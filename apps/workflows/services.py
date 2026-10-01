@@ -565,6 +565,9 @@ class WorkflowService:
         if return_to not in ["previous_step", "uploader", "same_step"]:
             raise WorkflowError(f"Invalid return_to value: {return_to}")
 
+        if return_to == "previous_step" and task.step.order <= 1:
+            raise WorkflowError("There is no previous step to return to.")
+
         task.status     = "returned"
         task.comment    = comment
         task.return_to  = return_to
@@ -605,19 +608,11 @@ class WorkflowService:
 
         WorkflowService._skip_active_tasks(instance, step_order=current_order)
 
-        if return_to == "previous_step" and current_order > 1:
-            prev_order = current_order - 1
-            doc.status = f"Returned to Step {prev_order}"
-            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
-
-            instance.current_step_order = prev_order
-            instance.save(update_fields=["current_step_order"])
-
-            WorkflowService._activate_step(instance, order=prev_order)
-
-        else:
-            doc.status = DocumentStatus.RETURNED
-            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+        # Both destinations pause the instance and keep current_step_order so
+        # resubmission resumes THIS step instead of restarting from step 1.
+        # return_to only controls who is notified / recorded on the action.
+        doc.status = DocumentStatus.RETURNED
+        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
         WorkflowService._notify_action(action, doc)
 

@@ -10,9 +10,12 @@
  *     Approved  → advance to the next step; after the last step the workflow is
  *                 Completed with outcome "Approved".
  *     Rejected  → the workflow stops right there and is Completed with outcome
- *                 "Rejected". Later steps are NOT executed — unless the approval
- *                 has an explicit Return block on its Rejected outlet (`on_reject`),
- *                 which sends the document back instead of ending it.
+ *                 "Rejected". Later steps are NOT executed. Always. There is no graph
+ *                 construct that changes this.
+ *     Returned  → NOT a graph concept. It is an approver ACTION chosen at runtime, enabled
+ *                 per step via `step.allow_return` (send back to the previous approval on
+ *                 the path taken) and `step.allow_return_submitter` (send back to the
+ *                 submitter). A return pauses the instance; it does not complete it.
  *   - `end` blocks are an optional shortcut (auto-approve / auto-reject).
  *
  * Pure TypeScript: no React, no API calls. Everything here is unit-testable and
@@ -154,14 +157,7 @@ export interface StepData {
   [key: string]: any;
 }
 
-export interface ApprovalBlock {
-  kind: "approval"; id: string; step: StepData;
-  /**
-   * What happens when this step is Rejected. Absent/empty = the workflow ends as
-   * Rejected. Otherwise holds exactly one `return` block (sends the document back).
-   */
-  on_reject?: Block[];
-}
+export interface ApprovalBlock { kind: "approval"; id: string; step: StepData }
 export interface NotificationBlock { kind: "notification"; id: string; step: StepData }
 
 export interface IfElseBranch { id: string; label?: string; when: ConditionGroup; blocks: Block[] }
@@ -189,17 +185,6 @@ export interface SetValueBlock {
   value_ref?: string;
 }
 
-/**
- * Sent back instead of ending when an approval is rejected. Only valid inside an
- * approval's `on_reject`. `target_id` is "previous" (the previous approval on the path
- * this instance actually took; the submitter if there is none) or an earlier approval's id.
- */
-export interface ReturnBlock {
-  kind: "return"; id: string;
-  target_id: "previous" | string;
-  reason?: string;
-}
-
 /** Completes the workflow early (auto-approve small items, auto-reject invalid ones). */
 export interface EndBlock {
   kind: "end"; id: string;
@@ -209,7 +194,7 @@ export interface EndBlock {
 
 export type Block =
   | ApprovalBlock | NotificationBlock
-  | IfElseBlock | SwitchBlock | SetValueBlock | EndBlock | ReturnBlock;
+  | IfElseBlock | SwitchBlock | SetValueBlock | EndBlock;
 
 export interface WorkflowDefinition { version: 2; blocks: Block[] }
 
@@ -244,7 +229,6 @@ export const newSwitch = (field_id = ""): SwitchBlock => ({
 });
 
 export const newSetValue = (): SetValueBlock => ({ kind: "set_value", id: uid(), variable: "", value: "" });
-export const newReturn = (target_id: string = "previous"): ReturnBlock => ({ kind: "return", id: uid("ret"), target_id });
 export const newEnd = (outcome: "approved" | "rejected" = "approved"): EndBlock => ({ kind: "end", id: uid(), outcome });
 
 export interface ChildList { slot: string; label: string; blocks: Block[] }
@@ -262,8 +246,6 @@ export function childLists(b: Block): ChildList[] {
         ...b.cases.map((c) => ({ slot: c.id, label: "CASE", blocks: c.blocks })),
         { slot: "default", label: "DEFAULT", blocks: b.default_blocks },
       ];
-    case "approval":
-      return b.on_reject?.length ? [{ slot: "reject", label: "ON REJECT", blocks: b.on_reject }] : [];
     default:
       return [];
   }
@@ -277,10 +259,6 @@ export function setChildList(b: Block, slot: string, blocks: Block[]): Block {
   if (b.kind === "switch") {
     if (slot === "default") return { ...b, default_blocks: blocks };
     return { ...b, cases: b.cases.map((c) => (c.id === slot ? { ...c, blocks } : c)) };
-  }
-  if (b.kind === "approval" && slot === "reject") {
-    const { on_reject: _drop, ...rest } = b;
-    return blocks.length ? { ...rest, on_reject: blocks } : rest;   // empty → back to "rejection ends the workflow"
   }
   return b;
 }
@@ -356,29 +334,17 @@ export function moveInList(list: Block[], id: string, dir: -1 | 1): Block[] {
 
 /** Deep clone with fresh ids (duplicate block / copy a branch). */
 export function cloneBlock(b: Block): Block {
-  const idMap = new Map<string, string>();
   const fresh = (x: any): any => {
     if (Array.isArray(x)) return x.map(fresh);
     if (x && typeof x === "object") {
       const o: any = {};
-      for (const k of Object.keys(x)) {
-        if (k === "id" && typeof x[k] === "string") { const n = uid(String(x[k]).split("_")[0] || "b"); idMap.set(x[k], n); o[k] = n; }
-        else o[k] = fresh(x[k]);
-      }
+      for (const k of Object.keys(x)) o[k] = k === "id" && typeof x[k] === "string"
+        ? uid(String(x[k]).split("_")[0] || "b") : fresh(x[k]);
       return o;
     }
     return x;
   };
   const c = fresh(b);
-  // A cloned Return that pointed at a step inside the cloned subtree must follow the copy.
-  const remap = (x: any) => {
-    if (Array.isArray(x)) return x.forEach(remap);
-    if (x && typeof x === "object") {
-      if (x.kind === "return" && idMap.has(x.target_id)) x.target_id = idMap.get(x.target_id);
-      Object.values(x).forEach(remap);
-    }
-  };
-  remap(c);
   if (c.step) delete c.step.id; // server assigns new step ids
   return c;
 }
@@ -616,11 +582,6 @@ export function describeGroup(g: ConditionGroup, fields: Map<string, WorkflowFie
   return g.negate ? `NOT ${wrapped}` : wrapped;
 }
 
-function targetName(blocks: Block[], id: string): string {
-  const t = findBlock(blocks, id);
-  return t && t.kind === "approval" ? t.step.name || "Untitled" : "missing step";
-}
-
 export function toPseudocode(blocks: Block[], fields: Map<string, WorkflowField>, groupName: (id: string | null | undefined) => string = (x) => x ?? "?"): string {
   const lines: string[] = [];
   const ind = (n: number) => "  ".repeat(n);
@@ -631,8 +592,8 @@ export function toPseudocode(blocks: Block[], fields: Map<string, WorkflowField>
           const s = b.step;
           const mode = s.assignee_type === "group_all" ? "ALL of" : s.assignee_type === "group_specific" ? "SPECIFIC member of" : "ANY of";
           lines.push(`${ind(d)}APPROVE "${s.name || "Untitled"}" by ${mode} ${groupName(s.assignee_group)}${s.sla_hours ? `  [SLA ${s.sla_hours}h]` : ""}`);
-          const ret = b.on_reject?.find((x): x is ReturnBlock => x.kind === "return");
-          if (ret) lines.push(`${ind(d + 1)}ON REJECT → RETURN to ${ret.target_id === "previous" ? "previous step" : `"${targetName(blocks, ret.target_id)}"`}${ret.reason ? `  // ${ret.reason}` : ""}`);
+          const rt = [s.allow_return ? "previous step" : "", s.allow_return_submitter ? "submitter" : ""].filter(Boolean);
+          if (rt.length) lines.push(`${ind(d + 1)}CAN RETURN to ${rt.join(" or ")}`);
           break;
         }
         case "notification": lines.push(`${ind(d)}NOTIFY "${b.step.name || "Untitled"}"`); break;
@@ -687,14 +648,26 @@ export interface SimDecision {
   evaluated: { slot: string; label: string; result: boolean }[];
 }
 
+/** What an approver can do at a step (Approve is the default path and isn't listed). */
+export type ApproverAction = "reject" | "return_previous" | "return_submitter";
+
+/** Which approver actions a step offers, given where it sits on the path taken. */
+export function availableActions(step: StepData, hasPreviousApproval: boolean): ApproverAction[] {
+  const out: ApproverAction[] = [];
+  if (step.allow_reject !== false) out.push("reject");
+  if (step.allow_return && hasPreviousApproval) out.push("return_previous");
+  if (step.allow_return_submitter) out.push("return_submitter");
+  return out;
+}
+
 export interface SimResult {
   /**
    * pending_approvals — goes to approvers; it will be Approved once every step approves.
-   * rejected / returned — only when `rejectAt` was given (what-if: this approval rejects).
+   * rejected / returned — only when `actAt` was given (what-if: an approver takes that action).
    */
   outcome: "pending_approvals" | "auto_approved" | "auto_rejected" | "no_approvers" | "rejected" | "returned";
-  /** Set when `rejectAt` fired. `return_target` = approval block id, or null = back to the submitter. */
-  rejection?: { block_id: string; action: "rejected" | "returned"; return_target?: string | null };
+  /** Set when `actAt` fired. For a return, `return_target` = approval block id, or null = back to the submitter. */
+  acted?: { block_id: string; action: ApproverAction; return_target?: string | null };
   chain: (ApprovalBlock | NotificationBlock)[];
   decisions: SimDecision[];
   /** Block ids on the executed path (incl. the if/switch blocks themselves). */
@@ -712,7 +685,7 @@ export function simulate(
   blocks: Block[],
   fields: Map<string, WorkflowField>,
   values: Record<string, unknown>,
-  opts: { rates?: Record<string, number>; now?: Date; /** simulate "this approval is rejected" */ rejectAt?: string } = {},
+  opts: { rates?: Record<string, number>; now?: Date; /** simulate "the approver at this step takes this action" */ actAt?: { id: string; action: ApproverAction } } = {},
 ): SimResult {
   const env = makeEnv(values, { rates: opts.rates, now: opts.now });
   const res: SimResult = {
@@ -728,16 +701,14 @@ export function simulate(
       switch (b.kind) {
         case "approval": {
           res.chain.push(b);
-          if (opts.rejectAt === b.id) {
-            // Rejected: nothing after this step runs — unless a Return block sends it back.
-            const ret = b.on_reject?.find((x): x is ReturnBlock => x.kind === "return");
-            halted = true;
-            if (ret) {
-              res.visited.add(ret.id);
-              const prev = [...res.chain].slice(0, -1).reverse().find((c) => c.kind === "approval");
-              res.rejection = { block_id: b.id, action: "returned",
-                return_target: ret.target_id === "previous" ? (prev?.id ?? null) : ret.target_id };
-            } else res.rejection = { block_id: b.id, action: "rejected" };
+          if (opts.actAt?.id === b.id) {
+            const prev = res.chain.slice(0, -1).reverse().find((c) => c.kind === "approval");
+            if (availableActions(b.step, !!prev).includes(opts.actAt.action)) {
+              // Reject ends the workflow as Rejected; a return pauses it. Either way nothing after this step runs.
+              halted = true;
+              const a = opts.actAt.action;
+              res.acted = { block_id: b.id, action: a, ...(a === "reject" ? {} : { return_target: a === "return_previous" ? prev!.id : null }) };
+            }
           }
           break;
         }
@@ -778,7 +749,7 @@ export function simulate(
     }
   };
   run(blocks);
-  res.outcome = res.rejection ? res.rejection.action
+  res.outcome = res.acted ? (res.acted.action === "reject" ? "rejected" : "returned")
     : ended === "approved" ? "auto_approved" : ended === "rejected" ? "auto_rejected"
     : res.chain.some((c) => c.kind === "approval") ? "pending_approvals" : "no_approvers";
   res.warnings = [...new Set(env.warnings)];
@@ -994,24 +965,15 @@ export function validateDefinition(
     }
   });
 
-  // ── Reject handling: rejection ends the workflow unless an approval carries a Return ──
-  const order = new Map<string, number>();            // document order of approvals
-  walk(blocks, (b) => { if (b.kind === "approval") order.set(b.id, order.size + 1); });
-  const attached = new Set<string>();                 // Return blocks that sit on an approval's Rejected outlet
+  // ── Approver actions ──
+  let firstApproval = true;
   walk(blocks, (b) => {
-    if (b.kind !== "approval" || !b.on_reject?.length) return;
-    if (b.on_reject.length > 1) err(`"${b.step.name || "Untitled"}": the Rejected outlet can hold only one Return.`, b.id);
-    if (b.step.allow_reject === false) warn(`"${b.step.name || "Untitled"}" has rejection turned off, so its Return will never be used.`, b.id);
-    for (const r of b.on_reject) {
-      if (r.kind !== "return") { err(`"${b.step.name || "Untitled"}": only a Return can be attached to the Rejected outlet.`, r.id); continue; }
-      attached.add(r.id);
-      if (r.target_id === "previous") continue;
-      const t = order.get(r.target_id);
-      if (t === undefined) err(`Return after "${b.step.name || "Untitled"}" points to a step that no longer exists.`, r.id);
-      else if (t >= (order.get(b.id) ?? 0)) err(`Return after "${b.step.name || "Untitled"}" must go back to an earlier step.`, r.id);
-    }
+    if (b.kind !== "approval") return;
+    const nm = b.step.name || "Untitled";
+    if (firstApproval && b.step.allow_return)
+      warn(`"${nm}" is the first approval, so there is no previous step to return to. Use "Return to submitter" instead.`, b.id);
+    firstApproval = false;
   });
-  walk(blocks, (b) => { if (b.kind === "return" && !attached.has(b.id)) err("A Return only works on an approval's Rejected outlet.", b.id); });
 
   // Every path must either need an approval or end explicitly.
   const { paths, truncated } = enumeratePaths(blocks, fields);
@@ -1030,9 +992,7 @@ export function validateDefinition(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type GraphNode =
-  | { id: string; type: "approval"; order: number; step: StepData; next: string | null;
-      /** Approved → `next`. Rejected → this: end the workflow as Rejected, or return to an earlier step. */
-      on_reject: { action: "end_rejected" } | { action: "return"; target: string /* "previous" | approval node id */; reason?: string } }
+  | { id: string; type: "approval"; order: number; step: StepData; next: string | null }
   | { id: string; type: "notification"; order: number; step: StepData; next: string | null }
   | { id: string; type: "set_value"; variable: string; value?: Scalar; value_ref?: string; next: string | null }
   | { id: string; type: "end"; outcome: "approved" | "rejected"; reason?: string }
@@ -1043,8 +1003,9 @@ export interface CompiledGraph { start: string | null; nodes: Record<string, Gra
 
 /**
  * `null` as a pointer means "workflow complete" — its outcome is Approved, because
- * every approval on the way was approved (a rejection leaves through `on_reject`
- * instead and never reaches `next`). A nested list's last
+ * every approval on the way was approved. A rejection never reaches `next`:
+ * it completes the workflow as Rejected. A return (`allow_return` /
+ * `allow_return_submitter` on the step) pauses the instance instead. A nested list's last
  * block points at whatever follows the parent block — no explicit join nodes.
  */
 export function compileToGraph(blocks: Block[]): CompiledGraph {
@@ -1060,12 +1021,8 @@ export function compileToGraph(blocks: Block[]): CompiledGraph {
   };
   const one = (b: Block, after: string | null): string => {
     switch (b.kind) {
-      case "approval": {
-        const ret = b.on_reject?.find((x): x is ReturnBlock => x.kind === "return");
-        nodes[b.id] = { id: b.id, type: "approval", order: orderOf.get(b.id)!, step: { ...b.step, order: orderOf.get(b.id)! }, next: after,
-          on_reject: ret ? { action: "return", target: ret.target_id, reason: ret.reason } : { action: "end_rejected" } };
-        break;
-      }
+      case "approval":
+        nodes[b.id] = { id: b.id, type: "approval", order: orderOf.get(b.id)!, step: { ...b.step, order: orderOf.get(b.id)! }, next: after }; break;
       case "notification":
         nodes[b.id] = { id: b.id, type: "notification", order: orderOf.get(b.id)!, step: { ...b.step, order: orderOf.get(b.id)! }, next: after }; break;
       case "set_value":

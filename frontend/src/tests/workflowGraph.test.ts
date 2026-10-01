@@ -160,77 +160,64 @@ const mig2 = W.migrateLegacyRules([tplA, tplB], [
 assert.equal(mig2.definition.blocks[0].kind, "switch");
 assert.deepEqual(W.simulate(mig2.definition.blocks, fields, { "context.phase": "rfq" }).chain.map((x) => x.step.name), ["Fin", "CFO"]);
 
-// ── rejection: ends the workflow at that step unless a Return is attached ──
+// ── approver actions: Reject ALWAYS completes as Rejected; Return is a per-step action that pauses ──
 {
-  const s1 = approval("S1"), s2 = approval("S2"), s3 = approval("S3");
+  const mk = (name: string, extra: any = {}) => { const b = approval(name) as W.ApprovalBlock; b.step = { ...b.step, allow_reject: true, ...extra }; return b; };
+  const s1 = mk("S1", { allow_return: true, allow_return_submitter: true }), s2 = mk("S2", { allow_return: true, allow_return_submitter: true }), s3 = mk("S3", { allow_return: true });
   const flow: W.Block[] = [s1, s2, s3, { kind: "notification", id: "nn", step: { name: "Tell", step_type: "notification" } }];
+  const act = (blocksArg: W.Block[], id: string, action: W.ApproverAction, vals: any = {}) => W.simulate(blocksArg, fields, vals, { actAt: { id, action } });
+
   const none = W.simulate(flow, fields, {});
-  assert.equal(none.outcome, "pending_approvals");                       // everyone approves → Completed as Approved
-  assert.equal(none.rejection, undefined);
+  assert.equal(none.outcome, "pending_approvals"); assert.equal(none.acted, undefined);
 
-  const rej = W.simulate(flow, fields, {}, { rejectAt: s2.id });
-  assert.equal(rej.outcome, "rejected");
-  assert.deepEqual(names(rej), ["S1", "S2"]);                            // S3 and the notification never run
-  assert.equal(rej.rejection?.action, "rejected");
-  assert.ok(!rej.visited.has(s3.id));
+  // Reject: ends right there; S3 and the notification never run; last-step reject is also Rejected
+  const rej = act(flow, s2.id, "reject");
+  assert.equal(rej.outcome, "rejected"); assert.deepEqual(names(rej), ["S1", "S2"]); assert.ok(!rej.visited.has(s3.id));
+  assert.equal(act(flow, s3.id, "reject").outcome, "rejected");
 
-  // last approval rejected → still "rejected"
-  assert.equal(W.simulate(flow, fields, {}, { rejectAt: s3.id }).outcome, "rejected");
+  // Return to previous → the previous approval on this path; to submitter → null
+  const rp = act(flow, s3.id, "return_previous");
+  assert.equal(rp.outcome, "returned"); assert.equal(rp.acted?.return_target, s2.id); assert.deepEqual(names(rp), ["S1", "S2", "S3"]);
+  const rs = act(flow, s2.id, "return_submitter");
+  assert.equal(rs.outcome, "returned"); assert.equal(rs.acted?.return_target, null);
 
-  // explicit Return on S3's Rejected outlet → sent back to the previous approval on the path
-  const s3r: W.Block = { ...(s3 as W.ApprovalBlock), on_reject: [W.newReturn("previous")] };
-  const flowR: W.Block[] = [s1, s2, s3r];
-  const ret = W.simulate(flowR, fields, {}, { rejectAt: s3.id });
-  assert.equal(ret.outcome, "returned");
-  assert.equal(ret.rejection?.return_target, s2.id);
-  // a Return on the FIRST step has no previous approval → back to the submitter
-  const s1r: W.Block = { ...(s1 as W.ApprovalBlock), on_reject: [W.newReturn("previous")] };
-  assert.equal(W.simulate([s1r, s2], fields, {}, { rejectAt: s1.id }).rejection?.return_target, null);
-  // explicit target
-  const s3t: W.Block = { ...(s3 as W.ApprovalBlock), on_reject: [W.newReturn(s1.id)] };
-  assert.equal(W.simulate([s1, s2, s3t], fields, {}, { rejectAt: s3.id }).rejection?.return_target, s1.id);
+  // No previous approval on the first step → that action is unavailable and ignored; the submitter return still works
+  assert.deepEqual(W.availableActions(s1.step, false), ["reject", "return_submitter"]);
+  assert.deepEqual(W.availableActions(s2.step, true), ["reject", "return_previous", "return_submitter"]);
+  assert.equal(act(flow, s1.id, "return_previous").outcome, "pending_approvals");
+  assert.equal(act(flow, s1.id, "return_submitter").outcome, "returned");
+  // actions a step doesn't allow are ignored, never silently applied
+  const noRej = mk("NR", { allow_reject: false });
+  assert.equal(act([noRej], noRej.id, "reject").outcome, "pending_approvals");
+  assert.equal(act([s3], s3.id, "return_submitter").outcome, "pending_approvals");
 
   // "previous" follows the path actually taken, not document order
-  const brA = approval("BranchA"), inA = { ...(approval("Inner") as W.ApprovalBlock), on_reject: [W.newReturn("previous")] } as W.Block;
-  const cond: W.IfElseBlock = { kind: "if_else", id: "cx", branches: [{ id: "cxb", when: grp(rule("gt", 10)), blocks: [brA, inA] }], else_blocks: [inA] };
-  const viaElse = W.simulate([cond], fields, { amount: { amount: 1, currency: "USD" } }, { rejectAt: inA.id });
-  assert.equal(viaElse.rejection?.return_target, null);                     // ELSE path had no earlier approval
-  const viaIf = W.simulate([cond], fields, { amount: { amount: 99, currency: "USD" } }, { rejectAt: inA.id });
-  assert.equal(viaIf.rejection?.return_target, brA.id);
+  const brA = mk("BranchA"), inner = mk("Inner", { allow_return: true });
+  const cond: W.IfElseBlock = { kind: "if_else", id: "cx", branches: [{ id: "cxb", when: grp(rule("gt", 10)), blocks: [brA, inner] }], else_blocks: [inner] };
+  const big = { amount: { amount: 99, currency: "USD" } }, small = { amount: { amount: 1, currency: "USD" } };
+  assert.equal(act([cond], inner.id, "return_previous", big).acted?.return_target, brA.id);
+  assert.equal(act([cond], inner.id, "return_previous", small).outcome, "pending_approvals");   // ELSE path: nothing earlier, button hidden
 
-  // compile: default is end_rejected, Return compiles to a return action
-  const cg = W.compileToGraph(flowR);
-  assert.deepEqual((cg.nodes[s1.id] as any).on_reject, { action: "end_rejected" });
-  assert.equal((cg.nodes[s3.id] as any).on_reject.action, "return");
-  assert.equal((cg.nodes[s3.id] as any).on_reject.target, "previous");
-  assert.equal(W.flattenSteps(flowR).length, 3);                           // Return is not a step
+  // compile: no special reject/return graph wiring; the flags ride on the step
+  const cg = W.compileToGraph(flow);
+  assert.equal((cg.nodes[s2.id] as any).next, s3.id); assert.equal((cg.nodes[s2.id] as any).on_reject, undefined);
+  assert.equal((cg.nodes[s2.id] as any).step.allow_return_submitter, true);
+  assert.equal(W.flattenSteps(flow).length, 4);
 
-  // pseudocode
-  assert.match(W.toPseudocode(flowR, fields), /APPROVE "S3"[^\n]*\n\s+ON REJECT → RETURN to previous step/);
+  // pseudocode shows what the approver can do
+  assert.match(W.toPseudocode(flow, fields), /APPROVE "S2"[^\n]*\n\s+CAN RETURN to previous step or submitter/);
+  assert.match(W.toPseudocode(flow, fields), /APPROVE "S3"[^\n]*\n\s+CAN RETURN to previous step\n/);
   assert.match(W.toPseudocode([{ kind: "end", id: "e", outcome: "approved", reason: "small" }], fields), /COMPLETE as APPROVED/);
 
-  // tree edits reach the Return; removing it restores "rejection ends the workflow"
-  const retId = (s3r as W.ApprovalBlock).on_reject![0].id;
-  assert.equal(W.findBlock(flowR, retId)?.kind, "return");
-  const removed = W.removeBlock(flowR, retId);
-  assert.equal((W.findBlock(removed, s3.id) as W.ApprovalBlock).on_reject, undefined);
+  // validation: returning to "previous" from the very first approval can't work → warning, not error
+  const v = W.validateDefinition([s1, s2], fields);
+  assert.ok(v.some((i) => i.severity === "warning" && /first approval/.test(i.message) && i.block_id === s1.id));
+  assert.ok(!v.some((i) => i.block_id === s2.id && /first approval/.test(i.message)));
+  assert.equal(W.validateDefinition([mk("OnlySubmitter", { allow_return_submitter: true })], fields).filter((i) => /first approval/.test(i.message)).length, 0);
+  assert.equal(W.validateDefinition(flow, fields).filter((i) => i.severity === "error").length, 0);
 
-  // validation
-  const errs = (b: W.Block[]) => W.validateDefinition(b, fields).filter((i) => i.severity === "error").map((i) => i.message);
-  assert.equal(errs(flowR).length, 0);
-  assert.ok(errs([s1, { ...(s2 as W.ApprovalBlock), on_reject: [W.newReturn(s3.id)] } as W.Block, s3]).some((m) => /earlier step/.test(m)));   // can't return forward
-  assert.ok(errs([{ ...(s1 as W.ApprovalBlock), on_reject: [W.newReturn("nope")] } as W.Block]).some((m) => /no longer exists/.test(m)));
-  assert.ok(errs([s1, W.newReturn()]).some((m) => /Rejected outlet/.test(m)));                                                                // Return floating in the main flow
-  const noRej = { ...(s2 as W.ApprovalBlock), step: { ...(s2 as W.ApprovalBlock).step, allow_reject: false }, on_reject: [W.newReturn("previous")] } as W.Block;
-  assert.ok(W.validateDefinition([s1, noRej], fields).some((i) => i.severity === "warning" && /rejection turned off/.test(i.message)));
-
-  // cloning a subtree keeps an internal Return pointing at the COPY of its target
-  const inner1 = approval("I1"), inner2 = { ...(approval("I2") as W.ApprovalBlock), on_reject: [W.newReturn(inner1.id)] } as W.Block;
-  const box: W.IfElseBlock = { kind: "if_else", id: "bx", branches: [{ id: "bxb", when: grp(rule("gt", 1)), blocks: [inner1, inner2] }], else_blocks: [] };
-  const cl = W.cloneBlock(box) as W.IfElseBlock;
-  const cl1 = cl.branches[0].blocks[0], cl2 = cl.branches[0].blocks[1] as W.ApprovalBlock;
-  assert.notEqual(cl1.id, inner1.id);
-  assert.equal((cl2.on_reject![0] as W.ReturnBlock).target_id, cl1.id);
+  // there is no Return block any more
+  assert.ok(!("newReturn" in W));
 }
 
 // ── migration regression: several open-ended bands used to drop all but the last ──
@@ -282,7 +269,7 @@ assert.deepEqual(W.simulate(mig2.definition.blocks, fields, { "context.phase": "
   assert.ok(W.validateDefinition([noDef], fields).some((i) => i.severity === "error" && /without any approval/.test(i.message)));
   // rejection inside a stacked IF ends the whole workflow there: later IFs never run
   const vpId = (swp.cases[0].blocks[2] as W.IfElseBlock).branches[0].blocks[0].id;   // Director Approval
-  const r = W.simulate([swp], fields, { "context.phase": "request", amount: { amount: 25000, currency: "USD" } }, { rejectAt: vpId });
+  const r = W.simulate([swp], fields, { "context.phase": "request", amount: { amount: 25000, currency: "USD" } }, { actAt: { id: vpId, action: "reject" } });
   assert.deepEqual(names(r), ["Manager Approval", "Finance Review", "Director Approval"]); assert.equal(r.outcome, "rejected");
 }
 

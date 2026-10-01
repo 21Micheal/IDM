@@ -26,13 +26,24 @@
  *  - Preview renders correctly typed inputs for every table column (dropdown
  *    becomes <select>, currency shows prefix, etc.) with validation.
  *
+ * v3.2 — Buttons, on-demand sections, linked tables:
+ *  - New "Button" field. action = "add_block" (reveals an on-demand section
+ *    at the end of the form / below the button / after a chosen section) or
+ *    "calculate" (one-shot formula that writes into a target field).
+ *  - Sections can be marked "Add on demand": hidden until a button adds them.
+ *  - Reference fields gain a "Table" source (tableRef): reuse a table's
+ *    layout from THIS form or ANOTHER form's template ("embed"), or pick a
+ *    row from it ("row_picker"). Embedded tables behave like native tables
+ *    (calc columns, SUM(table.col), validation) because they are resolved
+ *    into plain table fields at the edge — see materializeTableRefs().
+ *
  * Backwards-compatible with your existing Template / TemplateField /
  * TableColumn shapes — only adds optional fields. `outputTemplate` still
  * normalizes back to width/help_text/type=boolean for your API.
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { useQueryClient, useMutation, useQuery } from "@tanstack/react-query";
+import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from "react";
+import { useQueryClient, useMutation, useQuery, useQueries } from "@tanstack/react-query";
 import {
   DndContext, PointerSensor, useSensor, useSensors,
   useDraggable, useDroppable, DragOverlay,
@@ -52,10 +63,10 @@ import {
   ChevronRight, X, Loader2, Sliders, Link2, User as UserIcon,
   Wrench, FileCode, Calculator, Star, Percent, Link as UrlIcon, ListOrdered,
   Info, Files, ToggleLeft, MoveLeft, MoveRight, CopyPlus, Sigma,
-  Building2,
+  Building2, MousePointerClick, RefreshCw, Pin, AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { documentTypesAPI, groupsAPI, workflowAPI } from "@/services/api";
+import { documentTypesAPI, groupsAPI, normalizeListResponse, workflowAPI } from "@/services/api";
 import { FORMULA_OPTIONS } from "@/components/templates/formulas";
 import { CURRENCY_CODES, currencySymbolFor } from "@/lib/currencies";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
@@ -74,7 +85,8 @@ export type FieldType =
   | "calc_number" | "calc_currency" | "calc_text" | "calc_date" | "calc_boolean"
   | "info" | "spacer"
   | "sunsystems_account"
-  | "budget";
+  | "budget"
+  | "button";
 
 /* Field types that are auto-derived rather than typed by the person filling
  * the form: calculated values (formula over sibling field keys) and the
@@ -408,6 +420,73 @@ export interface TemplateField {
   visibleWhen?: RuleGroup | null;
   /* SunSystems binding (journal line / budget / header role). */
   sunsystems?: FieldFinanceBinding;
+  /* Button config (type === "button") — see ButtonConfig. */
+  button?: ButtonConfig | null;
+  /* Table reference (type === "reference" && referenceSource === "table") —
+   * see TableRef. */
+  tableRef?: TableRef | null;
+}
+
+/* A button's behaviour. Buttons hold no value; they either
+ *  - "add_block":  reveal an on-demand SECTION (TemplateSection.onDemand) —
+ *                  the section may hold any fields, including a table or a
+ *                  linked table from another form; or
+ *  - "calculate":  evaluate a formula ONCE, on click, and write the result
+ *                  into `targetKey` (same grammar as calculated fields, but
+ *                  user-triggered instead of reactive — handy for "Suggest
+ *                  amount" / "Apply default" style actions). */
+export interface ButtonConfig {
+  action: "add_block" | "calculate";
+  variant?: "primary" | "secondary" | "outline";
+  /* add_block */
+  targetSectionId?: string;
+  /* Where the block lands: the very end of the form (default — below every
+   * other section, including ones added earlier), directly below the section
+   * holding the button, or after a specific section. */
+  placement?: "end_of_form" | "below_button" | "after_section";
+  anchorSectionId?: string;
+  /* calculate */
+  targetKey?: string;
+  calc?: CalcConfig | null;
+}
+
+/* A reference to a TABLE, either in this template or in another one.
+ *  mode "embed"      — reuse the source table's column layout; rows are
+ *                      entered in THIS document (own data, shared schema).
+ *  mode "row_picker" — a dropdown of the source table's rows
+ *                      (`displayColumn` is the label shown).
+ * `sync` (embed only): "live" follows the source template (the saved
+ * `snapshot` is refreshed every time this template is opened/saved);
+ * "pinned" freezes the layout at `snapshot` until re-synced. The snapshot is
+ * ALWAYS written on save so the runtime form renderer can draw the table
+ * without a second template fetch. Finance (SunSystems) bindings are never
+ * inherited — they belong to the source template's accounts. */
+export interface TableRef {
+  scope: "this_form" | "other_form";
+  templateId?: string;
+  templateName?: string;
+  tableKey: string;
+  tableLabel?: string;
+  mode: "embed" | "row_picker";
+  sync?: "live" | "pinned";
+  displayColumn?: string;
+  snapshot?: { columns: TableColumn[]; takenAt: string; minRows?: number };
+}
+
+/* Light-weight entry in the "other forms" picker. */
+export interface TemplateSummary {
+  id: string;
+  name: string;
+  workflow_type?: string;        // form type, e.g. "imprest" | "requisition"
+  document_type_id?: string;
+  document_type_name?: string;
+}
+
+/* How the builder reads OTHER templates (for cross-form table references).
+ * Supplied by the host so this file doesn't need to know your endpoints. */
+export interface ExternalTemplateSource {
+  list: () => Promise<TemplateSummary[]>;
+  get: (id: string) => Promise<Template>;
 }
 
 /* The header/connection config the SunSystems settings card edits. The journal
@@ -474,6 +553,11 @@ export interface TemplateSection {
    * read-only; `editableWhen` = editable only when the rule group matches. */
   readonly?: boolean;
   editableWhen?: RuleGroup | null;
+  /* "Add on demand": the section is NOT part of the form until a Button
+   * (action "add_block") adds it. `removable` lets the person take it back
+   * out again once added. */
+  onDemand?: boolean;
+  removable?: boolean;
 }
 
 /* A reference to an RBAC group a section is restricted to. `id` is canonical
@@ -505,7 +589,7 @@ export interface Template {
 
 export type EditableTemplate = Omit<Template, "type"> & { type?: Template["type"] };
 
-type FieldGroup = "input" | "choice" | "reference" | "advanced" | "calculated" | "layout";
+type FieldGroup = "input" | "choice" | "reference" | "advanced" | "calculated" | "action" | "layout";
 
 const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults: Partial<TemplateField>; hint?: string }> = {
   text: { label: "Short text", group: "input", defaults: { colSpan: 6, placeholder: "Enter text…" } },
@@ -527,7 +611,8 @@ const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults
   boolean: { label: "Checkbox", group: "choice", defaults: { colSpan: 6 } },
   // Legacy alias of `boolean`; kept for stored templates, hidden from the palette.
   checkbox: { label: "Checkbox", group: "choice", defaults: { colSpan: 6 } },
-  reference: { label: "Reference", group: "reference", defaults: { colSpan: 6, referenceSource: "documents" }, hint: "Links to another document/record" },
+  reference: { label: "Reference", group: "reference", defaults: { colSpan: 6, referenceSource: "documents" }, hint: "Links to a record — or to a table in this form or another form" },
+  button: { label: "Button", group: "action", defaults: { colSpan: 4 }, hint: "Adds a section to the form on click, or runs a calculation" },
   user: { label: "User picker", group: "reference", defaults: { colSpan: 6, referenceSource: "users" } },
   signature: { label: "Signature", group: "advanced", defaults: { colSpan: 12 } },
   file: { label: "File upload", group: "advanced", defaults: { colSpan: 6 } },
@@ -561,12 +646,13 @@ const ICONS: Record<FieldType, React.ElementType> = {
   calc_boolean: Sigma, multi_file: Files, info: Info, spacer: Minus,
   sunsystems_account: Building2,
   budget: Wallet,
+  button: MousePointerClick,
 };
 
 /* Presentational-only field types. They never hold a value, so they're
  * skipped by the payload preview, can't be marked required, and never
  * appear as a formula/condition source. */
-const PRESENTATION_TYPES = new Set<FieldType>(["heading", "divider", "info", "spacer", "budget"]);
+const PRESENTATION_TYPES = new Set<FieldType>(["heading", "divider", "info", "spacer", "budget", "button"]);
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -623,6 +709,196 @@ const REFERENCE_SOURCE_OPTIONS = [
   { value: "departments", label: "Departments" },
   { value: "documents", label: "Documents" },
   { value: "document_types", label: "Document types" },
+];
+
+/* ============================================================
+ * Linked tables, buttons & on-demand sections — shared helpers
+ * ============================================================ */
+
+type TableRefStatus = "ok" | "stale" | "loading" | "missing" | "cycle";
+export interface ResolvedTableRef {
+  columns: TableColumn[];
+  minRows?: number;
+  status: TableRefStatus;
+  sourceLabel: string;
+}
+
+/* Everything the canvas / inspector need to know about the OTHER forms.
+ * Provided once by the root component; read with useContext(BuilderEnv). */
+interface BuilderEnvValue {
+  template: Template | null;
+  summaries: TemplateSummary[];
+  summariesLoading: boolean;
+  external: Record<string, Template | undefined>;
+  loadingIds: Set<string>;
+  canLinkExternal: boolean;
+}
+const BuilderEnv = createContext<BuilderEnvValue>({
+  template: null, summaries: [], summariesLoading: false,
+  external: {}, loadingIds: new Set(), canLinkExternal: false,
+});
+
+const isTableRefField = (f: TemplateField) => f.type === "reference" && f.referenceSource === "table";
+const isEmbeddedTableRef = (f: TemplateField) => isTableRefField(f) && f.tableRef?.mode === "embed";
+
+/* Tables a reference can point at: real tables, plus embedded references
+ * (which resolve to tables themselves — chains are cycle-checked). */
+function tableFieldsOf(t?: Template | null): TemplateField[] {
+  return (t?.sections ?? []).flatMap((s) => s.fields ?? []).filter((f) => f.type === "table" || isEmbeddedTableRef(f));
+}
+
+/* Borrowed columns keep their ids/keys (ids only need to be unique within a
+ * table) but lose SunSystems bindings: account codes, journal roles and
+ * retirement setups belong to the SOURCE template's accounting, and silently
+ * posting them from another form's document would be wrong. */
+function cloneColumnsForEmbed(cols: TableColumn[]): TableColumn[] {
+  return cols.map((c) => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { sunsystems, ...rest } = c;
+    return { ...rest };
+  });
+}
+
+/* Resolve a table reference to concrete columns. Pure; never throws.
+ * Order of precedence: pinned snapshot → live source → snapshot fallback
+ * (status "stale") → nothing (status "missing"/"loading"/"cycle"). */
+function resolveTableRef(
+  field: TemplateField,
+  owner: Template,
+  external: Record<string, Template | undefined>,
+  loadingIds: Set<string>,
+  opts: { ignorePinned?: boolean } = {},
+  visited: string[] = [],
+): ResolvedTableRef {
+  const ref = field.tableRef;
+  if (!ref || !ref.tableKey) return { columns: [], status: "missing", sourceLabel: "No table selected" };
+  const sourceLabel = `${ref.scope === "other_form" ? (ref.templateName ?? "Other form") : "This form"} › ${ref.tableLabel ?? ref.tableKey}`;
+  const fromSnapshot = (status: TableRefStatus): ResolvedTableRef =>
+    ref.snapshot
+      ? { columns: cloneColumnsForEmbed(ref.snapshot.columns), minRows: ref.snapshot.minRows, status, sourceLabel }
+      : { columns: [], status: status === "stale" ? "missing" : status, sourceLabel };
+
+  if (ref.mode === "embed" && ref.sync === "pinned" && ref.snapshot && !opts.ignorePinned) return fromSnapshot("ok");
+
+  const me = `${owner.id ?? "self"}:${field.key}`;
+  if (visited.includes(me)) return { columns: [], status: "cycle", sourceLabel };
+  const trail = [...visited, me];
+
+  const sourceOwner = ref.scope === "other_form" ? (ref.templateId ? external[ref.templateId] : undefined) : owner;
+  if (!sourceOwner) return fromSnapshot(ref.templateId && loadingIds.has(ref.templateId) ? "loading" : "stale");
+
+  const src = tableFieldsOf(sourceOwner).find((f) => f.key === ref.tableKey && !(sourceOwner === owner && f.id === field.id));
+  if (!src) return fromSnapshot("stale");
+  if (src.type === "table") {
+    return { columns: cloneColumnsForEmbed(src.columns ?? []), minRows: src.minRows, status: "ok", sourceLabel };
+  }
+  return { ...resolveTableRef(src, sourceOwner, external, loadingIds, {}, trail), sourceLabel };
+}
+
+/* Resolve every EMBEDDED table reference into a plain `table` field.
+ *
+ * This is the key design move: everything downstream — the Preview's table
+ * rows, per-row calc columns, cross-table SUM(table.col), the calc registry,
+ * column visibility — only ever sees ordinary tables, so linked tables get
+ * all of it for free and there is exactly one table implementation to keep
+ * correct. Ids/keys are preserved so selection and formulas keep working. */
+function materializeTableRefs(
+  template: Template,
+  external: Record<string, Template | undefined>,
+  loadingIds: Set<string>,
+): { sections: TemplateSection[]; resolved: Record<string, ResolvedTableRef> } {
+  const resolved: Record<string, ResolvedTableRef> = {};
+  const sections = template.sections.map((s) => ({
+    ...s,
+    fields: s.fields.map((f) => {
+      if (!isEmbeddedTableRef(f)) return f;
+      const r = resolveTableRef(f, template, external, loadingIds);
+      resolved[f.id] = r;
+      return { ...f, type: "table" as const, columns: r.columns, minRows: f.minRows ?? r.minRows ?? 1, colSpan: 12, width: 12 };
+    }),
+  }));
+  return { sections, resolved };
+}
+
+/* Identifiers a borrowed column's formula uses that don't exist in this form —
+ * a layout copied from another template may reference that template's
+ * top-level fields (e.g. `daily_rate`), which resolve to 0 here. */
+function missingCalcKeys(columns: TableColumn[], known: Set<string>): Array<{ column: string; keys: string[] }> {
+  const colKeys = new Set(columns.map((c) => c.key));
+  const out: Array<{ column: string; keys: string[] }> = [];
+  for (const c of columns) {
+    const expr = c.calc?.expression;
+    if (!expr) continue;
+    let toks: CalcToken[];
+    try { toks = calcTokenize(expr); } catch { continue; }
+    const missing = new Set<string>();
+    toks.forEach((t, i) => {
+      if (t.t !== "ident") return;
+      const nxt = toks[i + 1];
+      if (nxt?.t === "op" && nxt.v === "(") return; // function name
+      if (colKeys.has(t.v) || known.has(t.v)) return;
+      missing.add(t.v);
+    });
+    if (missing.size) out.push({ column: c.label || c.key, keys: [...missing] });
+  }
+  return out;
+}
+
+/* Every key a formula in `template` can legitimately use (fields, columns,
+ * table-qualified columns) — taken from the materialized sections so linked
+ * tables count too. */
+function formScopeKeys(sections: TemplateSection[]): Set<string> {
+  const keys = new Set<string>();
+  for (const f of sections.flatMap((s) => s.fields)) {
+    if (f.key) keys.add(f.key);
+    if (f.type === "table") {
+      for (const c of f.columns ?? []) { keys.add(c.key); keys.add(`${f.key}.${c.key}`); }
+    }
+  }
+  return keys;
+}
+
+/* On-demand sections (TemplateSection.onDemand) are absent from the form until
+ * a button adds them. `spawned` is the click-ordered list of additions; each
+ * remembers the section it should follow ("" = the very end of the form).
+ * Several blocks added after the same anchor stack in click order. */
+interface SpawnRecord { sectionId: string; anchorId: string }
+function orderSections(sections: TemplateSection[], spawned: SpawnRecord[]): TemplateSection[] {
+  const byId = new Map(sections.map((x) => [x.id, x]));
+  const out = sections.filter((x) => !x.onDemand);
+  for (const rec of spawned) {
+    const sec = byId.get(rec.sectionId);
+    if (!sec || out.some((x) => x.id === sec.id)) continue;
+    const idx = rec.anchorId ? out.findIndex((x) => x.id === rec.anchorId) : -1;
+    if (idx < 0) { out.push(sec); continue; }
+    let at = idx + 1;
+    while (at < out.length && out[at].onDemand) at++;
+    out.splice(at, 0, sec);
+  }
+  return out;
+}
+
+/* One-line, human description of what a button does — canvas caption. */
+function describeButton(f: TemplateField, sections: TemplateSection[]): string {
+  const b = f.button;
+  if (!b) return "Not configured";
+  if (b.action === "calculate") {
+    return b.targetKey ? `Calculates → ${b.targetKey}` : "Calculate: pick a target field";
+  }
+  const target = sections.find((x) => x.id === b.targetSectionId);
+  if (!target) return "Add section: pick a target";
+  const where = b.placement === "below_button" ? "below this section"
+    : b.placement === "after_section" ? `after “${sections.find((x) => x.id === b.anchorSectionId)?.title ?? "…"}”`
+      : "at the end of the form";
+  return `Adds “${target.title}” ${where}`;
+}
+
+/* Field-level reference sources = the shared list + "table". "table" is
+ * handled by `field.tableRef` (see TableRef) rather than by the generic
+ * record picker, so the runtime must special-case it in referenceSources.ts. */
+const FIELD_REFERENCE_SOURCE_OPTIONS = [
+  ...REFERENCE_SOURCE_OPTIONS,
+  { value: "table", label: "Table (this form or another form)" },
 ];
 
 // Field types that can carry an auto-fill formula (scalar inputs).
@@ -838,6 +1114,10 @@ function newField(type: FieldType): TemplateField {
     base.width = 12;
     base.multi = true;
   }
+  if (type === "button") {
+    base.label = "Add section";
+    base.button = { action: "add_block", placement: "end_of_form", variant: "primary" };
+  }
   return base;
 }
 
@@ -968,7 +1248,7 @@ function sampleScalar(f: { type: FieldType; label: string; options?: string[]; d
 
 function buildSampleValues(template: Template): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  const skip = new Set(["divider", "heading", "info", "spacer", "file", "image", "multi_file", "signature"]);
+  const skip = new Set(["divider", "heading", "info", "spacer", "file", "image", "multi_file", "signature", "button"]);
   for (const s of template.sections) {
     for (const f of s.fields ?? []) {
       if (!f.key) continue;
@@ -1192,7 +1472,19 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   return { ...ss, ui, journal, budget };
 }
 
-function outputTemplate(template: Template, keepId: boolean): Template {
+function outputTemplate(template: Template, keepId: boolean, resolved: Record<string, ResolvedTableRef> = {}): Template {
+  /* Linked tables: always persist a snapshot of the resolved columns so the
+   * runtime renderer can draw the table without fetching the source form.
+   * "live" refs refresh it on every save; "pinned" refs keep theirs until
+   * re-synced. takenAt only moves when the columns actually changed. */
+  const withSnapshot = (f: TemplateField): TableRef | null | undefined => {
+    const ref = f.tableRef;
+    const r = resolved[f.id];
+    if (!ref || ref.mode !== "embed" || r?.status !== "ok") return ref;
+    if (ref.sync === "pinned" && ref.snapshot) return ref;
+    if (ref.snapshot && JSON.stringify(ref.snapshot.columns) === JSON.stringify(r.columns)) return ref;
+    return { ...ref, snapshot: { columns: r.columns, takenAt: new Date().toISOString(), minRows: r.minRows } };
+  };
   const out = {
     ...template,
     type: template.type ?? "built",
@@ -1201,6 +1493,7 @@ function outputTemplate(template: Template, keepId: boolean): Template {
       ...s,
       fields: s.fields.map((f) => ({
         ...f,
+        tableRef: withSnapshot(f),
         type: f.type === "checkbox" ? "boolean" : f.type,
         width: f.colSpan,
         help_text: f.helpText,
@@ -1255,6 +1548,7 @@ const PALETTE_GROUPS: Array<{ key: FieldGroup; label: string }> = [
   { key: "choice", label: "Choice / Dropdown" },
   { key: "reference", label: "Reference" },
   { key: "calculated", label: "Calculated" },
+  { key: "action", label: "Actions" },
   { key: "advanced", label: "Advanced" },
   { key: "layout", label: "Layout" },
 ];
@@ -1262,7 +1556,7 @@ const PALETTE_GROUPS: Array<{ key: FieldGroup; label: string }> = [
 function Palette() {
   const [query, setQuery] = useState("");
   const [openGroups, setOpenGroups] = useState<Record<FieldGroup, boolean>>({
-    input: true, choice: true, reference: false, calculated: false, advanced: false, layout: false,
+    input: true, choice: true, reference: false, calculated: false, action: false, advanced: false, layout: false,
   });
   // Types that exist only for backwards compatibility with saved templates:
   // `checkbox` duplicates `boolean`, and `currency` is now a Number with a
@@ -1339,6 +1633,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
   onUpdateColumn?: (colId: string, patch: Partial<TableColumn>) => void;
 }) {
   const inputPreview = "h-8  border border-zinc-200 bg-white px-3 text-xs text-zinc-400 flex items-center";
+  const env = useContext(BuilderEnv);
   switch (field.type) {
     case "heading":
       return <div className="text-sm font-bold text-zinc-800">{field.label || "Heading"}</div>;
@@ -1367,8 +1662,67 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
     case "select":
     case "multi_select":
       return <div className={cn(inputPreview, "justify-between")}><span>{field.options?.[0] ?? "Select…"}</span><ChevronDown className="h-3 w-3" /></div>;
-    case "reference":
+    case "reference": {
+      if (isTableRefField(field) && field.tableRef) {
+        const r = field.tableRef;
+        const res = env.template ? resolveTableRef(field, env.template, env.external, env.loadingIds) : null;
+        if (r.mode === "row_picker") {
+          return (
+            <div className={cn(inputPreview, "justify-between")}>
+              <span className="flex items-center gap-1.5 truncate"><Link2 className="h-3 w-3 shrink-0" /> Pick a row from {res?.sourceLabel ?? r.tableKey}</span>
+              <ChevronDown className="h-3 w-3 shrink-0" />
+            </div>
+          );
+        }
+        return (
+          <div className="overflow-hidden border border-[#AEB5BB] bg-white">
+            <div className="flex items-center justify-between gap-2 border-b border-[#AEB5BB] bg-[#EEF6FB] px-3 py-2">
+              <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold text-[#287EAD]">
+                <Link2 className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">Linked table — {res?.sourceLabel ?? r.tableKey}</span>
+              </span>
+              <span className="flex shrink-0 items-center gap-1 text-[10px] font-semibold text-[#5E6870]">
+                {r.sync === "pinned" ? <><Pin className="h-3 w-3" /> pinned</> : <><RefreshCw className="h-3 w-3" /> live</>}
+              </span>
+            </div>
+            {res && res.columns.length > 0 ? (
+              <div className="overflow-x-auto">
+                <div className="flex min-w-max border-b border-[#AEB5BB] bg-[#F0F2F4]">
+                  {res.columns.map((c) => (
+                    <div key={c.id} className="w-28 shrink-0 border-r border-[#D0D5DA] px-2 py-1.5 text-[10px] font-semibold text-[#3E4851]">{c.label}</div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 px-3 py-3 text-xs text-amber-700">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {tableRefStatusText(res?.status ?? "missing")}
+              </div>
+            )}
+            {res && res.columns.length > 0 && res.status !== "ok" && (
+              <div className="flex items-center gap-1.5 border-t border-amber-200 bg-amber-50 px-3 py-1.5 text-[10px] text-amber-700">
+                <AlertTriangle className="h-3 w-3 shrink-0" /> {tableRefStatusText(res.status)}
+              </div>
+            )}
+          </div>
+        );
+      }
       return <div className={cn(inputPreview, "justify-between")}><span className="flex items-center gap-1.5"><Link2 className="h-3 w-3" /> Choose {field.referenceSource ?? "record"}…</span></div>;
+    }
+    case "button": {
+      const v = field.button?.variant ?? "primary";
+      return (
+        <div className="space-y-1">
+          <div className={cn(
+            "inline-flex h-8 items-center gap-1.5 px-3 text-xs font-semibold",
+            v === "primary" ? "bg-[#287EAD] text-white" : v === "secondary" ? "bg-[#E5E8EB] text-[#1F2933]" : "border border-[#287EAD] bg-white text-[#287EAD]",
+          )}>
+            {field.button?.action === "calculate" ? <Calculator className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+            {field.label || "Button"}
+          </div>
+          <p className="text-[10px] text-zinc-500">{describeButton(field, env.template?.sections ?? [])}</p>
+        </div>
+      );
+    }
     case "user":
       return <div className={cn(inputPreview, "justify-between")}><span className="flex items-center gap-1.5"><UserIcon className="h-3 w-3" /> Select user…</span></div>;
     case "table": {
@@ -1596,7 +1950,7 @@ function FieldCard({
 
   return (
     <div className={cn("relative flex items-stretch min-w-0", isDragging && "opacity-40")}
-      style={{ gridColumn: `span ${field.type === "table" ? 12 : (field.colSpan ?? 1)} / span ${field.type === "table" ? 12 : (field.colSpan ?? 1)}` }}>
+      style={{ gridColumn: `span ${(field.type === "table" || isEmbeddedTableRef(field)) ? 12 : (field.colSpan ?? 1)} / span ${(field.type === "table" || isEmbeddedTableRef(field)) ? 12 : (field.colSpan ?? 1)}` }}>
       <div ref={dropBefore.setNodeRef}
         className={cn("w-1 shrink-0 transition-all", dropBefore.isOver ? "bg-[#287EAD]" : "bg-transparent")} />
       <div onClick={(e) => { e.stopPropagation(); onSelect(); }}
@@ -1660,7 +2014,7 @@ function FieldCard({
           <span className="truncate">{field.key}</span>
           <span>{field.colSpan}/12</span>
         </div>
-        {field.type !== "table" && (
+        {field.type !== "table" && !isEmbeddedTableRef(field) && (
           <div onMouseDown={startResize}
             className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize opacity-0 transition group-hover:bg-[#287EAD]/40 group-hover:opacity-100"
             title="Drag to resize" />
@@ -1743,6 +2097,9 @@ function SectionBlock(props: {
               onChange={(e) => props.onUpdateSection(section.id, { title: e.target.value })}
               onClick={(e) => e.stopPropagation()}
               className="min-w-0 flex-1 bg-transparent text-sm font-bold text-[#1F2933] outline-none border-b border-transparent focus:border-[#287EAD] pb-0.5 transition-colors" />
+            {section.onDemand && (
+              <span className="bg-teal-50 px-1.5 py-0.5 text-[9px] font-semibold text-teal-700 border border-teal-200 flex-shrink-0" title="Not part of the form until a Button adds it">on demand</span>
+            )}
             {section.hidden ? (
               <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always hidden from people filling the form">hidden</span>
             ) : section.visibleToGroups && section.visibleToGroups.length > 0 ? (
@@ -2727,7 +3084,7 @@ function conditionSourcesFrom(fields: TemplateField[]): Array<{ key: string; lab
       }
       continue;
     }
-    if (f.type === "divider" || f.type === "heading") continue;
+    if (f.type === "divider" || f.type === "heading" || f.type === "button") continue;
     out.push({ key: f.key, label: f.label });
   }
   return out;
@@ -3503,6 +3860,281 @@ function CalcFormulaEditor({ field, siblings, onUpdate }: {
   );
 }
 
+function tableRefStatusText(st: TableRefStatus): string {
+  switch (st) {
+    case "loading": return "Loading the source form…";
+    case "stale": return "Source form unavailable — showing the last saved layout.";
+    case "cycle": return "Circular reference — this table (indirectly) points back at itself.";
+    case "missing": return "Source table not found — pick a table.";
+    default: return "";
+  }
+}
+
+const segCls = (active: boolean) =>
+  cn("flex-1 px-2 py-1.5 text-xs font-semibold transition-colors", active ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]");
+
+const BUTTON_PLACEMENT_OPTIONS = [
+  { value: "end_of_form", label: "End of the form (below everything)" },
+  { value: "below_button", label: "Directly below this section" },
+  { value: "after_section", label: "After a specific section…" },
+];
+
+/* Inspector panel for a Button field. */
+function ButtonEditor({ field, onUpdate, allFields }: {
+  field: TemplateField;
+  onUpdate: (patch: Partial<TemplateField>) => void;
+  allFields: TemplateField[];
+}) {
+  const env = useContext(BuilderEnv);
+  const sections = env.template?.sections ?? [];
+  const b: ButtonConfig = field.button ?? { action: "add_block", placement: "end_of_form", variant: "primary" };
+  const set = (patch: Partial<ButtonConfig>) => onUpdate({ button: { ...b, ...patch } });
+  const ownSection = sections.find((x) => x.fields.some((f) => f.id === field.id));
+  const onDemand = sections.filter((x) => x.onDemand && x.id !== ownSection?.id);
+  const anchors = sections.filter((x) => !x.onDemand);
+  const siblings = allFields.filter((f) => f.id !== field.id && f.key && f.type !== "button");
+  const NON_TARGET = new Set<string>(["table", "file", "image", "multi_file", "signature", "reference", "user", "sunsystems_account"]);
+  const targets = siblings.filter((f) => !PRESENTATION_TYPES.has(f.type) && !CALCULATED_TYPES.has(f.type) && !NON_TARGET.has(f.type));
+
+  return (
+    <div className="space-y-4 border border-[#C8CDD2] bg-white p-3">
+      <InspectorRow label="When clicked">
+        <div className="flex border border-[#C8CDD2]">
+          <button type="button" className={segCls(b.action === "add_block")} onClick={() => set({ action: "add_block" })}>Add a section</button>
+          <button type="button" className={segCls(b.action === "calculate")} onClick={() => set({ action: "calculate" })}>Calculate a value</button>
+        </div>
+      </InspectorRow>
+      <InspectorRow label="Style">
+        <CustomListbox
+          value={b.variant ?? "primary"}
+          onChange={(val) => set({ variant: val as ButtonConfig["variant"] })}
+          options={[{ value: "primary", label: "Primary (filled)" }, { value: "secondary", label: "Secondary (grey)" }, { value: "outline", label: "Outline" }]}
+          className={inputCls} buttonClassName="w-full" ariaLabel="Button style"
+        />
+      </InspectorRow>
+
+      {b.action === "add_block" && (
+        <>
+          <InspectorRow label="Section to add" hint="Only sections marked “Add on demand” can be added by a button.">
+            <CustomListbox
+              value={b.targetSectionId ?? ""}
+              onChange={(val) => set({ targetSectionId: val || undefined })}
+              options={[{ value: "", label: onDemand.length ? "Select a section…" : "No on-demand sections yet" }, ...onDemand.map((x) => ({ value: x.id, label: x.title || "Untitled section" }))]}
+              className={inputCls} buttonClassName="w-full" ariaLabel="Section to add"
+            />
+          </InspectorRow>
+          {onDemand.length === 0 && (
+            <p className="flex items-start gap-1.5 border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+              Select the section you want to add later and switch on “Add on demand” in its settings.
+            </p>
+          )}
+          <InspectorRow label="Where it appears">
+            <CustomListbox
+              value={b.placement ?? "end_of_form"}
+              onChange={(val) => set({ placement: val as ButtonConfig["placement"] })}
+              options={BUTTON_PLACEMENT_OPTIONS}
+              className={inputCls} buttonClassName="w-full" ariaLabel="Placement"
+            />
+          </InspectorRow>
+          {b.placement === "after_section" && (
+            <InspectorRow label="After section">
+              <CustomListbox
+                value={b.anchorSectionId ?? ""}
+                onChange={(val) => set({ anchorSectionId: val || undefined })}
+                options={[{ value: "", label: "Select a section…" }, ...anchors.map((x) => ({ value: x.id, label: x.title || "Untitled section" }))]}
+                className={inputCls} buttonClassName="w-full" ariaLabel="Anchor section"
+              />
+            </InspectorRow>
+          )}
+        </>
+      )}
+
+      {b.action === "calculate" && (
+        <>
+          <InspectorRow label="Write the result into" hint="Calculated fields can't be targets — they already recompute on their own.">
+            <CustomListbox
+              value={b.targetKey ?? ""}
+              onChange={(val) => set({ targetKey: val || undefined })}
+              options={[{ value: "", label: "Select a field…" }, ...targets.map((f) => ({ value: f.key, label: `${f.label} (${f.key})` }))]}
+              className={inputCls} buttonClassName="w-full" ariaLabel="Target field"
+            />
+          </InspectorRow>
+          <CalcFormulaEditor
+            field={{ ...field, type: "calc_number", calc: b.calc ?? { expression: "", decimals: 2 } }}
+            siblings={siblings}
+            onUpdate={(patch) => { if (patch.calc !== undefined) set({ calc: patch.calc }); }}
+          />
+          <p className="text-[10px] text-[#8C969E]">Runs once per click. The result is stored in the target field and stays editable unless that field is read-only.</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* Inspector panel for a Reference field whose source is "Table". */
+function TableRefEditor({ field, onUpdate }: {
+  field: TemplateField;
+  onUpdate: (patch: Partial<TemplateField>) => void;
+}) {
+  const env = useContext(BuilderEnv);
+  const owner = env.template;
+  const [typeFilter, setTypeFilter] = useState("");
+  const ref: TableRef = field.tableRef ?? { scope: "this_form", tableKey: "", mode: "embed", sync: "live" };
+  const patch = (p: Partial<TableRef>, extra: Partial<TemplateField> = {}) => onUpdate({ tableRef: { ...ref, ...p }, ...extra });
+
+  const sourceOwner = ref.scope === "other_form" ? (ref.templateId ? env.external[ref.templateId] : undefined) : owner ?? undefined;
+  const tables = tableFieldsOf(sourceOwner).filter((t) => !(sourceOwner === owner && t.id === field.id));
+  const probe: TemplateField = { ...field, tableRef: ref };
+  const resolved = owner ? resolveTableRef(probe, owner, env.external, env.loadingIds) : null;
+  const liveNow = owner ? resolveTableRef(probe, owner, env.external, env.loadingIds, { ignorePinned: true }) : null;
+
+  const others = env.summaries.filter((x) => x.id !== owner?.id);
+  const formTypes: string[] = Array.from(new Set(others.map((x) => x.workflow_type).filter((t): t is string => !!t)));
+  const cap = (x?: string) => (x ? x.charAt(0).toUpperCase() + x.slice(1) : "");
+  let shown = others.filter((x) => !typeFilter || x.workflow_type === typeFilter);
+  const picked = others.find((x) => x.id === ref.templateId);
+  if (picked && !shown.some((x) => x.id === picked.id)) shown = [picked, ...shown];
+
+  const warnings = owner && resolved && ref.mode === "embed"
+    ? missingCalcKeys(resolved.columns, formScopeKeys(materializeTableRefs(owner, env.external, env.loadingIds).sections))
+    : [];
+
+  const takeSnapshot = () => liveNow && liveNow.status === "ok"
+    ? { columns: liveNow.columns, takenAt: new Date().toISOString(), minRows: liveNow.minRows }
+    : ref.snapshot;
+
+  return (
+    <div className="space-y-4 border border-[#C8CDD2] bg-white p-3">
+      <InspectorRow label="Table lives in">
+        <div className="flex border border-[#C8CDD2]">
+          <button type="button" className={segCls(ref.scope === "this_form")}
+            onClick={() => patch({ scope: "this_form", templateId: undefined, templateName: undefined, tableKey: "", tableLabel: undefined, displayColumn: undefined, snapshot: undefined })}>
+            This form
+          </button>
+          <button type="button" disabled={!env.canLinkExternal} title={env.canLinkExternal ? undefined : "Host app hasn't provided externalTemplates"}
+            className={cn(segCls(ref.scope === "other_form"), "disabled:cursor-not-allowed disabled:opacity-40")}
+            onClick={() => patch({ scope: "other_form", tableKey: "", tableLabel: undefined, displayColumn: undefined, snapshot: undefined })}>
+            Another form
+          </button>
+        </div>
+      </InspectorRow>
+
+      {ref.scope === "other_form" && (
+        <>
+          {formTypes.length > 1 && (
+            <InspectorRow label="Form type">
+              <CustomListbox
+                value={typeFilter}
+                onChange={(val) => setTypeFilter(val)}
+                options={[{ value: "", label: "All form types" }, ...formTypes.map((t) => ({ value: t, label: cap(t) }))]}
+                className={inputCls} buttonClassName="w-full" ariaLabel="Form type filter"
+              />
+            </InspectorRow>
+          )}
+          <InspectorRow label="Form">
+            <CustomListbox
+              value={ref.templateId ?? ""}
+              onChange={(val) => {
+                const t = others.find((x) => x.id === val);
+                patch({ templateId: val || undefined, templateName: t?.name, tableKey: "", tableLabel: undefined, displayColumn: undefined, snapshot: undefined });
+              }}
+              options={[
+                { value: "", label: env.summariesLoading ? "Loading forms…" : "Select a form…" },
+                ...shown.map((x) => ({ value: x.id, label: `${x.name}${x.workflow_type ? ` · ${cap(x.workflow_type)}` : ""}` })),
+              ]}
+              className={inputCls} buttonClassName="w-full" ariaLabel="Source form"
+            />
+          </InspectorRow>
+        </>
+      )}
+
+      {(ref.scope === "this_form" || ref.templateId) && (
+        <InspectorRow label="Table" hint={tables.length === 0 && sourceOwner ? "That form has no tables." : undefined}>
+          <CustomListbox
+            value={ref.tableKey}
+            onChange={(val) => {
+              const t = tables.find((x) => x.key === val);
+              patch({ tableKey: val, tableLabel: t?.label, displayColumn: undefined, snapshot: undefined });
+            }}
+            options={[
+              { value: "", label: ref.scope === "other_form" && !sourceOwner ? "Loading…" : "Select a table…" },
+              ...tables.map((t) => ({ value: t.key, label: `${t.label} (${t.key})` })),
+            ]}
+            className={inputCls} buttonClassName="w-full" ariaLabel="Source table"
+          />
+        </InspectorRow>
+      )}
+
+      {ref.tableKey && (
+        <InspectorRow label="Use it as">
+          <div className="flex border border-[#C8CDD2]">
+            <button type="button" className={segCls(ref.mode === "embed")} onClick={() => patch({ mode: "embed", sync: ref.sync ?? "live" }, { colSpan: 12 })}>Table (same columns)</button>
+            <button type="button" className={segCls(ref.mode === "row_picker")} onClick={() => patch({ mode: "row_picker" }, { colSpan: 6 })}>Pick a row</button>
+          </div>
+        </InspectorRow>
+      )}
+
+      {ref.tableKey && ref.mode === "embed" && (
+        <InspectorRow label="Keep layout" hint={ref.sync === "pinned"
+          ? `Frozen${ref.snapshot ? ` since ${new Date(ref.snapshot.takenAt).toLocaleDateString()}` : ""}. Changes to the source won't reach this form until you re-sync.`
+          : "Follows the source — edits to it appear here the next time this template is opened or saved."}>
+          <div className="space-y-2">
+            <div className="flex border border-[#C8CDD2]">
+              <button type="button" className={segCls(ref.sync !== "pinned")} onClick={() => patch({ sync: "live" })}>Live</button>
+              <button type="button" className={segCls(ref.sync === "pinned")} onClick={() => patch({ sync: "pinned", snapshot: takeSnapshot() })}>Pinned</button>
+            </div>
+            {ref.sync === "pinned" && (
+              <button type="button" onClick={() => patch({ snapshot: takeSnapshot() })}
+                className="inline-flex items-center gap-1.5 border border-[#287EAD]/40 bg-[#EEF6FB] px-2 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white">
+                <RefreshCw className="h-3 w-3" /> Re-sync from source now
+              </button>
+            )}
+          </div>
+        </InspectorRow>
+      )}
+
+      {ref.tableKey && ref.mode === "row_picker" && (
+        <InspectorRow label="Show column" hint="The column whose value labels each row in the dropdown.">
+          <CustomListbox
+            value={ref.displayColumn ?? ""}
+            onChange={(val) => patch({ displayColumn: val || undefined })}
+            options={[{ value: "", label: "Select a column…" }, ...(resolved?.columns ?? []).map((c) => ({ value: c.key, label: c.label }))]}
+            className={inputCls} buttonClassName="w-full" ariaLabel="Display column"
+          />
+        </InspectorRow>
+      )}
+
+      {resolved && resolved.status !== "ok" && ref.tableKey && (
+        <p className="flex items-start gap-1.5 border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" /> {tableRefStatusText(resolved.status)}
+        </p>
+      )}
+
+      {resolved && resolved.columns.length > 0 && ref.mode === "embed" && (
+        <div className="space-y-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Columns ({resolved.columns.length}) — edited in the source table</span>
+          <div className="flex flex-wrap gap-1">
+            {resolved.columns.map((c) => (
+              <span key={c.id} className="border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 text-[10px] text-[#3E4851]">{c.label}</span>
+            ))}
+          </div>
+          <p className="text-[10px] text-[#8C969E]">Rows entered here belong to this document. SunSystems account/journal settings are not copied over.</p>
+        </div>
+      )}
+
+      {warnings.length > 0 && (
+        <div className="space-y-1 border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
+          <p className="flex items-center gap-1.5 font-semibold"><AlertTriangle className="h-3 w-3 shrink-0" /> Formulas that need fields this form doesn't have</p>
+          {warnings.map((w) => (
+            <p key={w.column}><span className="font-semibold">{w.column}</span> uses <span className="font-mono">{w.keys.join(", ")}</span> — these resolve to 0 here. Add fields with those IDs.</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   field: TemplateField;
   onUpdate: (patch: Partial<TemplateField>) => void;
@@ -3511,6 +4143,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
 }) {
   const [tab, setTab] = useState<"field" | "advanced">("field");
   const isTable = field.type === "table";
+  const isButton = field.type === "button";
   const isLayout = field.type === "divider" || field.type === "heading";
   const isNumeric = field.type === "number" || field.type === "currency";
   const isText = field.type === "text" || field.type === "textarea" || field.type === "email" || field.type === "phone";
@@ -3525,7 +4158,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   useEffect(() => { setAutoKey(looksAutoGenerated(field.key)); }, [field.id]);
 
   const keyDuplicate = allFields.filter((f) => f.id !== field.id && f.key === field.key).length > 0;
-  const siblings = allFields.filter((f) => f.id !== field.id && f.key);
+  const siblings = allFields.filter((f) => f.id !== field.id && f.key && f.type !== "button");
   // Fields whose selected value can drive a currency field's symbol — dropdowns
   // (and plain text) that hold a currency code.
   const currencySourceSiblings = siblings.filter((s) => ["select", "radio", "text"].includes(s.type));
@@ -3590,7 +4223,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               <div className="flex justify-between text-[10px] text-[#5E6870]"><span>1</span><span>6</span><span>12</span></div>
             </InspectorRow>
           )}
-          {!isLayout && !isTable && !isCalculated && (
+          {!isLayout && !isTable && !isCalculated && !isButton && (
             <div className="flex items-center gap-6">
               <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
                 <input type="checkbox" checked={!!field.required} onChange={(e) => onUpdate({ required: e.target.checked })}
@@ -3606,6 +4239,9 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               )}
               {/* Read-only moved to the Editability control (Advanced tab). */}
             </div>
+          )}
+          {isButton && (
+            <ButtonEditor field={field} onUpdate={onUpdate} allFields={allFields} />
           )}
           {isTable && (
             <InspectorRow label="Minimum rows shown">
@@ -3711,14 +4347,19 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
             <InspectorRow label="Reference source">
               <CustomListbox
                 value={field.referenceSource ?? (field.type === "user" ? "users" : "documents")}
-                onChange={(val) => onUpdate({ referenceSource: val })}
-                options={REFERENCE_SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+                onChange={(val) => onUpdate(
+                  val === "table"
+                    ? { referenceSource: val, tableRef: field.tableRef ?? { scope: "this_form", tableKey: "", mode: "embed", sync: "live" } }
+                    : { referenceSource: val },
+                )}
+                options={(field.type === "reference" ? FIELD_REFERENCE_SOURCE_OPTIONS : REFERENCE_SOURCE_OPTIONS).map((o) => ({ value: o.value, label: o.label }))}
                 className={inputCls}
                 buttonClassName="w-full"
                 ariaLabel="Reference source"
               />
             </InspectorRow>
           )}
+          {isTableRefField(field) && <TableRefEditor field={field} onUpdate={onUpdate} />}
           {FORMULA_FIELD_TYPES.has(field.type) && (
             <InspectorRow label="Auto-fill" hint="Fill this field automatically — the user won't type it.">
               <CustomListbox
@@ -3734,7 +4375,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           {isCalculated && (
             <CalcFormulaEditor field={field} siblings={siblings} onUpdate={onUpdate} />
           )}
-          {!isLayout && (
+          {!isLayout && !isButton && (
             <FinanceBindingFields field={field} onUpdate={onUpdate} />
           )}
         </>
@@ -3742,12 +4383,16 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
 
       {tab === "advanced" && (
         <>
-          <InspectorRow label="Default value">
-            <input className={inputCls} value={field.defaultValue ?? ""} onChange={(e) => onUpdate({ defaultValue: e.target.value })} />
-          </InspectorRow>
-          <InspectorRow label="Regular expression" hint="Validation pattern, e.g. ^[A-Z0-9-]+$">
-            <input className={cn(inputCls, "font-mono")} value={field.regex ?? ""} onChange={(e) => onUpdate({ regex: e.target.value })} />
-          </InspectorRow>
+          {!isButton && (
+            <>
+              <InspectorRow label="Default value">
+                <input className={inputCls} value={field.defaultValue ?? ""} onChange={(e) => onUpdate({ defaultValue: e.target.value })} />
+              </InspectorRow>
+              <InspectorRow label="Regular expression" hint="Validation pattern, e.g. ^[A-Z0-9-]+$">
+                <input className={cn(inputCls, "font-mono")} value={field.regex ?? ""} onChange={(e) => onUpdate({ regex: e.target.value })} />
+              </InspectorRow>
+            </>
+          )}
           {isNumeric && (
             <div className="grid grid-cols-2 gap-3">
               <InspectorRow label="Min"><input type="number" className={inputCls} value={field.min ?? ""} onChange={(e) => onUpdate({ min: e.target.value === "" ? undefined : Number(e.target.value) })} /></InspectorRow>
@@ -3825,6 +4470,30 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
           onChange={(e) => onUpdate({ description: e.target.value })}
           className={inputCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
       </InspectorRow>
+      <div className="space-y-2.5 border border-[#C8CDD2] bg-white p-3">
+        <label className="flex cursor-pointer items-start gap-2.5 text-sm text-[#1F2933]">
+          <input type="checkbox" checked={!!section.onDemand}
+            onChange={(e) => onUpdate({ onDemand: e.target.checked, ...(e.target.checked ? {} : { removable: false }) })}
+            className="mt-0.5 h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
+          <span>
+            <span className="font-semibold">Add on demand</span>
+            <span className="block text-xs text-[#5E6870]">Not part of the form until a Button adds it — at the end of the form or wherever that button says.</span>
+          </span>
+        </label>
+        {section.onDemand && (
+          <label className="flex cursor-pointer items-center gap-2.5 pl-6 text-sm text-[#1F2933]">
+            <input type="checkbox" checked={!!section.removable} onChange={(e) => onUpdate({ removable: e.target.checked })}
+              className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
+            Let people remove it again
+          </label>
+        )}
+        {section.onDemand && !allFields.some((f) => f.type === "button" && f.button?.action === "add_block" && f.button.targetSectionId === section.id) && (
+          <p className="flex items-start gap-1.5 border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
+            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+            No button adds this section yet, so it will never appear. Drop a Button (Actions group) and point it here.
+          </p>
+        )}
+      </div>
       <VisibilityEditor
         value={section}
         sources={sources}
@@ -3844,8 +4513,10 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
   );
 }
 
-function Inspector({ sections, selectedId, onUpdateField, onUpdateSection, onCollapse, processSteps }: {
+function Inspector({ sections, calcSections, selectedId, onUpdateField, onUpdateSection, onCollapse, processSteps }: {
   sections: TemplateSection[]; selectedId: string | null;
+  /* Same sections with linked tables resolved — what formulas/conditions can reference. */
+  calcSections?: TemplateSection[];
   onUpdateField: (sectionId: string, fieldId: string, patch: Partial<TemplateField>) => void;
   onUpdateSection: (sectionId: string, patch: Partial<TemplateSection>) => void;
   onCollapse: () => void;
@@ -3856,7 +4527,7 @@ function Inspector({ sections, selectedId, onUpdateField, onUpdateSection, onCol
     | { kind: "section"; section: TemplateSection }
     | null = null;
 
-  const allFields: TemplateField[] = sections.flatMap((s) => s.fields);
+  const allFields: TemplateField[] = (calcSections ?? sections).flatMap((s) => s.fields);
 
   for (const s of sections) {
     if (s.id === selectedId) { target = { kind: "section", section: s }; break; }
@@ -5054,7 +5725,7 @@ function formatCalcResult(fieldType: string | undefined, result: CalcValue): Cal
   return result;
 }
 
-function PreviewField({ field, register, errors, values, allFields, editable = true, tableRows, onUpdateTableCell, onAddTableRow, onRemoveTableRow, previewStep = "draft" }: {
+function PreviewField({ field, register, errors, values, allFields, editable = true, tableRows, onUpdateTableCell, onAddTableRow, onRemoveTableRow, previewStep = "draft", onButtonClick, buttonDone = false }: {
   field: TemplateField;
   register: UseFormRegister<Record<string, unknown>>;
   errors: FieldErrors<Record<string, unknown>>;
@@ -5066,10 +5737,27 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
   onAddTableRow?: (tableKey: string) => void;
   onRemoveTableRow?: (tableKey: string, rowIdx: number) => void;
   previewStep?: string;
+  onButtonClick?: (field: TemplateField) => void;
+  buttonDone?: boolean;
 }) {
   if (field.hidden) return null;
   // Read-only when always-read-only or not editable at this (draft) step.
   const dis = Boolean(field.readonly) || !editable;
+  if (field.type === "button") {
+    const v = field.button?.variant ?? "primary";
+    return (
+      <button type="button" disabled={dis || buttonDone} onClick={() => onButtonClick?.(field)}
+        className={cn(
+          "inline-flex h-10 items-center gap-2 px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60",
+          v === "primary" ? "bg-[#287EAD] text-white hover:bg-[#1E6F99]"
+            : v === "secondary" ? "bg-slate-200 text-slate-800 hover:bg-slate-300"
+              : "border border-[#287EAD] bg-white text-[#287EAD] hover:bg-[#EEF6FB]",
+        )}>
+        {buttonDone ? <CheckCircle2 className="h-4 w-4" /> : field.button?.action === "calculate" ? <Calculator className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+        {buttonDone ? `${field.label} — added` : (field.label || "Button")}
+      </button>
+    );
+  }
   if (field.type === "table") {
     return (
       <PreviewTableField
@@ -5194,7 +5882,31 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
       control = <input type="time" {...reg} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
       break;
     case "reference":
-    case "user":
+    case "user": {
+      const tr = field.type === "reference" && isTableRefField(field) ? field.tableRef : null;
+      if (tr && tr.mode === "row_picker") {
+        if (tr.scope === "this_form") {
+          // Live rows of the sibling table, labelled by the chosen column.
+          const opts = (tableRows?.[tr.tableKey] ?? [])
+            .map((r, i) => ({ i, label: String(r[tr.displayColumn ?? ""] ?? "") }))
+            .filter((o) => o.label.trim() !== "");
+          control = (
+            <select {...reg} disabled={dis} defaultValue="" className={previewInputCls}>
+              <option value="">{opts.length ? "Select a row…" : "No rows yet — fill the source table first"}</option>
+              {opts.map((o) => <option key={o.i} value={String(o.i)}>{`${o.i + 1}. ${o.label}`}</option>)}
+            </select>
+          );
+        } else {
+          // Rows of another form's table come from real documents at runtime.
+          control = (
+            <div className={cn(previewInputCls, "flex items-center justify-between gap-2 text-[#5E6870]")}>
+              <span className="truncate">Pick a row from {tr.templateName ?? "another form"} › {tr.tableLabel ?? tr.tableKey}…</span>
+              <Link2 className="h-3.5 w-3.5 flex-shrink-0" />
+            </div>
+          );
+        }
+        break;
+      }
       control = (
         <div className={cn(previewInputCls, "flex items-center justify-between gap-2 text-[#5E6870]")}>
           <span className="truncate">Pick {field.referenceSource ?? (field.type === "user" ? "user" : "record")}…</span>
@@ -5202,6 +5914,7 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
         </div>
       );
       break;
+    }
     case "file":
     case "image":
       control = (
@@ -5317,11 +6030,13 @@ function Preview({ sections, templateName, processSteps }: {
   sections: TemplateSection[]; templateName: string;
   processSteps: { value: string; label: string }[];
 }) {
-  const { register, handleSubmit, reset, watch, setValue, formState: { errors } } = useForm<Record<string, unknown>>();
+  const { register, handleSubmit, reset, watch, setValue, unregister, formState: { errors } } = useForm<Record<string, unknown>>();
   const [submitted, setSubmitted] = useState<Record<string, unknown> | null>(null);
   // Simulate the document being at a given workflow step, so process-step
   // visibility/editability rules can be exercised without a live document.
   const [previewStep, setPreviewStep] = useState("draft");
+  // On-demand sections a Button has added so far, in click order.
+  const [spawned, setSpawned] = useState<SpawnRecord[]>([]);
   const values = watch();
   const allFields = sections.flatMap((s) => s.fields);
   const tableFields = allFields.filter((f) => f.type === "table" && f.key);
@@ -5462,6 +6177,45 @@ function Preview({ sections, templateName, processSteps }: {
     }));
 
 
+  const freshRows = (f: TemplateField) => Array.from({ length: f.minRows ?? 2 }, () => {
+    const r: Record<string, string> = {};
+    (f.columns ?? []).forEach((c) => { if (c.defaultValue) r[c.key] = c.defaultValue; });
+    return r;
+  });
+
+  /* Button click. "add_block" appends the target on-demand section (at the end
+   * of the form, below the button's own section, or after a chosen one);
+   * "calculate" evaluates the formula once and writes it to the target field. */
+  const runButton = (btn: TemplateField, hostSectionId: string) => {
+    const b = btn.button;
+    if (!b) return;
+    if (b.action === "add_block") {
+      if (!b.targetSectionId || spawned.some((r) => r.sectionId === b.targetSectionId)) return;
+      const anchorId = b.placement === "below_button" ? hostSectionId : b.placement === "after_section" ? (b.anchorSectionId ?? "") : "";
+      setSpawned((prev) => [...prev, { sectionId: b.targetSectionId!, anchorId }]);
+      return;
+    }
+    const target = allFields.find((f) => f.key === b.targetKey);
+    if (!target || !b.calc?.expression) return;
+    const registry = buildTableCalcRegistry(tableFields, tableRows);
+    const scope = buildCalcScope(allFields, values, registry);
+    let result = evaluateCalcExpression(resolveRowAggregates(b.calc.expression, null, null, registry), scope);
+    if (typeof result === "number" && typeof b.calc.decimals === "number") result = Number(result.toFixed(b.calc.decimals));
+    setValue(target.id, result, { shouldDirty: true });
+  };
+
+  const removeSpawned = (sec: TemplateSection) => {
+    setSpawned((prev) => prev.filter((r) => r.sectionId !== sec.id));
+    sec.fields.forEach((f) => unregister(f.id));
+    setTableRows((prev) => {
+      const next = { ...prev };
+      sec.fields.filter((f) => f.type === "table").forEach((f) => { next[f.key] = freshRows(f); });
+      return next;
+    });
+  };
+
+  const ordered = orderSections(sections, spawned);
+
   if (submitted) {
     return (
       <div className="mx-auto max-w-4xl p-8">
@@ -5476,7 +6230,7 @@ function Preview({ sections, templateName, processSteps }: {
           <pre className="overflow-auto bg-slate-900 p-5 text-xs text-emerald-400 font-mono leading-relaxed">
             {JSON.stringify(submitted, null, 2)}
           </pre>
-          <button type="button" onClick={() => { setSubmitted(null); reset(); }}
+          <button type="button" onClick={() => { setSubmitted(null); setSpawned([]); reset(); }}
             className="mt-5 inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
             <RotateCcw className="h-4 w-4" /> Test again
           </button>
@@ -5505,7 +6259,7 @@ function Preview({ sections, templateName, processSteps }: {
             />
           </label>
         </header>
-        {sections.map((s) => {
+        {ordered.map((s) => {
           if (!evalVisible(s, values, allFields, previewStep)) return null;
           const sectionEditable = evalEditable(s, values, allFields, previewStep);
           return (
@@ -5515,6 +6269,12 @@ function Preview({ sections, templateName, processSteps }: {
                   {s.title}
                   {!sectionEditable && (
                     <span className="inline-flex items-center gap-1 bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">read-only</span>
+                  )}
+                  {s.onDemand && s.removable && (
+                    <button type="button" onClick={() => removeSpawned(s)}
+                      className="ml-auto inline-flex items-center gap-1 text-xs font-semibold text-slate-500 hover:text-red-600">
+                      <Trash2 className="h-3.5 w-3.5" /> Remove
+                    </button>
                   )}
                 </h2>
                 {s.description && <p className="mt-0.5 text-sm text-slate-500">{s.description}</p>}
@@ -5528,7 +6288,9 @@ function Preview({ sections, templateName, processSteps }: {
                         editable={sectionEditable && evalEditable(f, values, allFields, previewStep)}
                         tableRows={tableRows} onUpdateTableCell={updateTableCell}
                         onAddTableRow={addTableRow} onRemoveTableRow={removeTableRow}
-                        previewStep={previewStep} />
+                        previewStep={previewStep}
+                        onButtonClick={(btn) => runButton(btn, s.id)}
+                        buttonDone={f.button?.action === "add_block" && spawned.some((r) => r.sectionId === f.button?.targetSectionId)} />
                     </div>
                   );
                 })}
@@ -5537,7 +6299,7 @@ function Preview({ sections, templateName, processSteps }: {
           );
         })}
         <div className="flex items-center justify-end gap-3 pt-2">
-          <button type="button" onClick={() => reset()}
+          <button type="button" onClick={() => { reset(); setSpawned([]); }}
             className="inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
             <RotateCcw className="h-4 w-4" /> Reset
           </button>
@@ -6005,6 +6767,9 @@ export interface TemplateBuilderV2Props {
   onCancel: () => void;
   isSaving?: boolean;
   documentTypes?: Array<{ id: string; name: string; code: string }>;
+  /* Lets table references point at OTHER forms. Omit it and "Another form"
+   * is disabled in the reference editor (this-form references still work). */
+  externalTemplates?: ExternalTemplateSource;
 }
 
 /* Propagate a field/column KEY rename to every place in the template that
@@ -6067,6 +6832,16 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
       }
       : f.sunsystems,
     columns: f.columns ? f.columns.map(renameColumn) : f.columns,
+    button: f.button
+      ? { ...f.button, targetKey: f.button.targetKey === oldKey ? newKey : f.button.targetKey, calc: renameCalc(f.button.calc) }
+      : f.button,
+    tableRef: f.tableRef && f.tableRef.scope === "this_form"
+      ? {
+        ...f.tableRef,
+        tableKey: f.tableRef.tableKey === oldKey ? newKey : f.tableRef.tableKey,
+        displayColumn: f.tableRef.displayColumn === oldKey ? newKey : f.tableRef.displayColumn,
+      }
+      : f.tableRef,
   });
 
   return {
@@ -6080,7 +6855,8 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
   };
 }
 
-export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving, documentTypes = [] }: TemplateBuilderV2Props) {
+export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving, documentTypes = [], externalTemplates }: TemplateBuilderV2Props) {
+  const normalizedDocumentTypes = normalizeListResponse<NonNullable<TemplateBuilderV2Props["documentTypes"]>[number]>(documentTypes);
   // History + cursor live in ONE state so they can never desync. (A previous
   // split — setHistory using a stale `cursor` from a drag listener's closure
   // while setCursor incremented functionally — let `cursor` outrun the stack
@@ -6118,6 +6894,69 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
     },
     staleTime: 60_000,
   });
+
+  /* ── Cross-form table references ─────────────────────────────────────────
+   * Load the picker list, then every form this template links to (and, one
+   * level further, the forms THOSE link to — so chained references resolve).
+   * Everything downstream reads the result through BuilderEnv or `linked`. */
+  const { data: summaries = [], isLoading: summariesLoading } = useQuery({
+    queryKey: ["tb-external-templates"],
+    queryFn: async () => (externalTemplates ? await externalTemplates.list() : []),
+    enabled: !!externalTemplates,
+    staleTime: 60_000,
+  });
+  const collectExternalIds = (secs: TemplateSection[]) => {
+    const ids = new Set<string>();
+    for (const sec of secs) for (const f of sec.fields ?? []) {
+      if (isTableRefField(f) && f.tableRef?.scope === "other_form" && f.tableRef.templateId) ids.add(f.tableRef.templateId);
+    }
+    return [...ids].sort();
+  };
+  const ids1 = useMemo(() => collectExternalIds(template.sections), [template]);
+  const q1 = useQueries({
+    queries: ids1.map((id) => ({
+      queryKey: ["tb-external-template", id],
+      queryFn: async () => normalizeTemplate(await externalTemplates!.get(id)),
+      enabled: !!externalTemplates,
+      staleTime: 60_000,
+    })),
+  });
+  const ext1 = useMemo<Record<string, Template | undefined>>(() => {
+    const m: Record<string, Template | undefined> = {};
+    ids1.forEach((id, i) => { m[id] = q1[i]?.data as Template | undefined; });
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ids1.join(","), q1.map((r) => r.dataUpdatedAt).join(",")]);
+  const ids2 = useMemo<string[]>(
+    () => [...new Set(Object.values(ext1).flatMap((t) => (t ? collectExternalIds(t.sections) : [])))].filter((id) => !ids1.includes(id)).sort(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ext1],
+  );
+  const q2 = useQueries({
+    queries: ids2.map((id) => ({
+      queryKey: ["tb-external-template", id],
+      queryFn: async () => normalizeTemplate(await externalTemplates!.get(id)),
+      enabled: !!externalTemplates,
+      staleTime: 60_000,
+    })),
+  });
+  const external = useMemo<Record<string, Template | undefined>>(() => {
+    const m: Record<string, Template | undefined> = { ...ext1 };
+    ids2.forEach((id, i) => { m[id] = q2[i]?.data as Template | undefined; });
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ext1, ids2.join(","), q2.map((r) => r.dataUpdatedAt).join(",")]);
+  const loadingIds = useMemo(
+    () => new Set<string>([...ids1.filter((_, i) => q1[i]?.isLoading), ...ids2.filter((_, i) => q2[i]?.isLoading)]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ids1.join(","), ids2.join(","), q1.map((r) => r.status).join(","), q2.map((r) => r.status).join(",")],
+  );
+  const builderEnv = useMemo<BuilderEnvValue>(() => ({
+    template, summaries, summariesLoading, external, loadingIds, canLinkExternal: !!externalTemplates,
+  }), [template, summaries, summariesLoading, external, loadingIds, externalTemplates]);
+  /* Embedded table references resolved into plain tables — what the Preview
+   * renders and what formulas can see. The raw template stays untouched. */
+  const linked = useMemo(() => materializeTableRefs(template, external, loadingIds), [template, external, loadingIds]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -6379,6 +7218,45 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
         return;
       }
     }
+    // Buttons, on-demand sections and table references: catch the
+    // half-configured states that would otherwise fail silently at runtime.
+    for (const sec of template.sections) {
+      for (const f of sec.fields) {
+        if (f.type === "button") {
+          const b = f.button;
+          if (!b) { toast.error(`Button "${f.label}" isn't configured.`); return; }
+          if (b.action === "add_block") {
+            const target = template.sections.find((x) => x.id === b.targetSectionId);
+            if (!target) { toast.error(`Button "${f.label}" has no section to add.`); return; }
+            if (!target.onDemand) { toast.error(`Button "${f.label}" adds "${target.title}", which isn't marked "Add on demand".`); return; }
+            if (target.id === sec.id) { toast.error(`Button "${f.label}" sits inside the section it adds, so nobody could ever click it.`); return; }
+            if (b.placement === "after_section" && !template.sections.some((x) => x.id === b.anchorSectionId && !x.onDemand)) {
+              toast.error(`Button "${f.label}" is set to add after a section, but none is selected.`); return;
+            }
+          } else {
+            if (!b.targetKey || !allFields.some((x) => x.key === b.targetKey)) { toast.error(`Button "${f.label}" has no target field to calculate into.`); return; }
+            if (!b.calc?.expression?.trim()) { toast.error(`Button "${f.label}" has no formula.`); return; }
+          }
+        }
+        if (isTableRefField(f)) {
+          const r = f.tableRef;
+          if (!r || !r.tableKey) { toast.error(`"${f.label}" references a table, but none is selected.`); return; }
+          if (r.mode === "row_picker" && !r.displayColumn) { toast.error(`"${f.label}": choose which column labels the rows.`); return; }
+          if (r.mode === "embed") {
+            const res = linked.resolved[f.id];
+            if (res?.status === "loading") { toast.error(`"${f.label}": the linked form is still loading — try again in a moment.`); return; }
+            if (res?.status === "cycle") { toast.error(`"${f.label}" is a circular table reference.`); return; }
+            if (!res || res.columns.length === 0) { toast.error(`"${f.label}": the linked table couldn't be found or has no columns.`); return; }
+            if (res.status === "stale") toast.warning(`"${f.label}": the source form is unavailable, so the last saved layout was kept.`);
+          }
+        }
+      }
+    }
+    for (const sec of template.sections) {
+      if (sec.onDemand && !allFields.some((f) => f.type === "button" && f.button?.action === "add_block" && f.button.targetSectionId === sec.id)) {
+        toast.warning(`Section "${sec.title}" is "Add on demand" but no button adds it — it will never appear.`);
+      }
+    }
     // Retirement is easy to half-configure (enable it, build out the
     // scenarios, then forget to actually pick the issued-amount field). That
     // doesn't fail the build server-side — it just silently treats issued as
@@ -6398,7 +7276,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
       setTab("settings");
       return;
     }
-    onSave(outputTemplate(template, Boolean(initial?.id)), false);
+    onSave(outputTemplate(template, Boolean(initial?.id), linked.resolved), false);
   };
 
   /* AutoSave: debounce on commit when enabled (skip initial mount). */
@@ -6413,7 +7291,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
       if (!template.document_type_id) return; // silent skip until configured
       const keys = template.sections.flatMap((s) => s.fields).map((f) => f.key);
       if (keys.length !== new Set(keys).size) return;
-      onSave(outputTemplate(template, Boolean(initial?.id)), true);
+      onSave(outputTemplate(template, Boolean(initial?.id), linked.resolved), true);
       setLastAutoSavedAt(Date.now());
     }, 1200);
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
@@ -6429,6 +7307,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
   }, [configuringColumn, template]);
 
   return (
+    <BuilderEnv.Provider value={builderEnv}>
     <div
       className={cn(
         "fixed inset-0 z-50 flex h-screen w-full flex-col overflow-hidden transition-all duration-200",
@@ -6566,6 +7445,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
               <div className={cn("shrink-0 overflow-hidden transition-all duration-200", inspectorOpen ? "w-[400px]" : "w-0")}>
                 <Inspector
                   sections={template.sections}
+                  calcSections={linked.sections}
                   selectedId={selectedId}
                   onUpdateField={updateField}
                   onUpdateSection={updateSection}
@@ -6577,12 +7457,12 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
           )}
           {tab === "preview" && (
             <main key="preview" className="flex-1 overflow-y-auto bg-slate-100 animate-in fade-in duration-150">
-              <Preview sections={template.sections} templateName={template.name} processSteps={processSteps} />
+              <Preview sections={linked.sections} templateName={template.name} processSteps={processSteps} />
             </main>
           )}
           {tab === "settings" && (
             <main key="settings" className="flex-1 overflow-y-auto bg-slate-100 animate-in fade-in duration-150">
-              <SettingsTab template={template} documentTypes={documentTypes}
+              <SettingsTab template={template} documentTypes={normalizedDocumentTypes}
                 processSteps={processSteps}
                 onCommit={(patch) => commit({ ...template, ...patch })} />
             </main>
@@ -6640,5 +7520,6 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
       />
 
     </div>
+    </BuilderEnv.Provider>
   );
 }

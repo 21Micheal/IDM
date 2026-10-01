@@ -170,75 +170,51 @@ SYSTEM_FIELDS = [
 
 def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any]]:
     """
-    Build a field map from a document type's metadata.
-    
-    This extracts form fields from the document type's metadata and combines
-    them with system fields to create a complete field map for workflow conditions.
-    
-    Args:
-        document_type: DocumentType model instance
-    
-    Returns:
-        Dict mapping field_id to field metadata
+    Build a field map from a document type's form / metadata fields.
+
+    Form fields live on DocumentTemplate.sections (templates_engine). Admin-defined
+    attribute fields live on DocumentType.metadata_fields. System fields are always
+    included.
     """
     field_map = {f["id"]: f for f in SYSTEM_FIELDS}
-    
-    # Extract form fields from metadata
-    metadata = document_type.metadata if isinstance(document_type.metadata, dict) else {}
-    
-    # Try multiple possible paths for form fields
-    raw_fields = (
-        metadata.get("form", {}).get("fields")
-        or metadata.get("form_template", {}).get("fields")
-        or metadata.get("form", {}).get("schema", {}).get("fields")
-        or metadata.get("fields")
-        or []
-    )
-    
-    if not isinstance(raw_fields, list):
-        return field_map
-    
-    for field in raw_fields:
+
+    type_mapping = {
+        "currency": FieldType.MONEY,
+        "money": FieldType.MONEY,
+        "amount": FieldType.MONEY,
+        "number": FieldType.NUMBER,
+        "integer": FieldType.NUMBER,
+        "decimal": FieldType.NUMBER,
+        "float": FieldType.NUMBER,
+        "select": FieldType.SELECT,
+        "dropdown": FieldType.SELECT,
+        "radio": FieldType.SELECT,
+        "choice": FieldType.SELECT,
+        "multiselect": FieldType.MULTISELECT,
+        "multi_select": FieldType.MULTISELECT,
+        "checkbox_group": FieldType.MULTISELECT,
+        "tags": FieldType.MULTISELECT,
+        "checkbox": FieldType.BOOLEAN,
+        "boolean": FieldType.BOOLEAN,
+        "switch": FieldType.BOOLEAN,
+        "toggle": FieldType.BOOLEAN,
+        "date": FieldType.DATE,
+        "datetime": FieldType.DATE,
+    }
+
+    def add_field(field: Dict[str, Any], source: str = "form") -> None:
         if not isinstance(field, dict):
-            continue
-        
-        field_id = field.get("id") or field.get("name") or field.get("key")
+            return
+        field_id = field.get("id") or field.get("key") or field.get("name")
         if not field_id:
-            continue
-        
-        field_type_str = str(field.get("type", "")).lower()
-        
-        # Map field type to our FieldType constants
-        type_mapping = {
-            "currency": FieldType.MONEY,
-            "money": FieldType.MONEY,
-            "amount": FieldType.MONEY,
-            "number": FieldType.NUMBER,
-            "integer": FieldType.NUMBER,
-            "decimal": FieldType.NUMBER,
-            "float": FieldType.NUMBER,
-            "select": FieldType.SELECT,
-            "dropdown": FieldType.SELECT,
-            "radio": FieldType.SELECT,
-            "choice": FieldType.SELECT,
-            "multiselect": FieldType.MULTISELECT,
-            "multi_select": FieldType.MULTISELECT,
-            "checkbox_group": FieldType.MULTISELECT,
-            "tags": FieldType.MULTISELECT,
-            "checkbox": FieldType.BOOLEAN,
-            "boolean": FieldType.BOOLEAN,
-            "switch": FieldType.BOOLEAN,
-            "toggle": FieldType.BOOLEAN,
-            "date": FieldType.DATE,
-            "datetime": FieldType.DATE,
-        }
-        
-        field_type = type_mapping.get(field_type_str, FieldType.TEXT)
-        
-        # Extract options if available
+            return
+        field_id = str(field_id)
+        field_type = type_mapping.get(str(field.get("type", "")).lower(), FieldType.TEXT)
+
         options = []
-        if isinstance(field.get("options"), list):
-            for opt in field.get("options"):
+        raw_opts = field.get("options") or field.get("select_options") or []
+        if isinstance(raw_opts, list):
+            for opt in raw_opts:
                 if isinstance(opt, str):
                     options.append({"value": opt, "label": opt})
                 elif isinstance(opt, dict):
@@ -246,15 +222,54 @@ def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any
                         "value": str(opt.get("value") or opt.get("id") or opt.get("label")),
                         "label": str(opt.get("label") or opt.get("value") or opt.get("id")),
                     })
-        
+
         field_map[field_id] = {
             "id": field_id,
             "label": str(field.get("label") or field.get("title") or field_id),
             "type": field_type,
             "options": options if options else None,
-            "source": "form",
+            "source": source,
         }
-    
+        # Builder forms often key conditions by `key` while the block stores `id`.
+        key = field.get("key")
+        if key and str(key) != field_id:
+            field_map[str(key)] = {**field_map[field_id], "id": str(key)}
+
+    # Admin-defined metadata attributes on the document type
+    try:
+        for mf in document_type.metadata_fields.all():
+            add_field(
+                {
+                    "id": mf.key,
+                    "key": mf.key,
+                    "label": mf.label,
+                    "type": mf.field_type,
+                    "select_options": mf.select_options,
+                },
+                source="metadata",
+            )
+    except Exception:
+        logger.debug("Could not load metadata_fields for document type %s", getattr(document_type, "pk", None), exc_info=True)
+
+    # Interactive form templates attached to this document type
+    try:
+        from apps.templates_engine.models import DocumentTemplate
+
+        templates = DocumentTemplate.objects.filter(
+            document_type_id=document_type.pk,
+            is_active=True,
+            kind="form",
+        )
+        for tmpl in templates:
+            sections = tmpl.sections if isinstance(tmpl.sections, list) else []
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                for field in section.get("fields") or []:
+                    add_field(field, source="form")
+    except Exception:
+        logger.debug("Could not load form templates for document type %s", getattr(document_type, "pk", None), exc_info=True)
+
     return field_map
 
 

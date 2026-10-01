@@ -432,15 +432,40 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     def return_for_review(self, request, pk=None):
         task      = self.get_object()
         comment   = request.data.get("comment", "").strip()
-        return_to = request.data.get("return_to", "uploader")
+        return_to = (request.data.get("return_to") or "uploader").strip()
 
         if not comment:
             return Response(
                 {"detail": "A comment explaining what needs to be fixed is required."},
                 status=400,
             )
-        if not task.step.allow_return:
-            return Response({"detail": "Send back is not permitted for this step."}, status=403)
+        if return_to not in ("previous_step", "uploader", "same_step"):
+            return Response(
+                {"detail": "return_to must be previous_step, uploader, or same_step."},
+                status=400,
+            )
+
+        step = task.step
+        if return_to == "previous_step":
+            if not step.allow_return:
+                return Response(
+                    {"detail": "Return to previous step is not permitted for this step."},
+                    status=403,
+                )
+            if task.step.order <= 1:
+                return Response(
+                    {"detail": "There is no previous step to return to."},
+                    status=400,
+                )
+        elif return_to in ("uploader", "same_step"):
+            # Legacy templates only had allow_return; treat that as submitter return.
+            allow_submitter = getattr(step, "allow_return_submitter", False) or step.allow_return
+            if not allow_submitter:
+                return Response(
+                    {"detail": "Return to submitter is not permitted for this step."},
+                    status=403,
+                )
+
         self._check_permission(task, request.user)
         try:
             WorkflowService.return_for_review(task, request.user, comment, return_to)

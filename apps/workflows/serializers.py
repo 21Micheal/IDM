@@ -9,7 +9,7 @@ Adds:
 Everything else unchanged from previous version.
 """
 from rest_framework import serializers
-from django.db.models import Q, F
+from django.db.models import Q
 from django.db import transaction
 from django.utils import timezone
 from django.contrib.auth import get_user_model
@@ -96,7 +96,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             "assignee_type", "assignee_group", "assignee_group_name",
             "assignee_user", "assignee_user_name", "assignee_user_auto",
             "sla_hours", "allow_resubmit",
-            "allow_approve", "allow_reject", "allow_return",
+            "allow_approve", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
             "instructions",
             # custom approver email
@@ -171,7 +171,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             # approval-step
             "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto",
             "sla_hours", "allow_resubmit",
-            "allow_approve", "allow_reject", "allow_return",
+            "allow_approve", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
             "instructions",
             # custom approver email
@@ -224,6 +224,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             attrs["allow_approve"]       = False
             attrs["allow_reject"]        = False
             attrs["allow_return"]        = False
+            attrs["allow_return_submitter"] = False
             attrs["allow_resubmit"]      = False
             attrs["requires_signature"]  = False
             attrs["assignee_user_auto"]  = False
@@ -266,9 +267,13 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         allow_approve      = attrs.get("allow_approve",      getattr(self.instance, "allow_approve",      True))
         allow_reject       = attrs.get("allow_reject",       getattr(self.instance, "allow_reject",       True))
         allow_return       = attrs.get("allow_return",       getattr(self.instance, "allow_return",       True))
+        allow_return_submitter = attrs.get(
+            "allow_return_submitter",
+            getattr(self.instance, "allow_return_submitter", True),
+        )
         requires_signature = attrs.get("requires_signature", getattr(self.instance, "requires_signature", False))
 
-        if not any([allow_approve, allow_reject, allow_return]):
+        if not any([allow_approve, allow_reject, allow_return, allow_return_submitter]):
             raise serializers.ValidationError(
                 {"allow_approve": "At least one approver action (approve, reject, or send back) must be enabled."}
             )
@@ -304,10 +309,24 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
 
 class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
     steps = WorkflowStepWriteSerializer(many=True)
+    retire_siblings = serializers.BooleanField(
+        required=False,
+        write_only=True,
+        default=False,
+        help_text=(
+            "When saving a v2 branched definition, deactivate other templates for "
+            "the same document type, remove their routing rules, and point the "
+            "document type at this template."
+        ),
+    )
 
     class Meta:
         model  = WorkflowTemplate
-        fields = ["name", "description", "target_type", "document_type", "is_active", "notify_uploader_on_approval", "email_templates", "definition", "steps"]
+        fields = [
+            "name", "description", "target_type", "document_type", "is_active",
+            "notify_uploader_on_approval", "email_templates", "definition", "steps",
+            "retire_siblings",
+        ]
         extra_kwargs = {
             "is_active":                    {"required": False},
             "target_type":                  {"required": False},
@@ -361,53 +380,40 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"definition": "Workflow definition must have version 2."}
                 )
-            
-            # Import the engine for validation
+
             try:
                 from .engine import validate_definition, build_field_map_from_document_type
-                import uuid
-                
-                # Build field map from document type metadata
+
                 field_map = {}
-                if document_type:
-                    # Check if document_type is a valid UUID
-                    try:
-                        uuid.UUID(str(document_type))
-                        is_uuid = True
-                    except (ValueError, AttributeError):
-                        is_uuid = False
-                    
-                    if is_uuid:
-                        from apps.documents.models import DocumentType
-                        try:
-                            doc_type_obj = DocumentType.objects.get(id=document_type)
-                            field_map = build_field_map_from_document_type(doc_type_obj)
-                        except DocumentType.DoesNotExist:
-                            pass
+                doc_type_obj = None
+                if document_type is not None:
+                    if hasattr(document_type, "pk"):
+                        doc_type_obj = document_type
                     else:
-                        # document_type is a name or other non-UUID value
-                        # Try to look up by name
                         from apps.documents.models import DocumentType
                         try:
-                            doc_type_obj = DocumentType.objects.get(name=document_type)
-                            field_map = build_field_map_from_document_type(doc_type_obj)
-                        except DocumentType.DoesNotExist:
-                            pass
-                
-                # Validate the definition
-                from .engine import ValidationError as EngineValidationError
+                            doc_type_obj = DocumentType.objects.get(pk=document_type)
+                        except (DocumentType.DoesNotExist, ValueError, TypeError):
+                            try:
+                                doc_type_obj = DocumentType.objects.get(name=document_type)
+                            except DocumentType.DoesNotExist:
+                                doc_type_obj = None
+
+                if doc_type_obj is not None:
+                    field_map = build_field_map_from_document_type(doc_type_obj)
+
                 validation_errors = validate_definition(definition, field_map)
-                
-                # Convert engine validation errors to serializer errors
                 if validation_errors:
                     error_messages = [e.message for e in validation_errors if e.severity == "error"]
                     if error_messages:
                         raise serializers.ValidationError(
                             {"definition": f"Workflow definition validation failed: {', '.join(error_messages)}"}
                         )
+            except serializers.ValidationError:
+                raise
             except Exception as e:
-                # If validation fails for any reason (e.g., import error, database error),
-                # log it but don't block the save - the definition may still be valid
+                # If validation fails for any reason (e.g. import error, database error),
+                # log it but don't block the save — the definition may still be valid.
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.warning(f"Workflow definition validation skipped due to error: {e}")
@@ -457,10 +463,11 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
         ]
         removed_step_ids = [step.id for step in removed_steps]
 
-        # For v2 workflows, steps are just a flat mirror - relax the protection check
-        # The actual workflow is defined in the definition field
+        # For v2 workflows, steps are a flat mirror of the definition. Relax deletion
+        # protection so templates with live tasks can still be edited; only orphans
+        # without tasks are removed.
         is_v2 = bool(template.definition and template.definition.get("version") == 2)
-        
+
         if removed_step_ids and not is_v2:
             protected_step_names = list(
                 WorkflowStep.objects.filter(
@@ -476,22 +483,14 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                     {"steps": f"Cannot remove steps that already have workflow tasks: {names}."}
                 )
 
-        # For v2 workflows, skip the temporary reordering entirely
-        # since we're not deleting steps anyway
-        if not is_v2:
-            # Move ALL existing steps to negative orders first to guarantee no collisions
-            # This includes steps that will be removed - they'll be deleted later
-            WorkflowStep.objects.filter(template=template).update(order=F("order") - 10000)
-            
-            # Now assign temporary negative orders to each existing step
-            for idx, step in enumerate(existing_steps, start=1):
-                temp_order = -idx  # Use negative orders: -1, -2, -3, etc.
-                step.order = temp_order
-                step.save(update_fields=["order"])
+        # Always park existing rows on temporary high orders first. Skipping this
+        # for v2 caused IntegrityError on (template_id, order) when importing rules
+        # (new steps written as order=1..n while old rows still held those orders).
+        # Must stay non-negative: order is a PositiveSmallIntegerField.
+        for idx, step in enumerate(existing_steps):
+            WorkflowStep.objects.filter(pk=step.pk).update(order=20000 + idx)
+            step.order = 20000 + idx
 
-        # For v2 workflows, don't delete steps - they're just a flat mirror
-        # The actual workflow is in the definition field
-        # Skip deletion entirely for v2 to avoid ProtectedError from workflowtask foreign keys
         if removed_step_ids and not is_v2:
             WorkflowStep.objects.filter(id__in=removed_step_ids).delete()
 
@@ -507,9 +506,7 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                 step.save()
             else:
                 WorkflowStep.objects.create(template=template, **step_data)
-        
-        # For v2 workflows, clean up orphaned steps (steps not in the new flat array)
-        # We can only delete steps that don't have workflow tasks
+
         if is_v2 and removed_step_ids:
             deletable_ids = list(
                 WorkflowStep.objects.filter(
@@ -520,21 +517,82 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
             if deletable_ids:
                 WorkflowStep.objects.filter(id__in=deletable_ids).delete()
 
+            # Protected orphans keep their FK history but must leave the temp
+            # park zone so future upserts stay collision-free.
+            leftover = list(
+                WorkflowStep.objects.filter(template=template, order__gte=20000).order_by("order")
+            )
+            if leftover:
+                for offset, step in enumerate(leftover, start=1):
+                    step.order = 25000 + offset
+                    step.save(update_fields=["order"])
+
+    @staticmethod
+    def _retire_sibling_templates(template: WorkflowTemplate) -> int:
+        """
+        Make *template* the sole active workflow for its document type (or for
+        payment_run target). Deactivates siblings, deletes their routing rules
+        and this template's legacy rules, and points the document type here.
+        Returns how many sibling templates were retired.
+        """
+        # Branched definitions replace amount/phase routing rules.
+        template.rules.all().delete()
+
+        if template.target_type == "payment_run":
+            siblings = (
+                WorkflowTemplate.objects
+                .filter(target_type="payment_run", is_active=True)
+                .exclude(pk=template.pk)
+            )
+        elif template.document_type_id:
+            siblings = (
+                WorkflowTemplate.objects
+                .filter(
+                    target_type="document",
+                    document_type_id=template.document_type_id,
+                    is_active=True,
+                )
+                .exclude(pk=template.pk)
+            )
+        else:
+            siblings = WorkflowTemplate.objects.none()
+
+        retired = 0
+        for sibling in siblings:
+            sibling.rules.all().delete()
+            sibling.is_active = False
+            sibling.save(update_fields=["is_active", "updated_at"])
+            retired += 1
+
+        if template.document_type_id:
+            from apps.documents.models import DocumentType
+            DocumentType.objects.filter(pk=template.document_type_id).update(
+                workflow_template_id=template.pk,
+            )
+
+        return retired
+
     @transaction.atomic
     def create(self, validated_data):
         steps_data = validated_data.pop("steps", [])
-        template   = WorkflowTemplate.objects.create(**validated_data)
+        retire_siblings = validated_data.pop("retire_siblings", False)
+        template = WorkflowTemplate.objects.create(**validated_data)
         self._upsert_steps(template, steps_data)
+        if retire_siblings and template.definition and template.definition.get("version") == 2:
+            self._retire_sibling_templates(template)
         return template
 
     @transaction.atomic
     def update(self, instance, validated_data):
         steps_data = validated_data.pop("steps", None)
+        retire_siblings = validated_data.pop("retire_siblings", False)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
         if steps_data is not None:
             self._upsert_steps(instance, steps_data)
+        if retire_siblings and instance.definition and instance.definition.get("version") == 2:
+            self._retire_sibling_templates(instance)
         return instance
 
 

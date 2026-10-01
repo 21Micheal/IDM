@@ -1337,8 +1337,8 @@ export const workflowAPI = {
       : api.post(`/workflows/tasks/${id}/approve/`, { comment }),
   rejectTask: (id: string, comment: string) =>
     api.post(`/workflows/tasks/${id}/reject/`, { comment }),
-  returnForReview: (id: string, comment: string) =>
-    api.post(`/workflows/tasks/${id}/return_for_review/`, { comment }),
+  returnForReview: (id: string, comment: string, returnTo: "previous_step" | "uploader" | "same_step" = "uploader") =>
+    api.post(`/workflows/tasks/${id}/return_for_review/`, { comment, return_to: returnTo }),
   holdTask: (id: string, comment: string, holdHours: number) =>
     api.post(`/workflows/tasks/${id}/hold/`, {
       comment,

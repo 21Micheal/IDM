@@ -221,6 +221,7 @@ export interface WorkflowTask {
     allow_approve?: boolean;
     allow_reject?: boolean;
     allow_return?: boolean;
+    allow_return_submitter?: boolean;
   };
   workflow_instance?: {
     document?: {

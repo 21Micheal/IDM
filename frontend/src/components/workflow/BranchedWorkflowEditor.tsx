@@ -16,10 +16,11 @@
  *        └─────────────┼─────────────┘
  *                 ⚑ Completed
  *
- * Outcome model: approvals decide the outcome. Approved → next step; after the last one
- * the workflow is *Completed* as Approved. Rejected → the workflow ends right there as
- * Rejected (later steps never run) unless the approval has an explicit Return attached
- * to its Rejected outlet.
+ * Outcome model: approvals decide the outcome. Approve → next step; after the last one
+ * the workflow is *Completed* as Approved. Reject → the workflow ends right there as
+ * Rejected (later steps never run). Always. Return is a separate approver ACTION
+ * (to the previous step or to the submitter), enabled per step in the step panel; it
+ * pauses the workflow rather than completing it, so it is not a block in the graph.
  *
  * The step inspector for approval / notification blocks is *injected* via
  * `renderStepPanel` so the existing <StepEditPanel/> is reused untouched.
@@ -27,17 +28,17 @@
 import { Fragment, useMemo, useState, type ReactNode } from "react";
 import {
   Plus, Trash2, GitBranch, Copy, ArrowUp, ArrowDown, Bell, CheckCircle2, Flag, Play,
-  X, AlertCircle, Braces, Code2, FlaskConical, ListTree, Split, Clock, Users, CornerUpLeft, XCircle,
+  X, AlertCircle, Braces, Code2, FlaskConical, ListTree, Split, Clock, Users,
 } from "lucide-react";
 import clsx from "clsx";
 import {
   type Block, type ApprovalBlock, type NotificationBlock, type IfElseBlock, type SwitchBlock,
-  type SetValueBlock, type EndBlock, type ReturnBlock, type ConditionGroup, type ConditionRule, type WorkflowField,
+  type SetValueBlock, type EndBlock, type ApproverAction, type ConditionGroup, type ConditionRule, type WorkflowField,
   type StepData, type Operator, type FieldType, type Issue, type ListKey,
   OPERATOR_META, OPERATORS_BY_TYPE,
   childLists, cloneBlock, collectFieldRefs, declaredVariables, describeGroup, editList, enumeratePaths,
-  fieldMap, findBlock, listKey, moveInList, newEnd, newGroup, newIfElse, newReturn, newRule, newSetValue,
-  newSwitch, removeBlock, simulate, toPseudocode, uid, updateBlock, validateDefinition, walk,
+  fieldMap, findBlock, listKey, moveInList, newEnd, newGroup, newIfElse, newRule, newSetValue,
+  newSwitch, removeBlock, simulate, toPseudocode, availableActions, uid, updateBlock, validateDefinition, walk,
 } from "@/lib/workflowGraph";
 
 // ── Props ────────────────────────────────────────────────────────────────────
@@ -390,43 +391,17 @@ function EndInspector({ block, onChange, onClose }: { block: EndBlock; onChange:
   );
 }
 
-function ReturnInspector({ block, ownerName, options, onChange, onDelete, onClose }: {
-  block: ReturnBlock; ownerName: string; options: { id: string; label: string }[];
-  onChange: (b: ReturnBlock) => void; onDelete: () => void; onClose: () => void;
-}) {
-  const orphan = block.target_id !== "previous" && !options.some((o) => o.id === block.target_id);
-  return (
-    <InspectorShell title="Return" icon={<CornerUpLeft className="w-4 h-4 text-destructive" />} onClose={onClose}>
-      <p className="text-[11px] text-muted-foreground bg-muted/50 rounded-lg p-2.5">
-        Without a Return, rejecting <b>{ownerName || "this step"}</b> ends the workflow as <b>Rejected</b> and no later step runs.
-        With a Return, a rejection sends the document back instead.
-      </p>
-      <div><Lbl>Send back to</Lbl>
-        <select className={inp} value={block.target_id} onChange={(e) => onChange({ ...block, target_id: e.target.value })}>
-          <option value="previous">The previous approval on this path</option>
-          {orphan && <option value={block.target_id}>⚠ missing step</option>}
-          {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-        </select>
-        <p className="text-[11px] text-muted-foreground mt-1">If there is no earlier approval, it goes back to the submitter to edit and resubmit.</p>
-      </div>
-      <div><Lbl>Note for the audit trail (optional)</Lbl>
-        <input className={inp} value={block.reason ?? ""} placeholder="e.g. Needs corrected quotation" onChange={(e) => onChange({ ...block, reason: e.target.value })} /></div>
-      <button className="btn-secondary text-xs text-destructive" onClick={onDelete}><Trash2 className="w-3.5 h-3.5" /> Remove Return (rejection ends the workflow)</button>
-    </InspectorShell>
-  );
-}
-
 // ── Test panel ───────────────────────────────────────────────────────────────
 const OUTCOME_TEXT: Record<ReturnType<typeof simulate>["outcome"], string> = {
   pending_approvals: "Goes to approvers", auto_approved: "Completed · auto-approved", auto_rejected: "Completed · auto-rejected",
   no_approvers: "No approvers — fix this path", rejected: "Completed · Rejected", returned: "Returned — not completed",
 };
 
-function TestPanel({ fields, refs, values, setValues, currencies, result, groupName, rejectOptions, rejectAt, setRejectAt }: {
+function TestPanel({ fields, refs, values, setValues, currencies, result, groupName, actionOptions, act, setAct }: {
   fields: WorkflowField[]; refs: string[]; values: Record<string, any>; setValues: (v: Record<string, any>) => void;
   currencies: string[]; result: ReturnType<typeof simulate>; groupName: (id?: string | null) => string;
-  /** Approvals on the current path that can be rejected — for the "what if" picker. */
-  rejectOptions: (ApprovalBlock | NotificationBlock)[]; rejectAt: string; setRejectAt: (id: string) => void;
+  /** Every approver action available on the current path — for the "what if" picker. value = "<blockId>|<action>". */
+  actionOptions: { value: string; label: string }[]; act: string; setAct: (v: string) => void;
 }) {
   const set = (id: string, v: unknown) => setValues({ ...values, [id]: v });
   const used = refs.map((id) => fields.find((f) => f.id === id)).filter(Boolean) as WorkflowField[];
@@ -436,9 +411,9 @@ function TestPanel({ fields, refs, values, setValues, currencies, result, groupN
     rejected: "bg-destructive/10 text-destructive", returned: "bg-amber-100 text-amber-800",
   }[result.outcome];
   const outcomeText = OUTCOME_TEXT[result.outcome];
-  const rej = result.rejection;
-  const returnedTo = rej?.action === "returned"
-    ? (rej.return_target === null ? "the submitter" : `“${result.chain.find((c) => c.id === rej.return_target)?.step.name ?? "an earlier step"}”`) : null;
+  const acted = result.acted;
+  const returnedTo = acted && acted.action !== "reject"
+    ? (acted.return_target === null || acted.return_target === undefined ? "the submitter" : `“${result.chain.find((c) => c.id === acted.return_target)?.step.name ?? "an earlier step"}”`) : null;
   return (
     <div className="h-full overflow-y-auto p-4 space-y-4">
       <div>
@@ -476,14 +451,14 @@ function TestPanel({ fields, refs, values, setValues, currencies, result, groupN
         </div>
       ))}
 
-      {rejectOptions.length > 0 && (
+      {actionOptions.length > 0 && (
         <div className="border-t border-border pt-4">
-          <Lbl>What if someone rejects?</Lbl>
-          <select className={inp} value={rejectAt} onChange={(e) => setRejectAt(e.target.value)}>
-            <option value="">Nobody rejects — every step approves</option>
-            {rejectOptions.map((c) => <option key={c.id} value={c.id}>Rejected at “{c.step.name || "Untitled"}”</option>)}
+          <Lbl>What if an approver…</Lbl>
+          <select className={inp} value={act} onChange={(e) => setAct(e.target.value)}>
+            <option value="">Everyone approves</option>
+            {actionOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          <p className="text-[11px] text-muted-foreground mt-1">A rejection ends the workflow at that step — later steps never run — unless that step has a Return.</p>
+          <p className="text-[11px] text-muted-foreground mt-1">Reject ends the workflow as Rejected — later steps never run. Return sends the document back and pauses the workflow.</p>
         </div>
       )}
 
@@ -494,16 +469,18 @@ function TestPanel({ fields, refs, values, setValues, currencies, result, groupN
             {result.chain.map((c, i) => (
               <li key={c.id} className="flex items-center gap-2 text-xs">
                 <span className="w-5 h-5 rounded-full bg-muted flex items-center justify-center text-[10px] font-bold">{i + 1}</span>
-                <span className={clsx("font-medium", rej?.block_id === c.id ? "text-destructive" : "text-foreground")}>{c.step.name || "Untitled"}</span>
+                <span className={clsx("font-medium", acted?.block_id === c.id ? (acted.action === "reject" ? "text-destructive" : "text-amber-700") : "text-foreground")}>{c.step.name || "Untitled"}</span>
                 <span className="text-muted-foreground">{c.kind === "notification" ? "· notification" : `· ${groupName(c.step.assignee_group)}`}</span>
-                {rej?.block_id === c.id && <span className="text-destructive font-semibold">✕ rejected</span>}
+                {acted?.block_id === c.id && (acted.action === "reject"
+                  ? <span className="text-destructive font-semibold">✕ rejected</span>
+                  : <span className="text-amber-700 font-semibold">↩ returned</span>)}
               </li>
             ))}
           </ol>
         )}
-        {rej && (
+        {acted && (
           <p className="text-[11px] text-muted-foreground">
-            {rej.action === "rejected" ? "The workflow ends here as Rejected; later steps do not run." : `A Return sends it back to ${returnedTo}.`}
+            {acted.action === "reject" ? "The workflow ends here as Rejected; later steps do not run." : `It goes back to ${returnedTo}; the workflow is paused, not completed.`}
           </p>
         )}
         {result.decisions.length > 0 && (
@@ -543,7 +520,7 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
   const [panel, setPanel] = useState<SidePanel>("inspect");
   const [menuAt, setMenuAt] = useState<string | null>(null);
   const [testValues, setTestValues] = useState<Record<string, any>>({});
-  const [rejectAt, setRejectAt] = useState("");
+  const [act, setAct] = useState("");
   const [showIssues, setShowIssues] = useState(false);
   const [zoom, setZoom] = useState(1);
 
@@ -561,23 +538,27 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
     walk(blocks, (b) => { if (b.kind === "approval" || b.kind === "notification") m.set(b.id, ++n); });
     return m;
   }, [blocks]);
-  /** return-block id → the approval it hangs off */
-  const returnOwner = useMemo(() => {
-    const m = new Map<string, string>();
-    walk(blocks, (b) => { if (b.kind === "approval") b.on_reject?.forEach((r) => m.set(r.id, b.id)); });
-    return m;
-  }, [blocks]);
-
   const testing = panel === "test";
   const simBase = useMemo(() => (testing ? simulate(blocks, fm, testValues, { rates }) : null), [testing, blocks, fm, testValues, rates]);
-  const rejectOptions = useMemo(
-    () => (simBase ? simBase.chain.filter((c) => c.kind === "approval" && c.step.allow_reject !== false) : []),
-    [simBase],
-  );
-  const effReject = rejectOptions.some((c) => c.id === rejectAt) ? rejectAt : "";
+  /** Every approver action available on the path this sample takes (Return-to-previous only where an earlier approval exists). */
+  const actionOptions = useMemo(() => {
+    if (!simBase) return [];
+    const out: { value: string; label: string }[] = [];
+    let seenApproval = false;
+    for (const c of simBase.chain) {
+      if (c.kind !== "approval") continue;
+      const nm = c.step.name || "Untitled";
+      for (const a of availableActions(c.step, seenApproval))
+        out.push({ value: `${c.id}|${a}`, label: `${nm}: ${a === "reject" ? "rejects" : a === "return_previous" ? "returns to previous step" : "returns to submitter"}` });
+      seenApproval = true;
+    }
+    return out;
+  }, [simBase]);
+  const effAct = actionOptions.some((o) => o.value === act) ? act : "";
+  const actAt = useMemo(() => { if (!effAct) return undefined; const [id, action] = effAct.split("|"); return { id, action: action as ApproverAction }; }, [effAct]);
   const sim = useMemo(
-    () => (testing && effReject ? simulate(blocks, fm, testValues, { rates, rejectAt: effReject }) : simBase),
-    [testing, effReject, blocks, fm, testValues, rates, simBase],
+    () => (testing && actAt ? simulate(blocks, fm, testValues, { rates, actAt }) : simBase),
+    [testing, actAt, blocks, fm, testValues, rates, simBase],
   );
   const refs = useMemo(() => collectFieldRefs(blocks), [blocks]);
 
@@ -593,13 +574,6 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
     onChange(editList(blocks, key, (l) => { const i = l.findIndex((x) => x.id === b.id); return [...l.slice(0, i + 1), c, ...l.slice(i + 1)]; }));
   };
   const move = (key: ListKey, id: string, dir: -1 | 1) => onChange(editList(blocks, key, (l) => moveInList(l, id, dir)));
-  /** Put a Return on an approval's Rejected outlet (otherwise rejecting it ends the workflow). */
-  const addReturn = (ap: ApprovalBlock) => {
-    const r = newReturn("previous");
-    patch(ap.id, (b) => (b.kind === "approval" ? { ...b, on_reject: [r] } : b));
-    onSelect(r.id); setPanel("inspect");
-  };
-
   const makeBlock = (kind: string): Block => {
     switch (kind) {
       case "approval": return { kind: "approval", id: uid(), step: props.makeApprovalStep() };
@@ -706,12 +680,10 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
     if (b.kind === "approval" || b.kind === "notification") {
       const n = ordinals.get(b.id) ?? 0;
       const s = b.step; const isN = b.kind === "notification";
-      const ret = b.kind === "approval" ? b.on_reject?.find((x): x is ReturnBlock => x.kind === "return") : undefined;
-      const rejectedHere = sim?.rejection?.block_id === b.id;
-      const retTarget = !ret ? "" : ret.target_id === "previous" ? "previous step"
-        : `“${(findBlock(blocks, ret.target_id) as ApprovalBlock | null)?.step.name || "missing step"}”`;
+      const actedHere = sim?.acted?.block_id === b.id ? sim.acted.action : null;
       return (
-        <div className={clsx(shell(isN ? "border-sky-500" : "border-accent", isN ? "border-dashed" : undefined), rejectedHere && "!border-destructive ring-4 ring-destructive/15")} onClick={click}>
+        <div className={clsx(shell(isN ? "border-sky-500" : "border-accent", isN ? "border-dashed" : undefined),
+          actedHere === "reject" && "!border-destructive ring-4 ring-destructive/15", actedHere && actedHere !== "reject" && "!border-amber-500 ring-4 ring-amber-500/15")} onClick={click}>
           <div className="flex items-center gap-2">
             <span className={clsx("w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-bold flex-shrink-0", isN ? "bg-sky-500" : "bg-accent")}>
               {isN ? <Bell className="w-3.5 h-3.5" /> : n}
@@ -727,29 +699,10 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
             {bad && <AlertCircle className="w-4 h-4 text-destructive flex-shrink-0" />}
           </div>
 
-          {/* Outlets: Approved → next step. Rejected → workflow ends, unless a Return is attached. */}
-          {b.kind === "approval" && (
-            <div className="mt-2.5 pt-2 border-t border-dashed border-border flex items-center gap-2 text-[10px]">
-              <span className="inline-flex items-center gap-1 font-medium text-teal whitespace-nowrap flex-shrink-0"><span className="w-2 h-2 rounded-full bg-teal" />Approved → next</span>
-              <span className="ml-auto min-w-0">
-                {s.allow_reject === false ? (
-                  <span className="text-muted-foreground">rejection off</span>
-                ) : ret ? (
-                  <button type="button" title="Edit Return"
-                    onClick={(e) => { e.stopPropagation(); onSelect(ret.id); setPanel("inspect"); }}
-                    className={clsx("inline-flex max-w-full items-center gap-1 px-1.5 py-0.5 rounded-md border font-medium",
-                      selectedId === ret.id ? "border-destructive bg-destructive/10 text-destructive ring-2 ring-destructive/20" : "border-destructive/40 text-destructive hover:bg-destructive/5",
-                      rejectedHere && "bg-destructive/10")}>
-                    <CornerUpLeft className="w-3 h-3 flex-shrink-0" /><span className="truncate">Return · {retTarget}</span>
-                  </button>
-                ) : (
-                  <span className="inline-flex items-center gap-1 text-destructive whitespace-nowrap">
-                    <XCircle className={clsx("w-3 h-3", rejectedHere && "fill-destructive/20")} /><span className={rejectedHere ? "font-bold" : undefined}>Rejected ends</span>
-                    <button type="button" className="ml-1 underline decoration-dotted text-muted-foreground hover:text-destructive"
-                      onClick={(e) => { e.stopPropagation(); addReturn(b); }}>+ Return</button>
-                  </span>
-                )}
-              </span>
+          {/* Approve → next. (Reject / Return are configured in the step panel, not drawn on the node.) */}
+          {b.kind === "approval" && s.allow_approve !== false && (
+            <div className="mt-2.5 pt-2 border-t border-dashed border-border text-[10px] font-medium">
+              <span className="inline-flex items-center gap-1 text-teal"><span className="w-2 h-2 rounded-full bg-teal" />Approved → next</span>
             </div>
           )}
           {actions(lk, b, index, count)}
@@ -776,13 +729,7 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
       );
     }
 
-    // A Return floating in the main flow is invalid (it belongs on an approval's Rejected outlet).
-    return (
-      <div className={shell("border-destructive")} onClick={click}>
-        <p className="text-xs text-destructive flex items-center gap-1.5"><AlertCircle className="w-4 h-4" /> Misplaced Return — attach it to an approval's Rejected outlet, or delete it.</p>
-        {actions(lk, b, index, count)}
-      </div>
-    );
+    return null;
   };
 
   /** If/Else or Switch: header card, then one lane per branch side by side, re-joining below. */
@@ -864,7 +811,7 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
           <GitBranch className="w-6 h-6 mx-auto opacity-40" />
           <p>Select a block to edit it, or use <b>+</b> to add one.</p>
           <p>Use <b>If / Else</b> to send different documents down different approval chains — each branch gets its own lane.</p>
-          <p>Rejecting an approval ends the workflow as <b>Rejected</b>. To send it back instead, use <b>+ Return</b> on that step.</p>
+          <p>Rejecting ends the workflow as <b>Rejected</b>. Approvers who need changes use <b>Return</b> (to the previous step or the submitter), which you enable per step.</p>
         </div>
       );
     }
@@ -879,16 +826,6 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
     if (selected.kind === "if_else") return <IfElseInspector block={selected} fields={fields} currencies={currencies} onChange={(nb) => patch(nb.id, () => nb)} onClose={close} />;
     if (selected.kind === "switch") return <SwitchInspector block={selected} fields={fields} onChange={(nb) => patch(nb.id, () => nb)} onClose={close} />;
     if (selected.kind === "set_value") return <SetValueInspector block={selected} fields={fields} onChange={(nb) => patch(nb.id, () => nb)} onClose={close} />;
-    if (selected.kind === "return") {
-      const ownerId = returnOwner.get(selected.id);
-      const owner = ownerId ? (findBlock(blocks, ownerId) as ApprovalBlock | null) : null;
-      const ownOrd = ownerId ? ordinals.get(ownerId) ?? 0 : 0;
-      const options = [...ordinals.entries()]
-        .filter(([id, n]) => n < ownOrd && findBlock(blocks, id)?.kind === "approval")
-        .map(([id, n]) => ({ id, label: `${n}. ${(findBlock(blocks, id) as ApprovalBlock).step.name || "Untitled"}` }));
-      return <ReturnInspector block={selected} ownerName={owner?.step.name ?? ""} options={options}
-        onChange={(nb) => patch(nb.id, () => nb)} onDelete={() => remove(selected.id)} onClose={close} />;
-    }
     return <EndInspector block={selected} onChange={(nb) => patch(nb.id, () => nb)} onClose={close} />;
   };
 
@@ -898,7 +835,7 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
   const finalNote = !sim ? null
     : sim.outcome === "auto_approved" ? "Approved (auto)"
     : sim.outcome === "auto_rejected" ? "Rejected (auto)"
-    : sim.outcome === "rejected" ? `Rejected at “${(findBlock(blocks, sim.rejection!.block_id) as ApprovalBlock | null)?.step.name ?? "a step"}”`
+    : sim.outcome === "rejected" ? `Rejected at “${(findBlock(blocks, sim.acted!.block_id) as ApprovalBlock | null)?.step.name ?? "a step"}”`
     : sim.outcome === "returned" ? "Not completed — returned"
     : sim.outcome === "pending_approvals" ? "Approved once every step approves" : "No approvers on this path";
   const finalReached = !sim || (sim.outcome !== "returned");
@@ -964,7 +901,7 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
                 </div>
                 <p className="mt-2 text-[10px] leading-snug text-muted-foreground">
                   The outcome comes from the approvals: <b className="text-teal">Approved</b> when every step approves,
-                  {" "}<b className="text-destructive">Rejected</b> as soon as one rejects (later steps don't run) — unless that step has a Return.
+                  {" "}<b className="text-destructive">Rejected</b> as soon as one rejects (later steps don't run). Approvers can also <b className="text-accent">Return</b> a document instead, which pauses it.
                 </p>
               </div>
             </div>
@@ -1012,7 +949,7 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
       {testing && sim ? (
         <div className="w-[420px] flex-shrink-0 rounded-xl border border-border bg-card overflow-hidden">
           <TestPanel fields={fields} refs={refs} values={testValues} setValues={setTestValues} currencies={currencies} result={sim} groupName={groupName}
-            rejectOptions={rejectOptions} rejectAt={effReject} setRejectAt={setRejectAt} />
+            actionOptions={actionOptions} act={effAct} setAct={setAct} />
         </div>
       ) : selected && (selected.kind === "approval" || selected.kind === "notification") ? (
         inspector()

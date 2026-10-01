@@ -47,7 +47,10 @@ interface WorkflowStep {
   allow_resubmit: boolean;
   allow_approve: boolean;
   allow_reject: boolean;
+  /** Approver may send the document back to the PREVIOUS approval on the path it took. */
   allow_return: boolean;
+  /** Approver may send the document back to the SUBMITTER (to edit and resubmit). */
+  allow_return_submitter: boolean;
   requires_signature: boolean;
   instructions: string;
   // Custom approver email (approval steps)
@@ -342,6 +345,8 @@ function normalizeStep(step: WorkflowStep): WorkflowStep {
     assignee_user: isUuidLike(step.assignee_user) ? step.assignee_user : null,
     notify_user: isUuidLike(step.notify_user) ? step.notify_user : (step.notify_user ?? null),
     requires_signature: Boolean(step.requires_signature),
+    // Templates saved before this option existed keep their behaviour: no return-to-submitter.
+    allow_return_submitter: Boolean((step as any).allow_return_submitter),
     approver_email_subject: step.approver_email_subject ?? "",
     approver_email_body: step.approver_email_body ?? "",
   };
@@ -461,7 +466,7 @@ function blankStep(): WorkflowStep {
     order: 0, name: "", status_label: "Pending Approval",
     step_type: "approval",
     assignee_type: "group_any", assignee_group: null, assignee_user: null,
-    sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true,
+    sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, allow_return_submitter: true,
     requires_signature: false, instructions: "",
     approver_email_subject: "", approver_email_body: "",
   };
@@ -473,7 +478,7 @@ function blankNotificationStep(): WorkflowStep {
     step_type: "notification",
     assignee_type: "group_any", assignee_group: null, assignee_user: null,
     sla_hours: 1,
-    allow_resubmit: false, allow_approve: false, allow_reject: false, allow_return: false,
+    allow_resubmit: false, allow_approve: false, allow_reject: false, allow_return: false, allow_return_submitter: false,
     requires_signature: false,
     instructions: "",
     approver_email_subject: "", approver_email_body: "",
@@ -501,6 +506,7 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
     rest.allow_approve      = false;
     rest.allow_reject       = false;
     rest.allow_return       = false;
+    rest.allow_return_submitter = false;
     rest.allow_resubmit     = false;
     rest.requires_signature = false;
     rest.assignee_user_auto = false;
@@ -586,7 +592,7 @@ function validateStepData(raw: StepData): string | null {
   }
   if (!s.assignee_group) return `"${s.name}" needs a group.`;
   if (s.assignee_type === "group_specific" && !s.assignee_user) return `"${s.name}" needs a specific group member.`;
-  if (!s.allow_approve && !s.allow_reject && !s.allow_return) return `"${s.name}" must have at least one approver action enabled.`;
+  if (!s.allow_approve && !s.allow_reject && !s.allow_return && !s.allow_return_submitter) return `"${s.name}" must have at least one approver action enabled.`;
   if (s.requires_signature && !s.allow_approve) return `"${s.name}" requires approval before it can require a signature.`;
   return null;
 }
@@ -1045,11 +1051,30 @@ function StepEditPanel({
                     : "bg-muted/30 border-border text-muted-foreground"
                 )}
               >
-                <span className="text-xs font-semibold">Allow Return to Previous</span>
+                <span className="text-xs font-semibold">Allow Return to Previous Step</span>
                 <div className={clsx("w-8 h-4 rounded-full relative transition-colors", step.allow_return ? "bg-accent" : "bg-muted-foreground/30")}>
                   <div className={clsx("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform", step.allow_return ? "translate-x-4" : "translate-x-0.5")} />
                 </div>
               </button>
+              <button
+                type="button"
+                onClick={() => onChange({ allow_return_submitter: !step.allow_return_submitter })}
+                className={clsx(
+                  "w-full flex items-center justify-between px-4 py-2.5 rounded-xl border transition-all",
+                  step.allow_return_submitter
+                    ? "bg-accent/5 border-accent/30 text-accent shadow-sm"
+                    : "bg-muted/30 border-border text-muted-foreground"
+                )}
+              >
+                <span className="text-xs font-semibold">Allow Return to Submitter</span>
+                <div className={clsx("w-8 h-4 rounded-full relative transition-colors", step.allow_return_submitter ? "bg-accent" : "bg-muted-foreground/30")}>
+                  <div className={clsx("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform", step.allow_return_submitter ? "translate-x-4" : "translate-x-0.5")} />
+                </div>
+              </button>
+              <p className="text-[11px] text-muted-foreground px-1">
+                <b>Reject</b> always ends the workflow as Rejected. <b>Return</b> pauses approval so someone can rework:
+                previous step or submitter. After resubmit, the workflow resumes at <b>this</b> step — it does not restart from the beginning.
+              </p>
             </div>
           </div>
 
@@ -1776,7 +1801,7 @@ function TemplateEditor({
   template: WorkflowTemplate | null;
   docType?: DocumentType | null;
   initialTargetType?: WorkflowTargetType;
-  onSaved: (t: WorkflowTemplate, isNew: boolean) => void;
+  onSaved: (t: WorkflowTemplate, isNew: boolean, meta?: { retiredSiblings?: boolean }) => void;
   onDuplicate?: () => void;
   onDelete?: () => void;
   allTemplates?: WorkflowTemplate[];
@@ -1794,6 +1819,8 @@ function TemplateEditor({
   const [activeTab, setActiveTab] = useState<"flow" | "rules" | "emails">("flow");
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  /** After Import rules, the next save should deactivate the folded sibling templates. */
+  const [retireSiblingsOnSave, setRetireSiblingsOnSave] = useState(false);
 
   useEffect(() => {
     setName(template?.name ?? (docType ? `${docType.name} Workflow` : initialTargetType === "payment_run" ? "Payment Run Workflow" : "New Template"));
@@ -1810,6 +1837,7 @@ function TemplateEditor({
     setIsDirty(!template);
     setActiveTab("flow");
     setSelectedBlockId(null);
+    setRetireSiblingsOnSave(false);
   }, [template?.id, docType?.id, initialTargetType]);
 
   // The legacy "Routing rules" tab disappears once the template is saved as a branched workflow.
@@ -1853,16 +1881,20 @@ function TemplateEditor({
       email_templates: EmailTemplates;
       steps: Partial<WorkflowStep>[];
       definition: WorkflowDefinition;
+      retire_siblings?: boolean;
     }) =>
       template
         ? workflowAPI.updateTemplate(template.id, payload)
         : workflowAPI.createTemplate(payload),
-    onSuccess: async ({ data }) => {
+    onSuccess: async ({ data }, variables) => {
       const normalized = normalizeTemplate(data);
       setIsDirty(false);
+      setRetireSiblingsOnSave(false);
+      qc.setQueryData(["workflow-template", normalized.id], normalized);
       qc.invalidateQueries({ queryKey: ["workflow-templates"] });
       qc.invalidateQueries({ queryKey: ["document-types"] });
-      onSaved(normalized, !template);
+      qc.invalidateQueries({ queryKey: ["workflow-template", normalized.id] });
+      onSaved(normalized, !template, { retiredSiblings: Boolean(variables.retire_siblings) });
     },
     onError: (err: any) => {
       toast.error(formatApiError(err?.response?.data) || "Save failed");
@@ -1921,6 +1953,7 @@ function TemplateEditor({
         version: 2,
         blocks: mapSteps(blocksForSave, (s) => stepToPayload(s as WorkflowStep) as StepData),
       },
+      ...(retireSiblingsOnSave ? { retire_siblings: true } : {}),
     });
   };
 
@@ -1930,7 +1963,11 @@ function TemplateEditor({
       t.is_active !== false && t.target_type === targetType &&
       (targetType === "payment_run" ? !t.document_type : t.document_type === selectedDocumentTypeId));
     if (siblings.length === 0) { toast.warning("No existing templates found for this document type"); return; }
-    if (blocks.length > 0 && !window.confirm("Replace the current workflow with one built from the existing templates and routing rules?")) return;
+    const confirmMsg = siblings.length > 1
+      ? `Fold ${siblings.length} templates and their amount rules into this one branched workflow? On save, the other templates will be deactivated.`
+      : "Replace the current workflow with one built from the existing templates and routing rules?";
+    if (blocks.length > 0 && !window.confirm(confirmMsg)) return;
+    if (blocks.length === 0 && siblings.length > 1 && !window.confirm(confirmMsg)) return;
     setImporting(true);
     try {
       const full = await Promise.all(siblings.map((t) => workflowAPI.getTemplate(t.id).then((r) => normalizeTemplate(r.data))));
@@ -1944,8 +1981,12 @@ function TemplateEditor({
       setBlocks(definition.blocks);
       setSelectedBlockId(null);
       setIsDirty(true);
+      setRetireSiblingsOnSave(true);
       setActiveTab("flow");
-      toast.success(`Imported ${full.length} template${full.length > 1 ? "s" : ""} as one workflow — review it, then save`);
+      toast.success(
+        `Imported ${full.length} template${full.length > 1 ? "s" : ""} as one workflow — review it, then save` +
+        (full.length > 1 ? " (siblings will be retired)" : ""),
+      );
       if (notes.length) toast.warning(notes.join(" "));
     } catch (err: any) {
       toast.error(formatApiError(err?.response?.data) || "Import failed");
@@ -2045,7 +2086,11 @@ function TemplateEditor({
               >Routing rules (legacy)</button>
             )}
           </div>
-          {isDirty && <span className="text-[11px] text-accent bg-accent/20 px-2 py-1 rounded-md">Unsaved</span>}
+          {isDirty && (
+            <span className="text-[11px] text-accent bg-accent/20 px-2 py-1 rounded-md">
+              Unsaved{retireSiblingsOnSave ? " · will retire siblings" : ""}
+            </span>
+          )}
           {(template || docType) && (
             <button onClick={handleImportLegacy} disabled={importing} className="btn-secondary text-sm"
               title="Fold this document type's existing templates and amount rules into one branched workflow">
@@ -2523,7 +2568,7 @@ export default function WorkflowBuilderPage() {
     setSidebarTab("templates");
   };
 
-  const handleSaved = (t: WorkflowTemplate, isNew: boolean) => {
+  const handleSaved = (t: WorkflowTemplate, isNew: boolean, meta?: { retiredSiblings?: boolean }) => {
     if (isNew && creatingForDocType) {
       documentTypesAPI.update(creatingForDocType.id, { workflow_template: t.id })
         .then(() => {
@@ -2547,7 +2592,11 @@ export default function WorkflowBuilderPage() {
       toast.success(`Template "${t.name}" created`);
     } else {
       if (selectedDocType) setSelectedDocType(prev => prev ? { ...prev, workflow_template: t.id } : null);
-      toast.success(`Template "${t.name}" saved`);
+      toast.success(
+        meta?.retiredSiblings
+          ? `Saved "${t.name}" — old amount-based templates for this form were retired`
+          : `Template "${t.name}" saved`,
+      );
     }
     qc.invalidateQueries({ queryKey: ["document-types"] });
     qc.invalidateQueries({ queryKey: ["workflow-templates"] });

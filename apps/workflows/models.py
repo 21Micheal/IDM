@@ -171,7 +171,14 @@ class WorkflowStep(models.Model):
     allow_resubmit = models.BooleanField(default=True)
     allow_approve  = models.BooleanField(default=True, help_text="Approver can approve at this step")
     allow_reject   = models.BooleanField(default=True, help_text="Approver can reject at this step")
-    allow_return   = models.BooleanField(default=True, help_text="Approver can send back for review at this step")
+    allow_return   = models.BooleanField(
+        default=True,
+        help_text="Approver can send back to the previous approval step for review",
+    )
+    allow_return_submitter = models.BooleanField(
+        default=True,
+        help_text="Approver can send back to the document submitter for rework",
+    )
     requires_signature = models.BooleanField(
         default=False,
         help_text="Approving this step must stamp the approver's saved e-signature onto the document.",
@@ -250,7 +257,12 @@ class WorkflowStep(models.Model):
                 raise ValidationError(
                     {"assignee_group": "Approval steps require an assignee group."}
                 )
-            if not any([self.allow_approve, self.allow_reject, self.allow_return]):
+            if not any([
+                self.allow_approve,
+                self.allow_reject,
+                self.allow_return,
+                self.allow_return_submitter,
+            ]):
                 raise ValidationError(
                     "At least one approver action (approve, reject, or return) must be enabled."
                 )
