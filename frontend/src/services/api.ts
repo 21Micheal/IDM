@@ -1045,6 +1045,7 @@ export type SunSystemsAccount = {
   account_code: string;
   account_type: string;
   description: string;
+  email?: string;
 };
 
 export type AccountsResult = {

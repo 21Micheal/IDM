@@ -102,8 +102,9 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             # custom approver email
             "approver_email_subject", "approver_email_body",
             # notification-step fields
-            "notify_user", "notify_user_name", "notify_email",
+            "notify_user", "notify_user_name", "notify_email", "notify_emails",
             "notification_subject", "notification_message",
+            "notify_include_items_table", "notify_recipient_type", "notify_supplier_field",
         ]
 
     def get_assignee_type(self, obj):
@@ -177,8 +178,9 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             # custom approver email
             "approver_email_subject", "approver_email_body",
             # notification-step
-            "notify_user", "notify_email",
+            "notify_user", "notify_email", "notify_emails",
             "notification_subject", "notification_message",
+            "notify_include_items_table", "notify_recipient_type", "notify_supplier_field",
         ]
         extra_kwargs = {
             "instructions":            {"required": False, "allow_blank": True},
@@ -186,8 +188,12 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "approver_email_subject":  {"required": False, "allow_blank": True},
             "approver_email_body":     {"required": False, "allow_blank": True},
             "notify_email":            {"required": False, "allow_blank": True},
+            "notify_emails":           {"required": False},
             "notification_subject":    {"required": False, "allow_blank": True},
             "notification_message":    {"required": False, "allow_blank": True},
+            "notify_include_items_table": {"required": False},
+            "notify_recipient_type":   {"required": False, "allow_blank": True},
+            "notify_supplier_field":   {"required": False, "allow_null": True, "allow_blank": True},
         }
 
     def to_internal_value(self, data):
@@ -203,12 +209,23 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         if step_type == "notification":
             notify_user  = attrs.get("notify_user",  getattr(self.instance, "notify_user",  None))
             notify_email = (attrs.get("notify_email", getattr(self.instance, "notify_email", "")) or "").strip()
+            notify_emails = attrs.get("notify_emails", getattr(self.instance, "notify_emails", [])) or []
+            recipient_type = (attrs.get("notify_recipient_type", getattr(self.instance, "notify_recipient_type", "email")) or "email").strip()
+            supplier_field = attrs.get("notify_supplier_field", getattr(self.instance, "notify_supplier_field", None))
             subject      = (attrs.get("notification_subject", getattr(self.instance, "notification_subject", "")) or "").strip()
             message      = (attrs.get("notification_message", getattr(self.instance, "notification_message", "")) or "").strip()
 
-            if not notify_user and not notify_email:
+            if recipient_type == "user" and not notify_user:
                 raise serializers.ValidationError(
-                    {"notify_user": "Notification steps require either a recipient user or an email address."}
+                    {"notify_user": "Notification steps with recipient type 'user' require a selected user."}
+                )
+            if recipient_type == "email" and not notify_user and not notify_email and not notify_emails:
+                raise serializers.ValidationError(
+                    {"notify_email": "Notification steps with recipient type 'email' require at least one email address."}
+                )
+            if recipient_type == "supplier" and not supplier_field:
+                raise serializers.ValidationError(
+                    {"notify_supplier_field": "Notification steps with recipient type 'supplier' require a supplier field selection."}
                 )
             if not subject:
                 raise serializers.ValidationError(

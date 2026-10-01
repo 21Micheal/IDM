@@ -434,8 +434,9 @@ def notify_delegation_activated(delegation_id: str) -> None:
 def send_workflow_notification_step_email(
     recipient_user_id: str | None,
     recipient_email: str | None,
-    subject: str,
-    message: str,
+    recipient_emails: list[str] | None = None,
+    subject: str = "",
+    message: str = "",
     document_id: str | None = None,
     payment_run_id: str | None = None,
     step_name: str = "",
@@ -514,6 +515,18 @@ def send_workflow_notification_step_email(
             link="",
             include_footer=False,
         )
+        return
+
+    if recipient_emails and isinstance(recipient_emails, list):
+        for email in recipient_emails:
+            if email and isinstance(email, str) and "@" in email:
+                _send_email_to_address(
+                    email,
+                    subject=subject,
+                    body=message,
+                    link="",
+                    include_footer=False,
+                )
         return
 
     if recipient_email:

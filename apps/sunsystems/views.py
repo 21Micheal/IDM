@@ -910,7 +910,7 @@ class PaymentRunProcessView(APIView):
 
 
 class AccountsQueryView(APIView):
-    """Return supplier accounts from SunSystems (Accounts/Query, AccountType=1).
+    """Return supplier accounts from SunSystems (Supplier/Query).
 
     GET /api/v1/sunsystems/accounts/?business_unit=PK1
 
@@ -919,7 +919,7 @@ class AccountsQueryView(APIView):
         account_type    default 1 (Creditors/Suppliers); pass 0 for all
 
     Response:
-        { accounts: [{ account_code, account_type, description }] }
+        { accounts: [{ account_code, account_type, description, email }] }
     """
 
     permission_classes = [IsAuthenticated]
@@ -935,15 +935,8 @@ class AccountsQueryView(APIView):
         )
         account_type = str(request.query_params.get("account_type", "1")).strip()
 
-        # Build filter — omit if account_type is blank (return all)
-        if account_type:
-            filter_xml = (
-                f'<Filter>'
-                f'<Item name="/Accounts/AccountType" operator="EQU" value="{account_type}"/>'
-                f'</Filter>'
-            )
-        else:
-            filter_xml = ""
+        # No filter needed for Supplier/Query - get all suppliers
+        filter_xml = ""
 
         ssc_payload = (
             "<SSC>\n"
@@ -955,11 +948,12 @@ class AccountsQueryView(APIView):
             "  <Payload>\n"
             f"    {filter_xml}\n"
             "    <Select>\n"
-            "      <Accounts>\n"
-            "        <AccountCode>.</AccountCode>\n"
-            "        <AccountType>.</AccountType>\n"
+            "      <Supplier>\n"
             "        <Description>.</Description>\n"
-            "      </Accounts>\n"
+            "        <EMailAddress>.</EMailAddress>\n"
+            "        <SupplierCode>.</SupplierCode>\n"
+            "        <SupplierName>.</SupplierName>\n"
+            "      </Supplier>\n"
             "    </Select>\n"
             "  </Payload>\n"
             "</SSC>"
@@ -967,7 +961,7 @@ class AccountsQueryView(APIView):
 
         try:
             client = SunSystemsClient(config)
-            response_xml = client.execute("Accounts", "Query", ssc_payload)
+            response_xml = client.execute("Supplier", "Query", ssc_payload)
         except SunSystemsError as exc:
             return Response(
                 {"ok": False, "error": str(exc)},
@@ -977,18 +971,26 @@ class AccountsQueryView(APIView):
         accounts = []
         try:
             root = ET.fromstring(response_xml or "<SSC/>")
-            for acct in root.findall(".//Accounts"):
-                code = (acct.findtext("AccountCode") or "").strip()
+            for supplier in root.findall(".//Supplier"):
+                code = (supplier.findtext("SupplierCode") or "").strip()
                 if not code:
                     continue
+                description = (supplier.findtext("SupplierName") or supplier.findtext("Description") or "").strip()
+                email = (supplier.findtext("EMailAddress") or "").strip()
                 accounts.append({
                     "account_code":  code,
-                    "account_type":  (acct.findtext("AccountType") or "").strip(),
-                    "description":   (acct.findtext("Description") or "").strip(),
+                    "account_type":  account_type,  # Preserve backward compatibility
+                    "description":   description,
+                    "email":        email,
                 })
         except ET.ParseError as exc:
             return Response(
                 {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception as exc:
+            return Response(
+                {"ok": False, "error": f"Unexpected error processing SunSystems response: {exc}"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 

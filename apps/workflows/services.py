@@ -900,16 +900,28 @@ class WorkflowService:
             from apps.notifications.tasks import send_workflow_notification_step_email
             recipient_user_id = str(step.notify_user_id) if step.notify_user_id else None
             recipient_email = step.notify_email or None
+            recipient_emails = step.notify_emails or []
             subject = step.notification_subject
             message = step.notification_message
             step_name = step.name
             document_id = str(document.pk) if document is not None else None
             payment_run_id = str(payment_run.pk) if payment_run is not None else None
             template_id = str(step.template_id) if step.template_id else None
+
+            # Resolve supplier emails if recipient type is "supplier"
+            recipient_type = getattr(step, "notify_recipient_type", "email") or "email"
+            if recipient_type == "supplier" and document and step.notify_supplier_field:
+                supplier_emails = WorkflowService._resolve_supplier_emails(document, step.notify_supplier_field)
+                if supplier_emails:
+                    recipient_emails = supplier_emails
+                    recipient_email = None  # Use the email list instead
+                    recipient_user_id = None
+
             _queue_after_commit(
                 lambda: send_workflow_notification_step_email.delay(
                     recipient_user_id=recipient_user_id,
                     recipient_email=recipient_email,
+                    recipient_emails=recipient_emails,
                     subject=subject,
                     message=message,
                     document_id=document_id,
@@ -925,6 +937,112 @@ class WorkflowService:
                 "document" if document is not None else "payment run",
                 getattr(target, "pk", target),
             )
+
+    @staticmethod
+    def _resolve_supplier_emails(document, supplier_field_key: str) -> list[str]:
+        """
+        Resolve supplier emails from form data + SunSystems Supplier/Query.
+        Returns unique email addresses for the selected supplier codes.
+        """
+        try:
+            metadata = document.metadata if isinstance(document.metadata, dict) else {}
+            form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+            form_values = form.get("values") if isinstance(form.get("values"), dict) else {}
+            raw = form_values.get(supplier_field_key)
+
+            # Normalize stored value → list of supplier codes.
+            # AccountMultiSelect stores string[] (or a single string when multi=false).
+            codes: list[str] = []
+            if isinstance(raw, str) and raw.strip():
+                codes = [raw.strip()]
+            elif isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, str) and item.strip():
+                        codes.append(item.strip())
+                    elif isinstance(item, dict):
+                        code = (
+                            item.get("account_code")
+                            or item.get("SupplierCode")
+                            or item.get("code")
+                            or item.get("value")
+                        )
+                        if code:
+                            codes.append(str(code).strip())
+
+            codes = [c for c in codes if c]
+            if not codes:
+                logger.info(
+                    "No supplier codes on document %s for field %s",
+                    getattr(document, "pk", None),
+                    supplier_field_key,
+                )
+                return []
+
+            from apps.sunsystems.client import SunSystemsClient, SunSystemsConfig
+            from apps.sunsystems.models import effective_connection
+            import xml.etree.ElementTree as ET
+            from xml.sax.saxutils import escape
+
+            conn = effective_connection()
+            config = SunSystemsConfig.from_mapping(conn)
+            business_unit = config.business_unit or "PK1"
+
+            filter_parts = [
+                f'<Item name="/Supplier/SupplierCode" operator="EQU" value="{escape(code)}"/>'
+                for code in codes
+            ]
+            # OR semantics: SSC Filter items at the same level are typically OR'd
+            # for EQU on the same path across vendors; if the connector ANDs them,
+            # fall back to unfiltered query + local filter below.
+            filter_xml = f"<Filter>{''.join(filter_parts)}</Filter>"
+
+            ssc_payload = (
+                "<SSC>\n"
+                "  <ErrorContext/>\n"
+                "  <User/>\n"
+                f"  <SunSystemsContext>\n"
+                f"    <BusinessUnit>{escape(business_unit)}</BusinessUnit>\n"
+                "  </SunSystemsContext>\n"
+                "  <Payload>\n"
+                f"    {filter_xml}\n"
+                "    <Select>\n"
+                "      <Supplier>\n"
+                "        <Description>.</Description>\n"
+                "        <EMailAddress>.</EMailAddress>\n"
+                "        <SupplierCode>.</SupplierCode>\n"
+                "        <SupplierName>.</SupplierName>\n"
+                "      </Supplier>\n"
+                "    </Select>\n"
+                "  </Payload>\n"
+                "</SSC>"
+            )
+
+            client = SunSystemsClient(config)
+            response_xml = client.execute("Supplier", "Query", ssc_payload)
+
+            wanted = {c.upper() for c in codes}
+            emails: list[str] = []
+            seen: set[str] = set()
+            root = ET.fromstring(response_xml or "<SSC/>")
+            for supplier in root.findall(".//Supplier"):
+                code = (supplier.findtext("SupplierCode") or "").strip()
+                if wanted and code.upper() not in wanted:
+                    continue
+                email = (supplier.findtext("EMailAddress") or "").strip()
+                if email and email.lower() not in seen:
+                    seen.add(email.lower())
+                    emails.append(email)
+
+            if not emails:
+                logger.warning(
+                    "SunSystems returned no emails for suppliers %s on document %s",
+                    codes,
+                    getattr(document, "pk", None),
+                )
+            return emails
+        except Exception:
+            logger.exception("Failed to resolve supplier emails for field %s", supplier_field_key)
+            return []
 
     @staticmethod
     def _resolve_assignees(step: WorkflowStep, document=None):

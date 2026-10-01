@@ -2,7 +2,7 @@ import {
   useState, useCallback, useRef, useMemo, useEffect,
 } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { workflowAPI, documentTypesAPI, groupsAPI, normalizeListResponse } from "@/services/api";
+import { workflowAPI, documentTypesAPI, groupsAPI, templatesAPI, normalizeListResponse } from "@/services/api";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import {
   Plus, Trash2, Save, GitBranch, Loader2, X,
@@ -67,6 +67,10 @@ interface WorkflowStep {
   notification_message?: string;
   /** When true the backend appends the requisition items/qty/UOM table to the email body */
   notify_include_items_table?: boolean;
+  /** Recipient type: "user" | "email" | "supplier" */
+  notify_recipient_type?: "user" | "email" | "supplier";
+  /** Form field key containing supplier codes (when notify_recipient_type is "supplier") */
+  notify_supplier_field?: string | null;
 }
 
 interface WorkflowTemplate {
@@ -488,6 +492,8 @@ function blankNotificationStep(): WorkflowStep {
     notification_subject: "Workflow update",
     notification_message: "Hello,\n\nThis is an automated notification regarding the document workflow.\n\nThank you.",
     notify_include_items_table: false,
+    notify_recipient_type: "email",
+    notify_supplier_field: null,
   };
 }
 
@@ -514,6 +520,8 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
     rest.assignee_user      = null;
     rest.approver_email_subject = "";
     rest.approver_email_body    = "";
+    // Keep recipient type and supplier field for notification steps
+    rest.notify_recipient_type = rest.notify_recipient_type ?? "email";
     return rest;
   }
 
@@ -524,6 +532,8 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
   rest.notification_subject         = "";
   rest.notification_message         = "";
   rest.notify_include_items_table   = false;
+  rest.notify_recipient_type        = undefined;
+  rest.notify_supplier_field        = null;
 
   if (rest.assignee_type !== "group_specific") {
     rest.assignee_user      = null;
@@ -582,7 +592,10 @@ function validateStepData(raw: StepData): string | null {
   if (s.step_type === "notification") {
     const emails = s.notify_emails?.filter((e) => e.trim()) ?? [];
     const single = s.notify_email?.trim();
-    if (!s.notify_user && emails.length === 0 && !single) return `"${s.name}" needs at least one recipient (user or email).`;
+    const recipientType = s.notify_recipient_type ?? "email";
+    if (recipientType === "user" && !s.notify_user) return `"${s.name}" needs a selected user.`;
+    if (recipientType === "email" && !s.notify_user && emails.length === 0 && !single) return `"${s.name}" needs at least one recipient (user or email).`;
+    if (recipientType === "supplier" && !s.notify_supplier_field) return `"${s.name}" needs a supplier field selected.`;
     const bad = emails.find((e) => !EMAIL_RE.test(e.trim()));
     if (bad) return `"${s.name}" has an invalid email address: ${bad}`;
     if (single && !EMAIL_RE.test(single)) return `"${s.name}" has an invalid email address.`;
@@ -735,6 +748,7 @@ function StepEditPanel({
   index,
   total,
   groups,
+  docType,
   onChange,
   onClose,
   onDelete,
@@ -744,6 +758,7 @@ function StepEditPanel({
   index: number;
   total: number;
   groups: Group[];
+  docType: DocumentType | null;
   onChange: (patch: Partial<WorkflowStep>) => void;
   onClose: () => void;
   onDelete: () => void;
@@ -1165,6 +1180,7 @@ function StepEditPanel({
           <NotificationStepFields
             step={step}
             groups={groups}
+            docType={docType}
             onChange={onChange}
           />
         )}
@@ -1177,14 +1193,16 @@ function StepEditPanel({
 function NotificationStepFields({
   step,
   groups,
+  docType,
   onChange,
 }: {
   step: WorkflowStep;
   groups: Group[];
+  docType: DocumentType | null;
   onChange: (patch: Partial<WorkflowStep>) => void;
 }) {
-  const [recipientMode, setRecipientMode] = useState<"user" | "email">(
-    step.notify_user ? "user" : "email"
+  const [recipientMode, setRecipientMode] = useState<"user" | "email" | "supplier">(
+    (step.notify_recipient_type as any) || (step.notify_user ? "user" : "email")
   );
   // Tag-style multi-email input state
   const [emailDraft, setEmailDraft] = useState("");
@@ -1224,6 +1242,60 @@ function NotificationStepFields({
     enabled: !!step.assignee_group,
   });
 
+  // Form supplier fields live on DocumentTemplate.sections (templates_engine),
+  // not on DocumentType.metadata. List form templates for this document type.
+  const { data: supplierFields = [], isLoading: supplierFieldsLoading } = useQuery({
+    queryKey: ["form-supplier-fields", docType?.id],
+    queryFn: async () => {
+      if (!docType?.id) return [] as { key: string; label: string }[];
+      const res = await templatesAPI.list({ document_type: docType.id, type: "built" });
+      const raw = res.data?.results ?? res.data ?? [];
+      const templates = Array.isArray(raw) ? raw : [];
+      const fields: { key: string; label: string }[] = [];
+      const seen = new Set<string>();
+      for (const tmpl of templates) {
+        if (tmpl?.kind && tmpl.kind !== "form") continue;
+        const sections = Array.isArray(tmpl?.sections) ? tmpl.sections : [];
+        for (const section of sections) {
+          for (const f of section?.fields ?? []) {
+            if (f?.type !== "sunsystems_account") continue;
+            const key = String(f.key || f.id || "").trim();
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            fields.push({ key, label: String(f.label || f.key || f.id || key) });
+          }
+        }
+      }
+      return fields;
+    },
+    enabled: !!docType?.id,
+    staleTime: 5 * 60_000,
+  });
+
+  // When there is exactly one supplier field, pre-select it for the user.
+  useEffect(() => {
+    if (recipientMode !== "supplier") return;
+    if (step.notify_supplier_field) return;
+    if (supplierFields.length === 1) {
+      onChange({
+        notify_recipient_type: "supplier",
+        notify_supplier_field: supplierFields[0].key,
+      });
+    }
+  }, [recipientMode, supplierFields, step.notify_supplier_field, onChange]);
+
+  const handleRecipientModeChange = (mode: "user" | "email" | "supplier") => {
+    setRecipientMode(mode);
+    onChange({
+      notify_recipient_type: mode,
+      notify_user: null,
+      notify_user_name: undefined,
+      notify_email: "",
+      notify_emails: [],
+      notify_supplier_field: mode === "supplier" ? (step.notify_supplier_field ?? null) : null,
+    });
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex items-start gap-3 p-3 rounded-lg bg-sky-50 border border-sky-200">
@@ -1239,7 +1311,7 @@ function NotificationStepFields({
         <div className="flex bg-muted rounded-lg p-1 mb-2">
           <button
             type="button"
-            onClick={() => setRecipientMode("user")}
+            onClick={() => handleRecipientModeChange("user")}
             className={clsx(
               "flex-1 px-2 py-1.5 text-xs font-medium rounded-md transition-all",
               recipientMode === "user" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"
@@ -1249,13 +1321,23 @@ function NotificationStepFields({
           </button>
           <button
             type="button"
-            onClick={() => setRecipientMode("email")}
+            onClick={() => handleRecipientModeChange("email")}
             className={clsx(
               "flex-1 px-2 py-1.5 text-xs font-medium rounded-md transition-all",
               recipientMode === "email" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"
             )}
           >
             Email address(es)
+          </button>
+          <button
+            type="button"
+            onClick={() => handleRecipientModeChange("supplier")}
+            className={clsx(
+              "flex-1 px-2 py-1.5 text-xs font-medium rounded-md transition-all",
+              recipientMode === "supplier" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"
+            )}
+          >
+            Form suppliers
           </button>
         </div>
 
@@ -1293,6 +1375,37 @@ function NotificationStepFields({
               ariaLabel="Notification user"
               disabled={!step.assignee_group}
             />
+          </div>
+        ) : recipientMode === "supplier" ? (
+          <div className="space-y-2">
+            {!docType?.id ? (
+              <p className="text-xs text-muted-foreground p-3 bg-muted/50 rounded-lg">
+                Assign this workflow to a document type first, then pick the form&apos;s Supplier field.
+              </p>
+            ) : supplierFieldsLoading ? (
+              <p className="text-xs text-muted-foreground p-3 bg-muted/50 rounded-lg flex items-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Looking up supplier fields…
+              </p>
+            ) : supplierFields.length === 0 ? (
+              <p className="text-xs text-muted-foreground p-3 bg-muted/50 rounded-lg">
+                This form has no supplier fields. Add a <span className="font-semibold">Supplier</span> field
+                (SunSystems account) in the Template Builder to use this option.
+              </p>
+            ) : (
+              <>
+                <CustomListbox
+                  value={step.notify_supplier_field ?? ""}
+                  onChange={(v) => onChange({ notify_supplier_field: v || null, notify_recipient_type: "supplier" })}
+                  options={[{ value: "", label: "Select supplier field" }, ...supplierFields.map((f) => ({ value: f.key, label: f.label }))]}
+                  className={inp}
+                  buttonClassName="w-full"
+                  ariaLabel="Supplier field"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Emails will be sent to the suppliers selected in this field when the notification fires.
+                </p>
+              </>
+            )}
           </div>
         ) : (
           /* ── Multi-email tag input ── */
@@ -2137,6 +2250,7 @@ function TemplateEditor({
               index={index}
               total={total}
               groups={groups ?? []}
+              docType={selectedDocumentType}
               onChange={onChange as (patch: Partial<WorkflowStep>) => void}
               onClose={onClose}
               onDelete={onDelete}

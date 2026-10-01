@@ -29,6 +29,8 @@ interface Props {
   placeholder?: string;
   className?: string;
   multi?: boolean;
+  /** Optional: return emails for selected accounts */
+  onEmailsChange?: (emails: string[]) => void;
 }
 
 export default function AccountMultiSelect({
@@ -40,6 +42,7 @@ export default function AccountMultiSelect({
   placeholder = "All accounts",
   className = "",
   multi = true,
+  onEmailsChange,
 }: Props) {
   const [open, setOpen]     = useState(false);
   const [search, setSearch] = useState("");
@@ -130,14 +133,36 @@ export default function AccountMultiSelect({
   const isSelected  = (code: string) => valueArray.includes(code);
   const toggle      = (code: string) => {
     if (isMulti) {
-      onChange(isSelected(code) ? valueArray.filter((c) => c !== code) : [...valueArray, code]);
+      const newValue = isSelected(code) ? valueArray.filter((c) => c !== code) : [...valueArray, code];
+      onChange(newValue);
+      // Update emails for selected accounts
+      if (onEmailsChange) {
+        const selectedAccounts = accounts.filter((a) => newValue.includes(a.account_code));
+        const emails = selectedAccounts.map((a) => a.email).filter((e): e is string => Boolean(e));
+        onEmailsChange(emails);
+      }
     } else {
       onChange(code);
       setOpen(false);
+      // Update email for single selection
+      if (onEmailsChange) {
+        const account = accounts.find((a) => a.account_code === code);
+        onEmailsChange(account?.email ? [account.email] : []);
+      }
     }
   };
-  const selectAll   = () => onChange(filtered.map((a) => a.account_code));
-  const clearAll    = () => onChange(isMulti ? [] : "");
+  const selectAll   = () => {
+    const allCodes = filtered.map((a) => a.account_code);
+    onChange(allCodes);
+    if (onEmailsChange) {
+      const emails = filtered.map((a) => a.email).filter((e): e is string => Boolean(e));
+      onEmailsChange(emails);
+    }
+  };
+  const clearAll    = () => {
+    onChange(isMulti ? [] : "");
+    onEmailsChange?.([]);
+  };
 
   // ── Trigger label ───────────────────────────────────────────────────────
   let triggerLabel: React.ReactNode;

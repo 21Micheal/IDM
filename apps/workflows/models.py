@@ -204,7 +204,7 @@ class WorkflowStep(models.Model):
     )
 
     # ── Notification-step fields ───────────────────────────────────────────────
-    # Exactly one of notify_user or notify_email must be set for notification steps.
+    # Exactly one of notify_user, notify_email, or supplier field must be set for notification steps.
     notify_user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -217,6 +217,12 @@ class WorkflowStep(models.Model):
         blank=True,
         help_text="External email address to notify (notification steps only).",
     )
+    # Multiple recipient email addresses (RFQ supplier emails, etc.)
+    notify_emails = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of email addresses for notification steps.",
+    )
     notification_subject = models.CharField(
         max_length=255,
         blank=True,
@@ -225,6 +231,24 @@ class WorkflowStep(models.Model):
     notification_message = models.TextField(
         blank=True,
         help_text="Email body for notification steps.",
+    )
+    # When true the backend appends the requisition items/qty/UOM table to the email body
+    notify_include_items_table = models.BooleanField(
+        default=False,
+        help_text="Include requisition items table in notification email.",
+    )
+    # Recipient type: "user" | "email" | "supplier"
+    notify_recipient_type = models.CharField(
+        max_length=20,
+        blank=True,
+        help_text="Recipient type for notification steps.",
+    )
+    # Form field key containing supplier codes (when notify_recipient_type is "supplier")
+    notify_supplier_field = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Form field key for supplier codes (notification steps only).",
     )
 
     created_at     = models.DateTimeField(auto_now_add=True, null=True)
