@@ -907,6 +907,8 @@ class WorkflowService:
             document_id = str(document.pk) if document is not None else None
             payment_run_id = str(payment_run.pk) if payment_run is not None else None
             template_id = str(step.template_id) if step.template_id else None
+            include_items_table = bool(getattr(step, "notify_include_items_table", False))
+            table_field_key = (getattr(step, "notify_table_field", None) or "").strip() or None
 
             # Resolve supplier emails if recipient type is "supplier"
             recipient_type = getattr(step, "notify_recipient_type", "email") or "email"
@@ -928,6 +930,8 @@ class WorkflowService:
                     payment_run_id=payment_run_id,
                     step_name=step_name,
                     template_id=template_id,
+                    include_items_table=include_items_table,
+                    table_field_key=table_field_key,
                 )
             )
         except Exception:

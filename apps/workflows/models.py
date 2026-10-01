@@ -232,10 +232,17 @@ class WorkflowStep(models.Model):
         blank=True,
         help_text="Email body for notification steps.",
     )
-    # When true the backend appends the requisition items/qty/UOM table to the email body
+    # When true the backend appends / embeds the form items table in the email body
     notify_include_items_table = models.BooleanField(
         default=False,
-        help_text="Include requisition items table in notification email.",
+        help_text="Include a form table (quotation/items) in the notification email.",
+    )
+    # Which form table field to embed when notify_include_items_table is set
+    notify_table_field = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Form table field key to render as the items table in the email.",
     )
     # Recipient type: "user" | "email" | "supplier"
     notify_recipient_type = models.CharField(

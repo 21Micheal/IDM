@@ -27,18 +27,27 @@ def _send_email_to_address(
     link: str = "",
     *,
     include_footer: bool = True,
+    html_message: str | None = None,
 ) -> None:
     """Send email to a raw address (no User record required)."""
     if not email:
         return
     try:
         message = body + (_email_footer(link) if include_footer else "")
+        html = None
+        if html_message:
+            html = html_message + (
+                f"<p style=\"font-family:Arial,sans-serif;font-size:12px;color:#5E6870;\">"
+                f"{_email_footer(link).strip().replace(chr(10), '<br>')}</p>"
+                if include_footer else ""
+            )
         send_mail(
             subject=subject,
             message=message,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[email],
             fail_silently=False,
+            html_message=html,
         )
     except Exception as exc:
         logger.warning("Email send failed to %s: %s", email, exc)
@@ -51,6 +60,7 @@ def _send_email(
     link: str = "",
     *,
     include_footer: bool = True,
+    html_message: str | None = None,
 ) -> None:
     """Fire-and-forget email. Logs on failure, never raises.
 
@@ -63,12 +73,20 @@ def _send_email(
 
     try:
         message = body + (_email_footer(link) if include_footer else "")
+        html = None
+        if html_message:
+            html = html_message + (
+                f"<p style=\"font-family:Arial,sans-serif;font-size:12px;color:#5E6870;\">"
+                f"{_email_footer(link).strip().replace(chr(10), '<br>')}</p>"
+                if include_footer else ""
+            )
         send_mail(
             subject=subject,
             message=message,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[recipient.email],
             fail_silently=False,
+            html_message=html,
         )
     except Exception as exc:
         logger.warning("Email send failed to %s: %s", recipient.email, exc)
@@ -441,16 +459,50 @@ def send_workflow_notification_step_email(
     payment_run_id: str | None = None,
     step_name: str = "",
     template_id: str | None = None,
+    include_items_table: bool = False,
+    table_field_key: str | None = None,
 ) -> None:
     """
     Send the email configured on a workflow notification step.
 
-    These steps target people outside the approval chain. Emails contain only the
-    configured subject/body — no login or document deep-links. In-app notices
-    (when the recipient is a system user) also omit a deep-link.
+    Renders `{placeholder}` tokens from document/form values and optionally
+    embeds a styled HTML items table. External recipients get HTML + plain text.
     """
     from django.contrib.auth import get_user_model
     from apps.workflows.models import WorkflowTemplate
+    from apps.workflows.notification_content import (
+        build_notification_context,
+        plain_text_from_htmlish,
+        render_placeholders,
+        text_to_html_body,
+    )
+
+    document = None
+    payment_run = None
+    if document_id:
+        try:
+            from apps.documents.models import Document
+            document = Document.objects.get(id=document_id)
+        except Exception:
+            logger.warning("Notification step: document %s not found", document_id)
+    if payment_run_id:
+        try:
+            from apps.sunsystems.models import PaymentRun
+            payment_run = PaymentRun.objects.get(id=payment_run_id)
+        except Exception:
+            logger.warning("Notification step: payment run %s not found", payment_run_id)
+
+    # Prefer an explicit `{items_table}` in the body; otherwise append when toggled on.
+    body_wants_table = "{items_table}" in (message or "")
+    include_table = bool(include_items_table or body_wants_table)
+
+    ctx = build_notification_context(
+        document=document,
+        payment_run=payment_run,
+        step_name=step_name,
+        include_items_table=include_table,
+        table_field_key=table_field_key or None,
+    )
 
     # Optional template-level override (step subject/body remain the default).
     if template_id:
@@ -458,43 +510,42 @@ def send_workflow_notification_step_email(
             template = WorkflowTemplate.objects.get(id=template_id)
         except WorkflowTemplate.DoesNotExist:
             template = None
-        if template:
-            ctx = {"step_name": step_name}
-            if payment_run_id:
-                try:
-                    from apps.sunsystems.models import PaymentRun
-                    run = PaymentRun.objects.get(id=payment_run_id)
-                    ctx.update(
-                        payment_reference=run.payment_reference,
-                        line_count=run.line_count,
-                        total_amount=str(run.total_amount),
-                        currencies=", ".join(run.currency_codes or []),
-                        document_title=f"Payment Run {run.payment_reference}",
-                        document_ref=run.payment_reference,
-                    )
-                except Exception:
-                    pass
-            elif document_id:
-                try:
-                    from apps.documents.models import Document
-                    doc = Document.objects.get(id=document_id)
-                    ctx.update(
-                        document_title=doc.title,
-                        document_ref=doc.reference_number,
-                        payment_reference=doc.reference_number,
-                    )
-                except Exception:
-                    pass
+        else:
             custom_subject, custom_body = _template_email_parts(template, "workflow_notification")
             if custom_subject:
-                subject = _render_email_template(custom_subject, **ctx) or subject
+                subject = custom_subject
             if custom_body:
-                message = _render_email_template(custom_body, **ctx) or message
+                message = custom_body
+                body_wants_table = "{items_table}" in (message or "")
+                include_table = bool(include_items_table or body_wants_table)
+                ctx = build_notification_context(
+                    document=document,
+                    payment_run=payment_run,
+                    step_name=step_name,
+                    include_items_table=include_table,
+                    table_field_key=table_field_key or None,
+                )
 
-    in_app_message = (message or "").strip() or (
+    subject = render_placeholders(subject or "", ctx)
+    message = render_placeholders(message or "", ctx)
+
+    # If the toggle is on but the body never referenced {items_table}, append it.
+    if include_table and ctx.get("items_table") and "{items_table}" not in (message or ""):
+        # After render, items_table content is already expanded if the token was present.
+        # Here we append the raw HTML table for toggle-only mode.
+        from apps.workflows.notification_content import build_items_table_html
+        table_html = ctx.get("items_table") or (
+            build_items_table_html(document, table_field_key) if document else ""
+        )
+        if table_html and table_html not in message:
+            message = f"{message.rstrip()}\n\n{table_html}"
+
+    html_body = text_to_html_body(message)
+    plain_body = plain_text_from_htmlish(message)
+
+    in_app_message = plain_body.strip() or (
         f"Workflow notification: '{step_name}'" if step_name else "Workflow notification"
     )
-    # Keep tray rows compact; full text remains in the email body.
     if len(in_app_message) > 280:
         in_app_message = in_app_message[:277].rstrip() + "..."
 
@@ -511,9 +562,10 @@ def send_workflow_notification_step_email(
         _send_email(
             recipient,
             subject=subject,
-            body=message,
+            body=plain_body,
             link="",
             include_footer=False,
+            html_message=html_body,
         )
         return
 
@@ -523,9 +575,10 @@ def send_workflow_notification_step_email(
                 _send_email_to_address(
                     email,
                     subject=subject,
-                    body=message,
+                    body=plain_body,
                     link="",
                     include_footer=False,
+                    html_message=html_body,
                 )
         return
 
@@ -533,9 +586,10 @@ def send_workflow_notification_step_email(
         _send_email_to_address(
             recipient_email,
             subject=subject,
-            body=message,
+            body=plain_body,
             link="",
             include_footer=False,
+            html_message=html_body,
         )
         return
 

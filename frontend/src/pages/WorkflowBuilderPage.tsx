@@ -65,8 +65,10 @@ interface WorkflowStep {
   notify_emails?: string[];
   notification_subject?: string;
   notification_message?: string;
-  /** When true the backend appends the requisition items/qty/UOM table to the email body */
+  /** When true the backend embeds a form table in the email body */
   notify_include_items_table?: boolean;
+  /** Form table field key to render as the items/quotation table */
+  notify_table_field?: string | null;
   /** Recipient type: "user" | "email" | "supplier" */
   notify_recipient_type?: "user" | "email" | "supplier";
   /** Form field key containing supplier codes (when notify_recipient_type is "supplier") */
@@ -492,6 +494,7 @@ function blankNotificationStep(): WorkflowStep {
     notification_subject: "Workflow update",
     notification_message: "Hello,\n\nThis is an automated notification regarding the document workflow.\n\nThank you.",
     notify_include_items_table: false,
+    notify_table_field: null,
     notify_recipient_type: "email",
     notify_supplier_field: null,
   };
@@ -532,6 +535,7 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
   rest.notification_subject         = "";
   rest.notification_message         = "";
   rest.notify_include_items_table   = false;
+  rest.notify_table_field           = null;
   rest.notify_recipient_type        = undefined;
   rest.notify_supplier_field        = null;
 
@@ -1242,35 +1246,95 @@ function NotificationStepFields({
     enabled: !!step.assignee_group,
   });
 
-  // Form supplier fields live on DocumentTemplate.sections (templates_engine),
-  // not on DocumentType.metadata. List form templates for this document type.
-  const { data: supplierFields = [], isLoading: supplierFieldsLoading } = useQuery({
-    queryKey: ["form-supplier-fields", docType?.id],
+  // Form fields for supplier recipients, email placeholders, and items tables.
+  const { data: formCatalog, isLoading: formCatalogLoading } = useQuery({
+    queryKey: ["form-notification-catalog", docType?.id],
     queryFn: async () => {
-      if (!docType?.id) return [] as { key: string; label: string }[];
+      const empty = {
+        supplierFields: [] as { key: string; label: string }[],
+        scalarFields: [] as { key: string; label: string; type: string }[],
+        tableFields: [] as { key: string; label: string; columns: { key: string; label: string }[] }[],
+      };
+      if (!docType?.id) return empty;
       const res = await templatesAPI.list({ document_type: docType.id, type: "built" });
       const raw = res.data?.results ?? res.data ?? [];
       const templates = Array.isArray(raw) ? raw : [];
-      const fields: { key: string; label: string }[] = [];
+      const supplierFields: { key: string; label: string }[] = [];
+      const scalarFields: { key: string; label: string; type: string }[] = [];
+      const tableFields: { key: string; label: string; columns: { key: string; label: string }[] }[] = [];
       const seen = new Set<string>();
+      const skipTypes = new Set(["button", "signature", "file", "multi_file", "budget"]);
       for (const tmpl of templates) {
         if (tmpl?.kind && tmpl.kind !== "form") continue;
-        const sections = Array.isArray(tmpl?.sections) ? tmpl.sections : [];
-        for (const section of sections) {
+        for (const section of tmpl?.sections ?? []) {
           for (const f of section?.fields ?? []) {
-            if (f?.type !== "sunsystems_account") continue;
-            const key = String(f.key || f.id || "").trim();
+            const key = String(f?.key || f?.id || "").trim();
             if (!key || seen.has(key)) continue;
+            const type = String(f?.type || "text");
+            const label = String(f?.label || f?.key || f?.id || key);
+            if (type === "sunsystems_account") {
+              seen.add(key);
+              supplierFields.push({ key, label });
+              scalarFields.push({ key, label, type });
+              continue;
+            }
+            if (type === "table") {
+              seen.add(key);
+              const columns = (f.columns ?? [])
+                .filter((c: any) => c?.key || c?.id)
+                .filter((c: any) => !["file", "multi_file", "button", "signature"].includes(String(c?.type || "")))
+                .map((c: any) => ({ key: String(c.key || c.id), label: String(c.label || c.key || c.id) }));
+              tableFields.push({ key, label, columns });
+              continue;
+            }
+            if (skipTypes.has(type)) continue;
             seen.add(key);
-            fields.push({ key, label: String(f.label || f.key || f.id || key) });
+            scalarFields.push({ key, label, type });
           }
         }
       }
-      return fields;
+      return { supplierFields, scalarFields, tableFields };
     },
     enabled: !!docType?.id,
     staleTime: 5 * 60_000,
   });
+
+  const supplierFields = formCatalog?.supplierFields ?? [];
+  const supplierFieldsLoading = formCatalogLoading;
+  const scalarFields = formCatalog?.scalarFields ?? [];
+  const tableFields = formCatalog?.tableFields ?? [];
+  const messageBodyRef = useRef<HTMLTextAreaElement>(null);
+
+  const systemPlaceholders = useMemo(
+    () => [
+      { key: "document_title", label: "Document title" },
+      { key: "document_ref", label: "Reference" },
+      { key: "uploader_name", label: "Submitter" },
+      { key: "step_name", label: "Step name" },
+      { key: "today", label: "Today's date" },
+      { key: "items_table", label: "Items table" },
+    ],
+    [],
+  );
+
+  const insertPlaceholder = (token: string) => {
+    const snippet = `{${token}}`;
+    const el = messageBodyRef.current;
+    const current = step.notification_message ?? "";
+    if (!el) {
+      onChange({ notification_message: `${current}${current.endsWith("\n") || !current ? "" : " "}${snippet}` });
+      return;
+    }
+    const start = el.selectionStart ?? current.length;
+    const end = el.selectionEnd ?? current.length;
+    const next = current.slice(0, start) + snippet + current.slice(end);
+    onChange({ notification_message: next });
+    requestAnimationFrame(() => {
+      el.focus();
+      const pos = start + snippet.length;
+      el.setSelectionRange(pos, pos);
+    });
+  };
 
   // When there is exactly one supplier field, pre-select it for the user.
   useEffect(() => {
@@ -1283,6 +1347,15 @@ function NotificationStepFields({
       });
     }
   }, [recipientMode, supplierFields, step.notify_supplier_field, onChange]);
+
+  // Pre-select the only table when the items-table toggle is on.
+  useEffect(() => {
+    if (!step.notify_include_items_table) return;
+    if (step.notify_table_field) return;
+    if (tableFields.length === 1) {
+      onChange({ notify_table_field: tableFields[0].key });
+    }
+  }, [step.notify_include_items_table, step.notify_table_field, tableFields, onChange]);
 
   const handleRecipientModeChange = (mode: "user" | "email" | "supplier") => {
     setRecipientMode(mode);
@@ -1472,35 +1545,66 @@ function NotificationStepFields({
           value={step.notification_subject ?? ""}
           onChange={e => onChange({ notification_subject: e.target.value })}
           className={inp}
-          placeholder="e.g. RFQ — Quotation Request for [Document Title]"
+          placeholder="e.g. RFQ — Quotation request for {document_ref}"
         />
       </div>
 
-      {/* Message body */}
+      {/* Message body + variable chips */}
       <div>
         <Label required>Email message</Label>
         <textarea
+          ref={messageBodyRef}
           value={step.notification_message ?? ""}
           onChange={e => onChange({ notification_message: e.target.value })}
-          rows={8}
+          rows={9}
           className={clsx(inp, "resize-none font-mono text-xs leading-relaxed")}
-          placeholder={"Hello,\n\nPlease find below a request for quotation..."}
+          placeholder={"Hello,\n\nPlease send your quotation on or before {due_date_copy}.\n\nDetails:\n{items_table}\n\nThank you."}
         />
-        <p className="text-[11px] text-muted-foreground mt-1">
-          Plain text. Use <code className="text-[10px] bg-muted px-1 rounded">{`{document_title}`}</code>,{" "}
-          <code className="text-[10px] bg-muted px-1 rounded">{`{document_ref}`}</code>,{" "}
-          <code className="text-[10px] bg-muted px-1 rounded">{`{uploader_name}`}</code> as placeholders.
-        </p>
+        <div className="mt-2 space-y-1.5">
+          <p className="text-[11px] text-muted-foreground">
+            Click a variable to insert it at the cursor. Values are filled from the submitted form when the email sends.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {systemPlaceholders.map((p) => (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => insertPlaceholder(p.key)}
+                className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-800 hover:bg-sky-100"
+                title={`Insert {${p.key}}`}
+              >
+                {p.label}
+              </button>
+            ))}
+            {scalarFields.slice(0, 16).map((f) => (
+              <button
+                key={f.key}
+                type="button"
+                onClick={() => insertPlaceholder(f.key)}
+                className="rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-muted"
+                title={`Insert {${f.key}}`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          {!docType?.id && (
+            <p className="text-[11px] text-amber-700">Assign a document type to load form field variables.</p>
+          )}
+        </div>
       </div>
 
       {/* Items table toggle */}
-      <div className="rounded-lg border border-border p-3 space-y-1.5">
+      <div className="rounded-lg border border-border p-3 space-y-2">
         <label className="flex cursor-pointer items-start gap-3">
           <div className="relative mt-0.5 flex-shrink-0">
             <input
               type="checkbox"
               checked={Boolean(step.notify_include_items_table)}
-              onChange={(e) => onChange({ notify_include_items_table: e.target.checked })}
+              onChange={(e) => onChange({
+                notify_include_items_table: e.target.checked,
+                notify_table_field: e.target.checked ? (step.notify_table_field ?? tableFields[0]?.key ?? null) : null,
+              })}
               className="sr-only"
             />
             <div className={clsx(
@@ -1517,28 +1621,74 @@ function NotificationStepFields({
             </div>
           </div>
           <div>
-            <p className="text-xs font-medium text-foreground">Include requisition items table</p>
+            <p className="text-xs font-medium text-foreground">Include form table in email</p>
             <p className="text-[11px] text-muted-foreground leading-relaxed">
-              Appends the Items, Quantity, and Unit of Measure from the requisition form as a
-              formatted table in the email body. Ideal for RFQ supplier notifications.
+              Embeds a structured HTML table from the form (quotation / line items). Use{" "}
+              <code className="text-[10px] bg-muted px-1 rounded">{"{items_table}"}</code> in the message
+              to place it, or leave it out and the table is appended at the end.
             </p>
           </div>
         </label>
+
         {step.notify_include_items_table && (
-          <div className="ml-7 rounded border border-dashed border-sky-300 bg-sky-50 px-3 py-2">
-            <p className="text-[11px] text-sky-800 font-medium">Preview — items table will appear here:</p>
-            <div className="mt-1.5 overflow-hidden rounded border border-sky-200 text-[10px]">
-              <div className="grid grid-cols-3 bg-sky-100 font-semibold text-sky-700">
-                <div className="border-r border-sky-200 px-2 py-1">Item</div>
-                <div className="border-r border-sky-200 px-2 py-1">Qty</div>
-                <div className="px-2 py-1">UOM</div>
-              </div>
-              <div className="grid grid-cols-3 text-sky-600">
-                <div className="border-r border-t border-sky-200 px-2 py-1 italic">from form…</div>
-                <div className="border-r border-t border-sky-200 px-2 py-1 italic">—</div>
-                <div className="border-t border-sky-200 px-2 py-1 italic">—</div>
-              </div>
-            </div>
+          <div className="ml-7 space-y-2">
+            {formCatalogLoading ? (
+              <p className="text-xs text-muted-foreground flex items-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading form tables…
+              </p>
+            ) : tableFields.length === 0 ? (
+              <p className="text-xs text-muted-foreground p-2 bg-muted/50 rounded-lg">
+                This form has no table fields. Add a table (items / quotation lines) in the Template Builder.
+              </p>
+            ) : (
+              <>
+                <CustomListbox
+                  value={step.notify_table_field ?? ""}
+                  onChange={(v) => onChange({ notify_table_field: v || null })}
+                  options={[
+                    { value: "", label: "Select table field" },
+                    ...tableFields.map((t) => ({ value: t.key, label: t.label })),
+                  ]}
+                  className={inp}
+                  buttonClassName="w-full"
+                  ariaLabel="Form table field"
+                />
+                {(() => {
+                  const selected = tableFields.find((t) => t.key === step.notify_table_field) ?? tableFields[0];
+                  if (!selected) return null;
+                  const cols = selected.columns.length ? selected.columns : [{ key: "col", label: "…" }];
+                  return (
+                    <div className="rounded border border-dashed border-sky-300 bg-sky-50 px-3 py-2">
+                      <p className="text-[11px] text-sky-800 font-medium">
+                        Preview columns from “{selected.label}”:
+                      </p>
+                      <div className="mt-1.5 overflow-x-auto rounded border border-sky-200 text-[10px]">
+                        <div
+                          className="grid bg-sky-100 font-semibold text-sky-700"
+                          style={{ gridTemplateColumns: `repeat(${cols.length}, minmax(4rem, 1fr))` }}
+                        >
+                          {cols.map((c, i) => (
+                            <div key={c.key} className={clsx("px-2 py-1", i < cols.length - 1 && "border-r border-sky-200")}>
+                              {c.label}
+                            </div>
+                          ))}
+                        </div>
+                        <div
+                          className="grid text-sky-600"
+                          style={{ gridTemplateColumns: `repeat(${cols.length}, minmax(4rem, 1fr))` }}
+                        >
+                          {cols.map((c, i) => (
+                            <div key={c.key} className={clsx("border-t border-sky-200 px-2 py-1 italic", i < cols.length - 1 && "border-r border-sky-200")}>
+                              from form…
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </>
+            )}
           </div>
         )}
       </div>
