@@ -1252,7 +1252,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 values[key] = descriptor
                 attachments[key] = descriptor
 
-        sections = form.get("sections") or []
+        # Raw snapshot keeps every section so a draft can still add/remove
+        # blocks; only the effective sections (normal + `__sections_added`) are
+        # re-checked, reconciled, recomputed and rendered. Linked tables are
+        # materialised from their snapshots so nothing downstream sees
+        # `source="table"`.
+        raw_sections = form.get("sections") or []
+        from apps.templates_engine.blocks import effective_sections, prune_inactive_values
+        values = prune_inactive_values(raw_sections, values)
+        sections = effective_sections(raw_sections, values)
 
         # ── Editability enforcement (the "Security" axis) ──────────────────────
         # A field/section can be marked read-only or "editable only when <process
@@ -1292,11 +1300,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # Re-derive picked reference/user labels server-side from their ids.
         values = reconcile_references(values, sections, default_reference_resolver)
 
+        # Recompute calculated fields authoritatively, exactly like create.
+        from apps.templates_engine.conditions import compute_calculated_values
+        values = compute_calculated_values(sections, values)
+
         # The regenerated PDF view shows display strings, not structured dicts.
         render_values = descriptors_to_names(values)
         shim = SimpleNamespace(name=doc.title, sections=sections)
         try:
-            content = generate_built_pdf(shim, render_values)
+            content = generate_built_pdf(shim, render_values, sections=sections)
         except Exception as exc:
             logger.exception("update_form: regeneration failed for %s", doc.id)
             return Response({"detail": f"Could not regenerate the form: {exc}"}, status=400)

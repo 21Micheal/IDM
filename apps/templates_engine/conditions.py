@@ -1119,7 +1119,13 @@ def _resolve_column_ref(ref: str, rows, col_types, all_tables):
     return [], None, first
 
 
-def _num_literal(x: float) -> str:
+def _num_literal(x) -> str:
+    # Aggregate results can be plain ints (e.g. ``SUM`` over an empty/unknown
+    # table is ``sum([]) == 0``), so normalise before the float-only checks.
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return "0"
     if not math.isfinite(x):
         return "0"
     if x.is_integer() and abs(x) < 1e21:

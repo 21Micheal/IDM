@@ -32,6 +32,14 @@ import { currencySymbolFor } from "@/lib/currencies";
 import { useAuthStore } from "@/store/authStore";
 import { Sparkles } from "lucide-react";
 import { buildCalcScope, evaluateCalcExpression, evaluateTableColumnFormulas, resolveRowAggregates, formatCalcResult, type CalcValue } from "@/lib/calculations";
+import {
+  activeSections,
+  addedSectionIds,
+  materializeSections,
+  withSectionAdded,
+  withSectionRemoved,
+  type AnyTableRef,
+} from "@/lib/formBlocks";
 import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
 import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOperators";
 
@@ -111,6 +119,8 @@ type Field = {
   editableWhen?: VisibleWhen | null;
   /* Button behaviour (type === "button"). Mirrors the builder's ButtonConfig. */
   button?: ButtonConfig | null;
+  /* Table reference (type === "reference" && referenceSource === "table"). */
+  tableRef?: AnyTableRef | null;
   sunsystems?: {
     budgetAmountField?: string;
     monitoredAmountField?: string;
@@ -542,52 +552,8 @@ function conditionSourceValues(
   return [str(values[sib.key ?? ""])];
 }
 
-/* On-demand sections (section.onDemand) are absent from the form until a Button
- * (action "add_block") adds them. `spawned` is the click-ordered list of
- * additions; each remembers the section it should follow ("" = end of form).
- * Mirrors the builder preview's orderSections. */
-interface SpawnRecord { sectionId: string; anchorId: string }
-
-function orderSections(sections: Section[], spawned: SpawnRecord[]): Section[] {
-  const byId = new Map(sections.map((x) => [x.id ?? "", x]));
-  const out = sections.filter((x) => !x.onDemand);
-  for (const rec of spawned) {
-    const sec = byId.get(rec.sectionId);
-    if (!sec || out.some((x) => x.id === sec.id)) continue;
-    const idx = rec.anchorId ? out.findIndex((x) => x.id === rec.anchorId) : -1;
-    if (idx < 0) { out.push(sec); continue; }
-    let at = idx + 1;
-    while (at < out.length && out[at].onDemand) at++;
-    out.splice(at, 0, sec);
-  }
-  return out;
-}
-
-/* On-demand sections that already carry saved values (an existing document
- * reopened) are revealed without the person re-clicking the button. */
-function spawnedFromValues(sections: Section[], values: TemplateFormValues, allFields: Field[]): SpawnRecord[] {
-  const out: SpawnRecord[] = [];
-  for (const s of sections) {
-    if (!s.onDemand || !s.id) continue;
-    const hasData = (s.fields ?? []).some((f) => {
-      const k = f.key ?? f.id ?? "";
-      if (!k) return false;
-      const v = values[k];
-      if (v == null) return false;
-      if (typeof v === "string") return v.trim() !== "";
-      if (Array.isArray(v)) return v.length > 0;
-      return true;
-    });
-    if (!hasData) continue;
-    const btn = allFields.find((f) => f.type === "button" && f.button?.action === "add_block" && f.button?.targetSectionId === s.id);
-    const b = btn?.button;
-    const host = btn ? sections.find((x) => (x.fields ?? []).includes(btn)) : undefined;
-    const anchorId = b?.placement === "below_button" ? (host?.id ?? "")
-      : b?.placement === "after_section" ? (b.anchorSectionId ?? "") : "";
-    out.push({ sectionId: s.id, anchorId });
-  }
-  return out;
-}
+/* Section ordering / on-demand + linked-table helpers live in
+ * "@/lib/formBlocks" so the client and the Django engine share one contract. */
 
 // Works for a field OR a section — both carry `hidden` + `visibleWhen`. An
 // empty/absent rule group means no restriction (visible). `processStep` is the
@@ -1512,6 +1478,44 @@ function resolveNumericSource(
   return rows.reduce((sum, r) => sum + (parseAmount(r?.[colKey]) ?? 0), 0);
 }
 
+/** "Pick a row" linked table: choose one row from a table in THIS form,
+ * labelled by ``tableRef.displayColumn``, and store the label text as a plain
+ * string. Another form's rows need a permissions-aware endpoint that isn't
+ * shipped yet, so that case renders as unavailable. */
+function TableRowPicker({ field, value, disabled, onChange, allValues, allFields }: {
+  field: Field;
+  value: unknown;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  allValues: TemplateFormValues;
+  allFields: Field[];
+}) {
+  const ref = field.tableRef;
+  const tableKey = ref?.tableKey ?? "";
+  const displayColumn = ref?.displayColumn ?? "";
+  const table = allFields.find((f) => f.key === tableKey && f.type === "table");
+  const rows = Array.isArray(allValues[tableKey]) ? (allValues[tableKey] as Record<string, unknown>[]) : [];
+  const labels = rows
+    .map((row) => (row && typeof row === "object" ? String(row[displayColumn] ?? "").trim() : ""))
+    .filter((label) => label !== "");
+  if (ref?.scope !== "this_form" || !table || !displayColumn) {
+    return (
+      <select disabled className={inp} value="">
+        <option value="">
+          {ref?.scope === "other_form" ? "Unavailable for other forms" : "No source table"}
+        </option>
+      </select>
+    );
+  }
+  return (
+    <select value={String(value ?? "")} disabled={disabled} className={inp}
+      onChange={(e) => onChange(e.target.value)}>
+      <option value="">— select a row —</option>
+      {labels.map((label, i) => <option key={`${label}-${i}`} value={label}>{label}</option>)}
+    </select>
+  );
+}
+
 function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields, onLaunchSignatureModal, onButtonClick, buttonDone = false, viewer }: {
   field: Field;
   control: any;
@@ -1542,6 +1546,8 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
   // Action button — reveals an on-demand section or runs a one-shot calculation.
   if (type === "button") {
+    // Buttons are an editing affordance only; a read-only document hides them.
+    if (readOnly) return null;
     const variant = field.button?.variant ?? "primary";
     return (
       <div className="min-w-0" style={style}>
@@ -1970,6 +1976,21 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
     case "reference":
     case "user":
+      if (type === "reference" && field.referenceSource === "table") {
+        control_el = (
+          <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
+            <TableRowPicker
+              field={field}
+              value={f.value}
+              disabled={dis}
+              allValues={allValues}
+              allFields={allFields}
+              onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+            />
+          )} />
+        );
+        break;
+      }
       control_el = (
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
           <ReferencePicker
@@ -2040,17 +2061,19 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   canEditConditionalSections?: boolean;
   onLaunchSignatureModal?: (fieldKey?: string) => void;
 }) {
-  const list = (Array.isArray(sections) ? sections : []) as Section[];
-  const allFields = list.flatMap((s) => s.fields ?? []);
+  const rawSections = (Array.isArray(sections) ? sections : []) as Section[];
+  // Materialise linked tables (embed -> table) and keep only the ACTIVE
+  // sections: normal ones plus the on-demand ones in `__sections_added`. Every
+  // downstream computation (allFields, calc, conditions, required) sees only
+  // sections that are actually part of the form.
+  const addedIds = addedSectionIds(values);
+  const active = activeSections(materializeSections(rawSections), values);
+  const allFields = active.flatMap((s) => s.fields ?? []);
 
-  // On-demand sections a Button has added, in click order. Un-spawned
-  // on-demand sections are not rendered at all (mirrors the builder preview).
-  const [spawned, setSpawned] = useState<SpawnRecord[]>(() => spawnedFromValues(list, values, allFields));
-  // Sections the person explicitly removed — never auto-reveal them again.
-  const manuallyRemovedRef = useRef<Set<string>>(new Set());
-
-  // Derive a stable key from section IDs so we can detect template changes
-  const sectionsKey = list.map((s) => s.id ?? "").join("|");
+  // Derive a stable key from the RAW section IDs so we can detect template
+  // changes. Deriving it from the rendered list would reset the form whenever a
+  // button adds/removes a block.
+  const sectionsKey = rawSections.map((s) => s.id ?? "").join("|");
   const prevKeyRef = useRef(sectionsKey);
 
   const { control, formState: { errors }, reset, watch, setValue, getValues, unregister } = useForm<TemplateFormValues>({
@@ -2063,8 +2086,6 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
     if (prevKeyRef.current !== sectionsKey) {
       prevKeyRef.current = sectionsKey;
       reset({});
-      setSpawned(spawnedFromValues(list, values, allFields));
-      manuallyRemovedRef.current = new Set();
     }
   }, [sectionsKey]);
 
@@ -2130,30 +2151,14 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
     }
   }, [sectionsKey, JSON.stringify(values), readOnly, documentId]);
 
-  // Reveal on-demand blocks that already carry saved data (an existing document
-  // reopened). Add-only: removing a block clears its values, so it won't return.
-  useEffect(() => {
-    const found = spawnedFromValues(list, values, allFields).filter(
-      (r) => !manuallyRemovedRef.current.has(r.sectionId),
-    );
-    if (!found.length) return;
-    setSpawned((prev) => {
-      const missing = found.filter((r) => !prev.some((s) => s.sectionId === r.sectionId));
-      return missing.length ? [...prev, ...missing] : prev;
-    });
-  }, [JSON.stringify(values), sectionsKey]);
-
   /* Button click: reveal the target on-demand section at the chosen spot, or
    * evaluate a formula once and write it into the target field. */
-  const runButton = (btn: Field, hostSectionId: string) => {
+  const runButton = (btn: Field) => {
     const b = btn.button;
     if (!b) return;
     if (b.action === "add_block") {
-      if (!b.targetSectionId || spawned.some((r) => r.sectionId === b.targetSectionId)) return;
-      manuallyRemovedRef.current.delete(b.targetSectionId);
-      const anchorId = b.placement === "below_button" ? hostSectionId
-        : b.placement === "after_section" ? (b.anchorSectionId ?? "") : "";
-      setSpawned((prev) => [...prev, { sectionId: b.targetSectionId as string, anchorId }]);
+      if (!b.targetSectionId || addedIds.includes(b.targetSectionId)) return;
+      onChange("__sections_added", withSectionAdded(values, b.targetSectionId));
       return;
     }
     const target = allFields.find((f) => f.key === b.targetKey);
@@ -2178,17 +2183,16 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   };
 
   const removeSpawned = (section: Section) => {
-    if (section.id) manuallyRemovedRef.current.add(section.id);
-    setSpawned((prev) => prev.filter((r) => r.sectionId !== section.id));
+    if (section.id) onChange("__sections_added", withSectionRemoved(values, section.id));
     for (const f of section.fields ?? []) {
       const k = f.key ?? f.id ?? "";
       if (!k) continue;
       unregister(k);
-      onChange(k, undefined);
+      onChange(k, f.type === "table" ? [] : undefined);
     }
   };
 
-  const ordered = orderSections(list, spawned);
+  const ordered = active;
 
   // Keep a live snapshot of form values for conditional visibility
   const liveValues = { ...(watch() as TemplateFormValues), ...values, __document_id: documentId };
@@ -2203,7 +2207,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // Current process step for "process step" visibility conditions.
   const processStep = documentStatus || "draft";
 
-  if (list.length === 0) {
+  if (rawSections.length === 0) {
     return <p className="text-sm text-muted-foreground">This form has no fields.</p>;
   }
 
@@ -2265,8 +2269,8 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
                   processStep={processStep}
                   allFields={allFields}
                   onLaunchSignatureModal={onLaunchSignatureModal}
-                  onButtonClick={(btn) => runButton(btn, section.id ?? "")}
-                  buttonDone={f.button?.action === "add_block" && spawned.some((r) => r.sectionId === f.button?.targetSectionId)}
+                  onButtonClick={runButton}
+                  buttonDone={f.button?.action === "add_block" && addedIds.includes(f.button?.targetSectionId ?? "")}
                   viewer={viewer}
                 />
               ))}
@@ -2292,7 +2296,10 @@ export function requiredFieldLabels(
   viewer?: FormViewer,
   processStep = "draft",
 ): string[] {
-  const list = (Array.isArray(sections) ? sections : []) as Section[];
+  const rawList = (Array.isArray(sections) ? sections : []) as Section[];
+  // Validate only the sections that are part of the form (normal + added
+  // on-demand), mirroring the renderer and the server.
+  const list = activeSections(materializeSections(rawList), values);
   const allFields = list.flatMap((s) => s.fields ?? []);
   const missing: string[] = [];
   for (const s of list) {
@@ -2301,9 +2308,6 @@ export function requiredFieldLabels(
     // the viewer isn't a member of).
     if (!evalVisible(s, values, allFields, processStep, null, viewer)) continue;
     if (!sectionVisibleToViewer(s, viewer)) continue;
-    // On-demand sections aren't part of the form until a Button adds them, so
-    // their fields can't be required up-front (matches the renderer + server).
-    if (s.onDemand) continue;
     if (conditionalEditBlockedForViewer(s, viewer)) continue;
     // A read-only/locked section's fields can't be filled at this step.
     const sectionEditable = evalEditableForViewer(s, values, allFields, processStep, viewer);

@@ -27,6 +27,10 @@ def _form_values_for_metadata(values: dict) -> dict:
     for key, value in (values or {}).items():
         if key in STANDARD_DOCUMENT_FIELDS:
             continue
+        # Internal keys (`__sections_added`, `__document_id`) are metadata, not
+        # form data — never mirror them onto the document.
+        if str(key).startswith("__"):
+            continue
         if isinstance(value, dict) and value.get("storage_path"):
             continue
         metadata[key] = value
@@ -102,7 +106,7 @@ def _replace_placeholder_in_paragraph(para, values: dict):
 
 # ─── Built template generators ───────────────────────────────────────────────
 
-def generate_built_pdf(template, values) -> bytes:
+def generate_built_pdf(template, values, sections=None) -> bytes:
     """Generate PDF from built template using reportlab."""
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable,
@@ -151,7 +155,7 @@ def generate_built_pdf(template, values) -> bytes:
     story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e2e8f0")))
     story.append(Spacer(1, 8))
 
-    for section in template.sections:
+    for section in (sections if sections is not None else template.sections):
         story.append(Paragraph(section["title"], h2_style))
         if section.get("description"):
             story.append(Paragraph(section["description"], label_style))
@@ -162,6 +166,10 @@ def generate_built_pdf(template, values) -> bytes:
             key = field.get("key", "")
             label = field.get("label", "")
             value = _display_value(values.get(key, ""))
+
+            # Buttons are interactive only; never print them.
+            if ftype == "button":
+                continue
 
             if ftype == "divider":
                 story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e2e8f0")))
@@ -231,7 +239,7 @@ def generate_built_pdf(template, values) -> bytes:
     return buf.getvalue()
 
 
-def generate_built_docx(template, values) -> bytes:
+def generate_built_docx(template, values, sections=None) -> bytes:
     """Generate DOCX from built template using python-docx."""
     from docx import Document
     from docx.shared import Pt, RGBColor, Cm
@@ -252,7 +260,7 @@ def generate_built_docx(template, values) -> bytes:
     title_para = doc.add_heading(template.name, 0)
     title_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
-    for tmpl_section in template.sections:
+    for tmpl_section in (sections if sections is not None else template.sections):
         doc.add_heading(tmpl_section["title"], 1)
         if tmpl_section.get("description"):
             desc_para = doc.add_paragraph(tmpl_section["description"])
@@ -264,6 +272,10 @@ def generate_built_docx(template, values) -> bytes:
             key = field.get("key", "")
             label = field.get("label", "")
             value = _display_value(values.get(key, ""))
+
+            # Buttons are interactive only; never print them.
+            if ftype == "button":
+                continue
 
             if ftype == "divider":
                 p = doc.add_paragraph()
@@ -987,26 +999,34 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
             content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
     elif template.type == "built":
+        # Only the sections that are actually part of this form (normal plus
+        # the on-demand blocks in `__sections_added`) drive formulas, calc and
+        # the rendered file. Linked tables are materialised here from their
+        # snapshots, so the generators only ever see plain tables.
+        from apps.templates_engine.blocks import effective_sections, prune_inactive_values
+
+        values = prune_inactive_values(template.sections, values)
+        eff = effective_sections(template.sections, values)
         # Freeze auto-fill formula values authoritatively (creator, submit time,
         # assigned reference) into the stored form values.
         values = apply_formulas(
-            values, template.sections, user=user, reference_number=reference_number
+            values, eff, user=user, reference_number=reference_number
         )
         # Freeze calculated fields (e.g. "total_days * daily_rate") the same
         # way — computed server-side from the (now formula-frozen) values so
         # the stored document and the rendered file always agree, regardless
         # of what the client last had on screen.
         from apps.templates_engine.conditions import compute_calculated_values
-        values = compute_calculated_values(template.sections, values)
+        values = compute_calculated_values(eff, values)
         # The stored form.values keeps structured attachment descriptors and
         # reference {id,label} objects; the rendered file shows display strings.
         render_values = descriptors_to_names(values)
         if fmt == "pdf":
-            content = generate_built_pdf(template, render_values)
+            content = generate_built_pdf(template, render_values, sections=eff)
             filename = f"{title}.pdf"
             content_type = "application/pdf"
         else:
-            content = generate_built_docx(template, render_values)
+            content = generate_built_docx(template, render_values, sections=eff)
             filename = f"{title}.docx"
             content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 

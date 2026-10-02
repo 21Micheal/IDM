@@ -209,6 +209,15 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         if not isinstance(values, dict):
             raise ValidationError({"values": "values must be an object."})
 
+        # Only the sections actually part of this form drive reconciliation,
+        # calculation and validation: normal sections plus the on-demand blocks
+        # the client recorded in `__sections_added`. Forged values for a block
+        # that was never added are dropped here; linked tables are materialised
+        # from their snapshots so no downstream code sees `source="table"`.
+        from apps.templates_engine.blocks import effective_sections, prune_inactive_values
+        values = prune_inactive_values(template.sections, values)
+        eff = effective_sections(template.sections, values)
+
         from apps.documents.form_attachments import (
             apply_form_attachments,
             descriptors_to_names,
@@ -220,14 +229,14 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
 
         # Re-derive picked reference/user labels server-side from their ids so the
         # stored values are trustworthy (a stale/spoofed client label can't persist).
-        values = reconcile_references(values, template.sections, default_reference_resolver)
+        values = reconcile_references(values, eff, default_reference_resolver)
 
         # Recompute every `calc`-bearing field (e.g. "total_days * daily_rate")
         # authoritatively from the raw values — never trust a client-submitted
         # calculated figure. Must run before `generation_values` is derived so
         # both the required-field check and the stored usage snapshot see the
         # server-computed numbers.
-        values = compute_calculated_values(template.sections, values)
+        values = compute_calculated_values(eff, values)
 
         # `values` already carries filename placeholders for any file fields
         # (simple fields or file columns inside a table); the actual files arrive
@@ -277,9 +286,8 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             # are not part of the form until the user clicks their button, so
             # their fields can't be required up-front. Mirrors TemplateForm.tsx.
             visible_editable_sections = [
-                section for section in template.sections
-                if not section.get("onDemand")
-                and _eval_visible(section, generation_values, viewer=viewer)
+                section for section in eff
+                if _eval_visible(section, generation_values, viewer=viewer)
                 and _section_visible_to_user(section, group_ids, group_names, is_admin)
                 and is_editable(section, generation_values, viewer=viewer)
             ]
@@ -287,7 +295,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             all_fields = [
                 f for section in visible_editable_sections
                 for f in section.get("fields", [])
-                if f.get("required") and f.get("type") not in ("divider", "heading")
+                if f.get("required") and f.get("type") not in ("divider", "heading", "button")
                 and not f.get("formula") and not f.get("calc")
                 and _eval_visible(f, generation_values, viewer=viewer)
                 and is_editable(f, generation_values, viewer=viewer)
