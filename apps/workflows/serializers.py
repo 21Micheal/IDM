@@ -898,4 +898,17 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
             return obj.rule.phase
         if obj.target_type == "payment_run":
             return "payment_run"
+        # V2 templates carry no routing rule, so derive the phase from the
+        # document's builder metadata (requisition / rfq / lpo / retirement …).
+        # Without this every branched workflow reported "request", which made
+        # completed stages read as generic "Approved" instead of e.g.
+        # "Requisition Approved".
+        if obj.document_id:
+            try:
+                from apps.documents.builder_workflow import infer_builder_workflow_phase
+                phase = infer_builder_workflow_phase(obj.document)
+                if phase:
+                    return phase
+            except Exception:
+                pass
         return "request"

@@ -1,5 +1,7 @@
-import { Check, Clock, XCircle, Minus, Loader2 } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { Check, Clock, ChevronDown, ChevronRight, XCircle, Minus, Loader2 } from "lucide-react";
 import type { WorkflowStep, WorkflowStatus } from "../notifications/workflow-visualizer";
+import { PHASE_LABELS, PROCUREMENT_PHASE_ORDER } from "../notifications/workflow-data";
 
 const STATUS_TONE: Record<WorkflowStatus, {
   text: string;
@@ -55,6 +57,71 @@ interface ApprovalStagesTableProps {
 }
 
 export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalStagesTableProps) {
+  const [shownEarlierPhases, setShownEarlierPhases] = useState<Set<string>>(new Set());
+
+  // Always start collapsed when the document moves to a new phase.
+  useEffect(() => {
+    setShownEarlierPhases(new Set());
+  }, [phase]);
+
+  const taskSteps = useMemo(
+    () => steps.filter((step) => !step.kind || step.kind === "task"),
+    [steps],
+  );
+
+  const phaseRank = (value?: string) => {
+    if (!value) return -1;
+    const index = PROCUREMENT_PHASE_ORDER.indexOf(value as (typeof PROCUREMENT_PHASE_ORDER)[number]);
+    return index;
+  };
+
+  const currentPhase =
+    phase && phaseRank(phase) >= 0 ? (phase as string) : null;
+  const phased = Boolean(currentPhase && taskSteps.some((step) => step.phase));
+
+  const phaseCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const step of taskSteps) {
+      if (step.phase) counts.set(step.phase, (counts.get(step.phase) ?? 0) + 1);
+    }
+    return counts;
+  }, [taskSteps]);
+
+  // Earlier procurement phases available behind a toggle (requisition before
+  // rfq, requisition + rfq before lpo).  Later phases are never shown here.
+  const earlierPhases = phased
+    ? PROCUREMENT_PHASE_ORDER.filter(
+        (name) =>
+          name !== currentPhase
+          && (phaseCounts.get(name) ?? 0) > 0
+          && phaseRank(name) < phaseRank(currentPhase ?? undefined),
+      )
+    : [];
+
+  const visibleSteps = useMemo(() => {
+    if (!phased) return [...taskSteps].sort((a, b) => a.order - b.order);
+    const currentRank = phaseRank(currentPhase ?? undefined);
+    return taskSteps
+      .filter((step) => {
+        const rank = phaseRank(step.phase);
+        if (rank < 0 || rank > currentRank) return false;
+        return step.phase === currentPhase || shownEarlierPhases.has(step.phase ?? "");
+      })
+      .sort((a, b) => phaseRank(a.phase) - phaseRank(b.phase) || a.order - b.order);
+  }, [taskSteps, phased, currentPhase, shownEarlierPhases]);
+
+  const rows = useMemo(() => {
+    const counters: Record<string, number> = {};
+    let previousPhase: string | undefined;
+    return visibleSteps.map((step) => {
+      const key = step.phase ?? "_";
+      counters[key] = (counters[key] ?? 0) + 1;
+      const startGroup = phased && shownEarlierPhases.size > 0 && step.phase !== previousPhase;
+      previousPhase = step.phase;
+      return { step, number: counters[key], startGroup };
+    });
+  }, [visibleSteps, phased, shownEarlierPhases]);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center gap-2 border border-dashed border-[#C8CDD2] bg-[#F5F7F8] p-6 text-sm text-[#5E6870]">
@@ -64,19 +131,25 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
     );
   }
 
-  if (!steps.length) {
+  if (!taskSteps.length) {
     return null;
   }
 
-  // Filter out structural nodes (start, end, gateway) - only show task nodes
-  const taskSteps = steps.filter((s) => !s.kind || s.kind === "task");
+  const toggleEarlier = (name: string) => {
+    setShownEarlierPhases((previous) => {
+      const next = new Set(previous);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
 
   return (
     <div className="border border-[#C8CDD2] bg-[#FAFAFA] shadow-sm">
       {/* Title bar — clean, light */}
-      <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-white px-3 py-2">
-        <div className="flex items-center gap-2">
-          <p className="text-xs font-bold text-[#1F2933] uppercase tracking-wide">
+      <div className="flex items-center justify-between gap-2 border-b border-[#C8CDD2] bg-white px-3 py-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <p className="text-xs font-bold text-[#1F2933] uppercase tracking-wide truncate">
             {(() => {
               switch (phase) {
                 case "requisition": return "Requisition Approval Stages";
@@ -88,10 +161,35 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
               }
             })()}
           </p>
-          <span className="rounded-full bg-[#F1F5F9] px-2 py-0.5 text-[10px] font-semibold text-[#475569]">
-            {taskSteps.length} stage{taskSteps.length !== 1 ? "s" : ""}
+          <span className="rounded-full bg-[#F1F5F9] px-2 py-0.5 text-[10px] font-semibold text-[#475569] shrink-0">
+            {visibleSteps.length} stage{visibleSteps.length !== 1 ? "s" : ""}
           </span>
         </div>
+
+        {earlierPhases.length > 0 && (
+          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+            {earlierPhases.map((name) => {
+              const open = shownEarlierPhases.has(name);
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => toggleEarlier(name)}
+                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                    open
+                      ? "border-[#287EAD] bg-[#EAF4FA] text-[#1E6F99]"
+                      : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F5F7F8]"
+                  }`}
+                  title={open ? `Hide ${PHASE_LABELS[name] ?? name} stages` : `Show ${PHASE_LABELS[name] ?? name} stages`}
+                >
+                  {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                  {open ? "Hide" : "Show"} {PHASE_LABELS[name] ?? name}
+                  <span className="text-[#94A3B8]">({phaseCounts.get(name) ?? 0})</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="overflow-x-auto">
@@ -118,40 +216,53 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
           </thead>
 
           <tbody>
-            {taskSteps.map((step, index) => {
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-3 py-4 text-center text-xs text-[#5E6870]">
+                  No stages for this phase.
+                </td>
+              </tr>
+            )}
+            {rows.map(({ step, number, startGroup }) => {
               const tone = STATUS_TONE[step.status];
               return (
-                <tr
-                  key={step.id}
-                  className="border-b border-[#E5E7EB] last:border-b-0 bg-white hover:bg-[#F9FAFB] transition-colors"
-                >
-                  <td className="px-3 py-2.5 text-[#111827]">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-medium">{step.name}</span>
-                      <span className="text-xs text-[#6B7280]">#{index + 1}</span>
-                    </div>
-                  </td>
-                  <td className="px-3 py-2.5 text-[#374151]">
-                    {step.approver || "Unassigned"}
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <span className="inline-flex items-center gap-1.5 text-xs font-semibold">
-                      <span style={{ color: tone.text }}>{tone.icon}</span>
-                      <span style={{ color: tone.text }}>
-                        {step.statusDisplay || step.status}
+                <Fragment key={step.id}>
+                  {startGroup && (
+                    <tr className="bg-[#EEF2F6]">
+                      <td colSpan={5} className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-[#475569]">
+                        {PHASE_LABELS[step.phase ?? ""] ?? step.phase} stage
+                      </td>
+                    </tr>
+                  )}
+                  <tr className="border-b border-[#E5E7EB] last:border-b-0 bg-white hover:bg-[#F9FAFB] transition-colors">
+                    <td className="px-3 py-2.5 text-[#111827]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-medium">{step.name}</span>
+                        <span className="text-xs text-[#6B7280]">#{number}</span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2.5 text-[#374151]">
+                      {step.approver || "Unassigned"}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold">
+                        <span style={{ color: tone.text }}>{tone.icon}</span>
+                        <span style={{ color: tone.text }}>
+                          {step.statusDisplay || step.status}
+                        </span>
                       </span>
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5 text-[#6B7280]">
-                    {step.completedAt ? formatTime(step.completedAt) : "—"}
-                  </td>
-                  <td
-                    className="max-w-xs truncate px-3 py-2.5 text-[#6B7280]"
-                    title={step.comment}
-                  >
-                    {step.comment || "—"}
-                  </td>
-                </tr>
+                    </td>
+                    <td className="px-3 py-2.5 text-[#6B7280]">
+                      {step.completedAt ? formatTime(step.completedAt) : "—"}
+                    </td>
+                    <td
+                      className="max-w-xs truncate px-3 py-2.5 text-[#6B7280]"
+                      title={step.comment}
+                    >
+                      {step.comment || "—"}
+                    </td>
+                  </tr>
+                </Fragment>
               );
             })}
           </tbody>
