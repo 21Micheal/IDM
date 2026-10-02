@@ -1285,16 +1285,44 @@ class WorkflowService:
                 logger.exception("Could not record procurement workflow completion for %s", doc.id)
             WorkflowService._save_document(doc, update_fields=update_fields)
 
-            try:
-                from apps.notifications.tasks import notify_workflow_complete
-                instance_id = str(instance.id)
-                _queue_after_commit(
-                    lambda iid=instance_id, oc=outcome: notify_workflow_complete.delay(iid, oc)
-                )
-            except Exception:
-                pass
+            # Does an intermediate procurement stage follow this approval?
+            advances = False
+            if outcome == "approved":
+                try:
+                    from apps.documents.builder_workflow import next_procurement_stage
+                    advances = bool(next_procurement_stage(doc))
+                except Exception:
+                    advances = False
+
+            # Only the final procurement stage (or a non-procurement form)
+            # announces "document approved". Intermediate stages continue into
+            # the next stage below, so a "workflow complete" email here would be
+            # premature and would repeat at every stage.
+            if not advances:
+                try:
+                    from apps.notifications.tasks import notify_workflow_complete
+                    instance_id = str(instance.id)
+                    _queue_after_commit(
+                        lambda iid=instance_id, oc=outcome: notify_workflow_complete.delay(iid, oc)
+                    )
+                except Exception:
+                    pass
 
             WorkflowService._maybe_post_sunsystems_journal(doc, outcome)
+
+            # A fully-approved procurement stage opens the next stage on its
+            # own (Requisition -> RFQ -> LPO; Travel skips RFQ). The requestor
+            # no longer has to click "Submit RFQ"/"Submit LPO". Starting the new
+            # stage also emails its first approver via notify_task_assigned.
+            if advances:
+                try:
+                    WorkflowService._maybe_advance_procurement_stage(
+                        doc, actor=instance.started_by
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not auto-advance procurement stage for %s", doc.id
+                    )
             return
 
         if instance.payment_run_id:
@@ -1307,6 +1335,33 @@ class WorkflowService:
             except Exception:
                 pass
             WorkflowService._complete_payment_run(instance, outcome)
+
+    @staticmethod
+    def _maybe_advance_procurement_stage(document, actor=None) -> bool:
+        """Open the next procurement stage automatically after full approval.
+
+        Called when a stage's workflow completes as approved. Uses the same
+        ``next_procurement_stage`` gate as the manual submit button, so a stage
+        can only open once the previous one is complete and the document has no
+        live workflow. Travel requisitions jump straight from Requisition to LPO.
+        Emails for the new stage's first approver go out via the normal
+        ``_activate_step`` -> ``notify_task_assigned`` path.
+        """
+        from apps.documents.builder_workflow import (
+            is_procurement_document,
+            next_procurement_stage,
+            set_procurement_workflow_stage,
+        )
+
+        if not is_procurement_document(document):
+            return False
+        next_stage = next_procurement_stage(document)
+        if not next_stage:
+            return False
+
+        set_procurement_workflow_stage(document, next_stage)
+        WorkflowService.start(document, actor or document.uploaded_by)
+        return True
 
     @staticmethod
     def _complete_payment_run(instance: WorkflowInstance, outcome: str) -> None:

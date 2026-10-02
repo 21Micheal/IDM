@@ -127,6 +127,9 @@ class V2ActivationTests(TestCase):
             definition=_procurement_definition(),
             created_by=self.user,
         )
+        # The primary template is what WorkflowService._resolve_routing uses.
+        self.doc_type.workflow_template = self.template
+        self.doc_type.save(update_fields=["workflow_template"])
         # Flat mirror rows in document order — exactly what _upsert_steps writes.
         for order, step in enumerate(flatten_steps(self.template.definition), start=1):
             step = {key: value for key, value in step.items() if key != "order"}
@@ -208,15 +211,101 @@ class V2ActivationTests(TestCase):
         self.assertEqual(active.step.name, "Finance Review")
 
     def test_finishing_last_active_step_completes_instance(self):
+        # LPO is the terminal procurement stage: finishing it stops the
+        # lifecycle (no auto-advance loop).
+        form = self.document.metadata["form"]
+        form["workflow_phase"] = "lpo"
+        form["completed_workflow_stages"] = ["requisition", "rfq"]
+        self.document.save(update_fields=["metadata", "updated_at"])
+
         instance = self._instance()
-        instance.current_step_order = 6
-        instance.save(update_fields=["current_step_order"])
-        task = instance.tasks.create(step=self.template.steps.get(order=6), status="in_progress")
+        WorkflowService._activate_v2_step(instance)
+        task = instance.tasks.filter(status="in_progress").first()
         WorkflowService.approve(task, self.user)
         instance.refresh_from_db()
         self.assertEqual(instance.status, "approved")
         self.document.refresh_from_db()
         self.assertEqual(self.document.status, DocumentStatus.APPROVED)
         self.assertEqual(
-            self.document.metadata["form"]["completed_workflow_stages"], ["requisition"]
+            self.document.metadata["form"]["completed_workflow_stages"],
+            ["requisition", "rfq", "lpo"],
         )
+
+
+class ProcurementAutoAdvanceTests(V2ActivationTests):
+    """Completing a stage must open the next one automatically, with no
+    "Submit RFQ"/"Submit LPO" click from the requestor."""
+
+    def _approve_active_step(self, instance):
+        task = instance.tasks.filter(status="in_progress").first()
+        self.assertIsNotNone(task)
+        WorkflowService.approve(task, self.user)
+
+    def _set_phase(self, phase, completed, values=None):
+        form = self.document.metadata["form"]
+        form["workflow_phase"] = phase
+        form["completed_workflow_stages"] = completed
+        if values is not None:
+            form["values"] = values
+        self.document.save(update_fields=["metadata", "updated_at"])
+
+    def test_requisition_completion_auto_starts_rfq(self):
+        instance = self._instance()
+        WorkflowService._activate_v2_step(instance)
+        for _ in range(3):
+            self._approve_active_step(instance)
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, "in_progress")
+        self.assertEqual(instance.current_step_order, 2)
+        active = instance.tasks.filter(status="in_progress").first()
+        self.assertEqual(active.step.name, "Finance Approval")
+
+        self.document.refresh_from_db()
+        form = self.document.metadata["form"]
+        self.assertEqual(form["workflow_phase"], "rfq")
+        self.assertEqual(form["completed_workflow_stages"], ["requisition"])
+
+    def test_rfq_completion_auto_starts_lpo(self):
+        self._set_phase("rfq", ["requisition"])
+        instance = self._instance()
+        WorkflowService._activate_v2_step(instance)   # Finance Approval (order 2)
+        self._approve_active_step(instance)            # -> notification -> complete -> auto LPO
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, "in_progress")
+        self.assertEqual(instance.current_step_order, 1)
+        active = instance.tasks.filter(status="in_progress").first()
+        self.assertEqual(active.step.name, "Procurement Approval")
+
+        self.document.refresh_from_db()
+        form = self.document.metadata["form"]
+        self.assertEqual(form["workflow_phase"], "lpo")
+        self.assertEqual(form["completed_workflow_stages"], ["requisition", "rfq"])
+
+    def test_travel_requisition_completion_auto_skips_rfq_to_lpo(self):
+        self.document.metadata["form"]["requisition_type_field"] = "requisition_type"
+        self.document.metadata["form"]["travel_type_value"] = "Travel"
+        self.document.metadata["form"]["values"] = {"requisition_type": "Travel"}
+        self.document.save(update_fields=["metadata", "updated_at"])
+
+        instance = self._instance()
+        WorkflowService._activate_v2_step(instance)
+        for _ in range(3):
+            self._approve_active_step(instance)
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, "in_progress")
+        self.assertEqual(instance.current_step_order, 1)
+        active = instance.tasks.filter(status="in_progress").first()
+        self.assertEqual(active.step.name, "Procurement Approval")
+
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.metadata["form"]["workflow_phase"], "lpo")
+
+    def test_activation_schedules_approver_notifications(self):
+        """Emails are queued the moment a stage starts (i.e. on submission)."""
+        instance = self._instance()
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            WorkflowService._activate_v2_step(instance)
+        self.assertTrue(callbacks)
