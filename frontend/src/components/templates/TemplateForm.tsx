@@ -41,6 +41,8 @@ import {
   type AnyTableRef,
 } from "@/lib/formBlocks";
 import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
+import ExternalSelect from "@/components/ui/ExternalSelect";
+import { ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
 import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOperators";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -48,7 +50,7 @@ import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOp
 type ColType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
   | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "url" | "percentage" | "multi_select" | "image";
+  | "url" | "percentage" | "multi_select" | "image" | "external";
 
 type Column = {
   id?: string; key?: string; label?: string; required?: boolean;
@@ -62,6 +64,7 @@ type Column = {
   visibleWhen?: VisibleWhen | null;
   editableWhen?: VisibleWhen | null;
   calc?: { expression?: string };
+  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string } | null;
 };
 
 type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
@@ -121,6 +124,8 @@ type Field = {
   button?: ButtonConfig | null;
   /* Table reference (type === "reference" && referenceSource === "table"). */
   tableRef?: AnyTableRef | null;
+  /* External (SunSystems-backed) lookup — mirrors the builder's ExternalConfig. */
+  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string } | null;
   sunsystems?: {
     budgetAmountField?: string;
     monitoredAmountField?: string;
@@ -690,8 +695,9 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }:
   );
 }
 
-function TableColInput({ col, value, onChange, readOnly, documentId, attachmentKey, row }: {
+function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentId, attachmentKey, row }: {
   col: Column; value: unknown; onChange: (v: unknown) => void; readOnly?: boolean;
+  onChangeCell?: (key: string, value: unknown) => void;
   documentId?: string; attachmentKey?: string; row?: Record<string, unknown>;
 }) {
   const base = "w-full bg-transparent py-0.5 text-sm outline-none text-foreground placeholder:text-muted-foreground/50";
@@ -834,6 +840,26 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
           compact
         />
       );
+    case "external":
+      return (
+        <ExternalSelect
+          source={col.external?.source ?? "items"}
+          dimension={col.external?.dimension}
+          value={sval}
+          onChange={onChange}
+          onSelectRecord={(rec) => {
+            // Items: mirror the picked item's BaseItemUnit into a sibling cell.
+            const unit = rec.data?.unit;
+            if (col.external?.fillColumn && unit !== undefined) {
+              onChangeCell?.(col.external.fillColumn, unit);
+            }
+          }}
+          multi={false}
+          compact
+          disabled={dis}
+          className="w-full"
+        />
+      );
     default:
       return <input type="text" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
   }
@@ -880,6 +906,11 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
       ? value
       : Array.from({ length: field.minRows ?? 1 }, emptyRow)
   );
+  // Mirror of `rows` for synchronous multi-cell edits (e.g. picking an item
+  // writes both the item cell and the auto-filled UOM cell in one event; the
+  // second write must build on the first, before React re-renders).
+  const rowsRef = useRef<Record<string, unknown>[]>(rows);
+  useEffect(() => { rowsRef.current = rows; }, [rows]);
 
   // ── Sync rows from parent prop ─────────────────────────────────────────────
   // The parent passes the saved/live table rows via `value`. Because useState
@@ -970,7 +1001,8 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
 
   // ── Row mutation helpers ───────────────────────────────────────────────────
   const update = (ri: number, key: string, val: unknown) => {
-    const next = rows.map((r, i) => i === ri ? { ...r, [key]: val } : r);
+    const next = rowsRef.current.map((r, i) => i === ri ? { ...r, [key]: val } : r);
+    rowsRef.current = next;
     setRows(next);
     // computedRows effect will fire and call onChange with the merged result.
     // For non-calc tables (no calc columns), call onChange directly now.
@@ -1051,6 +1083,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                               value={row[key] ?? ""}
                               row={row}
                               onChange={(v) => update(ri, key, v)}
+                              onChangeCell={(cellKey, cellVal) => update(ri, cellKey, cellVal)}
                               readOnly={cellLocked}
                               documentId={documentId}
                               attachmentKey={`${tableKey}~${ri}~${key}`}
@@ -1516,6 +1549,53 @@ function TableRowPicker({ field, value, disabled, onChange, allValues, allFields
   );
 }
 
+/* The ten SunSystems analysis slots (Project, Cost Centre, …). Each slot holds
+ * one analysis code; the value is stored as { "1": code, "2": code, … } so an
+ * empty panel is `{}` (and therefore falsy to the required-field checks). */
+function AnalysisPanelInput({ value, onChange, disabled, slots }: {
+  value: unknown; onChange: (v: Record<string, string>) => void; disabled?: boolean; slots?: string[];
+}) {
+  const current = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, string>)
+    : {};
+  const dimensionSlots = Array.isArray(slots) && slots.length === 10 ? slots : ANALYSIS_PANEL_SLOTS;
+  return (
+    <div className="grid gap-2 border border-border bg-card p-3 sm:grid-cols-2">
+      {dimensionSlots.map((dimensionId, idx) => {
+        const slot = String(idx + 1);
+        const slotValue = current[slot] ?? "";
+        return (
+          <div key={slot} className="flex items-start gap-2">
+            <span className="mt-4 w-4 shrink-0 text-right text-xs text-muted-foreground">{idx + 1}</span>
+            <div className="min-w-0 flex-1">
+              <div className="mb-1 break-words text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {analysisDimensionName(dimensionId)}
+              </div>
+              <ExternalSelect
+                source="analysis_codes"
+                dimension={dimensionId}
+                multi={false}
+                compact
+                disabled={disabled}
+                value={slotValue}
+                placeholder="Select code…"
+                showSelectedName
+                onChange={(v) => {
+                  const next = { ...current };
+                  const code = Array.isArray(v) ? (v[0] ?? "") : v;
+                  if (code) next[slot] = code;
+                  else delete next[slot];
+                  onChange(next);
+                }}
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields, onLaunchSignatureModal, onButtonClick, buttonDone = false, viewer }: {
   field: Field;
   control: any;
@@ -1677,8 +1757,19 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
   // Validation rules
   const rules: Record<string, any> = {};
-  if (field.required && !readOnly && type !== "boolean" && type !== "checkbox")
+  const isAnalysisPanel =
+    (type === "external" && field.external?.source === "analysis_codes" && field.external?.mode !== "single") ||
+    type === "analysis_panel";
+  if (field.required && !readOnly && type !== "boolean" && type !== "checkbox" && !isAnalysisPanel)
     rules.required = `${label} is required`;
+  if (isAnalysisPanel && field.required && !readOnly) {
+    rules.validate = (v: unknown) => {
+      const filled =
+        v && typeof v === "object" && !Array.isArray(v) &&
+        Object.values(v as Record<string, unknown>).some((x) => x);
+      return filled || `${label} is required`;
+    };
+  }
   if (field.regex)
     rules.pattern = { value: new RegExp(field.regex), message: "Invalid format" };
   if (field.minLength !== undefined)
@@ -2010,6 +2101,40 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
             value={f.value}
             onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
             multi={field.multi ?? true}
+          />
+        )} />
+      );
+      break;
+
+    case "external":
+      // Analysis Codes is a composite: the ten ledger slots, not one lookup.
+      // Other sources are a plain lookup (single or multi).
+      control_el = isAnalysisPanel ? (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
+          <AnalysisPanelInput
+            value={f.value}
+            disabled={dis}
+            slots={field.external?.slots}
+            onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+          />
+        )} />
+      ) : (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
+          <ExternalSelect
+            source={field.external?.source ?? "items"}
+            dimension={field.external?.dimension}
+            value={(f.value as string | string[]) ?? (field.external?.multi ? [] : "")}
+            onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+            onSelectRecord={(rec) => {
+              // Items: mirror the picked item's BaseItemUnit into a sibling field.
+              const unit = rec.data?.unit;
+              if (field.external?.fillField && unit !== undefined) {
+                onChangeCb(field.external.fillField, unit);
+              }
+            }}
+            multi={field.external?.multi ?? false}
+            disabled={dis}
+            showSelectedName={!(field.external?.multi ?? false)}
           />
         )} />
       );
@@ -2364,7 +2489,10 @@ export function requiredFieldLabels(
           v === undefined || v === null ||
           (typeof v === "string" && v.trim() === "") ||
           (typeof v === "boolean" && !v) ||
-          (Array.isArray(v) && v.length === 0);
+          (Array.isArray(v) && v.length === 0) ||
+          (((type === "external" && f.external?.source === "analysis_codes") || type === "analysis_panel") &&
+            typeof v === "object" && !Array.isArray(v) &&
+            !Object.values(v as Record<string, unknown>).some((x) => x));
         if (empty) { missing.push(f.label ?? key); continue; }
       }
       // Regex validation

@@ -3,7 +3,9 @@ from django.urls import path
 from .views import (
     AccountsQueryView,
     AmendMarkerView,
+    AnalysisCodesQueryView,
     BudgetCheckView,
+    ItemsQueryView,
     JournalPostingDetailView,
     JournalPostingListView,
     JournalPostingRetryView,
@@ -25,6 +27,8 @@ urlpatterns = [
     path("payment-runs/<uuid:payment_run_id>/approve/", PaymentRunApproveView.as_view(), name="sunsystems-payment-run-approve"),
     path("payment-runs/<uuid:payment_run_id>/process/", PaymentRunProcessView.as_view(), name="sunsystems-payment-run-process"),
     path("accounts/", AccountsQueryView.as_view(), name="sunsystems-accounts"),
+    path("items/", ItemsQueryView.as_view(), name="sunsystems-items"),
+    path("analysis-codes/", AnalysisCodesQueryView.as_view(), name="sunsystems-analysis-codes"),
     path("connection/", SunSystemsConnectionView.as_view(), name="sunsystems-connection"),
     path("connection/test/", SunSystemsTestConnectionView.as_view(), name="sunsystems-connection-test"),
     path("postings/", JournalPostingListView.as_view(), name="sunsystems-posting-list"),

@@ -20,6 +20,7 @@ import {
   Settings,
   PenTool,
   UserCheck,
+  Package,
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { useQuery } from "@tanstack/react-query";
@@ -111,6 +112,11 @@ export default function Layout({
         to: "/suppliers",
         label: "SunSystems Suppliers",
         icon: Building2,
+      },
+      {
+        to: "/external",
+        label: "External Data",
+        icon: Package,
       },
       {
         to: "/analytics",
@@ -403,6 +409,8 @@ export default function Layout({
                 ? "New Requisition"
                 : location.pathname.includes("/suppliers")
                 ? "SunSystems Suppliers & Vendors"
+                : location.pathname.includes("/external")
+                ? "External Components"
                 : location.pathname.includes("/approvals")
                 ? "Requisition Approvals Queue"
                 : location.pathname.includes("/analytics")

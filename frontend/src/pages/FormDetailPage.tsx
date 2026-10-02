@@ -397,7 +397,7 @@ export default function FormDetailPage() {
   const canSubmitProcurementStage = Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
   const canSubmit = canSubmitRequest || canSubmitRetirement || canSubmitProcurementStage;
   const submitLabel = canSubmitProcurementStage
-    ? `Start ${procurementNextStage!.toUpperCase()} approval`
+    ? `Submit ${procurementNextStage!.toUpperCase()}`
     : canSubmitRetirement
     ? "Submit retirement"
     : doc.status === "returned"

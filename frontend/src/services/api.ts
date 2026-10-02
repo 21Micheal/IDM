@@ -1055,6 +1055,33 @@ export type AccountsResult = {
   error?: string;
 };
 
+export type SunSystemsItem = {
+  item_code: string;
+  description: string;
+  item_type?: string;
+  base_item_unit?: string;
+};
+
+export type ItemsResult = {
+  ok: boolean;
+  items: SunSystemsItem[];
+  count: number;
+  error?: string;
+};
+
+export type SunSystemsAnalysisCode = {
+  analysis_code: string;
+  analysis_dimension_id: string;
+  name: string;
+};
+
+export type AnalysisCodesResult = {
+  ok: boolean;
+  analysis_codes: SunSystemsAnalysisCode[];
+  count: number;
+  error?: string;
+};
+
 export const sunsystemsAPI = {
   budgetCheck: (input: BudgetCheckInput) =>
     api.post<BudgetResult>("/sunsystems/budget-check/", input),
@@ -1072,6 +1099,10 @@ export const sunsystemsAPI = {
     api.post<PaymentRunProcessResult>(`/sunsystems/payment-runs/${paymentRunId}/process/`),
   getAccounts: (params?: { business_unit?: string; account_type?: string }) =>
     api.get<AccountsResult>("/sunsystems/accounts/", { params }),
+  getItems: (params?: { business_unit?: string }) =>
+    api.get<ItemsResult>("/sunsystems/items/", { params }),
+  getAnalysisCodes: (params: { dimension: string; business_unit?: string }) =>
+    api.get<AnalysisCodesResult>("/sunsystems/analysis-codes/", { params }),
   getConnection: () =>
     api.get<SunSystemsConnectionResponse>("/sunsystems/connection/"),
   updateConnection: (conn: SunSystemsConnection) =>

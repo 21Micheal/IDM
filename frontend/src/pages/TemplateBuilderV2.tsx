@@ -53,6 +53,8 @@ import {
 import { useForm, type UseFormRegister, type FieldErrors } from "react-hook-form";
 import { toast } from "sonner";
 import CustomListbox from "@/components/ui/CustomListbox";
+import { EXTERNAL_SOURCES } from "@/components/ui/ExternalSelect";
+import { ANALYSIS_DIMENSIONS, ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
 import {
   ArrowLeft, Save, Undo2, Redo2, Eye, LayoutGrid, Settings,
   Plus, Trash2, GripVertical, Copy, Search, CheckCircle2,
@@ -63,7 +65,7 @@ import {
   ChevronRight, X, Loader2, Sliders, Link2, User as UserIcon,
   Wrench, FileCode, Calculator, Star, Percent, Link as UrlIcon, ListOrdered,
   Info, Files, ToggleLeft, MoveLeft, MoveRight, CopyPlus, Sigma,
-  Building2, MousePointerClick, RefreshCw, Pin, AlertTriangle,
+  Building2, MousePointerClick, RefreshCw, Pin, AlertTriangle, Package,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { documentTypesAPI, groupsAPI, normalizeListResponse, workflowAPI } from "@/services/api";
@@ -85,6 +87,7 @@ export type FieldType =
   | "calc_number" | "calc_currency" | "calc_text" | "calc_date" | "calc_boolean"
   | "info" | "spacer"
   | "sunsystems_account"
+  | "external"
   | "budget"
   | "button";
 
@@ -109,7 +112,7 @@ export interface CalcConfig {
 export type TableColumnType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
   | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "percentage" | "url" | "multi_select" | "image";
+  | "percentage" | "url" | "multi_select" | "image" | "external";
 
 export interface TableColumn {
   id: string;
@@ -161,6 +164,8 @@ export interface TableColumn {
   calc?: CalcConfig | null;
   /* SunSystems binding for table columns (journal line column roles). */
   sunsystems?: ColumnFinanceBinding;
+  /* External (SunSystems-backed) lookup — see ExternalConfig. */
+  external?: ExternalConfig | null;
 }
 
 /* SunSystems / finance bindings (see compileSunSystems). A field/column carries
@@ -442,6 +447,26 @@ function ruleGroupHasConditions(g?: RuleGroup | null): boolean {
   return g.conditions.length > 0 || (g.groups ?? []).some(ruleGroupHasConditions);
 }
 
+/* Config for an External (SunSystems-backed) lookup field or table column.
+ * `source` names the entity exposed by ExternalSelect (see EXTERNAL_SOURCES);
+ * `multi` allows several values in one form field (ignored by table cells). */
+export interface ExternalConfig {
+  source: string;
+  /** AnalysisDimensionId, for source "analysis_codes". */
+  dimension?: string;
+  /** Analysis codes layout in a form field: the ten-slot panel (default) or a
+   * single-dimension lookup. Table columns always behave as "single". */
+  mode?: "panel" | "single";
+  multi?: boolean;
+  /** Analysis panel: the ten AnalysisDimensionIds in slot order. */
+  slots?: string[];
+  /** Items autofill: copy the picked item's BaseItemUnit into this sibling
+   * table column (within the same row). */
+  fillColumn?: string;
+  /** Items autofill: copy the picked item's BaseItemUnit into this sibling form field. */
+  fillField?: string;
+}
+
 export interface TemplateField {
   id: string;
   key: string;
@@ -497,6 +522,8 @@ export interface TemplateField {
   /* Table reference (type === "reference" && referenceSource === "table") —
    * see TableRef. */
   tableRef?: TableRef | null;
+  /* External (SunSystems-backed) lookup — see ExternalConfig. */
+  external?: ExternalConfig | null;
 }
 
 /* A button's behaviour. Buttons hold no value; they either
@@ -681,6 +708,7 @@ const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults
   email: { label: "Email", group: "input", defaults: { colSpan: 6, placeholder: "name@company.com" } },
   phone: { label: "Phone", group: "input", defaults: { colSpan: 4, placeholder: "+254 700 000000" } },
   sunsystems_account: { label: "Supplier", group: "input", defaults: { colSpan: 12, multi: true }, hint: "Live supplier lookup from SunSystems" },
+  external: { label: "External", group: "input", defaults: { colSpan: 12, external: { source: "items" } }, hint: "Live lookup from SunSystems — items, analysis codes, and more" },
   budget: { label: "Budget Banner", group: "advanced", defaults: { colSpan: 12 }, hint: "Shows available budget for a specified account code" },
   select: { label: "Dropdown", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
   multi_select: { label: "Multi-select", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
@@ -722,6 +750,7 @@ const ICONS: Record<FieldType, React.ElementType> = {
   calc_number: Calculator, calc_currency: Calculator, calc_text: Calculator, calc_date: Calculator,
   calc_boolean: Sigma, multi_file: Files, info: Info, spacer: Minus,
   sunsystems_account: Building2,
+  external: Package,
   budget: Wallet,
   button: MousePointerClick,
 };
@@ -730,6 +759,13 @@ const ICONS: Record<FieldType, React.ElementType> = {
  * skipped by the payload preview, can't be marked required, and never
  * appear as a formula/condition source. */
 const PRESENTATION_TYPES = new Set<FieldType>(["heading", "divider", "info", "spacer", "budget", "button"]);
+
+/* Human label for an External source, used by the canvas and preview stubs. */
+function externalSourceLabel(source?: string, plural = true): string {
+  const def = EXTERNAL_SOURCES.find((s) => s.value === (source ?? EXTERNAL_SOURCES[0]?.value));
+  if (!def) return "records";
+  return plural ? def.plural : def.noun;
+}
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -1140,6 +1176,7 @@ function newColumn(type: TableColumnType = "text", label = "New Column"): TableC
     options: type === "select" || type === "multi_select" ? ["Option 1", "Option 2"] : undefined,
     currencySymbol: type === "currency" ? "KSh" : undefined,
     referenceSource: type === "reference" ? "documents" : type === "user" ? "users" : undefined,
+    external: type === "external" ? { source: "items" } : undefined,
   };
 }
 
@@ -1191,6 +1228,10 @@ function newField(type: FieldType): TemplateField {
     base.width = 12;
     base.multi = true;
   }
+  if (type === "external") {
+    base.width = 12;
+    base.external = { source: "items", multi: false };
+  }
   if (type === "button") {
     base.label = "Add section";
     base.button = { action: "add_block", placement: "end_of_form", variant: "primary" };
@@ -1224,7 +1265,10 @@ function migrateFinanceBinding(ss?: FieldFinanceBinding): FieldFinanceBinding | 
 }
 
 function normalizeField(field: TemplateField): TemplateField {
-  const type = field.type === "checkbox" ? "boolean" : field.type;
+  // "analysis_panel" was folded into External -> Analysis Codes. Upgrade any
+  // field saved while it existed so old templates keep rendering the panel.
+  const legacyPanel = (field.type as string) === "analysis_panel";
+  const type = legacyPanel ? "external" : field.type === "checkbox" ? "boolean" : field.type;
   const colSpan = field.colSpan ?? field.width ?? 6;
   const helpText = field.helpText ?? field.help_text;
   const key = field.key || `field_${uid()}`;
@@ -1234,7 +1278,10 @@ function normalizeField(field: TemplateField): TemplateField {
   const sunsystems = migrateFinanceBinding(field.sunsystems);
   const visibleWhen = toRuleGroup(field.visibleWhen);
   const editableWhen = toRuleGroup(field.editableWhen);
-  return { ...field, type, key, colSpan, width: colSpan, helpText, columns, sunsystems, visibleWhen, editableWhen };
+  const external = legacyPanel
+    ? { source: "analysis_codes", ...(field.external ?? {}) }
+    : field.external;
+  return { ...field, type, key, colSpan, width: colSpan, helpText, columns, sunsystems, visibleWhen, editableWhen, external };
 }
 
 function normalizeTemplate(template: EditableTemplate): Template {
@@ -1836,7 +1883,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                     date: Calendar, datetime: Calendar, time: Clock, select: List,
                     boolean: CheckSquare, email: Mail, phone: Phone, reference: Link2,
                     user: UserIcon, file: Paperclip, image: ImageIcon, multi_select: List,
-                    url: UrlIcon, percentage: Percent,
+                    url: UrlIcon, percentage: Percent, external: Package,
                   } as Record<TableColumnType, React.ElementType>)[(c.type ?? "text") as TableColumnType] ?? Type;
                   return (
                     <div
@@ -1977,6 +2024,22 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
           </span>
         </div>
       );
+    case "external": {
+      const isAnalysis = field.external?.source === "analysis_codes";
+      const isPanel = isAnalysis && field.external?.mode !== "single";
+      return (
+        <div className={cn(inputPreview, "justify-between border border-zinc-200 bg-white")}>
+          <span className="flex items-center gap-1.5 text-zinc-400">
+            <Package className="h-3 w-3" />
+            {isPanel
+              ? "10 analysis code slots (Project, Cost Centre, …)"
+              : isAnalysis
+                ? `Select ${analysisDimensionName(field.external?.dimension)} code…`
+                : `Select ${externalSourceLabel(field.external?.source)} from SunSystems…`}
+          </span>
+        </div>
+      );
+    }
     default:
       return <div className={inputPreview}>{field.placeholder || ""}</div>;
   }
@@ -2042,7 +2105,7 @@ function FieldCard({
           <div ref={setDragRef} {...listeners} {...attributes}
             className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 cursor-grab active:cursor-grabbing flex-1 min-w-0 overflow-hidden">
             <GripVertical className="h-3.5 w-3.5 text-slate-300 flex-shrink-0" />
-            {(() => { const TypeIcon = ICONS[field.type]; return <TypeIcon className="h-3.5 w-3.5 text-[#287EAD] flex-shrink-0" />; })()}
+            {(() => { const TypeIcon = ICONS[field.type] ?? Type; return <TypeIcon className="h-3.5 w-3.5 text-[#287EAD] flex-shrink-0" />; })()}
             <span className="truncate min-w-0 flex-1" title={`${field.label || "Unlabelled"} — ${FIELD_META[field.type]?.label ?? field.type}`}>
               {field.label || <em className="font-normal text-slate-400">Unlabelled</em>}
             </span>
@@ -2332,6 +2395,7 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
   { value: "percentage", label: "Percentage" },
   { value: "url", label: "URL / Link" },
   { value: "multi_select", label: "Multi-select" },
+  { value: "external", label: "External" },
 ];
 
 /* ── Formula reference ────────────────────────────────────────────────────
@@ -2829,6 +2893,48 @@ function ColumnConfigModal({
                   ariaLabel="Column type"
                 />
               </Row>
+              {draft.type === "external" && (
+                <>
+                  <Row label="Source">
+                    <CustomListbox
+                      value={draft.external?.source ?? EXTERNAL_SOURCES[0]?.value ?? "items"}
+                      onChange={(val) => set({ external: { ...(draft.external ?? {}), source: val, ...(val === "analysis_codes" && !draft.external?.dimension ? { dimension: "04" } : {}) } })}
+                      options={EXTERNAL_SOURCES.map((s) => ({ value: s.value, label: s.label }))}
+                      className={iCls}
+                      buttonClassName="w-full"
+                      ariaLabel="External source"
+                    />
+                  </Row>
+                  {(draft.external?.source ?? "items") === "analysis_codes" && (
+                    <Row label="Analysis dimension">
+                      <CustomListbox
+                        value={draft.external?.dimension ?? "04"}
+                        onChange={(val) => set({ external: { ...(draft.external ?? { source: "analysis_codes" }), dimension: val } })}
+                        options={ANALYSIS_DIMENSIONS.map((d) => ({ value: d.id, label: `${d.name} (${d.id})` }))}
+                        className={iCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Analysis dimension"
+                      />
+                    </Row>
+                  )}
+                  {(draft.external?.source ?? "items") !== "analysis_codes" && (() => {
+                    const targets = siblingColumns.filter((c) => c.id !== draft.id && c.key);
+                    if (targets.length === 0) return null;
+                    return (
+                      <Row label="Auto-fill unit into" hint="When an item is picked, write its BaseItemUnit into this column in the same row.">
+                        <CustomListbox
+                          value={draft.external?.fillColumn ?? ""}
+                          onChange={(val) => set({ external: { ...(draft.external ?? { source: "items" }), fillColumn: val || undefined } })}
+                          options={[{ value: "", label: "— none —" }, ...targets.map((c) => ({ value: c.key as string, label: c.label || c.key || "" }))]}
+                          className={iCls}
+                          buttonClassName="w-full"
+                          ariaLabel="Auto-fill unit target column"
+                        />
+                      </Row>
+                    );
+                  })()}
+                </>
+              )}
               {isNumeric && (
                 <Row label="Number format" hint="Controls how the cell is displayed and rounded. Turn on “Show as currency” to prefix a symbol.">
                   <NumberFormatEditor
@@ -4013,7 +4119,7 @@ function ButtonEditor({ field, onUpdate, allFields }: {
   const onDemand = sections.filter((x) => x.onDemand && x.id !== ownSection?.id);
   const anchors = sections.filter((x) => !x.onDemand);
   const siblings = allFields.filter((f) => f.id !== field.id && f.key && f.type !== "button");
-  const NON_TARGET = new Set<string>(["table", "file", "image", "multi_file", "signature", "reference", "user", "sunsystems_account"]);
+  const NON_TARGET = new Set<string>(["table", "file", "image", "multi_file", "signature", "reference", "user", "sunsystems_account", "external"]);
   const targets = siblings.filter((f) => !PRESENTATION_TYPES.has(f.type) && !CALCULATED_TYPES.has(f.type) && !NON_TARGET.has(f.type));
 
   return (
@@ -4255,6 +4361,28 @@ function TableRefEditor({ field, onUpdate }: {
   );
 }
 
+/* Ten dropdowns that bind each analysis-panel slot to a ledger dimension. */
+function PanelSlotsEditor({ slots, onChange }: { slots?: string[]; onChange: (slots: string[]) => void }) {
+  const current = Array.isArray(slots) && slots.length === 10 ? slots : ANALYSIS_PANEL_SLOTS;
+  return (
+    <div className="grid grid-cols-2 gap-1.5">
+      {current.map((dimId, i) => (
+        <div key={i} className="flex items-center gap-1.5">
+          <span className="w-3 shrink-0 text-right text-[10px] font-semibold text-[#5E6870]">{i + 1}</span>
+          <CustomListbox
+            value={dimId}
+            onChange={(val) => onChange(current.map((d, j) => (j === i ? val : d)))}
+            options={ANALYSIS_DIMENSIONS.map((d) => ({ value: d.id, label: `${d.name} (${d.id})` }))}
+            className={inputCls}
+            buttonClassName="w-full"
+            ariaLabel={`Panel slot ${i + 1}`}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   field: TemplateField;
   onUpdate: (patch: Partial<TemplateField>) => void;
@@ -4324,7 +4452,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           </InspectorRow>
           {!["heading", "divider", "checkbox", "boolean", "table", "file", "image", "signature",
             "rating", "auto_number", "calc_number", "calc_currency", "calc_text", "calc_date",
-            "calc_boolean", "multi_file", "info", "spacer", "sunsystems_account", "budget"].includes(field.type) && (
+            "calc_boolean", "multi_file", "info", "spacer", "sunsystems_account", "external", "budget"].includes(field.type) && (
               <InspectorRow label="Placeholder">
                 <input className={inputCls} value={field.placeholder ?? ""} onChange={(e) => onUpdate({ placeholder: e.target.value })} />
               </InspectorRow>
@@ -4359,6 +4487,79 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               )}
               {/* Read-only moved to the Editability control (Advanced tab). */}
             </div>
+          )}
+          {field.type === "external" && (
+            <>
+              <InspectorRow label="Source">
+                <CustomListbox
+                  value={field.external?.source ?? EXTERNAL_SOURCES[0]?.value ?? "items"}
+                  onChange={(val) => onUpdate({ external: { ...(field.external ?? {}), source: val } })}
+                  options={EXTERNAL_SOURCES.map((s) => ({ value: s.value, label: s.label }))}
+                  className={inputCls}
+                  buttonClassName="w-full"
+                  ariaLabel="External source"
+                />
+              </InspectorRow>
+              {(field.external?.source ?? "items") === "analysis_codes" ? (
+                <>
+                  <InspectorRow label="Layout">
+                    <div className="flex border border-[#C8CDD2]">
+                      <button type="button" className={segCls((field.external?.mode ?? "panel") !== "single")}
+                        onClick={() => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), mode: "panel" } })}>
+                        All ten (panel)
+                      </button>
+                      <button type="button" className={segCls(field.external?.mode === "single")}
+                        onClick={() => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), mode: "single", dimension: field.external?.dimension ?? "04" } })}>
+                        Single dimension
+                      </button>
+                    </div>
+                  </InspectorRow>
+                  {field.external?.mode === "single" ? (
+                    <InspectorRow label="Analysis dimension" hint="Render codes for just this dimension.">
+                      <CustomListbox
+                        value={field.external?.dimension ?? "04"}
+                        onChange={(val) => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), dimension: val } })}
+                        options={ANALYSIS_DIMENSIONS.map((d) => ({ value: d.id, label: `${d.name} (${d.id})` }))}
+                        className={inputCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Analysis dimension"
+                      />
+                    </InspectorRow>
+                  ) : (
+                    <InspectorRow label="Panel dimensions" hint="Which ledger dimension each of the ten slots uses.">
+                      <PanelSlotsEditor
+                        slots={field.external?.slots}
+                        onChange={(slots) => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), slots } })}
+                      />
+                    </InspectorRow>
+                  )}
+                </>
+              ) : (
+                <>
+                  <InspectorRow label="Multiple values">
+                    <input type="checkbox" checked={field.external?.multi ?? false}
+                      onChange={(e) => onUpdate({ external: { ...(field.external ?? { source: "items" }), multi: e.target.checked } })}
+                      className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
+                  </InspectorRow>
+                  {(() => {
+                    const targets = allFields.filter((f) => f.id !== field.id && f.key && f.type !== "button");
+                    if (targets.length === 0) return null;
+                    return (
+                      <InspectorRow label="Auto-fill unit into" hint="When an item is picked, write its BaseItemUnit into this field.">
+                        <CustomListbox
+                          value={field.external?.fillField ?? ""}
+                          onChange={(val) => onUpdate({ external: { ...(field.external ?? { source: "items" }), fillField: val || undefined } })}
+                          options={[{ value: "", label: "— none —" }, ...targets.map((f) => ({ value: f.key, label: f.label || f.key }))]}
+                          className={inputCls}
+                          buttonClassName="w-full"
+                          ariaLabel="Auto-fill unit target"
+                        />
+                      </InspectorRow>
+                    );
+                  })()}
+                </>
+              )}
+            </>
           )}
           {isButton && (
             <ButtonEditor field={field} onUpdate={onUpdate} allFields={allFields} />
@@ -4747,6 +4948,13 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
         <div className={cn(base, "flex items-center justify-between gap-1 text-muted-foreground")}>
           <span className="truncate">Pick {col.referenceSource ?? (col.type === "user" ? "user" : "record")}…</span>
           <Link2 className="h-3 w-3 flex-shrink-0" />
+        </div>
+      );
+    case "external":
+      return (
+        <div className={cn(base, "flex items-center justify-between gap-1 text-muted-foreground")}>
+          <span className="truncate">Select {externalSourceLabel(col.external?.source, false)}…</span>
+          <Package className="h-3 w-3 flex-shrink-0" />
         </div>
       );
     case "file":
@@ -6126,6 +6334,20 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
         <div className={cn(previewInputCls, "flex items-center justify-between gap-2 text-[#5E6870]")}>
           <span className="truncate">Select supplier from SunSystems…</span>
           <Building2 className="h-3.5 w-3.5 flex-shrink-0" />
+        </div>
+      );
+      break;
+    case "external":
+      control = (
+        <div className={cn(previewInputCls, "flex items-center justify-between gap-2 text-[#5E6870]")}>
+          <span className="truncate">
+            {field.external?.source === "analysis_codes" && field.external?.mode !== "single"
+              ? "10 analysis code slots…"
+              : field.external?.source === "analysis_codes"
+                ? `Select ${analysisDimensionName(field.external?.dimension)} code…`
+                : `Select ${externalSourceLabel(field.external?.source)} from SunSystems…`}
+          </span>
+          <Package className="h-3.5 w-3.5 flex-shrink-0" />
         </div>
       );
       break;
@@ -7731,7 +7953,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
         }}>
           {dragType ? (
             <div className="flex items-center gap-2 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white shadow-xl">
-              {(() => { const Icon = ICONS[dragType]; return <Icon className="h-4 w-4" />; })()}
+              {(() => { const Icon = ICONS[dragType] ?? Type; return <Icon className="h-4 w-4" />; })()}
               {FIELD_META[dragType].label}
             </div>
           ) : null}

@@ -995,3 +995,178 @@ class AccountsQueryView(APIView):
             )
 
         return Response({"ok": True, "accounts": accounts, "count": len(accounts)})
+
+
+class ItemsQueryView(APIView):
+    """Return item records from SunSystems (Item/Query).
+
+    GET /api/v1/sunsystems/items/?business_unit=PK1
+
+    Optional query params:
+        business_unit   override the configured default
+
+    Response:
+        { items: [{ item_code, description, item_type, base_item_unit }] }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        import xml.etree.ElementTree as ET
+
+        conn = effective_connection()
+        config = SunSystemsConfig.from_mapping(conn)
+
+        business_unit = str(
+            request.query_params.get("business_unit") or config.business_unit or "PK1"
+        )
+
+        ssc_payload = (
+            "<SSC>\n"
+            "  <ErrorContext/>\n"
+            "  <User/>\n"
+            "  <SunSystemsContext>\n"
+            f"    <BusinessUnit>{business_unit}</BusinessUnit>\n"
+            "  </SunSystemsContext>\n"
+            "  <Payload>\n"
+            "    <Select>\n"
+            "      <Item>\n"
+            "        <BaseItemUnit>.</BaseItemUnit>\n"
+            "        <Description>.</Description>\n"
+            "        <ItemCode>.</ItemCode>\n"
+            "        <ItemType>.</ItemType>\n"
+            "      </Item>\n"
+            "    </Select>\n"
+            "  </Payload>\n"
+            "</SSC>"
+        )
+
+        try:
+            client = SunSystemsClient(config)
+            response_xml = client.execute("Item", "Query", ssc_payload)
+        except SunSystemsError as exc:
+            return Response(
+                {"ok": False, "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        items = []
+        try:
+            root = ET.fromstring(response_xml or "<SSC/>")
+            for item in root.findall(".//Item"):
+                code = (item.findtext("ItemCode") or "").strip()
+                if not code:
+                    continue
+                items.append({
+                    "item_code": code,
+                    "description": (item.findtext("Description") or "").strip(),
+                    "item_type": (item.findtext("ItemType") or "").strip(),
+                    "base_item_unit": (item.findtext("BaseItemUnit") or "").strip(),
+                })
+        except ET.ParseError as exc:
+            return Response(
+                {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception as exc:
+            return Response(
+                {"ok": False, "error": f"Unexpected error processing SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"ok": True, "items": items, "count": len(items)})
+
+
+class AnalysisCodesQueryView(APIView):
+    """Return analysis codes for ONE SunSystems dimension (AnalysisCodes/Query).
+
+    GET /api/v1/sunsystems/analysis-codes/?dimension=04&business_unit=PK1
+
+    ``dimension`` is the AnalysisDimensionId the codes belong to (e.g. "04"
+    Project, "05" Cost Centre). The SunSystems query requires it as a filter,
+    so it is mandatory here.
+
+    Response:
+        { analysis_codes: [{ analysis_code, analysis_dimension_id, name }] }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        import xml.etree.ElementTree as ET
+
+        conn = effective_connection()
+        config = SunSystemsConfig.from_mapping(conn)
+
+        business_unit = str(
+            request.query_params.get("business_unit") or config.business_unit or "PK1"
+        )
+        dimension = str(request.query_params.get("dimension") or "").strip()
+        if not dimension:
+            return Response(
+                {"ok": False, "error": "A dimension id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        safe_dimension = (
+            dimension.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+        ssc_payload = (
+            "<SSC>\n"
+            "  <ErrorContext/>\n"
+            "  <User/>\n"
+            "  <SunSystemsContext>\n"
+            f"    <BusinessUnit>{business_unit}</BusinessUnit>\n"
+            "  </SunSystemsContext>\n"
+            "  <Payload>\n"
+            "    <Filter>\n"
+            f'      <Item name="/AnalysisCodes/AnalysisDimensionId" operator="EQU" value="{safe_dimension}"/>\n'
+            "    </Filter>\n"
+            "    <Select>\n"
+            "      <AnalysisCodes>\n"
+            "        <AnalysisCode>.</AnalysisCode>\n"
+            "        <AnalysisDimensionId>.</AnalysisDimensionId>\n"
+            "        <Name>.</Name>\n"
+            "      </AnalysisCodes>\n"
+            "    </Select>\n"
+            "  </Payload>\n"
+            "</SSC>"
+        )
+
+        try:
+            client = SunSystemsClient(config)
+            response_xml = client.execute("AnalysisCodes", "Query", ssc_payload)
+        except SunSystemsError as exc:
+            return Response(
+                {"ok": False, "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        analysis_codes = []
+        try:
+            root = ET.fromstring(response_xml or "<SSC/>")
+            for node in root.findall(".//AnalysisCodes"):
+                code = (node.findtext("AnalysisCode") or "").strip()
+                if not code:
+                    continue
+                analysis_codes.append({
+                    "analysis_code": code,
+                    "analysis_dimension_id": (node.findtext("AnalysisDimensionId") or dimension).strip(),
+                    "name": (node.findtext("Name") or "").strip(),
+                })
+        except ET.ParseError as exc:
+            return Response(
+                {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception as exc:
+            return Response(
+                {"ok": False, "error": f"Unexpected error processing SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"ok": True, "analysis_codes": analysis_codes, "count": len(analysis_codes)})

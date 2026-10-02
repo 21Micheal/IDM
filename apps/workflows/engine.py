@@ -1238,6 +1238,74 @@ def flatten_steps(definition: Dict[str, Any]) -> List[Dict[str, Any]]:
     return steps
 
 
+def resolve_active_path(
+    definition: Dict[str, Any],
+    field_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[int], Optional[str]]:
+    """Resolve which steps a v2 definition actually executes for *context*.
+
+    A v2 definition is a graph: ``if_else`` chooses a branch and ``switch``
+    chooses a case.  The flat ``WorkflowStep`` mirror, however, is built by
+    :func:`flatten_steps`, which appends *every* branch in document order.  So a
+    fresh instance must not start at mirror order 1 — it must start at the first
+    step of the branch/case that matches the evaluation context (e.g. the
+    ``requisition`` case for a new requisition, not ``lpo``).
+
+    Returns ``(orders, end_outcome)`` where *orders* are 1-based positions
+    aligned with :func:`flatten_steps` (and therefore ``WorkflowStep.order``).
+    Non-taken branches are still counted so positions line up, but only the
+    taken path's steps are returned.  *end_outcome* is set when the taken path
+    reaches an ``end`` block (e.g. the switch default).
+    """
+    if not definition or definition.get("version") != 2:
+        return [], None
+
+    field_map = field_map or {}
+    ctx = EvalContext(values=context or {}, vars={}, rates={})
+    counter = [0]
+    orders: List[int] = []
+    end_outcome: List[Optional[str]] = [None]
+
+    def walk(blocks_list: Optional[List[Dict[str, Any]]], active: bool) -> None:
+        for block in blocks_list or []:
+            kind = block.get("kind")
+            if kind in ("approval", "notification"):
+                counter[0] += 1
+                if active:
+                    orders.append(counter[0])
+            elif kind == "if_else":
+                branches = block.get("branches", [])
+                matched_index = None
+                for index, branch in enumerate(branches):
+                    try:
+                        if eval_group(branch.get("when"), field_map, ctx):
+                            matched_index = index
+                            break
+                    except Exception:
+                        continue
+                for index, branch in enumerate(branches):
+                    walk(branch.get("blocks", []), active and index == matched_index)
+                walk(block.get("else_blocks", []), active and matched_index is None)
+            elif kind == "switch":
+                field_value = to_string(get_value(ctx, block.get("field_id")))
+                cases = block.get("cases", [])
+                matched_index = None
+                for index, case in enumerate(cases):
+                    if field_value in [to_string(value) for value in case.get("values", [])]:
+                        matched_index = index
+                        break
+                for index, case in enumerate(cases):
+                    walk(case.get("blocks", []), active and index == matched_index)
+                walk(block.get("default_blocks", []), active and matched_index is None)
+            elif kind == "end":
+                if active and not end_outcome[0]:
+                    end_outcome[0] = block.get("outcome")
+
+    walk(definition.get("blocks", []), True)
+    return orders, end_outcome[0]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runtime Execution (for actual workflow instances)
 # ─────────────────────────────────────────────────────────────────────────────

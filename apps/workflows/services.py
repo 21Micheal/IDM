@@ -293,9 +293,12 @@ class WorkflowService:
                 context["uploader.department"] = (
                     uploader.department.name if uploader.department else ""
                 )
+                now = timezone.now()
                 context["uploader.groups"] = list(
                     uploader.group_memberships.filter(
-                        is_active=True
+                        group__is_active=True,
+                    ).filter(
+                        Q(expires_at__isnull=True) | Q(expires_at__gt=now)
                     ).values_list("group_id", flat=True)
                 )
             else:
@@ -342,9 +345,12 @@ class WorkflowService:
                 context["uploader.department"] = (
                     uploader.department.name if uploader.department else ""
                 )
+                now = timezone.now()
                 context["uploader.groups"] = list(
                     uploader.group_memberships.filter(
-                        is_active=True
+                        group__is_active=True,
+                    ).filter(
+                        Q(expires_at__isnull=True) | Q(expires_at__gt=now)
                     ).values_list("group_id", flat=True)
                 )
             else:
@@ -738,22 +744,55 @@ class WorkflowService:
     # ── Internals ──────────────────────────────────────────────────────────
 
     @staticmethod
+    def _v2_active_step_orders(instance: WorkflowInstance):
+        """Return ``(orders, end_outcome)`` for the v2 branch this instance is on.
+
+        ``orders`` are ``WorkflowStep.order`` values (1-based positions in the
+        flat mirror) for the approval/notification steps on the branch selected
+        by the evaluation context — e.g. the ``requisition`` case of a switch on
+        ``context.phase``.  Non-matching branches are skipped, so a fresh
+        requisition no longer starts at whatever case happened to be flattened
+        first (the bug that made new requisitions jump into LPO).
+        """
+        from apps.workflows.engine import (
+            build_field_map_from_document_type,
+            resolve_active_path,
+        )
+
+        definition = instance.template.definition or {}
+        document = instance.document
+        payment_run = instance.payment_run
+        context = WorkflowService.build_evaluation_context(
+            document=document, payment_run=payment_run
+        )
+        document_type = document.document_type if document is not None else None
+        field_map = (
+            build_field_map_from_document_type(document_type)
+            if document_type is not None else {}
+        )
+        return resolve_active_path(definition, field_map, context)
+
+    @staticmethod
     def _activate_v2_step(instance: WorkflowInstance) -> None:
+        """Activate the first/next step on the branch of a v2 definition.
+
+        The definition decides which branch is live (switch on ``context.phase``
+        for procurement, if/else for other forms).  The flat ``WorkflowStep``
+        mirror just supplies the task/step rows, so activation resolves the
+        branch once and picks the matching order instead of trusting
+        ``current_step_order`` blindly.
         """
-        Activate the next step in a v2 branched workflow.
-        
-        For now, v2 workflows use a simplified approach:
-        - The definition is saved but execution still uses the linear steps
-        - The steps field is maintained as a flat mirror of the definition
-        - Full graph execution will be implemented in a future iteration
-        
-        This allows v2 workflows to function immediately while we work on
-        full graph-based execution.
-        """
-        # For now, v2 workflows still use legacy execution with linear steps
-        # The definition is saved but not yet used for execution
-        # This allows the frontend to work while we build full graph execution
-        WorkflowService._activate_step(instance, instance.current_step_order)
+        orders, end_outcome = WorkflowService._v2_active_step_orders(instance)
+        if not orders:
+            WorkflowService._complete(instance, end_outcome or "approved")
+            return
+
+        order = instance.current_step_order
+        if order not in orders:
+            order = orders[0]
+            instance.current_step_order = order
+            instance.save(update_fields=["current_step_order"])
+        WorkflowService._activate_step(instance, order)
 
     @staticmethod
     def _activate_step(instance: WorkflowInstance, order: int) -> None:
@@ -1179,6 +1218,16 @@ class WorkflowService:
     @staticmethod
     def _advance_step(instance: WorkflowInstance, order: int) -> None:
         WorkflowService._skip_active_tasks(instance, step_order=order)
+        if WorkflowService.is_v2_workflow(instance.template):
+            # Stay within the active branch: the next order is the smallest
+            # active order greater than this step, not necessarily order + 1.
+            orders, end_outcome = WorkflowService._v2_active_step_orders(instance)
+            later = [candidate for candidate in orders if candidate > order]
+            if later:
+                WorkflowService._activate_step(instance, order=later[0])
+            else:
+                WorkflowService._complete(instance, end_outcome or "approved")
+            return
         next_order = order + 1
         if instance.template.steps.filter(order=next_order).exists():
             WorkflowService._activate_step(instance, order=next_order)

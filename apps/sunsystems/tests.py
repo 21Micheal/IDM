@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TestCase
+from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.documents.models import Document, DocumentStatus, DocumentType
@@ -147,3 +148,108 @@ class JournalPostingQueueTests(TestCase):
         self.assertEqual(posting.status, JournalPostingStatus.PENDING)
         self.assertEqual(posting.stage_label, "Advance")
         self.assertEqual(posting.message, "Queued for SunSystems posting.")
+
+
+class ItemsQueryViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="items@example.com",
+            password="pass",
+            first_name="Item",
+            last_name="Reader",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_items_query_parses_response_and_uses_item_component(self):
+        response_xml = (
+            "<SSC><Payload>"
+            "<Item>"
+            "<ItemCode>ITM001</ItemCode>"
+            "<Description>Widget</Description>"
+            "<ItemType>STOCK</ItemType>"
+            "<BaseItemUnit>EA</BaseItemUnit>"
+            "</Item>"
+            "<Item><ItemCode>ITM002</ItemCode><Description>Gadget</Description></Item>"
+            "</Payload></SSC>"
+        )
+        with patch("apps.sunsystems.views.SunSystemsClient") as client_cls:
+            client_cls.return_value.execute.return_value = response_xml
+            response = self.client.get("/api/v1/sunsystems/items/")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(body["items"][0], {
+            "item_code": "ITM001",
+            "description": "Widget",
+            "item_type": "STOCK",
+            "base_item_unit": "EA",
+        })
+
+        args = client_cls.return_value.execute.call_args.args
+        self.assertEqual(args[0], "Item")
+        self.assertEqual(args[1], "Query")
+        self.assertIn("<ItemCode>.</ItemCode>", args[2])
+        self.assertIn("<BusinessUnit>PK1</BusinessUnit>", args[2])
+
+    def test_items_query_reports_gateway_errors(self):
+        from apps.sunsystems.client import SunSystemsError
+
+        with patch("apps.sunsystems.views.SunSystemsClient") as client_cls:
+            client_cls.return_value.execute.side_effect = SunSystemsError("boom")
+            response = self.client.get("/api/v1/sunsystems/items/")
+
+        self.assertEqual(response.status_code, 502)
+        self.assertFalse(response.json()["ok"])
+
+
+class AnalysisCodesQueryViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="analysis@example.com",
+            password="pass",
+            first_name="Analysis",
+            last_name="Reader",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_requires_a_dimension(self):
+        response = self.client.get("/api/v1/sunsystems/analysis-codes/")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["ok"])
+
+    def test_substitutes_the_dimension_filter_and_parses_codes(self):
+        response_xml = (
+            "<SSC><Payload>"
+            "<AnalysisCodes>"
+            "<AnalysisCode>P001</AnalysisCode>"
+            "<AnalysisDimensionId>04</AnalysisDimensionId>"
+            "<Name>Project One</Name>"
+            "</AnalysisCodes>"
+            "<AnalysisCodes><AnalysisCode>P002</AnalysisCode><Name>Project Two</Name></AnalysisCodes>"
+            "</Payload></SSC>"
+        )
+        with patch("apps.sunsystems.views.SunSystemsClient") as client_cls:
+            client_cls.return_value.execute.return_value = response_xml
+            response = self.client.get("/api/v1/sunsystems/analysis-codes/?dimension=04")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(body["analysis_codes"][0], {
+            "analysis_code": "P001",
+            "analysis_dimension_id": "04",
+            "name": "Project One",
+        })
+        # A missing dimension id in the response falls back to the requested one.
+        self.assertEqual(body["analysis_codes"][1]["analysis_dimension_id"], "04")
+
+        args = client_cls.return_value.execute.call_args.args
+        self.assertEqual(args[0], "AnalysisCodes")
+        self.assertEqual(args[1], "Query")
+        self.assertIn('value="04"', args[2])
+        self.assertIn('/AnalysisCodes/AnalysisDimensionId', args[2])
