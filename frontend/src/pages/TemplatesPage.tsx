@@ -27,8 +27,11 @@ import { templatesAPI, documentTypesAPI, normalizeListResponse } from "@/service
 import type { DocumentType } from "@/types";
 import TemplateBuilderV2 from "@/pages/TemplateBuilderV2";
 import DocumentTemplateDesigner, {
-  type DocumentTemplate as DesignerTemplate,
-  type EditableDocumentTemplate,
+  createBlankTemplate,
+  importLegacyTemplate,
+  normalizeTemplate,
+  type DocumentTemplateV2 as DesignerTemplate,
+  type LegacyTemplate,
 } from "@/pages/TemplateDesigner";
 import TemplatePreview from "@/components/templates/TemplatePreview";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
@@ -84,7 +87,7 @@ export interface Template {
   type: "built" | "uploaded";
   /** Sub-kind for type="built": interactive form vs WYSIWYG document layout. */
   kind?: "form" | "document";
-  /** For kind="document": the designer block layout ({page,theme,header,footer,blocks}). */
+  /** For kind="document": the structured designer layout. */
   design?: Record<string, unknown>;
   category?: string;
   tags?: string[];
@@ -103,9 +106,8 @@ export interface Template {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Designer (document-kind) adapters — the WYSIWYG designer uses a flat shape
-// (page/theme/header/footer/blocks at top level); the backend nests those under
-// `design` and uses document_type / kind. These translate between the two.
+// The designer uses schema-v2 pages/rows/cells; the API stores its layout under
+// `design` and keeps the document type in the `document_type` relation.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function designerToBackend(dt: DesignerTemplate): Record<string, unknown> {
@@ -117,29 +119,56 @@ function designerToBackend(dt: DesignerTemplate): Record<string, unknown> {
     kind: "document",
     category: dt.category ?? "other",
     tags: dt.tags ?? [],
-    document_type: dt.document_type_id,
-    design: { page: dt.page, theme: dt.theme, header: dt.header, footer: dt.footer, blocks: dt.blocks, references: dt.references ?? [] },
-    placeholders: dt.placeholders ?? [],
+    document_type: dt.documentTypeId,
+    design: {
+      schemaVersion: dt.schemaVersion,
+      page: dt.page,
+      theme: dt.theme,
+      header: dt.header,
+      footer: dt.footer,
+      watermark: dt.watermark,
+      pages: dt.pages,
+      requiredFields: dt.requiredFields,
+    },
+    placeholders: dt.requiredFields,
   };
 }
 
-function backendToDesigner(row: Template): EditableDocumentTemplate {
-  const design = (row.design ?? {}) as Partial<DesignerTemplate>;
-  return {
+function backendToDesigner(row: Template): DesignerTemplate {
+  const defaults = createBlankTemplate();
+  const rawDesign = row.design ?? {};
+  const design = rawDesign as Partial<DesignerTemplate>;
+  if (!Array.isArray(design.pages) && Array.isArray((rawDesign as Partial<LegacyTemplate>).blocks)) {
+    const migrated = importLegacyTemplate({
+      ...(rawDesign as Partial<LegacyTemplate>),
+      name: row.name,
+      description: row.description,
+    } as LegacyTemplate);
+    return {
+      ...migrated,
+      id: row.id,
+      documentTypeId: row.document_type_id || row.document_type,
+      category: row.category,
+      tags: row.tags,
+    };
+  }
+  return normalizeTemplate({
+    ...defaults,
     id: row.id,
     name: row.name,
     description: row.description,
+    schemaVersion: 2,
+    documentTypeId: row.document_type_id || row.document_type,
     category: row.category,
     tags: row.tags,
-    document_type_id: row.document_type_id || row.document_type,
-    page: design.page,
-    theme: design.theme,
-    header: design.header,
-    footer: design.footer,
-    blocks: design.blocks,
-    references: design.references,
-    placeholders: row.placeholders,
-  } as EditableDocumentTemplate;
+    page: design.page ?? defaults.page,
+    theme: design.theme ?? defaults.theme,
+    header: design.header ?? defaults.header,
+    footer: design.footer ?? defaults.footer,
+    watermark: design.watermark ?? defaults.watermark,
+    pages: design.pages ?? defaults.pages,
+    requiredFields: design.requiredFields ?? row.placeholders ?? defaults.requiredFields,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -627,7 +656,7 @@ export default function TemplatesPage({ initialMode }: { initialMode?: PageMode 
     // template; the designer shape is translated to the backend's `design` form.
     mutationFn: (params: { template: Template | DesignerTemplate; stayOpen?: boolean }) => {
       const { template } = params;
-      const isDesigner = (template as { kind?: string }).kind === "document";
+      const isDesigner = "schemaVersion" in template;
       const payload = isDesigner
         ? designerToBackend(template as DesignerTemplate)
         : { ...template, document_type: (template as Template).document_type_id };

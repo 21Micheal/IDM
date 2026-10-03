@@ -113,9 +113,11 @@ class DocumentTemplateSerializer(serializers.ModelSerializer):
         if template_type == "built":
             if template_kind == "document":
                 design = attrs.get("design", getattr(self.instance, "design", {})) or {}
-                if not design.get("blocks"):
+                has_legacy_blocks = isinstance(design.get("blocks"), list) and bool(design["blocks"])
+                has_v2_pages = isinstance(design.get("pages"), list) and bool(design["pages"])
+                if not (has_legacy_blocks or has_v2_pages):
                     raise serializers.ValidationError(
-                        {"design": "Add at least one block to the document layout."}
+                        {"design": "Add at least one page to the document layout."}
                     )
             elif not attrs.get("sections", getattr(self.instance, "sections", [])):
                 raise serializers.ValidationError({"sections": "At least one section is required."})
