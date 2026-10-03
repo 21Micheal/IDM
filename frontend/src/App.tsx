@@ -26,6 +26,7 @@ const WorkflowBuilderPage = lazy(() => import("@/pages/WorkflowBuilderPage"));
 const NotificationsPage = lazy(() => import("@/pages/NotificationsPage"));
 const NotificationWorkflowPage = lazy(() => import("@/pages/NotificationWorkflowPage"));
 const TemplatesPage = lazy(() => import("@/pages/TemplatesPage"));
+const AdminPage = lazy(() => import("@/pages/AdminPage"));
 const FormDetailPage = lazy(() => import("@/pages/FormDetailPage"));
 const RequisitionsPage = lazy(() => import("@/pages/RequisitionsPage"));
 const SuppliersPage = lazy(() => import("@/pages/SuppliersPage"));
@@ -293,6 +294,11 @@ const ROUTE_FALLBACK_CONTENT = [
     description: "Loading supplier records and integration details.",
   },
   {
+    match: (pathname: string) => pathname.startsWith("/admin/settings"),
+    title: "Preparing system settings",
+    description: "Loading DMS configuration, lifecycle, and security settings.",
+  },
+  {
     match: (pathname: string) => pathname.startsWith("/admin"),
     title: "Preparing administration",
     description: "Loading configuration, user controls, and system management tools.",
@@ -378,6 +384,7 @@ export default function App() {
               {/* Admin-only routes */}
               <Route path="admin/templates" element={<RequireAdmin><TemplatesPage /></RequireAdmin>} />
               <Route path="admin/templates/new-document" element={<RequireAdmin><TemplatesPage initialMode="designer" /></RequireAdmin>} />
+              <Route path="admin/settings" element={<RequireAdmin><AdminPage /></RequireAdmin>} />
               <Route path="admin/users" element={<RequireAdmin><UsersPage /></RequireAdmin>} />
               <Route path="admin/users/:id" element={<RequireAdmin><UserDetailPage /></RequireAdmin>} />
               <Route path="admin/departments" element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />

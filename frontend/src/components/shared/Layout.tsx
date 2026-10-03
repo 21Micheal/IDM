@@ -135,6 +135,11 @@ export default function Layout({
         icon: FileText,
       },
       {
+        to: "/admin/settings",
+        label: "Settings",
+        icon: Settings,
+      },
+      {
         to: "/admin/users",
         label: "Users",
         icon: CircleUserRound,
