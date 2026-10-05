@@ -1308,6 +1308,10 @@ class WorkflowService:
                 except Exception:
                     pass
 
+            # Generate the printable LPO document first: it reserves the LPO
+            # number that the SunSystems PurchaseOrder posting then references.
+            WorkflowService._maybe_generate_lpo_document(doc, outcome=outcome, actor=instance.started_by)
+
             WorkflowService._maybe_post_sunsystems_journal(doc, outcome)
 
             # A fully-approved procurement stage opens the next stage on its
@@ -1387,6 +1391,35 @@ class WorkflowService:
             run.status = PaymentRunStatus.REJECTED
             run.error = f"Payment run workflow completed with outcome '{outcome}'."
             run.save(update_fields=["status", "error", "updated_at"])
+
+    @staticmethod
+    def _maybe_generate_lpo_document(document, *, outcome: str = "approved", actor=None):
+        """Generate the printable LPO document when the LPO phase completes.
+
+        Only procurement requisitions whose LPO stage was just fully approved
+        qualify. Idempotent — the relation is stored on the requisition, and a
+        second call returns the already-generated document. Generation failure
+        must never block the workflow (or the SunSystems posting), so it is
+        caught and logged.
+        """
+        try:
+            from apps.documents.builder_workflow import (
+                completed_procurement_stages,
+                is_procurement_document,
+            )
+
+            if outcome != "approved" or not is_procurement_document(document):
+                return None
+            phase = WorkflowService._document_workflow_phase(document)
+            if phase != "lpo" or "lpo" not in completed_procurement_stages(document):
+                return None
+
+            from apps.documents.lpo import generate_lpo_for_document
+
+            return generate_lpo_for_document(document, actor=actor)
+        except Exception:
+            logger.exception("Could not generate LPO document for %s", document.id)
+            return None
 
     @staticmethod
     def _maybe_post_sunsystems_journal(document, outcome: str) -> None:

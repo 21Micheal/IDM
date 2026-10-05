@@ -130,10 +130,21 @@ def resolve_value(spec: Any, values: dict, row: dict | None = None, *, default: 
         raw = (row or {}).get(spec["row_field"]) if row is not None else None
     elif "field" in spec:
         raw = (values or {}).get(spec["field"])
+    elif "source" in spec:
+        # System-generated values injected by the runtime before posting, e.g.
+        # the LPO number created when the LPO phase completes. Stored under a
+        # ``__``-prefixed key so it can never collide with a real form field.
+        raw = (values or {}).get(f"__{spec['source']}")
     else:
         raw = None
 
-    if raw in (None, ""):
+    # Optional sub-key: read one entry out of an object value. The ten-slot
+    # analysis panel stores {"1": "P01", "2": "CC-B", …}, so a PO/jour al line
+    # binds `{"field": "analysis_codes", "key": "3"}` for slot 3.
+    if spec.get("key") is not None and isinstance(raw, dict):
+        raw = raw.get(str(spec["key"]))
+
+    if raw in (None, "", [], {}):
         raw = spec.get("default", default)
 
     fmt = spec.get("format")
@@ -265,6 +276,92 @@ def build_journal_ssc(
     return build
 
 
+def _po_line_specs(po: dict) -> list[dict]:
+    """Return the list of PurchaseOrder line specs.
+
+    New mappings carry an explicit ``purchase_order.lines`` list (each entry may
+    ``repeat_over`` a form table). Legacy mappings have no ``lines`` key and
+    describe a single line directly on ``purchase_order``; normalise that into a
+    one-element list, folding the legacy ``analysis10_*`` constants into slot 10.
+    """
+    specs = po.get("lines")
+    if isinstance(specs, list) and specs:
+        return [spec for spec in specs if isinstance(spec, dict)]
+
+    legacy = dict(po)
+    analysis = dict(po.get("analysis") or {})
+    analysis.setdefault("10", {
+        "category": po.get("analysis10_category", {"const": ""}),
+        "code": po.get("analysis10_code", {"const": ""}),
+    })
+    legacy["analysis"] = analysis
+    return [legacy]
+
+
+def _iter_po_lines(specs: list[dict], values: dict, warnings: list[str]) -> Iterator[tuple[dict, dict | None]]:
+    """Yield ``(line_spec, row)`` pairs, expanding ``repeat_over`` tables.
+
+    A spec without ``repeat_over`` is a header-scoped single line; a spec with it
+    emits one line per non-empty row of that table. Rows that are entirely blank
+    (every column empty) are skipped so trailing grid rows don't post.
+    """
+    for spec in specs:
+        repeat = spec.get("repeat_over")
+        if not repeat:
+            yield spec, None
+            continue
+        rows = values.get(repeat)
+        if not isinstance(rows, list):
+            warnings.append(f"Table '{repeat}' has no rows; its purchase-order lines were skipped.")
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if not any(value not in (None, "", [], {}) for value in row.values()):
+                continue
+            yield spec, row
+
+
+def _po_line_amount(spec: dict, values: dict, row: dict | None, quantity: Decimal, unit_price: Decimal) -> Decimal:
+    """The line's transaction value.
+
+    Priority: an explicit ``amount`` spec (the line total, e.g. Gross/Net value),
+    else ``quantity × unit_price``, else 0. Amounts are never taken from the PO
+    header so each repeated line stands on its own.
+    """
+    amount_spec = spec.get("amount")
+    if amount_spec is not None:
+        amount = resolve_amount(amount_spec, values, row)
+        if amount != 0:
+            return amount
+    if unit_price != 0:
+        return quantity * unit_price
+    return Decimal("0")
+
+
+def _po_analysis_children(parent: ET.Element, analysis: dict, values: dict, row: dict | None) -> None:
+    """Emit ``<Analysis1>…<Analysis10>`` children for a line.
+
+    Each slot's spec carries a ``category`` (AnalysisDimensionId) and ``code``;
+    either may be a ValueSpec, including a ``{"field": …, "key": "n"}`` lookup
+    into the ten-slot analysis panel. Slots where both resolve empty are omitted.
+    """
+    for n in _ANALYSIS_CODES:
+        spec = analysis.get(str(n), analysis.get(n)) or {}
+        if not isinstance(spec, dict):
+            spec = {"const": spec}
+        category = resolve_value(spec.get("category") or spec.get("cat") or spec.get("dimension"), values, row)
+        code = resolve_value(spec.get("code"), values, row)
+        # A slot is only emitted when it carries a code; an empty code means the
+        # operator picked nothing for that dimension, so the category alone has
+        # nothing to say.
+        if not code:
+            continue
+        analysis_el = ET.SubElement(parent, f"Analysis{n}")
+        ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCatId").text = category
+        ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCode").text = code
+
+
 def build_purchase_order_ssc(
     mapping: dict,
     values: dict,
@@ -273,11 +370,15 @@ def build_purchase_order_ssc(
     budget_code_default: str = "A",
     pretty: bool = False,
 ) -> JournalBuild:
-    """Compile a minimal PurchaseOrder/CreateOrAmend SSC payload.
+    """Compile a PurchaseOrder/CreateOrAmend SSC payload.
 
-    This mirrors the proven LPO test payload while keeping the real business
-    values mapped from the form. Constants can be promoted to builder controls
-    later as SunSystems confirms which fields should vary by template.
+    Header values (supplier, references, comment, transaction type, date) and
+    per-line values (account, item, quantity, currency, amount, analysis 1-10,
+    VLABs) are all declarative ValueSpecs, so the builder can bind any of them to
+    a form field, a table column (``row_field``), a constant, or a sub-key of an
+    object value (``{"field": "analysis_codes", "key": "3"}``). ``lines`` may
+    repeat over a table (General / Travel requisition), emitting one
+    ``<PurchaseOrderLine>`` per row with its own LineNumber/UserLineNumber.
     """
     if not isinstance(mapping, dict):
         raise MappingError("Purchase order mapping is missing or not an object.")
@@ -286,19 +387,23 @@ def build_purchase_order_ssc(
     context = mapping.get("context") or {}
     component = (mapping.get("component") or "PurchaseOrder").strip()
     method = (mapping.get("method") or "CreateOrAmend").strip()
+    warnings: list[str] = []
 
     reference = resolve_value(po.get("reference") or mapping.get("reference"), values)
-    amount = resolve_amount(po.get("amount"), values)
-    currency = resolve_value(po.get("currency") or mapping.get("currency"), values)
-    description = resolve_value(po.get("description"), values)
+    supplier_code = resolve_value(po.get("supplier_code"), values)
+    second_reference = resolve_value(po.get("second_reference"), values)
+    comment = resolve_value(po.get("comment") or po.get("description") or mapping.get("description"), values)
+    transaction_type = resolve_value(po.get("transaction_type"), values)
+    invoice_address_code = resolve_value(po.get("invoice_address_code"), values, default="0000000000")
+    order_date = resolve_value(po.get("date") or mapping.get("date"), values)
+    header_currency = resolve_value(po.get("currency") or mapping.get("currency"), values)
+    header_analysis = dict(po.get("analysis") or {})
 
     missing = []
     if not reference:
         missing.append("reference")
-    if amount <= 0:
-        missing.append("amount")
-    if not currency:
-        missing.append("currency")
+    if not supplier_code:
+        missing.append("supplier_code")
     if missing:
         raise MappingError(f"Purchase order mapping produced missing/invalid fields: {', '.join(missing)}.")
 
@@ -312,55 +417,86 @@ def build_purchase_order_ssc(
 
     payload_el = ET.SubElement(ssc, "Payload")
     order_el = ET.SubElement(payload_el, "PurchaseOrder")
-    ET.SubElement(order_el, "Comment").text = description
-    ET.SubElement(order_el, "InvoiceAddressCode").text = resolve_value(po.get("invoice_address_code"), values, default="0000000000")
-    ET.SubElement(order_el, "PurchaseTransactionType").text = resolve_value(po.get("transaction_type"), values, default="ASSETS")
+    ET.SubElement(order_el, "Comment").text = comment
+    ET.SubElement(order_el, "InvoiceAddressCode").text = invoice_address_code
+    # Legacy/custom mappings may still specify a transaction type. Omit the
+    # element when the template leaves it unset (the requisition LPO flow does).
+    if transaction_type:
+        ET.SubElement(order_el, "PurchaseTransactionType").text = transaction_type
     ET.SubElement(order_el, "PurchaseOrderReference").text = reference
-    ET.SubElement(order_el, "SecondReference").text = resolve_value(po.get("second_reference"), values)
-    ET.SubElement(order_el, "SupplierCode").text = resolve_value(po.get("supplier_code"), values, default="81105")
+    if second_reference:
+        ET.SubElement(order_el, "SecondReference").text = second_reference
+    ET.SubElement(order_el, "SupplierCode").text = supplier_code
 
-    # Resolve order quantity — defaults to "1" for non-inventory / service LPOs.
-    quantity_str = resolve_value(po.get("quantity"), values, default="1") or "1"
+    specs = _po_line_specs(po)
+    total_amount = Decimal("0")
+    line_count = 0
+    for spec, row in _iter_po_lines(specs, values, warnings):
+        line_count += 1
+        line_el = ET.SubElement(order_el, "PurchaseOrderLine")
 
-    line_el = ET.SubElement(order_el, "PurchaseOrderLine")
-    ET.SubElement(line_el, "AccountCode").text = resolve_value(po.get("account_code"), values)
-    ET.SubElement(line_el, "CurrencyCode").text = currency
-    ET.SubElement(line_el, "ItemCode").text = resolve_value(po.get("item_code"), values, default="ITM29")
-    ET.SubElement(line_el, "LineNumber").text = "1"
-    ET.SubElement(line_el, "OrderDate").text = resolve_value(po.get("date") or mapping.get("date"), values)
-    ET.SubElement(line_el, "UserLineNumber").text = "1"
+        currency = resolve_value(
+            spec.get("currency") or po.get("currency") or mapping.get("currency"),
+            values, row, default=header_currency,
+        )
+        ET.SubElement(line_el, "AccountCode").text = resolve_value(
+            spec.get("account_code") or spec.get("account") or po.get("account_code"), values, row
+        )
+        ET.SubElement(line_el, "CurrencyCode").text = currency
+        ET.SubElement(line_el, "ItemCode").text = resolve_value(
+            spec.get("item_code") or po.get("item_code"), values, row,
+        )
+        product_group = resolve_value(
+            spec.get("product_group") or po.get("product_group"), values, row,
+        )
+        if product_group:
+            ET.SubElement(line_el, "ProductGroup").text = product_group
+        ET.SubElement(line_el, "LineNumber").text = str(line_count)
+        ET.SubElement(line_el, "OrderDate").text = resolve_value(
+            spec.get("date") or po.get("date") or mapping.get("date"),
+            values, row, default=order_date,
+        )
+        ET.SubElement(line_el, "UserLineNumber").text = str(line_count)
 
-    analysis_qty = ET.SubElement(line_el, "AnalysisQuantity")
-    ET.SubElement(analysis_qty, "Quantity").text = quantity_str
-    analysis = dict(po.get("analysis") or {})
-    analysis.setdefault("10", {
-        "category": po.get("analysis10_category", {"const": ""}),
-        "code": po.get("analysis10_code", {"const": ""}),
-    })
-    for n in _ANALYSIS_CODES:
-        spec = analysis.get(str(n)) or {}
-        category = resolve_value(spec.get("category"), values)
-        code = resolve_value(spec.get("code"), values)
-        # Skip entries where both category and code are empty.
-        if not category and not code:
-            continue
-        analysis_el = ET.SubElement(analysis_qty, f"Analysis{n}")
-        ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCatId").text = category
-        ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCode").text = code
+        quantity_str = resolve_value(
+            spec.get("quantity") or po.get("quantity"), values, row, default="1",
+        ) or "1"
+        quantity = resolve_amount({"const": quantity_str}, values, row)
+        unit_price = (
+            resolve_amount(spec.get("unit_price"), values, row)
+            if spec.get("unit_price") is not None else Decimal("0")
+        )
+        amount = _po_line_amount(spec, values, row, quantity, unit_price)
 
-    # VLAB numbers vary by SunSystems transaction-type configuration (e.g. PK1
-    # uses VLAB1=base-quantity and VLAB2=transaction-value; other BUs may differ).
-    # Override via purchase_order.vlab_base_num / vlab_trans_num in the mapping.
-    vlab_base_num = resolve_value(po.get("vlab_base_num"), values, default="1") or "1"
-    vlab_trans_num = resolve_value(po.get("vlab_trans_num"), values, default="2") or "2"
+        analysis_qty = ET.SubElement(line_el, "AnalysisQuantity")
+        ET.SubElement(analysis_qty, "Quantity").text = quantity_str
+        analysis: dict = {}
+        analysis.update(header_analysis)
+        analysis.update(spec.get("analysis") or {})
+        _po_analysis_children(analysis_qty, analysis, values, row)
 
-    vlab_base_el = ET.SubElement(line_el, f"VLAB{vlab_base_num}")
-    base = ET.SubElement(vlab_base_el, "Base")
-    ET.SubElement(base, "VPolVlabEntry_Val").text = quantity_str
+        # VLAB numbers vary by SunSystems transaction-type configuration (e.g.
+        # PK1 uses 7 = base-quantity, 9 = transaction-value). Override per PO or
+        # per line; defaults keep the original 1/2 behaviour.
+        vlab_base_num = resolve_value(
+            spec.get("vlab_base_num") or po.get("vlab_base_num"), values, default="1",
+        ) or "1"
+        vlab_trans_num = resolve_value(
+            spec.get("vlab_trans_num") or po.get("vlab_trans_num"), values, default="2",
+        ) or "2"
 
-    vlab_trans_el = ET.SubElement(line_el, f"VLAB{vlab_trans_num}")
-    trans = ET.SubElement(vlab_trans_el, "Trans")
-    ET.SubElement(trans, "VPolVlabEntry_Val").text = _amount_str(amount)
+        base_el = ET.SubElement(line_el, f"VLAB{vlab_base_num}")
+        base = ET.SubElement(base_el, "Base")
+        ET.SubElement(base, "VPolVlabEntry_Val").text = quantity_str
+
+        trans_el = ET.SubElement(line_el, f"VLAB{vlab_trans_num}")
+        trans = ET.SubElement(trans_el, "Trans")
+        ET.SubElement(trans, "VPolVlabEntry_Val").text = _amount_str(amount)
+
+        total_amount += amount
+
+    if line_count == 0:
+        raise MappingError("Purchase order mapping produced no lines.")
 
     if pretty:
         try:
@@ -372,10 +508,10 @@ def build_purchase_order_ssc(
         component=component,
         method=method,
         ssc_xml=_serialize(ssc),
-        line_count=1,
-        debit_total=amount,
+        line_count=line_count,
+        debit_total=total_amount,
         credit_total=Decimal("0"),
-        warnings=[],
+        warnings=warnings,
     )
 
 
@@ -818,6 +954,11 @@ def _to_str(value: Any) -> str:
     if isinstance(value, dict):
         # Structured reference/user values store {id, label, source}; post the label.
         return str(value.get("label", "")) if "label" in value else ""
+    if isinstance(value, (list, tuple)):
+        # Multi-select columns (e.g. the supplier account picker) post a single
+        # code; join multiples so nothing is silently dropped.
+        parts = [_to_str(v) for v in value if v not in (None, "")]
+        return parts[0] if len(parts) == 1 else ", ".join(parts)
     return str(value)
 
 

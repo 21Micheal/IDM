@@ -2,7 +2,7 @@
  * ExternalPage
  *
  * Read-only browser for the SunSystems-backed lookups the form designer can
- * drop into a form: Items and Analysis Codes. Handy for checking that the
+ * drop into a form: Items, Product Groups, and Analysis Codes. Handy for checking that the
  * gateway returns what the builder expects without opening a template.
  */
 import { useMemo, useState } from "react";
@@ -13,7 +13,7 @@ import CustomListbox from "@/components/ui/CustomListbox";
 import { ANALYSIS_DIMENSIONS, analysisDimensionName } from "@/lib/analysisDimensions";
 import { cn } from "@/lib/utils";
 
-type Tab = "items" | "analysis";
+type Tab = "items" | "product_groups" | "analysis";
 
 const inputCls =
   "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
@@ -71,6 +71,7 @@ function ResultTable({ codeLabel, nameLabel, rows, loading, error }: {
 export default function ExternalPage() {
   const [tab, setTab] = useState<Tab>("items");
   const [itemSearch, setItemSearch] = useState("");
+  const [productGroupSearch, setProductGroupSearch] = useState("");
   const [codeSearch, setCodeSearch] = useState("");
   const [dimension, setDimension] = useState(ANALYSIS_DIMENSIONS.find((d) => d.id === "04")?.id ?? "04");
 
@@ -88,8 +89,16 @@ export default function ExternalPage() {
     staleTime: 5 * 60_000,
   });
 
+  const productGroupsQuery = useQuery({
+    queryKey: ["sunsystems", "external", "product_groups", "page"],
+    queryFn: () => sunsystemsAPI.getProductGroups(),
+    enabled: tab === "product_groups",
+    staleTime: 5 * 60_000,
+  });
+
   const items = itemsQuery.data?.data.items ?? [];
   const codes = codesQuery.data?.data.analysis_codes ?? [];
+  const productGroups = productGroupsQuery.data?.data.product_groups ?? [];
 
   const filteredItems = useMemo(() => {
     const q = itemSearch.trim().toLowerCase();
@@ -105,6 +114,13 @@ export default function ExternalPage() {
     return rows.filter((r) => r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
   }, [codes, codeSearch]);
 
+  const filteredProductGroups = useMemo(() => {
+    const q = productGroupSearch.trim().toLowerCase();
+    const rows = productGroups.map((group) => ({ code: group.product_group, name: group.description }));
+    if (!q) return rows;
+    return rows.filter((r) => r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
+  }, [productGroups, productGroupSearch]);
+
   return (
     <div className="mx-auto w-full max-w-5xl p-6">
       <div className="mb-5">
@@ -117,6 +133,7 @@ export default function ExternalPage() {
       <div className="mb-5 flex border border-[#C8CDD2]">
         {([
           { key: "items", label: "Items", icon: Package },
+          { key: "product_groups", label: "Product Groups", icon: Package },
           { key: "analysis", label: "Analysis Codes", icon: Tags },
         ] as const).map(({ key, label, icon: Icon }) => (
           <button
@@ -145,6 +162,20 @@ export default function ExternalPage() {
             rows={filteredItems}
             loading={itemsQuery.isLoading}
             error={itemsQuery.isError ? (itemsQuery.error as Error)?.message || "Could not load items." : (itemsQuery.data?.data.error ?? null)}
+          />
+        </div>
+      ) : tab === "product_groups" ? (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <SearchBox value={productGroupSearch} onChange={setProductGroupSearch} placeholder="Search product groups by code or description…" />
+            <span className="text-xs text-[#5E6870]">{filteredProductGroups.length} product group(s)</span>
+          </div>
+          <ResultTable
+            codeLabel="Product group"
+            nameLabel="Description"
+            rows={filteredProductGroups}
+            loading={productGroupsQuery.isLoading}
+            error={productGroupsQuery.isError ? (productGroupsQuery.error as Error)?.message || "Could not load product groups." : (productGroupsQuery.data?.data.error ?? null)}
           />
         </div>
       ) : (

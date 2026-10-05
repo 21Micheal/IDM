@@ -1069,6 +1069,20 @@ export type ItemsResult = {
   error?: string;
 };
 
+export type SunSystemsProductGroup = {
+  product_group: string;
+  description: string;
+  item_type?: string;
+  base_item_unit?: string;
+};
+
+export type ProductGroupsResult = {
+  ok: boolean;
+  product_groups: SunSystemsProductGroup[];
+  count: number;
+  error?: string;
+};
+
 export type SunSystemsAnalysisCode = {
   analysis_code: string;
   analysis_dimension_id: string;
@@ -1101,6 +1115,8 @@ export const sunsystemsAPI = {
     api.get<AccountsResult>("/sunsystems/accounts/", { params }),
   getItems: (params?: { business_unit?: string }) =>
     api.get<ItemsResult>("/sunsystems/items/", { params }),
+  getProductGroups: (params?: { business_unit?: string }) =>
+    api.get<ProductGroupsResult>("/sunsystems/product-groups/", { params }),
   getAnalysisCodes: (params: { dimension: string; business_unit?: string }) =>
     api.get<AnalysisCodesResult>("/sunsystems/analysis-codes/", { params }),
   getConnection: () =>

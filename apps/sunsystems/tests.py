@@ -253,3 +253,130 @@ class AnalysisCodesQueryViewTests(TestCase):
         self.assertEqual(args[1], "Query")
         self.assertIn('value="04"', args[2])
         self.assertIn('/AnalysisCodes/AnalysisDimensionId', args[2])
+
+
+class PurchaseOrderMappingTests(SimpleTestCase):
+    """The multi-line PurchaseOrder compiler used by LPO posting."""
+
+    BASE = {
+        "enabled": True,
+        "component": "PurchaseOrder",
+        "method": "CreateOrAmend",
+        "context": {"business_unit": {"const": "PK1"}},
+        "purchase_order": {
+            "reference": {"source": "lpo_number"},
+            "second_reference": {"field": "reference_7mz7"},
+            "supplier_code": {"field": "supplier_wudn"},
+            "transaction_type": {"const": "ASSETS"},
+            "invoice_address_code": {"const": "0000000000"},
+            "date": {"field": "approved_date", "format": "DDMMYYYY"},
+            "vlab_base_num": {"const": "7"},
+            "vlab_trans_num": {"const": "9"},
+            "analysis": {
+                str(n): {
+                    "category": {"const": dim},
+                    "code": {"field": "analysis_codes", "key": str(n)},
+                }
+                for n, dim in enumerate(
+                    ["04", "05", "06", "03", "08", "09", "10", "11", "07", "12"], start=1
+                )
+            },
+            "lines": [
+                {
+                    "repeat_over": "items",
+                    "account_code": {"const": "1-1-05-0060"},
+                    "item_code": {"row_field": "item"},
+                    "currency": {"row_field": "currency"},
+                    "quantity": {"row_field": "qty"},
+                    "unit_price": {"row_field": "price"},
+                    "amount": {"row_field": "gross"},
+                }
+            ],
+        },
+    }
+
+    def _values(self):
+        return {
+            "__lpo_number": "LPO-00001",
+            "reference_7mz7": "RQF-00012",
+            "supplier_wudn": ["SPN046"],
+            "approved_date": "2024-01-26",
+            "analysis_codes": {"1": "PROJ-1", "2": "CC-9", "5": "SI-3"},
+            "items": [
+                {"item": "ITM29", "currency": "USD", "qty": "2", "price": "100", "gross": "230"},
+                {"item": "ITM30", "currency": "USD", "qty": "1", "price": "50", "gross": "59"},
+                {"item": "", "currency": "", "qty": "", "price": "", "gross": ""},
+            ],
+        }
+
+    def test_builds_one_line_per_non_empty_row(self):
+        from xml.etree import ElementTree as ET
+        from apps.sunsystems.mapping import build_sunsystems_ssc
+
+        build = build_sunsystems_ssc(dict(self.BASE), self._values())
+        self.assertEqual(build.line_count, 2)
+        self.assertEqual(build.debit_total, 289)
+
+        root = ET.fromstring(build.ssc_xml)
+        self.assertEqual(root.findtext(".//BusinessUnit"), "PK1")
+        order = root.find(".//PurchaseOrder")
+        self.assertEqual(order.findtext("SupplierCode"), "SPN046")
+        self.assertEqual(order.findtext("PurchaseOrderReference"), "LPO-00001")
+        self.assertEqual(order.findtext("SecondReference"), "RQF-00012")
+        lines = order.findall("PurchaseOrderLine")
+        self.assertEqual(len(lines), 2)
+        self.assertEqual([l.findtext("LineNumber") for l in lines], ["1", "2"])
+        self.assertEqual(lines[0].findtext("OrderDate"), "26012024")
+        # VLAB 7/9 configuration is honoured.
+        self.assertIsNotNone(lines[0].find("VLAB7/Base/VPolVlabEntry_Val"))
+        self.assertEqual(lines[0].findtext("VLAB9/Trans/VPolVlabEntry_Val"), "230")
+        # Analysis 1/2/5 resolved from the ten-slot panel; 3/4 omitted (empty).
+        self.assertEqual(lines[0].findtext("AnalysisQuantity/Analysis1/VPolCatAnalysis_AnlCode"), "PROJ-1")
+        self.assertEqual(lines[0].findtext("AnalysisQuantity/Analysis1/VPolCatAnalysis_AnlCatId"), "04")
+        self.assertEqual(lines[0].findtext("AnalysisQuantity/Analysis5/VPolCatAnalysis_AnlCode"), "SI-3")
+        self.assertIsNone(lines[0].find("AnalysisQuantity/Analysis3"))
+
+    def test_quantity_times_unit_price_when_no_amount_column(self):
+        from apps.sunsystems.mapping import build_sunsystems_ssc
+
+        mapping = dict(self.BASE)
+        mapping["purchase_order"] = dict(self.BASE["purchase_order"])
+        mapping["purchase_order"]["lines"] = [{
+            "repeat_over": "items",
+            "account_code": {"const": "A"},
+            "item_code": {"row_field": "item"},
+            "quantity": {"row_field": "qty"},
+            "unit_price": {"row_field": "price"},
+        }]
+        values = self._values()
+        build = build_sunsystems_ssc(mapping, values)
+        self.assertEqual(build.debit_total, 250)  # 2*100 + 1*50
+
+    def test_missing_supplier_raises(self):
+        from apps.sunsystems.mapping import MappingError, build_sunsystems_ssc
+
+        values = self._values()
+        values.pop("supplier_wudn")
+        with self.assertRaises(MappingError):
+            build_sunsystems_ssc(dict(self.BASE), values)
+
+    def test_legacy_single_line_shape_still_works(self):
+        from apps.sunsystems.mapping import build_sunsystems_ssc
+
+        legacy = {
+            "enabled": True,
+            "component": "PurchaseOrder",
+            "method": "CreateOrAmend",
+            "purchase_order": {
+                "reference": {"field": "reference_7mz7"},
+                "supplier_code": {"const": "81105"},
+                "item_code": {"const": "ITM29"},
+                "amount": {"field": "total_gross_copy"},
+                "analysis10_category": {"const": "11"},
+                "analysis10_code": {"const": "E"},
+            },
+        }
+        values = {"reference_7mz7": "RQF-1", "total_gross_copy": "1005.66"}
+        build = build_sunsystems_ssc(legacy, values)
+        self.assertEqual(build.line_count, 1)
+        self.assertEqual(build.debit_total, __import__("decimal").Decimal("1005.66"))

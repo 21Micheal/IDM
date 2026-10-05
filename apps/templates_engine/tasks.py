@@ -566,6 +566,116 @@ def _designer_merge_values(values, *, user, reference_number, title):
     return resolved
 
 
+def _design_element_to_block(el: dict) -> dict | None:
+    """Map one v2 designer element to the legacy block dict the DOCX renderer
+    understands. Returns None for element types with no printable output."""
+    if not isinstance(el, dict):
+        return None
+    etype = el.get("type")
+    style = el.get("style") or {}
+
+    if etype == "heading":
+        return {"type": "heading", "text": el.get("text", ""),
+                "level": el.get("level", 2), **style}
+    if etype in ("text", "note"):
+        return {"type": "paragraph", "text": el.get("text", ""), **style}
+    if etype in ("bulleted_list", "numbered_list"):
+        return {"type": etype, "items": el.get("items") or []}
+    if etype == "field_group":
+        pairs = [
+            {"label": f.get("label", ""), "value": f.get("value", "")}
+            for f in (el.get("fields") or [])
+        ]
+        return {"type": "key_value", "pairs": pairs} if pairs else None
+    if etype == "data_table":
+        cols = [
+            {"key": c.get("key", ""), "label": c.get("label", "")}
+            for c in (el.get("columns") or [])
+        ]
+        if not cols:
+            return None
+        source = el.get("sourceKey")
+        return {
+            "type": "data_table",
+            "columns": cols,
+            "bound": bool(source),
+            "sourceKey": source or "",
+            "rows": el.get("staticRows") or [],
+            "fillRows": el.get("previewRows") or 3,
+            "bordered": True,
+        }
+    if etype == "divider":
+        return {"type": "divider"}
+    if etype == "spacer":
+        return {"type": "spacer", "height": el.get("height", 24)}
+    if etype == "box":
+        return {"type": "spacer", "height": style.get("minHeight", 24)}
+    if etype == "image":
+        return {
+            "type": "image",
+            "src": el.get("src", ""),
+            "alt": el.get("alt", ""),
+            "width": el.get("width") or 160,
+        }
+    if etype == "signature_group":
+        sigs = [
+            {
+                "role": s.get("role", ""),
+                "nameToken": s.get("name", ""),
+                "dateToken": s.get("date", ""),
+            }
+            for s in (el.get("signatories") or [])
+        ]
+        return {"type": "signature", "signatories": sigs} if sigs else None
+    return None
+
+
+def _design_pages_to_legacy_blocks(design: dict) -> list[dict]:
+    """Flatten a v2 designer layout (pages -> rows -> cells -> elements) into the
+    legacy block list ``generate_designer_docx`` renders. Flow layout loses the
+    exact grid geometry, but preserves order, text, groups, tables and page
+    breaks so the generated DOCX is a faithful, editable approximation."""
+    blocks: list[dict] = []
+    pages = design.get("pages") or []
+    for page_index, page in enumerate(pages):
+        if page_index:
+            blocks.append({"type": "page_break"})
+        for row in (page.get("rows") or []):
+            for cell in (row.get("columns") or []):
+                for el in (cell.get("elements") or []):
+                    converted = _design_element_to_block(el)
+                    if converted:
+                        blocks.append(converted)
+        for item in (page.get("floating") or []):
+            converted = _design_element_to_block((item or {}).get("element") or {})
+            if converted:
+                blocks.append(converted)
+    return blocks
+
+
+def _design_band_to_legacy(band: dict | None) -> dict:
+    """Normalise a v2 designer header/footer PageBand into the legacy
+    ``{enabled, content:{left,center,right}}`` shape the renderer expects."""
+    if not isinstance(band, dict):
+        return {"enabled": False, "content": {}}
+    if band.get("content"):
+        return band
+    parts: list[str] = []
+    for row in (band.get("rows") or []):
+        texts: list[str] = []
+        for cell in (row.get("columns") or []):
+            for el in (cell.get("elements") or []):
+                if el.get("type") in ("text", "note", "heading"):
+                    text = str(el.get("text") or "").strip()
+                    if text:
+                        texts.append(text)
+        joined = "  ".join(texts)
+        if joined:
+            parts.append(joined)
+    content = {"left": "  ".join(parts)} if parts else {}
+    return {"enabled": bool(band.get("enabled", True)) and bool(parts), "content": content}
+
+
 def generate_designer_docx(design, values) -> bytes:
     """
     Render a WYSIWYG document-designer template (block layout) to an editable
@@ -583,6 +693,8 @@ def generate_designer_docx(design, values) -> bytes:
     theme = design.get("theme", {}) or {}
     page = design.get("page", {}) or {}
     blocks = design.get("blocks", []) or []
+    if not blocks and isinstance(design.get("pages"), list) and design["pages"]:
+        blocks = _design_pages_to_legacy_blocks(design)
 
     body_font = _designer_font_family(theme.get("fontFamily")) or "Calibri"
     heading_font = _designer_font_family(theme.get("headingFamily")) or body_font
@@ -636,8 +748,8 @@ def generate_designer_docx(design, values) -> bytes:
             _designer_band_runs(para, content.get(slot, ""), values)
 
     section = doc.sections[0]
-    render_band(design.get("header"), section.header)
-    render_band(design.get("footer"), section.footer)
+    render_band(_design_band_to_legacy(design.get("header")), section.header)
+    render_band(_design_band_to_legacy(design.get("footer")), section.footer)
 
     # ── Blocks ──────────────────────────────────────────────────────────────
     def add_text(paragraph, raw, **style):
@@ -963,8 +1075,13 @@ def xlsx_to_pdf(xlsx_bytes: bytes) -> bytes:
 
 # ─── Main entry ─────────────────────────────────────────────────────────────
 
-def generate_document_from_template_sync(template, values, fmt, title, user, type_id):
-    """Generate a document from a template synchronously."""
+def generate_document_from_template_sync(template, values, fmt, title, user, type_id, reference_number=None):
+    """Generate a document from a template synchronously.
+
+    ``reference_number`` lets a caller that must know the number *before*
+    rendering (e.g. the LPO generator embedding it in the document body) reserve
+    it up front instead of having one issued inside this function.
+    """
     from apps.documents.models import Document, DocumentStatus
     from apps.documents.serializers import _generate_unique_reference
     from apps.documents.form_attachments import descriptors_to_names
@@ -977,7 +1094,7 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
     kind = getattr(template, "kind", "form") or "form"
 
     # Reserve the reference up front so a `reference_number` formula can use it.
-    reference_number = _generate_unique_reference(template.document_type)
+    reference_number = reference_number or _generate_unique_reference(template.document_type)
 
     if template.type == "built" and kind == "document":
         # WYSIWYG document designer: merge fields auto-populate from the user,

@@ -59,6 +59,19 @@ export const EXTERNAL_SOURCES: ExternalSourceDef[] = [
       ),
   },
   {
+    value: "product_groups",
+    label: "Product Groups",
+    noun: "product group",
+    plural: "product groups",
+    fetch: () =>
+      sunsystemsAPI.getProductGroups().then((r) =>
+        (r.data.product_groups ?? []).map((group) => ({
+          code: group.product_group,
+          description: group.description,
+        })),
+      ),
+  },
+  {
     value: "analysis_codes",
     label: "Analysis Codes",
     noun: "analysis code",

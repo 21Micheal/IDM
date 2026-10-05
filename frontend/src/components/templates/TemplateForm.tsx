@@ -50,7 +50,7 @@ import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOp
 type ColType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
   | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "url" | "percentage" | "multi_select" | "image" | "external";
+  | "url" | "percentage" | "multi_select" | "image" | "external" | "sunsystems_account";
 
 type Column = {
   id?: string; key?: string; label?: string; required?: boolean;
@@ -745,6 +745,19 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
   const sval = typeof value === "string" ? value : value == null ? "" : String(value);
 
   switch (type) {
+    case "sunsystems_account": {
+      const selected = Array.isArray(value) ? value.join(", ") : sval;
+      if (dis) return <span className="py-0.5 text-sm text-foreground">{selected || <span className="italic text-muted-foreground">—</span>}</span>;
+      return (
+        <AccountMultiSelect
+          value={selected}
+          onChange={(next) => onChange(Array.isArray(next) ? next[0] ?? "" : next)}
+          multi={false}
+          placeholder="Select supplier…"
+          className="w-full"
+        />
+      );
+    }
     case "select":
       const selectOptions = [
         { value: "", label: "—" },

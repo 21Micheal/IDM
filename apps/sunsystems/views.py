@@ -1077,6 +1077,79 @@ class ItemsQueryView(APIView):
         return Response({"ok": True, "items": items, "count": len(items)})
 
 
+class ProductGroupsQueryView(APIView):
+    """Return product groups from SunSystems (Item/Query).
+
+    GET /api/v1/sunsystems/product-groups/?business_unit=PK1
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        import xml.etree.ElementTree as ET
+
+        config = SunSystemsConfig.from_mapping(effective_connection())
+        business_unit = str(
+            request.query_params.get("business_unit") or config.business_unit or "PK1"
+        )
+        ssc_payload = (
+            "<SSC>\n"
+            "  <ErrorContext/>\n"
+            "  <User/>\n"
+            "  <SunSystemsContext>\n"
+            f"    <BusinessUnit>{business_unit}</BusinessUnit>\n"
+            "  </SunSystemsContext>\n"
+            "  <Payload>\n"
+            "    <Select>\n"
+            "      <Item>\n"
+            "        <BaseItemUnit>.</BaseItemUnit>\n"
+            "        <Description>.</Description>\n"
+            "        <ProductGroup>.</ProductGroup>\n"
+            "        <ItemType>.</ItemType>\n"
+            "      </Item>\n"
+            "    </Select>\n"
+            "  </Payload>\n"
+            "</SSC>"
+        )
+
+        try:
+            client = SunSystemsClient(config)
+            response_xml = client.execute("Item", "Query", ssc_payload)
+        except SunSystemsError as exc:
+            return Response(
+                {"ok": False, "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        product_groups = []
+        try:
+            root = ET.fromstring(response_xml or "<SSC/>")
+            seen = set()
+            for item in root.findall(".//Item"):
+                code = (item.findtext("ProductGroup") or "").strip()
+                if not code or code in seen:
+                    continue
+                seen.add(code)
+                product_groups.append({
+                    "product_group": code,
+                    "description": (item.findtext("Description") or "").strip(),
+                    "item_type": (item.findtext("ItemType") or "").strip(),
+                    "base_item_unit": (item.findtext("BaseItemUnit") or "").strip(),
+                })
+        except ET.ParseError as exc:
+            return Response(
+                {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception as exc:
+            return Response(
+                {"ok": False, "error": f"Unexpected error processing SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"ok": True, "product_groups": product_groups, "count": len(product_groups)})
+
+
 class AnalysisCodesQueryView(APIView):
     """Return analysis codes for ONE SunSystems dimension (AnalysisCodes/Query).
 

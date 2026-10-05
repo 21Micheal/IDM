@@ -112,7 +112,7 @@ export interface CalcConfig {
 export type TableColumnType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
   | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "percentage" | "url" | "multi_select" | "image" | "external";
+  | "percentage" | "url" | "multi_select" | "image" | "external" | "sunsystems_account";
 
 export interface TableColumn {
   id: string;
@@ -627,6 +627,11 @@ export interface SunSystemsUi {
   vlabBase?: string;
   /** VLAB label number for the transaction/amount value line (default "2"). */
   vlabTrans?: string;
+  /** Constant PurchaseOrderReference emitted when the template has no
+   *  "Purchase order number" field. Blank uses the runtime-generated LPO no. */
+  poNumberConst?: string;
+  /** Constant Comment / description on the purchase-order header. */
+  poComment?: string;
 }
 export interface SunSystemsConfig {
   ui?: SunSystemsUi;
@@ -1162,6 +1167,7 @@ function cellPlaceholder(c: TableColumn): string {
     case "url": return "https://…";
     case "multi_select": return c.options?.[0] ? `${c.options[0]} +` : "Select many…";
     case "image": return "🖼 image";
+    case "sunsystems_account": return "Select supplier…";
     default: return "—";
   }
 }
@@ -1315,6 +1321,9 @@ export const FINANCE_FIELD_ROLES = [
   { value: "reference", label: "Transaction reference" },
   { value: "transaction_date", label: "Transaction date" },
   { value: "description", label: "Description" },
+  { value: "supplier_code", label: "Supplier code (PO)" },
+  { value: "po_number", label: "Purchase order number" },
+  { value: "product_group", label: "Product group (PO)" },
 ];
 // Budget roles (live-check side) — independent of the journal role.
 export const FINANCE_BUDGET_ROLES = [
@@ -1328,6 +1337,12 @@ export const FINANCE_COLUMN_ROLES = [
   { value: "account_code", label: "Account code" },
   { value: "description", label: "Description" },
   { value: "analysis", label: "Analysis code" },
+  { value: "item_code", label: "Item code" },
+  { value: "product_group", label: "Product group" },
+  { value: "uom", label: "Unit of measure" },
+  { value: "quantity", label: "Quantity" },
+  { value: "unit_price", label: "Unit price" },
+  { value: "currency", label: "Currency" },
 ];
 
 /* A field's budget role, tolerating the legacy combined `role` values
@@ -1542,12 +1557,76 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   // for the XML preview which expects a single-stage shape.
   void isMultiStage;
 
-  const purchaseAmountField = byRole("journal_amount");
+  const poNumberSpec = valueSpec(byRole("po_number"));
+  const supplierSpec = valueSpec(byRole("supplier_code"));
+  const productGroupSpec = valueSpec(byRole("product_group"));
+
+  // Analysis Dimensions 1-10 for the purchase order: the form's ten-slot
+  // analysis panel maps slot N -> AnalysisN, each with its configured
+  // AnalysisDimensionId; dedicated single-dimension fields override their slot.
+  const poAnalysis: Record<string, unknown> = {};
+  const panelField = fields.find(
+    (f) => f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode !== "single",
+  );
+  if (panelField) {
+    const slots = Array.isArray(panelField.external?.slots) && panelField.external!.slots!.length === 10
+      ? panelField.external!.slots!
+      : ANALYSIS_PANEL_SLOTS;
+    slots.forEach((dim, idx) => {
+      poAnalysis[String(idx + 1)] = {
+        category: { const: dim },
+        code: { field: panelField.key, key: String(idx + 1) },
+      };
+    });
+  }
+  for (const f of fields) {
+    if (f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode === "single" && f.external?.dimension) {
+      const slot = ANALYSIS_PANEL_SLOTS.indexOf(f.external.dimension) + 1;
+      if (slot > 0) poAnalysis[String(slot)] = { category: { const: f.external.dimension }, code: { field: f.key } };
+    }
+  }
+
+  // PurchaseOrder lines: one per requisition table that carries a value source
+  // (an explicit amount column, or quantity + unit price). Repeats per row.
+  const poLines: Record<string, unknown>[] = [];
+  for (const f of fields) {
+    if (f.type !== "table") continue;
+    const cols = f.columns ?? [];
+    const amtCol = cols.find((c) => c.sunsystems?.role === "line_amount");
+    const itemCol = cols.find((c) => c.sunsystems?.role === "item_code");
+    const productGroupCol = cols.find((c) => c.sunsystems?.role === "product_group");
+    const qtyCol = cols.find((c) => c.sunsystems?.role === "quantity");
+    const upCol = cols.find((c) => c.sunsystems?.role === "unit_price");
+    const acctCol = cols.find((c) => c.sunsystems?.role === "account_code");
+    const curCol = cols.find((c) => c.sunsystems?.role === "currency");
+    const analysisCols = cols.filter((c) => c.sunsystems?.role === "analysis");
+    if (!amtCol && !(qtyCol && upCol)) continue;
+    const lineAnalysis: Record<string, unknown> = {};
+    for (const c of analysisCols) lineAnalysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
+    poLines.push({
+      repeat_over: f.key,
+      account_code: acctCol ? { row_field: acctCol.key } : { const: f.sunsystems?.account ?? ui.accountCode ?? "" },
+      ...(itemCol
+        ? { item_code: { row_field: itemCol.key } }
+        : (ui.itemCode ? { item_code: { const: ui.itemCode } } : {})),
+      ...(productGroupCol
+        ? { product_group: { row_field: productGroupCol.key } }
+        : (productGroupSpec ? { product_group: productGroupSpec } : {})),
+      ...(curCol ? { currency: { row_field: curCol.key } } : (currencySpec ? { currency: currencySpec } : {})),
+      quantity: qtyCol ? { row_field: qtyCol.key } : { const: ui.quantity || "1" },
+      ...(upCol ? { unit_price: { row_field: upCol.key } } : {}),
+      ...(amtCol ? { amount: { row_field: amtCol.key } } : {}),
+      ...(Object.keys(lineAnalysis).length ? { analysis: lineAnalysis } : {}),
+    });
+  }
+
   const journal = ui.journalEnabled
     ? postingKind === "purchase_order"
       ? {
         enabled: true,
-        post_on: "approved",
+        // The procurement hook fires the synthetic "fully_approved" trigger when
+        // the LPO phase completes (intermediate approvals never post).
+        post_on: "fully_approved",
         component: "PurchaseOrder",
         method: "CreateOrAmend",
         context: {
@@ -1555,28 +1634,27 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           ...(ui.budgetCode ? { budget_code: { const: ui.budgetCode } } : {}),
         },
         ...(currencySpec ? { currency: currencySpec } : {}),
-        ...(referenceSpec ? { reference: referenceSpec } : {}),
-        ...(dateSpec ? { date: dateSpec } : {}),
         purchase_order: {
-          supplier_code: { const: ui.supplierCode || "81105" },
-          transaction_type: { const: ui.purchaseTransactionType || "ASSETS" },
+          // PO reference: a "Purchase order number" field, a fixed constant, or
+          // (default) the LPO number reserved when the LPO document is created.
+          reference: poNumberSpec
+            ? { ...poNumberSpec, default: ui.poNumberConst || "" }
+            : (ui.poNumberConst ? { const: ui.poNumberConst } : { source: "lpo_number" }),
+          // The source requisition's reference becomes SecondReference.
+          ...(referenceSpec ? { second_reference: referenceSpec } : {}),
+          // A bound supplier field wins, but an empty one falls back to the
+          // configured constant so an unfilled RFQ cannot block posting.
+          supplier_code: supplierSpec
+            ? { ...supplierSpec, default: ui.supplierCode || "81105" }
+            : { const: ui.supplierCode || "81105" },
+          ...(descSpec ? { comment: descSpec } : (ui.poComment ? { comment: { const: ui.poComment } } : {})),
           invoice_address_code: { const: ui.invoiceAddressCode || "0000000000" },
-          item_code: { const: ui.itemCode || "ITM29" },
-          account_code: { const: ui.accountCode || "" },
-          analysis10_category: { const: ui.analysis10Category ?? "11" },
-          analysis10_code: { const: ui.analysis10Code ?? "E" },
-          // quantity / unit_price: only emit when the operator has set them;
-          // the backend defaults quantity to "1"and unit_price to the total amount.
-          ...(ui.quantity ? { quantity: { const: ui.quantity } } : {}),
-          ...(ui.unitPrice ? { unit_price: { const: ui.unitPrice } } : {}),
-          // VLAB numbers: only emit when explicitly set; backend defaults to 1 and 2.
-          ...(ui.vlabBase ? { vlab_base_num: { const: ui.vlabBase } } : {}),
-          ...(ui.vlabTrans ? { vlab_trans_num: { const: ui.vlabTrans } } : {}),
-          ...(purchaseAmountField ? { amount: { field: purchaseAmountField.key } } : {}),
-          ...(currencySpec ? { currency: currencySpec } : {}),
-          ...(referenceSpec ? { reference: referenceSpec } : {}),
           ...(dateSpec ? { date: dateSpec } : {}),
-          ...(descSpec ? { description: descSpec } : {}),
+          ...(currencySpec ? { currency: currencySpec } : {}),
+          vlab_base_num: { const: ui.vlabBase || "7" },
+          vlab_trans_num: { const: ui.vlabTrans || "9" },
+          ...(Object.keys(poAnalysis).length ? { analysis: poAnalysis } : {}),
+          lines: poLines,
         },
       }
       : {
@@ -2396,6 +2474,7 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
   { value: "url", label: "URL / Link" },
   { value: "multi_select", label: "Multi-select" },
   { value: "external", label: "External" },
+  { value: "sunsystems_account", label: "SunSystems supplier" },
 ];
 
 /* ── Formula reference ────────────────────────────────────────────────────
@@ -2917,7 +2996,7 @@ function ColumnConfigModal({
                       />
                     </Row>
                   )}
-                  {(draft.external?.source ?? "items") !== "analysis_codes" && (() => {
+                  {(draft.external?.source ?? "items") === "items" && (() => {
                     const targets = siblingColumns.filter((c) => c.id !== draft.id && c.key);
                     if (targets.length === 0) return null;
                     return (
@@ -4541,7 +4620,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                       onChange={(e) => onUpdate({ external: { ...(field.external ?? { source: "items" }), multi: e.target.checked } })}
                       className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
                   </InspectorRow>
-                  {(() => {
+                  {field.external?.source === "items" && (() => {
                     const targets = allFields.filter((f) => f.id !== field.id && f.key && f.type !== "button");
                     if (targets.length === 0) return null;
                     return (
@@ -4955,6 +5034,13 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
         <div className={cn(base, "flex items-center justify-between gap-1 text-muted-foreground")}>
           <span className="truncate">Select {externalSourceLabel(col.external?.source, false)}…</span>
           <Package className="h-3 w-3 flex-shrink-0" />
+        </div>
+      );
+    case "sunsystems_account":
+      return (
+        <div className={cn(base, "flex items-center justify-between gap-1 text-muted-foreground")}>
+          <span className="truncate">Select supplier from SunSystems…</span>
+          <Building2 className="h-3 w-3 flex-shrink-0" />
         </div>
       );
     case "file":
@@ -6953,6 +7039,18 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
   const journalTableLines = fields.filter((f) => f.type === "table" && isJournalLineSource(f)).length;
   const postingKind = ui.postingKind ?? "journal";
   const purchaseAmountLabel = roleLabel("journal_amount");
+  const poNumberLabel = roleLabel("po_number");
+  const poSupplierLabel = roleLabel("supplier_code");
+  const poLineTables = fields.filter(
+    (f) => f.type === "table" && (f.columns ?? []).some((c) =>
+      ["line_amount", "item_code", "quantity", "unit_price"].includes(c.sunsystems?.role ?? "")),
+  );
+  const analysisPanelField = fields.find(
+    (f) => f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode !== "single",
+  );
+  const analysisSlots = Array.isArray(analysisPanelField?.external?.slots) && analysisPanelField!.external!.slots!.length === 10
+    ? analysisPanelField!.external!.slots!
+    : ANALYSIS_PANEL_SLOTS;
   const stageOptions = processSteps.some((s) => s.value === "approved")
     ? processSteps
     : [...processSteps, { value: "approved", label: "Approved" }];
@@ -7071,10 +7169,12 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 <>
                   <div className="space-y-1.5"><span className={label}>Supplier code</span>
                     <input className={cn(iCls, "font-mono")} value={ui.supplierCode ?? "81105"} onChange={(e) => setUi({ supplierCode: e.target.value })} placeholder="81105" /></div>
-                  <div className="space-y-1.5"><span className={label}>Transaction type</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.purchaseTransactionType ?? "ASSETS"} onChange={(e) => setUi({ purchaseTransactionType: e.target.value })} placeholder="ASSETS" /></div>
                   <div className="space-y-1.5"><span className={label}>Invoice address</span>
                     <input className={cn(iCls, "font-mono")} value={ui.invoiceAddressCode ?? "0000000000"} onChange={(e) => setUi({ invoiceAddressCode: e.target.value })} placeholder="0000000000" /></div>
+                  <div className="space-y-1.5"><span className={label}>PO number (fixed)</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.poNumberConst ?? ""} onChange={(e) => setUi({ poNumberConst: e.target.value })} placeholder="auto: generated LPO no." /></div>
+                  <div className="space-y-1.5"><span className={label}>Comment</span>
+                    <input className={iCls} value={ui.poComment ?? ""} onChange={(e) => setUi({ poComment: e.target.value })} placeholder="e.g. Purchase of Cabinets" /></div>
                   <div className="space-y-1.5"><span className={label}>Item code</span>
                     <input className={cn(iCls, "font-mono")} value={ui.itemCode ?? "ITM29"} onChange={(e) => setUi({ itemCode: e.target.value })} placeholder="ITM29" /></div>
                   <div className="space-y-1.5"><span className={label}>Account code</span>
@@ -7101,6 +7201,34 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
               <div><span className={label}>Description</span><div className="mt-1 text-[#1F2933]">{roleLabel("description")}</div></div>
               {postingKind === "purchase_order" && <div><span className={label}>Amount</span><div className="mt-1 text-[#1F2933]">{purchaseAmountLabel}</div></div>}
             </div>
+            {postingKind === "purchase_order" && (
+              <div className="space-y-2 border border-[#E1E5E8] bg-[#F8FAFB] p-3 text-xs">
+                <div>
+                  <span className={label}>PO lines</span>
+                  <div className="mt-1 text-[#1F2933]">
+                    {poLineTables.length
+                      ? poLineTables.map((t) => t.label || t.key).join(", ")
+                      : <span className="text-amber-600">No line table — tag a table column as Line amount / Quantity / Unit price.</span>}
+                  </div>
+                </div>
+                <div>
+                  <span className={label}>Supplier source</span>
+                  <div className="mt-1 text-[#1F2933]">{poSupplierLabel !== "—" ? poSupplierLabel : (ui.supplierCode || "81105 (constant)")}</div>
+                </div>
+                <div>
+                  <span className={label}>PO number source</span>
+                  <div className="mt-1 text-[#1F2933]">{poNumberLabel !== "—" ? poNumberLabel : (ui.poNumberConst || "generated LPO number")}</div>
+                </div>
+                <div>
+                  <span className={label}>Analysis 1–10</span>
+                  <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[#1F2933]">
+                    {analysisSlots.map((dim, idx) => (
+                      <div key={`${dim}-${idx}`}>{idx + 1}. {analysisDimensionName(dim)} <span className="font-mono text-[10px] text-[#5E6870]">{dim}</span></div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
             {postingKind === "journal" && (
               <>
                 <div className="space-y-2">
@@ -7204,12 +7332,12 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 </>
               ) : (
                 <>
-                  LPO amount binding: <b className="text-[#1F2933]">{purchaseAmountLabel}</b>.
-                  {purchaseAmountLabel === "—" && <span className="text-amber-600"> Bind one amount field as Journal line amount.</span>}
+                  LPO lines from tables: <b className="text-[#1F2933]">{poLineTables.length}</b> table block{poLineTables.length !== 1 ? "s" : ""}.
+                  {poLineTables.length === 0 && <span className="text-amber-600"> Tag a table column as Line amount, or Quantity + Unit price.</span>}
                 </>
               )}
             </div>
-            {(postingKind === "purchase_order" ? purchaseAmountLabel !== "—" : journalFieldLines + journalTableLines > 0) && (
+            {(postingKind === "purchase_order" ? poLineTables.length > 0 : journalFieldLines + journalTableLines > 0) && (
               <button
                 type="button"
                 onClick={() => setShowXml(true)}
