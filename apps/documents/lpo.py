@@ -13,7 +13,7 @@ it without either side reaching into the other.
 from __future__ import annotations
 
 import logging
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 logger = logging.getLogger(__name__)
 
@@ -622,23 +622,40 @@ def _user_name(user) -> str:
 
 
 def amount_in_words(amount, currency: str = "") -> str:
-    """Render a money amount as words, e.g. ``One Thousand Two Hundred And 50/100``."""
-    value = _dec(amount)
+    """Render a money amount with its currency and named minor units."""
+    value = _dec(amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     negative = value < 0
     value = abs(value)
     whole = int(value)
-    cents = int((value - whole) * 100 + Decimal("0.5"))
+    minor = int((value - whole) * 100)
     words = _int_to_words(whole) or "Zero"
-    text = words
-    if cents:
-        text = f"{text} And {cents:02d}/100"
+    currency_code = _as_text(currency).strip()
+    minor_unit = _currency_minor_unit(currency_code)
+    text = f"{words} {currency_code}" if currency_code else words
+    if minor:
+        unit = minor_unit[0] if minor == 1 else minor_unit[1]
+        text = f"{text} And {_int_to_words(minor)} {unit}"
     else:
         text = f"{text} Only"
-    if currency:
-        text = f"{text} {currency}"
     if negative:
         text = f"Minus {text}"
     return text
+
+
+def _currency_minor_unit(currency: str) -> tuple[str, str]:
+    """Return singular/plural names for common currency subdivisions."""
+    code = currency.upper()
+    if code in {"GBP", "UKP", "POUND", "POUNDS", "STERLING"}:
+        return "Penny", "Pence"
+    if code in {"AED", "BHD", "KWD"}:
+        return "Fil", "Fils"
+    if code == "OMR":
+        return "Baisa", "Baisa"
+    if code == "SAR":
+        return "Halala", "Halalas"
+    if code in {"JPY", "KRW", "CLP", "VND", "XAF", "XOF"}:
+        return "Sen", "Sen"
+    return "Cent", "Cents"
 
 
 def _int_to_words(number: int) -> str:
