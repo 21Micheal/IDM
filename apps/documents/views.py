@@ -499,11 +499,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             ).values("document_id")
 
             # INVOLVEMENT: own docs, an ACTIVE workflow task (including delegated),
-            # an LPO relationship the user generated/last approved, a PENDING
+            # a generated LPO the user initiated, a PENDING
             # signature assignment, or an active share. Tasks and signature
             # assignments must be status-filtered because their rows persist after
-            # action; the explicit LPO relationship is the completed-approver view
-            # exception.
+            # action; the generated LPO remains visible to its initiating/final
+            # approver, while its source requisition follows normal visibility.
             from apps.accounts.delegation import active_delegations_qs
             from apps.documents.file_streaming import lpo_participation_filter
             delegated_task_filter = models.Q()
@@ -630,7 +630,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     models.Q(uploaded_by=user) |                         # Own uploads (always visible)
                     models.Q(owned_by=user) |                             # Owned documents (always visible)  
                     models.Q(workflow_instance__tasks__assigned_to=user, workflow_instance__tasks__status__in=["in_progress", "held"]) |  # Work queue (always visible)
-                    lpo_participation  # LPO generator/final approver keeps requisition and generated PO visible
+                    lpo_participation  # LPO generator/final approver keeps the generated LPO visible
                 ).distinct()
 
         # Trash visibility: the list shows either live docs or Trash (?trash=true).
