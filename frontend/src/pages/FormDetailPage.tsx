@@ -19,7 +19,7 @@
 
 import { Suspense, useEffect, useRef, useState, useMemo } from "react";
 import { extractApiError } from "@/lib/apiError";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useNavigate, useLocation, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
 import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
@@ -124,6 +124,7 @@ type TabId = "workflow" | "details" | "history" | "comments" | "audit";
 export default function FormDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const qc = useQueryClient();
   const user = useAuthStore((s) => s.user);
 
@@ -175,7 +176,9 @@ export default function FormDetailPage() {
     : formData?.lpo_document_id
       ? [{ id: formData.lpo_document_id, reference: formData.lpo_reference }]
       : [];
-  const [selectedLpoId, setSelectedLpoId] = useState<string | null>(null);
+  const [selectedLpoId, setSelectedLpoId] = useState<string | null>(
+    (location.state as { selectedLpoId?: string } | null)?.selectedLpoId ?? null,
+  );
   const selectedLpo = generatedLpos.find((lpo) => lpo.id === selectedLpoId) || generatedLpos[0];
   const generatedLpoId = selectedLpo?.id;
   const generatedLpoReference = selectedLpo?.reference || formData?.lpo_reference;
@@ -381,8 +384,8 @@ export default function FormDetailPage() {
             <p className="mt-2 text-sm text-[#5E6870]">This form is no longer available.</p>
           </div>
         </div>
-        <Link to="/forms" className="mt-6 inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#246d9c]">
-          <ArrowLeft className="h-4 w-4" /> Back to Forms
+        <Link to="/list" className="mt-6 inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#246d9c]">
+          <ArrowLeft className="h-4 w-4" /> Back to Requisitions
         </Link>
       </div>
     );
@@ -401,8 +404,8 @@ export default function FormDetailPage() {
           </div>
         </div>
         <div className="mt-6 flex gap-3">
-          <Link to="/forms" className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
-            Back to Forms
+          <Link to="/list" className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
+            Back to Requisitions
           </Link>
           <Link to={`/documents/${id}`} className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#246d9c]">
             Open in Documents
@@ -911,8 +914,9 @@ export default function FormDetailPage() {
               variant="bar"
               onBeforeApprove={savePendingFormEditsBeforeApproval}
               onCompleted={() => {
-                setWorkflowActionCompleted(true);
-                void qc.invalidateQueries({ queryKey: ["form", id] });
+                setWorkflowActionCompleted(false);
+                void qc.invalidateQueries({ queryKey: ["requisitions", "pool"] });
+                navigate("/list", { replace: true, state: { openLpoFor: id } });
               }}
             />
           </Suspense>
@@ -979,7 +983,7 @@ export default function FormDetailPage() {
             <div className="flex justify-center pb-5">
               <button
                 type="button"
-                onClick={() => navigate(-1)}
+                onClick={() => navigate("/list", { replace: true })}
                 className="inline-flex items-center bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors"
               >
                 OK

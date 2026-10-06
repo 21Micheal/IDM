@@ -283,9 +283,30 @@ def _row_line_item(row: dict, columns: list) -> dict:
                     return _as_text(raw)
         return ""
 
-    description = pick("description")
-    item_code = pick("item")
-    item = description or item_code
+    def pick_role(role: str) -> str | None:
+        for column in columns:
+            sunsystems = column.get("sunsystems") or {}
+            if sunsystems.get("role") == role:
+                return _as_text(row.get(column.get("key")))
+        return None
+
+    # A role mapping is the schema contract. Labels remain a fallback for
+    # tables created before SunSystems role mapping was available.
+    role_description = pick_role("description")
+    description = role_description if role_description is not None else pick("description")
+    role_item_code = pick_role("item_code")
+    item_code = role_item_code if role_item_code is not None else pick("item")
+    item_column = next((column for column in columns if (column.get("sunsystems") or {}).get("role") == "item_code"), None)
+    if item_column is None:
+        item_column = next((
+            column for column in columns
+            if "item" in str(column.get("label", "")).lower()
+            and "description" not in str(column.get("label", "")).lower()
+        ), {})
+    external = item_column.get("external") if isinstance(item_column, dict) else {}
+    is_sunsystems_item = isinstance(external, dict) and external.get("source") == "items"
+    item_description = _query_item_description(item_code) if item_code and is_sunsystems_item else ""
+    item = " — ".join(part for part in (item_code, item_description) if part)
     if not item:
         item = " — ".join(
             part for part in (pick("purpose"), pick("destination")) if part
@@ -326,7 +347,10 @@ def _row_line_item(row: dict, columns: list) -> dict:
     return {
         "number": 0,
         "item": item,
-        "description": description or item,
+        # The line description is entered explicitly on the requisition. Keep
+        # it separate from the SunSystems item's own description shown beside
+        # its code in the Item column.
+        "description": description,
         "uom": uom,
         "quantity": quantity,
         "unit_price": unit_price,
@@ -388,6 +412,42 @@ def _supplier_details(values: dict, meta: dict, sections: list, *, table_key=Non
         resolved = _query_supplier_details(code)
         return code, resolved.get("name", ""), resolved.get("email", ""), resolved.get("phone", ""), resolved.get("address", "")
     return "", name, email, phone, address
+
+
+def _query_item_description(code: str) -> str:
+    """Resolve the SunSystems description for an item code used on an LPO."""
+    if not code:
+        return ""
+    try:
+        from django.core.cache import cache
+        cached = cache.get(f"lpo-item-description:{code}")
+        if cached is not None:
+            return cached
+
+        import xml.etree.ElementTree as ET
+        from xml.sax.saxutils import escape
+        from apps.sunsystems.client import SunSystemsClient, SunSystemsConfig
+        from apps.sunsystems.models import effective_connection
+
+        config = SunSystemsConfig.from_mapping(effective_connection())
+        business_unit = escape(config.business_unit or "PK1")
+        item_code = escape(code)
+        payload = (
+            "<SSC><ErrorContext/><User/>"
+            f"<SunSystemsContext><BusinessUnit>{business_unit}</BusinessUnit></SunSystemsContext>"
+            "<Payload><Filter>"
+            f"<Item name=\"/Item/ItemCode\" operator=\"EQU\" value=\"{item_code}\"/>"
+            "</Filter><Select><Item><ItemCode>.</ItemCode><Description>.</Description>"
+            "</Item></Select></Payload></SSC>"
+        )
+        response = SunSystemsClient(config).execute("Item", "Query", payload)
+        item = ET.fromstring(response or "<SSC/>").find(".//Item")
+        description = (item.findtext("Description") or "").strip() if item is not None else ""
+        cache.set(f"lpo-item-description:{code}", description, 3600)
+        return description
+    except Exception:
+        logger.exception("Could not resolve SunSystems item %s for LPO", code)
+        return ""
 
 
 def _form_supplier_value(values: dict, sections: list, *, table_key=None):

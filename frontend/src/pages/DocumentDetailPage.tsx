@@ -285,10 +285,10 @@ export default function DocumentDetailPage() {
     refetchInterval: LOCK_STATUS_POLL_MS,
   });
 
-  // Redirect form documents to the dedicated Forms page
+  // Redirect form documents to the requisition form detail route.
   useEffect(() => {
     if (doc && (doc as any).metadata?.form?.sections) {
-      navigate(`/forms/${doc.id}`, { replace: true });
+      navigate(`/${doc.id}`, { replace: true });
     }
   }, [doc, navigate]);
 
@@ -1432,7 +1432,17 @@ export default function DocumentDetailPage() {
                       <span className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Current approver</span>
                     </div>
                     <Suspense fallback={<div className="text-sm text-muted-foreground">Loading workflow actions…</div>}>
-                      <WorkflowActionPanel task={activeTask} documentId={id!} onCompleted={() => setWorkflowActionCompleted(true)} />
+                      <WorkflowActionPanel
+                        task={activeTask}
+                        documentId={id!}
+                        onCompleted={() => {
+                          if ((doc as any)?.metadata?.form?.sections) {
+                            navigate("/list", { replace: true, state: { openLpoFor: id } });
+                            return;
+                          }
+                          setWorkflowActionCompleted(true);
+                        }}
+                      />
                     </Suspense>
                   </div>
                 )}

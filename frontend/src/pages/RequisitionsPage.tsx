@@ -8,10 +8,10 @@
  * form from the template editor.
  */
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import { Plus, Search as SearchIcon, X, ClipboardList, Loader2 } from "lucide-react";
+import { Plus, Search as SearchIcon, X, ClipboardList, Loader2, FileText } from "lucide-react";
 import { documentsAPI, sunsystemsAPI } from "@/services/api";
 import StatusBadge from "@/components/documents/StatusBadge";
 import CustomListbox from "@/components/ui/CustomListbox";
@@ -35,6 +35,14 @@ function getReqDepartment(doc: any): string {
   return doc?.department_name || doc?.uploaded_by_department_name || doc?.uploaded_by?.department_name || "—";
 }
 
+function getLpoDocuments(doc: any): Array<{ id: string; reference?: string }> {
+  const form = doc?.metadata?.form;
+  if (Array.isArray(form?.lpo_documents)) return form.lpo_documents;
+  return form?.lpo_document_id
+    ? [{ id: form.lpo_document_id, reference: form.lpo_reference }]
+    : [];
+}
+
 function formatMoney(amount: number | null, currency?: string) {
   if (amount === null) return "—";
   try {
@@ -46,6 +54,8 @@ function formatMoney(amount: number | null, currency?: string) {
 
 export default function RequisitionsPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const openLpoFor = (location.state as { openLpoFor?: string } | null)?.openLpoFor;
   const user = useAuthStore((s) => s.user);
   const showDepartmentColumn = Boolean(user?.has_admin_access || (user?.group_names ?? []).includes("HOD"));
   const [search, setSearch] = useState("");
@@ -62,6 +72,7 @@ export default function RequisitionsPage() {
     queryFn: () =>
       documentsAPI.list({ is_form: true, ordering: "-created_at", page: 1, page_size: STATS_POOL_SIZE }).then((r) => r.data),
     staleTime: 15_000,
+    refetchInterval: openLpoFor ? 1_200 : false,
   });
 
   const { data: supplierAccounts } = useQuery({
@@ -75,6 +86,26 @@ export default function RequisitionsPage() {
     const results = ((poolData?.results ?? []) as any[]).filter((d) => Boolean(d?.metadata?.form?.sections));
     return results;
   }, [poolData]);
+
+  useEffect(() => {
+    if (!openLpoFor) return;
+    const target = poolRows.find((doc: any) => doc.id === openLpoFor);
+    const lpos = getLpoDocuments(target);
+    if (target && lpos.length) {
+      navigate(`/${target.id}`, {
+        replace: true,
+        state: { selectedLpoId: lpos[0].id },
+      });
+    }
+  }, [openLpoFor, poolRows, navigate]);
+
+  useEffect(() => {
+    if (!openLpoFor) return;
+    const timeout = window.setTimeout(() => {
+      navigate("/list", { replace: true, state: null });
+    }, 15_000);
+    return () => window.clearTimeout(timeout);
+  }, [openLpoFor, navigate]);
 
   const departmentOptions = useMemo(
     () =>
@@ -231,6 +262,7 @@ export default function RequisitionsPage() {
                 {showDepartmentColumn && <th className="px-5 py-3 font-medium">Department</th>}
                 <th className="px-5 py-3 font-medium">Amount</th>
                 <th className="px-5 py-3 font-medium">Status</th>
+                <th className="px-5 py-3 font-medium">LPO</th>
                 <th className="px-5 py-3 font-medium">Created</th>
               </tr>
             </thead>
@@ -252,6 +284,24 @@ export default function RequisitionsPage() {
                   {showDepartmentColumn && <td className="px-5 py-3 text-[#5E6870]">{getReqDepartment(doc)}</td>}
                   <td className="px-5 py-3 text-[#1F2933]">{formatMoney(getReqAmount(doc), doc.currency)}</td>
                   <td className="px-5 py-3"><StatusBadge status={doc.status} /></td>
+                  <td className="px-5 py-3">
+                    <div className="flex flex-wrap gap-1.5">
+                      {getLpoDocuments(doc).map((lpo, index) => (
+                        <button
+                          key={lpo.id}
+                          type="button"
+                          title={`Open purchase order ${lpo.reference || index + 1}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            navigate(`/${doc.id}`, { state: { selectedLpoId: lpo.id } });
+                          }}
+                          className="inline-flex items-center gap-1 border border-[#A7CDE3] bg-[#EEF6FB] px-2 py-1 text-[11px] font-semibold text-[#206D99] hover:bg-[#DDEFF9]"
+                        >
+                          <FileText className="h-3 w-3" /> {lpo.reference || `LPO ${index + 1}`}
+                        </button>
+                      ))}
+                    </div>
+                  </td>
                   <td className="px-5 py-3 text-[#5E6870]">
                     {doc.created_at ? formatDistanceToNow(new Date(doc.created_at), { addSuffix: true }) : "—"}
                   </td>

@@ -1217,7 +1217,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         from types import SimpleNamespace
         from django.core.files.base import ContentFile
         from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
-        from apps.documents.access import document_allows_form_edit, user_owns_document
+        from apps.documents.access import document_allows_form_edit
         from apps.documents.file_streaming import user_can_edit_document
         from apps.templates_engine.tasks import generate_built_pdf
 
@@ -1337,20 +1337,14 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 if key not in values or (not field_visible and not has_analysis_value(values.get(key))):
                     values[key] = prior_values[key]
 
-        owns_document = user_owns_document(request.user, doc) or getattr(request.user, "has_admin_access", False)
-        owner_only_conditional_edit = process_step.strip().lower() != "returned"
         locked_keys = set()
         for section in sections:
             section_editable = is_editable(section, prior_render, process_step, viewer)
-            if section.get("editableWhen") and owner_only_conditional_edit and not owns_document:
-                section_editable = False
             for f in section.get("fields", []):
                 key = f.get("key")
                 if not key:
                     continue
                 field_editable = is_editable(f, prior_render, process_step, viewer)
-                if f.get("editableWhen") and owner_only_conditional_edit and not owns_document:
-                    field_editable = False
                 if not (section_editable and field_editable):
                     locked_keys.add(key)
         for key in locked_keys:
