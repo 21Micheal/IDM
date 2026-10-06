@@ -499,13 +499,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             ).values("document_id")
 
             # INVOLVEMENT: own docs, an ACTIVE workflow task (including delegated),
-            # a PENDING signature assignment, or an active share. Both the task and
-            # the signature assignment must be status-filtered — a WorkflowTask row
-            # and a SignatureRequestSigner row both persist after being actioned,
-            # they just change status, so an unfiltered join keeps granting visibility
-            # forever after the action is complete.
+            # an LPO relationship the user generated/last approved, a PENDING
+            # signature assignment, or an active share. Tasks and signature
+            # assignments must be status-filtered because their rows persist after
+            # action; the explicit LPO relationship is the completed-approver view
+            # exception.
             from apps.accounts.delegation import active_delegations_qs
+            from apps.documents.file_streaming import lpo_participation_filter
             delegated_task_filter = models.Q()
+            lpo_participation = lpo_participation_filter(user)
             for delegation in active_delegations_qs(delegate=user):
                 clause = models.Q(
                     workflow_instance__tasks__assigned_to_id=delegation.delegator_id,
@@ -522,6 +524,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     workflow_instance__tasks__status__in=["in_progress", "held"],
                 ) |
                 delegated_task_filter |
+                lpo_participation |
                 models.Q(
                     signature_request__signers__signer=user,
                     signature_request__signers__status="pending",
@@ -626,7 +629,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     models.Q(document_type_id__in=user_view_doc_types) |  # Has VIEW permission on type
                     models.Q(uploaded_by=user) |                         # Own uploads (always visible)
                     models.Q(owned_by=user) |                             # Owned documents (always visible)  
-                    models.Q(workflow_instance__tasks__assigned_to=user, workflow_instance__tasks__status__in=["in_progress", "held"])  # Work queue (always visible)
+                    models.Q(workflow_instance__tasks__assigned_to=user, workflow_instance__tasks__status__in=["in_progress", "held"]) |  # Work queue (always visible)
+                    lpo_participation  # LPO generator/final approver keeps requisition and generated PO visible
                 ).distinct()
 
         # Trash visibility: the list shows either live docs or Trash (?trash=true).

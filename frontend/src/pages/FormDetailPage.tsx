@@ -136,7 +136,12 @@ export default function FormDetailPage() {
   const [showJournalXml, setShowJournalXml] = useState(false);
   const [comment, setComment] = useState("");
   const [auditPage, setAuditPage] = useState(1);
-  const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
+  const [workflowActionCompleted, setWorkflowActionCompleted] = useState(
+    Boolean((location.state as { workflowActionCompleted?: boolean } | null)?.workflowActionCompleted),
+  );
+  const [awaitingLpo, setAwaitingLpo] = useState(
+    Boolean((location.state as { awaitLpo?: boolean } | null)?.awaitLpo),
+  );
   const [isSigningOpen, setIsSigningOpen] = useState(false);
   const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
   // Required fields that failed the last save/submit attempt. Kept in state
@@ -159,7 +164,7 @@ export default function FormDetailPage() {
     queryFn: () => documentsAPI.get(id!).then((r) => r.data),
     enabled: !!id,
     ...QUERY_SHORT_STALE,
-    refetchInterval: 8_000,
+    refetchInterval: awaitingLpo ? 1_000 : 8_000,
   });
 
   const formData = (doc?.metadata as Record<string, any> | undefined)?.form as
@@ -188,11 +193,21 @@ export default function FormDetailPage() {
 
   useEffect(() => {
     if (!generatedLpos.length) return;
+    setAwaitingLpo(false);
     if (!generatedLpos.some((lpo) => lpo.id === selectedLpoId)) setSelectedLpoId(generatedLpos[0].id);
     setLpoModalOpen(true);
     setLpoMinimized(false);
     setWorkflowActionCompleted(false);
   }, [lpoSetKey]);
+
+  useEffect(() => {
+    if (!awaitingLpo || generatedLpos.length) return;
+    const timeout = window.setTimeout(() => {
+      setAwaitingLpo(false);
+      setWorkflowActionCompleted(true);
+    }, 30_000);
+    return () => window.clearTimeout(timeout);
+  }, [awaitingLpo, generatedLpos.length]);
 
   const lpoPdfQuery = useQuery({
     queryKey: ["lpo-pdf", generatedLpoId],
@@ -915,8 +930,34 @@ export default function FormDetailPage() {
               onBeforeApprove={savePendingFormEditsBeforeApproval}
               onCompleted={() => {
                 setWorkflowActionCompleted(false);
-                void qc.invalidateQueries({ queryKey: ["requisitions", "pool"] });
-                navigate("/list", { replace: true, state: { openLpoFor: id } });
+                const phase = String(formData?.workflow_phase ?? doc?.builder_workflow_phase ?? "").toLowerCase();
+                const lpoApprovalSteps = (workflowData?.steps ?? []).filter((step) =>
+                  step.kind === "task"
+                    && /^approver-\d+$/.test(step.id)
+                    && (!step.phase || step.phase === "lpo"),
+                );
+                const activeOrder = activeTask?.step?.order ?? 0;
+                const laterLpoStepExists = lpoApprovalSteps.some((step) =>
+                  Number(step.id.slice("approver-".length)) > activeOrder,
+                );
+                const isLastLpoApprover = phase === "lpo"
+                  && activeOrder > 0
+                  && lpoApprovalSteps.some((step) => step.id === `approver-${activeOrder}`)
+                  && !laterLpoStepExists;
+
+                if (!isLastLpoApprover) {
+                  setAwaitingLpo(false);
+                  setWorkflowActionCompleted(true);
+                  return;
+                }
+                if (generatedLpos.length) {
+                  setSelectedLpoId(generatedLpos[0].id);
+                  setLpoModalOpen(true);
+                  setLpoMinimized(false);
+                  return;
+                }
+                setAwaitingLpo(true);
+                void qc.invalidateQueries({ queryKey: ["form", id] });
               }}
             />
           </Suspense>
@@ -959,6 +1000,18 @@ export default function FormDetailPage() {
                   <p>Loading the LPO PDF.</p>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {awaitingLpo && !generatedLpos.length && (
+        <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
+          <div className="flex w-full max-w-sm items-center gap-3 border border-[#C8CDD2] bg-white px-6 py-5 shadow-2xl">
+            <Loader2 className="h-5 w-5 shrink-0 animate-spin text-[#287EAD]" />
+            <div>
+              <p className="text-sm font-bold text-[#1F2933]">Approval complete</p>
+              <p className="mt-1 text-xs text-[#5E6870]">Preparing the generated LPO…</p>
             </div>
           </div>
         </div>

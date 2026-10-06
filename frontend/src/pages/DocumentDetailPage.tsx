@@ -1437,7 +1437,31 @@ export default function DocumentDetailPage() {
                         documentId={id!}
                         onCompleted={() => {
                           if ((doc as any)?.metadata?.form?.sections) {
-                            navigate("/list", { replace: true, state: { openLpoFor: id } });
+                            const phase = String(
+                              (doc as any)?.metadata?.form?.workflow_phase
+                                ?? (doc as any)?.builder_workflow_phase
+                                ?? "",
+                            ).toLowerCase();
+                            const order = activeTask.step?.order ?? 0;
+                            const lpoSteps = (workflowData?.steps ?? []).filter((step) =>
+                              step.kind === "task"
+                                && /^approver-\d+$/.test(step.id)
+                                && (!step.phase || step.phase === "lpo"),
+                            );
+                            const laterLpoStepExists = lpoSteps.some((step) =>
+                              Number(step.id.slice("approver-".length)) > order,
+                            );
+                            const isLastLpoApprover = phase === "lpo"
+                              && order > 0
+                              && lpoSteps.some((step) => step.id === `approver-${order}`)
+                              && !laterLpoStepExists;
+                            navigate(`/${id}`, {
+                              replace: true,
+                              state: {
+                                awaitLpo: isLastLpoApprover,
+                                workflowActionCompleted: !isLastLpoApprover,
+                              },
+                            });
                             return;
                           }
                           setWorkflowActionCompleted(true);

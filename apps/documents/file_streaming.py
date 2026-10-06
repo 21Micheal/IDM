@@ -31,6 +31,35 @@ SIGN_SALT = "idm.document-file"
 SIGN_MAX_AGE = 30 * 60  # 30 minutes
 
 
+def lpo_participation_filter(user):
+    """Return a queryset filter for requisitions/LPOs tied to this LPO approver.
+
+    Object access already treats the LPO generator (normally the final
+    approver) as involved. The list queryset needs the matching predicate too,
+    because completed approvers no longer have an active workflow task.
+    """
+    from django.db.models import OuterRef, Q, Subquery
+    from apps.workflows.models import WorkflowTaskAction
+
+    latest_approval_actor = WorkflowTaskAction.objects.filter(
+        task__workflow_instance__document_id=OuterRef("source_document_id"),
+        action="approved",
+        actor__isnull=False,
+    ).order_by("-created_at").values("actor_id")[:1]
+    links = DocumentRelationship.objects.filter(
+        relation_type=DocumentRelationship.RelationType.REFERENCES,
+        note="Generated on LPO approval",
+    ).annotate(
+        last_approval_actor_id=Subquery(latest_approval_actor),
+    ).filter(
+        Q(created_by=user) | Q(last_approval_actor_id=user.id)
+    )
+    return (
+        Q(id__in=links.values("source_document_id"))
+        | Q(id__in=links.values("target_document_id"))
+    )
+
+
 def user_generated_lpo_for_document(user: User, doc: Document) -> bool:
     """Whether this user generated the LPO linked to/from this document."""
     if not user or not getattr(user, "is_authenticated", False):
@@ -70,12 +99,11 @@ def signed_file_urls_enabled() -> bool:
 
 def user_is_involved_with_document(user: User, doc: Document) -> bool:
     """Access is scoped to **involvement**: a non-admin may only reach a workflow
-    document if they uploaded/own it, currently hold an ACTIVE workflow task on
-    it, hold an active (non-revoked, unexpired) share, are a signer on an ad-hoc
-    signature request for it, or head the department it (or its uploader)
-    belongs to. Group permissions then decide *what* they can do with documents
-    they're involved in — they do NOT grant blanket access to every document of
-    a type."""
+    document if they uploaded/own it, currently hold an ACTIVE workflow task,
+    generated an LPO linked to it (or were its final approver), hold an active
+    share, are a pending signer, or head its department. Group permissions then
+    decide *what* they can do with documents they're involved in — they do NOT
+    grant blanket access to every document of a type."""
     if not user or not getattr(user, "is_authenticated", False):
         return False
     # Members of a "sees all documents" group are involved with everything.
