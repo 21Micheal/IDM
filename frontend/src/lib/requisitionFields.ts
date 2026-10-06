@@ -3,8 +3,9 @@ export type SupplierAccount = { account_code: string; description: string };
 type FormField = {
   key?: string;
   type?: string;
+  label?: string;
   sunsystems?: { role?: string };
-  columns?: { key?: string; sunsystems?: { role?: string } }[];
+  columns?: { key?: string; type?: string; label?: string; sunsystems?: { role?: string } }[];
 };
 
 const toNumber = (raw: unknown): number | null => {
@@ -82,11 +83,27 @@ export function getReqSupplier(doc: any, accounts: SupplierAccount[] = []): stri
     return [];
   };
 
-  const supplierKeys = fields
-    .filter((field) => field.type === "sunsystems_account" && field.key)
-    .map((field) => field.key!);
-  const candidates = supplierKeys.length
-    ? supplierKeys.map((key) => values[key])
-    : [values.supplier, values.supplier_name, doc?.supplier];
-  return Array.from(new Set(candidates.flatMap(namesOf))).join(", ") || "—";
+  const candidates: unknown[] = [];
+  for (const field of fields) {
+    const isSupplier = field.type === "sunsystems_account"
+      || field.sunsystems?.role === "supplier_code"
+      || norm(field.label).includes("supplier");
+    if (field.type === "table" && field.key) {
+      const rows = values[field.key];
+      if (!Array.isArray(rows)) continue;
+      const supplierColumns = (field.columns ?? []).filter((column) =>
+        column.type === "sunsystems_account"
+        || column.sunsystems?.role === "supplier_code"
+        || norm(column.label).includes("supplier"),
+      );
+      for (const column of supplierColumns) {
+        if (column.key) candidates.push(...rows.map((row: any) => row?.[column.key!]));
+      }
+    } else if (isSupplier && field.key) {
+      candidates.push(values[field.key]);
+    }
+  }
+  let supplierNames = candidates.flatMap(namesOf);
+  if (!supplierNames.length) supplierNames = [values.supplier, values.supplier_name, doc?.supplier].flatMap(namesOf);
+  return Array.from(new Set(supplierNames)).join(", ") || "—";
 }

@@ -22,12 +22,46 @@ from apps.documents.access import (
     document_allows_edit,
     document_allows_form_edit,
     is_built_form_document,
+    user_has_active_approval_task,
 )
-from apps.documents.models import DMSSettings, Document, DocumentShare, DocumentVersion
+from apps.documents.models import DMSSettings, Document, DocumentRelationship, DocumentShare, DocumentVersion
 from apps.workflows.models import WorkflowTask
 
 SIGN_SALT = "idm.document-file"
 SIGN_MAX_AGE = 30 * 60  # 30 minutes
+
+
+def user_generated_lpo_for_document(user: User, doc: Document) -> bool:
+    """Whether this user generated the LPO linked to/from this document."""
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    form = ((doc.metadata or {}).get("form") or {})
+    document_type = getattr(doc, "document_type", None)
+    is_requisition = str(form.get("workflow_type") or "").strip().lower() == "requisition"
+    is_lpo = str(getattr(document_type, "code", "") or "").strip().upper() == "LPO"
+    if not (is_requisition or is_lpo):
+        return False
+
+    link = DocumentRelationship.objects.filter(
+        relation_type=DocumentRelationship.RelationType.REFERENCES,
+        note="Generated on LPO approval",
+    ).filter(
+        models.Q(source_document=doc) | models.Q(target_document=doc)
+    ).select_related("source_document").first()
+    if not link:
+        return False
+    if link.created_by_id == user.id:
+        return True
+
+    # Older LPO records were attributed to the workflow starter. Also recognize
+    # the final approver recorded on the source requisition's latest approval.
+    from apps.workflows.models import WorkflowTaskAction
+    last_approval = WorkflowTaskAction.objects.filter(
+        task__workflow_instance__document=link.source_document,
+        action="approved",
+        actor__isnull=False,
+    ).select_related("actor").order_by("-created_at").first()
+    return bool(last_approval and last_approval.actor_id == user.id)
 
 
 def signed_file_urls_enabled() -> bool:
@@ -48,6 +82,8 @@ def user_is_involved_with_document(user: User, doc: Document) -> bool:
     if getattr(user, "sees_all_documents", False):
         return True
     if doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id:
+        return True
+    if user_generated_lpo_for_document(user, doc):
         return True
     # ACTIVE task only — a WorkflowTask row persists (under a new status) after
     # being actioned, so this must be status-filtered. Without it, an approver
@@ -196,6 +232,8 @@ def user_can_download_document(user: User, doc: Document) -> bool:
     # Must be involved AND have DOWNLOAD on the type.
     if not user_is_involved_with_document(user, doc):
         return False
+    if user_generated_lpo_for_document(user, doc):
+        return True
     perms = user.get_all_permissions_for_doctype(document_type_id, document=doc)
     return GroupAction.DOWNLOAD.value in perms
 
@@ -219,7 +257,11 @@ def user_can_edit_document(user: User, doc: Document) -> bool:
     if not user_is_involved_with_document(user, doc):
         return False
     perms = user.get_all_permissions_for_doctype(document_type_id, document=doc)
-    return GroupAction.EDIT.value in perms
+    return GroupAction.EDIT.value in perms or (
+        is_built_form_document(doc)
+        and GroupAction.APPROVE.value in perms
+        and user_has_active_approval_task(user, doc)
+    )
 
 
 def version_preview_storage_name(version_id: str) -> str:

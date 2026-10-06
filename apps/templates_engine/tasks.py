@@ -347,7 +347,7 @@ def generate_built_docx(template, values, sections=None) -> bytes:
 
 # ─── Document designer (WYSIWYG block layout) → DOCX ─────────────────────────
 
-_TOKEN_RE = re.compile(r"\{\{([a-zA-Z0-9_]+)\}\}")
+_TOKEN_RE = re.compile(r"\{\{([a-zA-Z0-9_.-]+)\}\}")
 # User placeholders the admin marks for the recipient to fill when editing the
 # generated document, e.g. [[Amount]]. Rendered as highlighted fill-in markers.
 _PLACEHOLDER_RE = re.compile(r"\[\[([^\]]+)\]\]")
@@ -920,6 +920,541 @@ def generate_designer_docx(design, values) -> bytes:
     return buf.getvalue()
 
 
+def generate_designer_pdf(design, values) -> bytes:
+    """Render a designer document directly with ReportLab, without LibreOffice."""
+    if isinstance((design or {}).get("pages"), list) and design.get("pages"):
+        return _generate_designer_pdf_v2(design, values)
+
+    from xml.sax.saxutils import escape as xml_escape
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
+    from reportlab.lib.pagesizes import A4, letter, legal, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        HRFlowable, Image as RLImage, PageBreak, Paragraph, SimpleDocTemplate,
+        Spacer, Table, TableStyle,
+    )
+
+    design = design or {}
+    theme = design.get("theme") or {}
+    page = design.get("page") or {}
+    blocks = design.get("blocks") or []
+    if not blocks and isinstance(design.get("pages"), list) and design["pages"]:
+        blocks = _design_pages_to_legacy_blocks(design)
+
+    page_size = {"A4": A4, "Letter": letter, "Legal": legal}.get(page.get("size", "A4"), A4)
+    if page.get("orientation") == "landscape":
+        page_size = landscape(page_size)
+    margin = page.get("margin") or {}
+    left = float(margin.get("left", 18)) * mm
+    right = float(margin.get("right", 18)) * mm
+    top = float(margin.get("top", 20)) * mm
+    bottom = float(margin.get("bottom", 20)) * mm
+    content_width = page_size[0] - left - right
+
+    def color(value, fallback):
+        candidate = str(value or fallback).lstrip("#")
+        if len(candidate) != 6:
+            candidate = fallback.lstrip("#")
+        try:
+            return colors.HexColor(f"#{candidate}")
+        except (TypeError, ValueError):
+            return colors.HexColor(f"#{fallback.lstrip('#')}")
+
+    body_color = color(theme.get("textColor"), "1F2933")
+    heading_color = color(theme.get("headingColor"), "0F2A3A")
+    accent_color = color(theme.get("accentColor"), "287EAD")
+    px_to_pt = lambda value, fallback: max(8, round(float(value) * 0.75)) if value else fallback
+    styles = getSampleStyleSheet()
+    body_style = ParagraphStyle(
+        "DesignerBody", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=px_to_pt(theme.get("baseFontSize"), 10), textColor=body_color,
+        leading=px_to_pt(theme.get("baseFontSize"), 10) * 1.3,
+    )
+    heading_style = ParagraphStyle(
+        "DesignerHeading", parent=body_style, fontName="Helvetica-Bold",
+        fontSize=14, leading=17, textColor=heading_color, spaceBefore=6, spaceAfter=4,
+    )
+    alignments = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT, "justify": TA_JUSTIFY}
+
+    def para(text, style=None, **kwargs):
+        rendered = xml_escape(_subst_tokens(text or "", values), {"'": "&#39;", '"': "&quot;"})
+        rendered = rendered.replace("\n", "<br/>")
+        return Paragraph(rendered, style or body_style, **kwargs)
+
+    story = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        alignment = alignments.get(block.get("align", "left"), TA_LEFT)
+        if kind == "heading":
+            level = int(block.get("level") or 2)
+            size = px_to_pt(block.get("fontSize"), {1: 18, 2: 14, 3: 12}.get(level, 14))
+            style = ParagraphStyle(
+                f"DesignerH{level}", parent=heading_style, fontSize=size,
+                leading=size * 1.2, alignment=alignment,
+                textColor=color(block.get("color"), "0F2A3A"),
+            )
+            story.extend([para(block.get("text"), style), Spacer(1, 3)])
+        elif kind in ("paragraph", "quote"):
+            size = px_to_pt(block.get("fontSize"), body_style.fontSize)
+            style = ParagraphStyle(
+                "DesignerQuote" if kind == "quote" else "DesignerParagraph",
+                parent=body_style,
+                fontName=("Helvetica-BoldOblique" if block.get("bold") and (block.get("italic") or kind == "quote")
+                          else "Helvetica-Bold" if block.get("bold")
+                          else "Helvetica-Oblique" if block.get("italic") or kind == "quote"
+                          else "Helvetica"),
+                fontSize=size, leading=size * 1.3, alignment=alignment,
+                textColor=color(block.get("color"), "1F2933"),
+                spaceAfter=6,
+            )
+            story.append(para(block.get("text"), style))
+        elif kind in ("bulleted_list", "numbered_list"):
+            list_style = ParagraphStyle("DesignerList", parent=body_style, leftIndent=14, firstLineIndent=-10)
+            for index, item in enumerate(block.get("items") or [], start=1):
+                bullet = "•" if kind == "bulleted_list" else f"{index}."
+                story.append(para(item, list_style, bulletText=bullet))
+        elif kind == "key_value":
+            rows = []
+            for pair in block.get("pairs") or []:
+                label = para(pair.get("label", ""), ParagraphStyle("KVLabel", parent=body_style, fontName="Helvetica-Bold"))
+                value = para(pair.get("value", ""))
+                rows.append([label, value])
+            if rows:
+                label_width = min(45 * mm, content_width * 0.4)
+                table = Table(rows, colWidths=[label_width, content_width - label_width], hAlign="LEFT")
+                table.setStyle(TableStyle([
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]))
+                story.extend([table, Spacer(1, 6)])
+        elif kind == "data_table":
+            columns = block.get("columns") or []
+            if columns:
+                if block.get("bound"):
+                    source = values.get(block.get("sourceKey") or "")
+                    rows = [
+                        [record.get(column.get("key", ""), "") for column in columns]
+                        for record in source if isinstance(record, dict)
+                    ] if isinstance(source, list) else []
+                    if not rows:
+                        rows = [[""] * len(columns) for _ in range(max(1, int(block.get("fillRows") or 3)))]
+                else:
+                    rows = block.get("rows") or []
+                data = [[para(column.get("label", ""), ParagraphStyle("TableHeader", parent=body_style, fontName="Helvetica-Bold", textColor=colors.white)) for column in columns]]
+                data.extend([
+                    [para(cell) for cell in (row if isinstance(row, list) else [])[:len(columns)]]
+                    + [para("")] * max(0, len(columns) - len(row if isinstance(row, list) else []))
+                    for row in rows
+                ])
+                table = Table(data, colWidths=[content_width / len(columns)] * len(columns), repeatRows=1, hAlign="LEFT")
+                table.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, 0), accent_color),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]))
+                story.extend([table, Spacer(1, 8)])
+        elif kind == "two_column":
+            table = Table([[para(block.get("left", "")), para(block.get("right", ""))]], colWidths=[content_width / 2] * 2)
+            table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 4)]))
+            story.extend([table, Spacer(1, 6)])
+        elif kind == "divider":
+            story.extend([HRFlowable(width="100%", thickness=0.7, color=color(block.get("color"), "C8CDD2")), Spacer(1, 5)])
+        elif kind == "spacer":
+            story.append(Spacer(1, max(0, float(block.get("height", 24))) * 0.75))
+        elif kind == "page_break":
+            story.append(PageBreak())
+        elif kind == "signature":
+            signatories = block.get("signatories") or []
+            if signatories:
+                rows = []
+                for start in range(0, len(signatories), 3):
+                    row = []
+                    for signatory in signatories[start:start + 3]:
+                        lines = [para(signatory.get("role", ""), heading_style), Spacer(1, 20), para("_______________________"), para("Signature")]
+                        if signatory.get("nameToken"):
+                            lines.append(para(f"Name: {signatory['nameToken']}"))
+                        if signatory.get("dateToken"):
+                            lines.append(para(f"Date: {signatory['dateToken']}"))
+                        row.append(lines)
+                    rows.append(row + [[]] * (3 - len(row)))
+                table = Table(rows, colWidths=[content_width / 3] * 3)
+                table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+                story.extend([table, Spacer(1, 8)])
+        elif kind in ("image", "logo"):
+            raw = _decode_data_url_image(block.get("src"))
+            if raw:
+                try:
+                    image = RLImage(BytesIO(raw))
+                    width = min(float(block.get("width") or 160) * 0.75, 120 * mm)
+                    ratio = image.imageHeight / max(image.imageWidth, 1)
+                    image.drawWidth, image.drawHeight = width, width * ratio
+                    story.append(image)
+                except Exception:
+                    story.append(para(block.get("alt") or "Image", body_style))
+            else:
+                story.append(para(block.get("alt") or ("Logo" if kind == "logo" else "Image"), body_style))
+
+    header = _design_band_to_legacy(design.get("header"))
+    footer = _design_band_to_legacy(design.get("footer"))
+
+    def draw_band(canv, band, y):
+        if not band.get("enabled"):
+            return
+        content = band.get("content") or {}
+        canv.saveState()
+        canv.setFillColor(body_color)
+        canv.setFont("Helvetica", 8)
+        width, _height = page_size
+        for slot, x, align in (("left", left, "left"), ("center", width / 2, "center"), ("right", width - right, "right")):
+            text = _subst_tokens(content.get(slot, ""), {**values, "page": canv.getPageNumber(), "pages": ""})
+            if align == "center":
+                canv.drawCentredString(x, y, text)
+            elif align == "right":
+                canv.drawRightString(x, y, text)
+            else:
+                canv.drawString(x, y, text)
+        canv.restoreState()
+
+    def on_page(canv, _doc):
+        draw_band(canv, header, page_size[1] - 10 * mm)
+        draw_band(canv, footer, 8 * mm)
+
+    buf = BytesIO()
+    pdf = SimpleDocTemplate(buf, pagesize=page_size, leftMargin=left, rightMargin=right, topMargin=top, bottomMargin=bottom)
+    pdf.build(story or [Spacer(1, 1)], onFirstPage=on_page, onLaterPages=on_page)
+    return buf.getvalue()
+
+
+def _generate_designer_pdf_v2(design, values) -> bytes:
+    """Render v2 page rows and columns without flattening the designer layout."""
+    from xml.sax.saxutils import escape as xml_escape
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    from reportlab.lib.pagesizes import A4, letter, legal, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import (
+        HRFlowable, Image as RLImage, KeepTogether, PageBreak, Paragraph,
+        SimpleDocTemplate, Spacer, Table, TableStyle,
+    )
+
+    page = design.get("page") or {}
+    theme = design.get("theme") or {}
+    pages = design.get("pages") or []
+    page_size = {"A4": A4, "Letter": letter, "Legal": legal}.get(page.get("size", "A4"), A4)
+    if page.get("orientation") == "landscape":
+        page_size = landscape(page_size)
+    margin = page.get("margin") or {}
+    left = float(margin.get("left", 18)) * mm
+    right = float(margin.get("right", 18)) * mm
+    top = float(margin.get("top", 20)) * mm
+    bottom = float(margin.get("bottom", 20)) * mm
+    content_width = page_size[0] - left - right
+    styles = getSampleStyleSheet()
+    text_color = colors.HexColor(str(theme.get("textColor", "#1F2933")))
+    heading_color = colors.HexColor(str(theme.get("headingColor", "#0F2A3A")))
+    accent = colors.HexColor(str(theme.get("accentColor", "#287EAD")))
+    base_size = max(8, round(float(theme.get("baseFontSize", 13)) * .75))
+    align_map = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
+
+    def as_color(value, fallback):
+        fallback_color = fallback if isinstance(fallback, colors.Color) else colors.HexColor(str(fallback))
+        if not value:
+            return fallback_color
+        try:
+            return colors.HexColor(str(value))
+        except (TypeError, ValueError):
+            return fallback_color
+
+    def para(raw, *, style=None, element=None):
+        element = element or {}
+        estyle = element.get("style") or {}
+        size = max(7, round(float(estyle.get("fontSize", base_size / .75)) * .75))
+        bold, italic = bool(estyle.get("bold")), bool(estyle.get("italic"))
+        font = "Helvetica-BoldOblique" if bold and italic else "Helvetica-Bold" if bold else "Helvetica-Oblique" if italic else "Helvetica"
+        if style is None:
+            style = ParagraphStyle(
+                "DesignerV2", parent=styles["Normal"], fontName=font,
+                fontSize=size, leading=size * float(theme.get("lineHeight", 1.25)),
+                textColor=as_color(estyle.get("color"), text_color),
+                alignment=align_map.get(estyle.get("textAlign"), TA_LEFT),
+                spaceBefore=float(estyle.get("marginTop", 0)) * .75,
+                spaceAfter=float(estyle.get("marginBottom", 2)) * .75,
+            )
+        rendered = xml_escape(_subst_tokens(str(raw or ""), values), {"'": "&#39;", '"': "&quot;"}).replace("\n", "<br/>")
+        if estyle.get("underline"):
+            rendered = f"<u>{rendered}</u>"
+        return Paragraph(rendered or "&#160;", style)
+
+    def render_element(element, available_width):
+        kind = element.get("type")
+        style = element.get("style") or {}
+        if kind in ("text", "note", "heading"):
+            text = element.get("text", "")
+            if kind == "heading":
+                level = int(element.get("level") or 2)
+                size = max(9, round(float(style.get("fontSize", {1: 24, 2: 18, 3: 16}.get(level, 18))) * .75))
+                pstyle = ParagraphStyle(
+                    f"DesignerV2Heading{level}", parent=styles["Normal"], fontName="Helvetica-Bold",
+                    fontSize=size, leading=size * 1.2, textColor=as_color(style.get("color"), heading_color),
+                    alignment=align_map.get(style.get("textAlign"), TA_LEFT),
+                    spaceBefore=float(style.get("marginTop", 0)) * .75,
+                    spaceAfter=float(style.get("marginBottom", 4)) * .75,
+                )
+                return [para(text, style=pstyle)]
+            return [para(text, element=element)]
+        if kind == "field_group":
+            fields = element.get("fields") or []
+            label_width = min(float(element.get("labelWidth") or 120) * .75, available_width * .45)
+            rows = [[para(field.get("label", ""), element={"style": {"bold": bool(field.get("boldLabel"))}}),
+                     para(field.get("value", ""), element={"style": {"bold": bool(field.get("boldValue"))}})] for field in fields]
+            table = Table(rows, colWidths=[label_width, max(10, available_width - label_width)], hAlign="LEFT")
+            table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 4), ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+            return [table]
+        if kind == "data_table":
+            columns = element.get("columns") or []
+            if not columns:
+                return []
+            source = values.get(element.get("sourceKey") or "")
+            rows = [[record.get(column.get("key", ""), "") for column in columns] for record in source if isinstance(record, dict)] if isinstance(source, list) else []
+            if not rows and not element.get("sourceKey"):
+                rows = element.get("staticRows") or []
+            if not rows and element.get("sourceKey"):
+                rows = [[""] * len(columns) for _ in range(max(1, int(element.get("previewRows") or 2)))]
+            widths = [available_width * max(1, float(column.get("width") or 1)) / sum(max(1, float(c.get("width") or 1)) for c in columns) for column in columns]
+            header_bg = as_color(element.get("headerBackground"), accent)
+            header_color = as_color(element.get("headerColor"), "#FFFFFF")
+            header_style = ParagraphStyle("DesignerV2TableHeader", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=max(7, base_size - 1), leading=base_size, textColor=header_color)
+            data = [[para(column.get("label", ""), style=header_style) for column in columns]]
+            data.extend([[para(row[i] if i < len(row) else "") for i in range(len(columns))] for row in rows])
+            summaries = element.get("summaries") or []
+            summary_spans = []
+            for summary in summaries:
+                values_for_summary = summary.get("values") or []
+                default_span = max(1, len(columns) - len(values_for_summary))
+                span = max(1, min(len(columns), int(summary.get("labelSpan") or default_span)))
+                summary_row = [para(summary.get("label", ""), element={"style": {"bold": bool(summary.get("bold", True)), "textAlign": "right"}})]
+                if span > 1:
+                    summary_row.extend([""] * (span - 1))
+                summary_row.extend(para(value, element={"style": {"bold": bool(summary.get("bold", True))}}) for value in values_for_summary)
+                summary_row.extend([""] * max(0, len(columns) - len(summary_row)))
+                data.append(summary_row[:len(columns)])
+                summary_spans.append((len(data) - 1, span))
+            table = Table(data, colWidths=widths, repeatRows=1, hAlign="LEFT")
+            pad = max(1, float(element.get("cellPadding", 4)) * .75)
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), header_bg),
+                ("TEXTCOLOR", (0, 0), (-1, 0), header_color),
+                ("GRID", (0, 0), (-1, -1), float((element.get("style") or {}).get("borderWidth", 1)) * .35, as_color((element.get("style") or {}).get("borderColor"), "#475569")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), pad), ("RIGHTPADDING", (0, 0), (-1, -1), pad),
+                ("TOPPADDING", (0, 0), (-1, -1), pad), ("BOTTOMPADDING", (0, 0), (-1, -1), pad),
+            ] + [("SPAN", (0, row_index), (span - 1, row_index)) for row_index, span in summary_spans if span > 1]))
+            return [table]
+        if kind in ("bulleted_list", "numbered_list"):
+            mark = "•" if kind == "bulleted_list" else None
+            return [Paragraph(xml_escape(_subst_tokens(str(item), values)), styles["Normal"], bulletText=mark) for item in (element.get("items") or [])]
+        if kind in ("image", "logo"):
+            raw = _decode_data_url_image(element.get("src"))
+            if raw:
+                image = RLImage(BytesIO(raw))
+                max_width = min(float(element.get("width") or 120) * .75, available_width)
+                ratio = image.imageHeight / max(image.imageWidth, 1)
+                image.drawWidth, image.drawHeight = max_width, max_width * ratio
+                return [image]
+            return [para(element.get("alt") or "")]
+        if kind == "signature_group":
+            signatures = element.get("signatories") or []
+            rows = []
+            for signature in signatures:
+                role = f"{signature.get('step')}. " if signature.get("step") else ""
+                rows.append([para(role + str(signature.get("role") or ""), element={"style": {"bold": True}}), para(""), para("")])
+                rows.append([para(_subst_tokens(str(signature.get("name") or ""), values)), para(""), para("Date: " + _subst_tokens(str(signature.get("date") or ""), values))])
+            if not rows:
+                return []
+            table = Table(rows, colWidths=[available_width * .42, available_width * .12, available_width * .46])
+            table.setStyle(TableStyle([("SPAN", (0, i), (2, i)) for i in range(0, len(rows), 2)] + [("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2)]))
+            return [table]
+        if kind == "divider":
+            return [HRFlowable(width="100%", thickness=float(style.get("borderWidth", 1)), color=as_color(style.get("borderColor"), "#94A3B8"))]
+        if kind in ("spacer", "box"):
+            return [Spacer(1, float(element.get("height") or style.get("minHeight") or 12) * .75)]
+        return []
+
+    story = []
+    for page_index, page_spec in enumerate(pages):
+        if page_index:
+            story.append(PageBreak())
+        for row in page_spec.get("rows") or []:
+            cells = row.get("columns") or []
+            if not cells:
+                continue
+            row_gap = float(row.get("gap", 0)) * .75
+            weights = [max(1, float(cell.get("width") or 1)) for cell in cells]
+            gaps_total = row_gap * (len(cells) - 1)
+            widths = [(content_width - gaps_total) * weight / sum(weights) for weight in weights]
+            rendered_cells = []
+            for cell, width in zip(cells, widths):
+                flowables = []
+                for element in cell.get("elements") or []:
+                    flowables.extend(render_element(element, width))
+                rendered_cells.append(flowables or [Spacer(1, 1)])
+            table = Table([rendered_cells], colWidths=widths, hAlign="LEFT")
+            commands = [("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), row_gap / 2), ("RIGHTPADDING", (0, 0), (-1, -1), row_gap / 2)]
+            for index, cell in enumerate(cells):
+                valign = {"center": "MIDDLE", "end": "BOTTOM"}.get(cell.get("verticalAlign"), "TOP")
+                commands.append(("VALIGN", (index, 0), (index, 0), valign))
+                pad = float(cell.get("padding", 0)) * .75
+                commands.extend([("TOPPADDING", (index, 0), (index, 0), pad), ("BOTTOMPADDING", (index, 0), (index, 0), pad)])
+                if cell.get("background"):
+                    commands.append(("BACKGROUND", (index, 0), (index, 0), as_color(cell.get("background"), "#FFFFFF")))
+                if cell.get("borderWidth"):
+                    bw = float(cell.get("borderWidth")) * .5
+                    bc = as_color(cell.get("borderColor"), "#CBD5E1")
+                    commands.extend((edge, (index, 0), (index, 0), bw, bc) for edge in ("BOX",))
+            table.setStyle(TableStyle(commands))
+            if row.get("marginTop"):
+                story.append(Spacer(1, float(row["marginTop"]) * .75))
+            story.append(KeepTogether(table) if row.get("keepTogether") else table)
+            if row.get("marginBottom"):
+                story.append(Spacer(1, float(row["marginBottom"]) * .75))
+
+    def band_row_heights(band):
+        if not band or not band.get("enabled"):
+            return []
+        heights = []
+        for row in band.get("rows") or []:
+            cells = row.get("columns") or []
+            weights = [max(1, float(cell.get("width") or 1)) for cell in cells]
+            cell_widths = [content_width * weight / max(1, sum(weights)) for weight in weights]
+            row_height = max(float(row.get("minHeight") or 12) * .75, 12)
+            for cell, cell_width in zip(cells, cell_widths):
+                for element in cell.get("elements") or []:
+                    kind = element.get("type")
+                    if kind in ("text", "note", "heading"):
+                        raw = _subst_tokens(str(element.get("text") or ""), {**values, "page": 1, "pages": len(pages)})
+                        style = element.get("style") or {}
+                        font_size = max(6, float(style.get("fontSize", 10)) * .75)
+                        font = "Helvetica-Bold" if kind == "heading" or style.get("bold") else "Helvetica"
+                        text_style = ParagraphStyle(
+                            "BandMeasure", parent=styles["Normal"], fontName=font,
+                            fontSize=font_size, leading=font_size * 1.15,
+                            textColor=as_color(style.get("color"), text_color),
+                            alignment=align_map.get(style.get("textAlign"), TA_CENTER),
+                        )
+                        paragraph = Paragraph(xml_escape(raw).replace("\n", "<br/>"), text_style)
+                        _, height = paragraph.wrap(max(1, cell_width - 4), 10000)
+                        row_height = max(row_height, height + 4)
+                    elif kind in ("image", "logo"):
+                        image_data = _decode_data_url_image(element.get("src"))
+                        if image_data:
+                            reader = ImageReader(BytesIO(image_data))
+                            image_width, image_height = reader.getSize()
+                            width = min(float(element.get("width") or 80) * .75, 60, max(1, cell_width - 4))
+                            row_height = max(row_height, width * image_height / max(image_width, 1) + 4)
+            heights.append(row_height)
+        return heights
+
+    def draw_band(canv, band, y_top, *, border_below=False):
+        if not band or not band.get("enabled"):
+            return
+        canv.saveState()
+        usable = content_width
+        y = y_top
+        logo_widths = {}
+        row_heights = band_row_heights(band)
+        for row, row_height in zip(band.get("rows") or [], row_heights):
+            cells = row.get("columns") or []
+            weights = [max(1, float(cell.get("width") or 1)) for cell in cells]
+            x = left
+            for cell, weight in zip(cells, weights):
+                cell_width = usable * weight / max(1, sum(weights))
+                for element in cell.get("elements") or []:
+                    kind = element.get("type")
+                    if kind in ("text", "note", "heading"):
+                        raw = _subst_tokens(str(element.get("text") or ""), {**values, "page": canv.getPageNumber(), "pages": len(pages)})
+                        font_size = max(6, float((element.get("style") or {}).get("fontSize", 10)) * .75)
+                        style = element.get("style") or {}
+                        font = "Helvetica-Bold" if kind == "heading" or style.get("bold") else "Helvetica"
+                        text_style = ParagraphStyle(
+                            "BandText", parent=styles["Normal"], fontName=font,
+                            fontSize=font_size, leading=font_size * 1.15,
+                            textColor=as_color(style.get("color"), text_color),
+                            alignment=align_map.get(style.get("textAlign"), TA_CENTER),
+                        )
+                        paragraph = Paragraph(xml_escape(raw).replace("\n", "<br/>"), text_style)
+                        _, text_height = paragraph.wrap(max(1, cell_width - 4), row_height)
+                        paragraph.drawOn(canv, x + 2, y - text_height + 2)
+                    elif kind in ("image", "logo"):
+                        raw = _decode_data_url_image(element.get("src"))
+                        if raw:
+                            source_key = element.get("src") or ""
+                            width = logo_widths.setdefault(source_key, min(float(element.get("width") or 80) * .75, 60))
+                            width = min(width, max(1, cell_width - 4))
+                            image = ImageReader(BytesIO(raw))
+                            iw, ih = image.getSize()
+                            height = width * ih / max(iw, 1)
+                            canv.drawImage(image, x + (cell_width - width) / 2, y - height, width=width, height=height, preserveAspectRatio=True, mask="auto")
+                x += cell_width
+            y -= row_height
+        if band.get("border"):
+            canv.setStrokeColor(accent)
+            canv.setLineWidth(.6)
+            border_y = y - 4 if border_below else y_top - 4
+            canv.line(left, border_y, page_size[0] - right, border_y)
+        canv.restoreState()
+
+    header, footer = design.get("header") or {}, design.get("footer") or {}
+    if header.get("enabled"):
+        # Keep body content below the actual logo/text height, with a small gap.
+        top = max(top, 8 * mm + sum(band_row_heights(header)) + 8 * mm)
+
+    def on_page(canv, _doc):
+        watermark = design.get("watermark") or {}
+        if watermark.get("enabled") and watermark.get("value"):
+            canv.saveState()
+            try:
+                opacity = float(watermark.get("opacity", .15))
+                canv.setFillAlpha(opacity / 100 if opacity > 1 else opacity)
+            except (AttributeError, TypeError, ValueError):
+                pass
+            canv.translate(page_size[0] / 2, page_size[1] / 2)
+            canv.rotate(float(watermark.get("rotation", -25)))
+            mark = _subst_tokens(str(watermark["value"]), values)
+            if watermark.get("kind") == "image":
+                raw = _decode_data_url_image(mark)
+                if raw:
+                    image = ImageReader(BytesIO(raw))
+                    width = min(float(watermark.get("width", 500)) * .75, page_size[0] * .8)
+                    iw, ih = image.getSize()
+                    height = width * ih / max(iw, 1)
+                    canv.drawImage(image, -width / 2, -height / 2, width=width, height=height, preserveAspectRatio=True, mask="auto")
+            else:
+                canv.setFillColor(accent)
+                canv.setFont("Helvetica-Bold", min(48, page_size[0] / 9))
+                canv.drawCentredString(0, 0, mark)
+            canv.restoreState()
+        draw_band(canv, header, page_size[1] - 8 * mm, border_below=True)
+        draw_band(canv, footer, 12 * mm)
+
+    buffer = BytesIO()
+    pdf = SimpleDocTemplate(buffer, pagesize=page_size, leftMargin=left, rightMargin=right, topMargin=top, bottomMargin=bottom)
+    pdf.build(story or [Spacer(1, 1)], onFirstPage=on_page, onLaterPages=on_page)
+    return buffer.getvalue()
+
+
 # ─── Uploaded template fillers ───────────────────────────────────────────────
 
 def fill_docx_template(template, values) -> bytes:
@@ -1105,12 +1640,12 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
             values, user=user, reference_number=reference_number, title=title
         )
         render_values = descriptors_to_names(merge_values)
-        docx_content = generate_designer_docx(template.design, render_values)
         if fmt == "pdf":
-            content = docx_to_pdf(docx_content)
+            content = generate_designer_pdf(template.design, render_values)
             filename = f"{title}.pdf"
             content_type = "application/pdf"
         else:
+            docx_content = generate_designer_docx(template.design, render_values)
             content = docx_content
             filename = f"{title}.docx"
             content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"

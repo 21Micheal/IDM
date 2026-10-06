@@ -245,14 +245,29 @@ def user_owns_document(user, document: Document) -> bool:
     )
 
 
+def user_has_active_approval_task(user, document: Document) -> bool:
+    """Whether the user can act on an active approval task for this document."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    try:
+        from apps.accounts.delegation import tasks_visible_to_user
+        return tasks_visible_to_user(user).filter(
+            workflow_instance__document_id=document.id,
+            workflow_instance__status="in_progress",
+            status="in_progress",
+        ).exists()
+    except Exception:
+        return False
+
+
 def document_allows_form_edit(document: Document, *, user=None) -> bool:
     """Whether an in-app built-template form may be edited (stage-aware).
 
     Creation-stage rules mirror ``document_allows_edit`` (workflow task gates).
-    Later lifecycle stages allow owner-only edits when the form schema exposes
-    editable fields at the document's current process step — e.g. imprest
-    retirement sections that unlock after the first approval. Pending approval
-    remains locked; approvers act through workflow actions, not form edits.
+    Later lifecycle stages allow owner edits when the form schema exposes
+    editable fields at the current process step. During approval, only a user
+    with an active assigned task may edit; section and field rules still control
+    which inputs are enabled.
     """
     if not is_built_form_document(document):
         return False
@@ -272,6 +287,12 @@ def document_allows_form_edit(document: Document, *, user=None) -> bool:
         pass
 
     if not form_has_editable_fields(document, user=user):
+        return False
+
+    if user_has_active_approval_task(user, document):
+        return True
+
+    if stage == ACCESS_STAGE_APPROVAL:
         return False
 
     if stage == ACCESS_STAGE_AFTER_APPROVAL:
@@ -341,6 +362,12 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
         document=document,
     )
     perms = filter_permissions_for_document(user, document, perms)
+    if (
+        is_built_form_document(document)
+        and GroupAction.APPROVE.value in perms
+        and user_has_active_approval_task(user, document)
+    ):
+        perms.add(GroupAction.EDIT.value)
     # Involvement implies the ability to view (the access gates allow it), even
     # if the group's action set doesn't explicitly include VIEW.
     perms = set(perms) | {GroupAction.VIEW.value}

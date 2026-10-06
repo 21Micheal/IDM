@@ -953,6 +953,17 @@ class AccountsQueryView(APIView):
             "        <EMailAddress>.</EMailAddress>\n"
             "        <SupplierCode>.</SupplierCode>\n"
             "        <SupplierName>.</SupplierName>\n"
+            "        <SupplierAddress>\n"
+            "          <AddressLine1>.</AddressLine1>\n"
+            "          <AddressLine2>.</AddressLine2>\n"
+            "          <AddressLine3>.</AddressLine3>\n"
+            "          <AddressLine4>.</AddressLine4>\n"
+            "          <AddressLine5>.</AddressLine5>\n"
+            "          <Country>.</Country>\n"
+            "          <PostalCode>.</PostalCode>\n"
+            "          <TelephoneNumber>.</TelephoneNumber>\n"
+            "          <TownCity>.</TownCity>\n"
+            "        </SupplierAddress>\n"
             "      </Supplier>\n"
             "    </Select>\n"
             "  </Payload>\n"
@@ -977,11 +988,27 @@ class AccountsQueryView(APIView):
                     continue
                 description = (supplier.findtext("SupplierName") or supplier.findtext("Description") or "").strip()
                 email = (supplier.findtext("EMailAddress") or "").strip()
+                address_node = supplier.find("SupplierAddress")
+                address_lines = [
+                    (address_node.findtext(f"AddressLine{i}") or "").strip()
+                    for i in range(1, 6)
+                ] if address_node is not None else []
+                address = " ".join(filter(None, address_lines))
+                if address_node is not None:
+                    address = ", ".join(filter(None, (
+                        address,
+                        (address_node.findtext("TownCity") or "").strip(),
+                        (address_node.findtext("PostalCode") or "").strip(),
+                        (address_node.findtext("Country") or "").strip(),
+                    )))
+                phone = (address_node.findtext("TelephoneNumber") or "").strip() if address_node is not None else ""
                 accounts.append({
                     "account_code":  code,
                     "account_type":  account_type,  # Preserve backward compatibility
                     "description":   description,
                     "email":        email,
+                    "phone":        phone,
+                    "address":      address,
                 })
         except ET.ParseError as exc:
             return Response(

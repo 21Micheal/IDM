@@ -250,7 +250,7 @@ export default function ExternalSelect({
   if (valueArray.length === 0) {
     triggerText = <span className="text-[#8C969E]">{displayPlaceholder}</span>;
   } else if (valueArray.length === 1) {
-    triggerText = <span className="truncate text-[#1F2933]">{showNameOutside ? valueArray[0] : labelFor(valueArray[0])}</span>;
+    triggerText = <span className="truncate font-semibold !text-[#111827]">{showNameOutside ? valueArray[0] : labelFor(valueArray[0])}</span>;
   } else {
     triggerText = (
       <span className="truncate text-[#1F2933]">
@@ -274,7 +274,7 @@ export default function ExternalSelect({
         <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-[#5E6870]" />
       </button>
       {showNameOutside && (
-        <p className="mt-1 break-words text-xs leading-snug text-[#5E6870]" title={selectedName}>
+        <p className="mt-1 break-words text-xs font-medium leading-snug text-[#374151]" title={selectedName}>
           {selectedName}
         </p>
       )}

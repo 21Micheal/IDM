@@ -162,8 +162,51 @@ export default function FormDetailPage() {
   });
 
   const formData = (doc?.metadata as Record<string, any> | undefined)?.form as
-    | { sections?: unknown[]; values?: Record<string, unknown> }
+    | {
+        sections?: unknown[];
+        values?: Record<string, unknown>;
+        lpo_document_id?: string;
+        lpo_reference?: string;
+        lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string }>;
+      }
     | undefined;
+  const generatedLpos = formData?.lpo_documents?.length
+    ? formData.lpo_documents
+    : formData?.lpo_document_id
+      ? [{ id: formData.lpo_document_id, reference: formData.lpo_reference }]
+      : [];
+  const [selectedLpoId, setSelectedLpoId] = useState<string | null>(null);
+  const selectedLpo = generatedLpos.find((lpo) => lpo.id === selectedLpoId) || generatedLpos[0];
+  const generatedLpoId = selectedLpo?.id;
+  const generatedLpoReference = selectedLpo?.reference || formData?.lpo_reference;
+  const lpoSetKey = generatedLpos.map((lpo) => lpo.id).join(",");
+  const [lpoModalOpen, setLpoModalOpen] = useState(false);
+  const [lpoMinimized, setLpoMinimized] = useState(false);
+
+  useEffect(() => {
+    if (!generatedLpos.length) return;
+    if (!generatedLpos.some((lpo) => lpo.id === selectedLpoId)) setSelectedLpoId(generatedLpos[0].id);
+    setLpoModalOpen(true);
+    setLpoMinimized(false);
+    setWorkflowActionCompleted(false);
+  }, [lpoSetKey]);
+
+  const lpoPdfQuery = useQuery({
+    queryKey: ["lpo-pdf", generatedLpoId],
+    queryFn: () => documentsAPI.downloadAsPdf(generatedLpoId!).then((r) => r.data as Blob),
+    enabled: Boolean(generatedLpoId),
+  });
+  const [lpoPdfUrl, setLpoPdfUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!lpoPdfQuery.data) {
+      setLpoPdfUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(lpoPdfQuery.data);
+    setLpoPdfUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [lpoPdfQuery.data]);
 
   useEffect(() => {
     if (!doc) return;
@@ -201,6 +244,22 @@ export default function FormDetailPage() {
     ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
+
+  // Approval tasks can arrive after the document query. Enter edit mode when
+  // the reviewer's active task resolves; TemplateForm still enforces each
+  // section/field's own visibility and editability rules.
+  useEffect(() => {
+    if (!doc || formEditing || activeTask?.status !== "in_progress") return;
+    if (isFinalFormProcessStep(doc.builder_process_step || doc.status)) return;
+    const permissions = doc.permissions ?? [];
+    const hasEditPermission = Boolean(user?.has_admin_access)
+      || permissions.includes("edit")
+      || permissions.includes("approve");
+    if (!hasEditPermission) return;
+    setFormValues({ ...(formData?.values ?? {}) });
+    formDirtyRef.current = false;
+    setFormEditing(true);
+  }, [doc, activeTask, formEditing, formData?.values, user?.has_admin_access]);
 
   const { data: workflowData, isLoading: workflowDataLoading } = useQuery({
     queryKey: ["form-workflow", id],
@@ -359,12 +418,13 @@ export default function FormDetailPage() {
   const canComment = hasAdminAccess || (doc.permissions ?? []).includes("comment");
   const canApprove = hasAdminAccess || (doc.permissions ?? []).includes("approve");
   const hasConditionalEditability = formHasConditionalEditability(formData.sections);
+  const hasActiveApprovalTask = Boolean(activeTask && activeTask.status === "in_progress");
 
   function formProcessStep() {
     return doc.builder_process_step || doc.status;
   }
   function canEditConditionalSections() {
-    return hasAdminAccess || isOwnerOrSubmitter;
+    return hasAdminAccess || isOwnerOrSubmitter || hasActiveApprovalTask;
   }
 
   const step = formProcessStep();
@@ -374,10 +434,11 @@ export default function FormDetailPage() {
   // conditional editability rules. Builder-defined field-level editableWhen rules
   // still apply normally through TemplateForm — this only controls the "Edit form" button.
   const isProcurementApprovedStage = ["requisition_approved", "rfq_approved", "lpo_approved"].includes(step);
-  const canEditForm = canEdit
-    && !isApprovalLockedStatus(step)
+  const canEditForm = (canEdit || hasActiveApprovalTask)
     && !isFinalFormProcessStep(step)
-    && (doc.status !== "approved" || isProcurementApprovedStage || (isPostApprovalEditable && hasConditionalEditability && canEditConditionalSections()));
+    && (hasActiveApprovalTask
+      || (!isApprovalLockedStatus(step)
+        && (doc.status !== "approved" || isProcurementApprovedStage || (isPostApprovalEditable && hasConditionalEditability && canEditConditionalSections()))));
 
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
@@ -409,6 +470,9 @@ export default function FormDetailPage() {
     formDirtyRef.current = false;
     setFormEditing(true);
   };
+  const retryLpoPreview = async () => {
+    await lpoPdfQuery.refetch();
+  };
   const saveForm = () => {
     const missing = requiredFieldLabels(formData.sections ?? [], formValues, {
       groupNames: user?.group_names ?? [],
@@ -422,6 +486,11 @@ export default function FormDetailPage() {
     }
     setMissingFields([]);
     updateFormMutation.mutate();
+  };
+  const savePendingFormEditsBeforeApproval = async () => {
+    if (formEditing && formDirtyRef.current) {
+      await updateFormMutation.mutateAsync();
+    }
   };
 
   // Leaving edit mode throws away unsaved work — always confirm first.
@@ -532,6 +601,25 @@ export default function FormDetailPage() {
                       showJournalXml && "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/50",
                     )}>
                     <FileCode className="h-3.5 w-3.5" /> Journal XML
+                  </button>
+                )}
+                {generatedLpos.length > 1 && (
+                  <select aria-label="Select LPO to download" value={generatedLpoId} onChange={(event) => setSelectedLpoId(event.target.value)} className="max-w-44 border border-[#C8CDD1] bg-white px-2 py-1.5 text-xs text-[#1F2933]">
+                    {generatedLpos.map((lpo, index) => <option key={lpo.id} value={lpo.id}>{lpo.table_label || `LPO ${index + 1}`} · {lpo.reference || index + 1}</option>)}
+                  </select>
+                )}
+                {generatedLpoId && (lpoPdfUrl ? (
+                  <a href={lpoPdfUrl} download={`Purchase_Order_${generatedLpoReference || "LPO"}.pdf`} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99]">
+                    <Download className="h-3.5 w-3.5" /> Download LPO
+                  </a>
+                ) : (
+                  <button type="button" disabled className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#5E6870] disabled:opacity-70">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Preparing LPO
+                  </button>
+                ))}
+                {generatedLpoId && (
+                  <button type="button" onClick={() => { setLpoMinimized(false); setLpoModalOpen(true); }} className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
+                    <Eye className="h-3.5 w-3.5" /> Open LPO
                   </button>
                 )}
                 {!formEditing && canEditForm && (
@@ -821,13 +909,58 @@ export default function FormDetailPage() {
               task={activeTask}
               documentId={id!}
               variant="bar"
-              onCompleted={() => setWorkflowActionCompleted(true)}
+              onBeforeApprove={savePendingFormEditsBeforeApproval}
+              onCompleted={() => {
+                setWorkflowActionCompleted(true);
+                void qc.invalidateQueries({ queryKey: ["form", id] });
+              }}
             />
           </Suspense>
         </div>
       )}
 
-      {workflowActionCompleted && !activeTask && (
+      {generatedLpoId && (lpoMinimized || !lpoModalOpen) && (
+        <div className="fixed bottom-4 right-4 z-[250] flex items-center gap-3 border border-[#AEB5BB] bg-white px-4 py-3 shadow-xl">
+          <button type="button" onClick={() => { setLpoMinimized(false); setLpoModalOpen(true); }} className="text-left">
+            <span className="block text-sm font-semibold text-[#1F2933]">LPO {generatedLpoReference || "generated"}</span>
+            <span className="block text-xs text-[#5E6870]">Open purchase order{generatedLpos.length > 1 ? ` (${generatedLpos.length} generated)` : ""}</span>
+          </button>
+        </div>
+      )}
+
+      {generatedLpoId && lpoModalOpen && !lpoMinimized && (
+        <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/50 p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={`LPO ${generatedLpoReference || "document"}`}>
+          <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden border border-[#AEB5BB] bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
+              <div className="min-w-0">
+                <h2 className="truncate text-sm font-bold text-[#1F2933]">Purchase Order {generatedLpoReference || ""}</h2>
+                <p className="text-xs text-[#5E6870]">Generated LPO document</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <button type="button" aria-label="Minimize LPO" onClick={() => setLpoMinimized(true)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><PanelRightClose className="h-4 w-4" /></button>
+                <button type="button" aria-label="Close LPO" onClick={() => setLpoModalOpen(false)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><X className="h-4 w-4" /></button>
+              </div>
+            </div>
+            <div className="min-h-[50vh] flex-1 bg-[#E9EEF1]">
+              {lpoPdfUrl ? (
+                <iframe title={`LPO ${generatedLpoReference || "preview"}`} src={lpoPdfUrl} className="h-[72vh] w-full bg-white" />
+              ) : lpoPdfQuery.isError ? (
+                <div className="flex h-[50vh] flex-col items-center justify-center gap-2 px-6 text-center text-sm text-[#5E6870]">
+                  <p>Could not load the LPO PDF. Retry, or reload the page to try again.</p>
+                  <button type="button" onClick={retryLpoPreview} className="border border-[#AEB5BB] bg-white px-3 py-2 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">Retry preview</button>
+                </div>
+              ) : (
+                <div className="flex h-[50vh] flex-col items-center justify-center gap-3 px-6 text-center text-sm text-[#46545E]">
+                  <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
+                  <p>Loading the LPO PDF.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {workflowActionCompleted && !activeTask && !generatedLpos.length && (
         <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
           <div
             role="alertdialog"

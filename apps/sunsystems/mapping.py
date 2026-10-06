@@ -121,8 +121,21 @@ def resolve_value(spec: Any, values: dict, row: dict | None = None, *, default: 
     ``row`` when inside a ``repeat_over`` line)."""
     if spec is None:
         return default
+    if isinstance(spec, list):
+        for candidate in spec:
+            resolved = resolve_value(candidate, values, row)
+            if resolved:
+                return resolved
+        return default
     if not isinstance(spec, dict):
         return _to_str(spec)
+
+    if isinstance(spec.get("sources"), list):
+        for candidate in spec["sources"]:
+            resolved = resolve_value(candidate, values, row)
+            if resolved:
+                return resolved
+        return _to_str(spec.get("default") or default)
 
     if "const" in spec:
         raw = spec.get("const")
@@ -130,6 +143,17 @@ def resolve_value(spec: Any, values: dict, row: dict | None = None, *, default: 
         raw = (row or {}).get(spec["row_field"]) if row is not None else None
     elif "field" in spec:
         raw = (values or {}).get(spec["field"])
+    elif "table" in spec:
+        rows = (values or {}).get(spec["table"])
+        raw = None
+        if isinstance(rows, list):
+            for table_row in rows:
+                if not isinstance(table_row, dict):
+                    continue
+                candidate = table_row.get(spec.get("row_field"))
+                if candidate not in (None, "", [], {}):
+                    raw = candidate
+                    break
     elif "source" in spec:
         # System-generated values injected by the runtime before posting, e.g.
         # the LPO number created when the LPO phase completes. Stored under a
@@ -391,6 +415,10 @@ def build_purchase_order_ssc(
 
     reference = resolve_value(po.get("reference") or mapping.get("reference"), values)
     supplier_code = resolve_value(po.get("supplier_code"), values)
+    if not supplier_code:
+        supplier_code = resolve_value(po.get("supplier_code_fallback"), values)
+    if not supplier_code:
+        supplier_code = resolve_value(po.get("supplier_code_default"), values)
     second_reference = resolve_value(po.get("second_reference"), values)
     comment = resolve_value(po.get("comment") or po.get("description") or mapping.get("description"), values)
     transaction_type = resolve_value(po.get("transaction_type"), values)

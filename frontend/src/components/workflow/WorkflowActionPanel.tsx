@@ -65,6 +65,7 @@ interface Props {
   task: WorkflowTask;
   documentId?: string;
   onCompleted?: () => void;
+  onBeforeApprove?: () => Promise<void>;
   variant?: "panel" | "bar";
 }
 
@@ -206,7 +207,7 @@ function TaskHistoryDrawer({ taskId, task, currentUserId: _currentUserId }: { ta
 }
 
 // ── Main panel ────────────────────────────────────────────────────────────────
-export default function WorkflowActionPanel({ task, documentId, onCompleted, variant = "panel" }: Props) {
+export default function WorkflowActionPanel({ task, documentId, onCompleted, onBeforeApprove, variant = "panel" }: Props) {
   const qc = useQueryClient();
   const currentUser = useAuthStore((s) => s.user);
   const hasDocument = Boolean(documentId);
@@ -323,7 +324,10 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
   };
 
   const approveMutation = useMutation({
-    mutationFn: (result?: SignaturePlacementResult) => workflowAPI.approveTask(task.id, comment, result ?? undefined),
+    mutationFn: async (result?: SignaturePlacementResult) => {
+      await onBeforeApprove?.();
+      return workflowAPI.approveTask(task.id, comment, result ?? undefined);
+    },
     onMutate: () => beginOptimisticAction("approve"),
     onSuccess: () => { toast.success(`${capitalizedTargetLabel} approved`); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>

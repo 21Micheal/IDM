@@ -1310,7 +1310,18 @@ class WorkflowService:
 
             # Generate the printable LPO document first: it reserves the LPO
             # number that the SunSystems PurchaseOrder posting then references.
-            WorkflowService._maybe_generate_lpo_document(doc, outcome=outcome, actor=instance.started_by)
+            last_approver_action = (
+                WorkflowTaskAction.objects.filter(
+                    task__workflow_instance=instance,
+                    action="approved",
+                    actor__isnull=False,
+                )
+                .select_related("actor")
+                .order_by("-created_at")
+                .first()
+            )
+            lpo_actor = last_approver_action.actor if last_approver_action else instance.started_by
+            WorkflowService._maybe_generate_lpo_document(doc, outcome=outcome, actor=lpo_actor)
 
             WorkflowService._maybe_post_sunsystems_journal(doc, outcome)
 

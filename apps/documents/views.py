@@ -728,6 +728,37 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         except Exception:
             logger.exception("_queue_office_preview: failed for doc=%s", doc.id)
 
+    def _render_legacy_lpo_preview(self, doc: Document) -> bool:
+        """Upgrade a previously generated LPO DOCX to a direct ReportLab PDF preview."""
+        if (
+            not doc.is_office_doc()
+            or str(getattr(doc.document_type, "code", "") or "").strip().upper() != "LPO"
+            or doc.preview_pdf
+        ):
+            return False
+        metadata = doc.metadata if isinstance(doc.metadata, dict) else {}
+        template_id = metadata.get("template_id")
+        if not template_id:
+            return False
+        try:
+            from apps.templates_engine.models import DocumentTemplate
+            from apps.templates_engine.tasks import generate_designer_pdf
+
+            template = DocumentTemplate.objects.filter(
+                pk=template_id, type="built", kind="document"
+            ).first()
+            if not template:
+                return False
+            pdf_bytes = generate_designer_pdf(template.design, metadata)
+            safe_stem = (doc.file_name or doc.title or "purchase-order").rsplit(".", 1)[0]
+            doc.preview_pdf.save(f"{safe_stem}.pdf", ContentFile(pdf_bytes), save=False)
+            doc.preview_status = PreviewStatus.DONE
+            doc.save(update_fields=["preview_pdf", "preview_status", "updated_at"])
+            return True
+        except Exception:
+            logger.exception("Could not render legacy LPO %s with ReportLab", doc.id)
+            return False
+
     def _queue_office_version_preview(self, version: DocumentVersion) -> None:
         if not version.is_office_doc():
             return
@@ -1271,10 +1302,41 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # can't unlock a field within the same request that edits it).
         from apps.documents.builder_workflow import builder_process_step
         from apps.documents.access import viewer_for_user
-        from apps.templates_engine.conditions import is_editable
+        from apps.templates_engine.conditions import is_editable, is_visible
         process_step = builder_process_step(doc)
         viewer = viewer_for_user(request.user)
         prior_render = descriptors_to_names(prior_values)
+
+        # Analysis code fields are often visible only to one approval group.
+        # A later reviewer may therefore submit the rest of the form without
+        # those fields mounted. Keep their prior selections when omitted, or
+        # when they are currently hidden; allow an explicit clear while visible.
+        def has_analysis_value(value):
+            if isinstance(value, dict):
+                return any(item not in (None, "", [], {}) for item in value.values())
+            if isinstance(value, list):
+                return any(item not in (None, "", [], {}) for item in value)
+            return value not in (None, "", [], {})
+
+        for section in raw_sections:
+            if not isinstance(section, dict):
+                continue
+            section_visible = is_visible(section, prior_render, process_step, viewer)
+            for field in section.get("fields", []):
+                if not isinstance(field, dict) or not field.get("key"):
+                    continue
+                external = field.get("external") or {}
+                is_analysis_field = (
+                    field.get("type") == "analysis_panel"
+                    or (field.get("type") == "external" and external.get("source") == "analysis_codes")
+                )
+                key = field["key"]
+                if not is_analysis_field or key not in prior_values or not has_analysis_value(prior_values[key]):
+                    continue
+                field_visible = section_visible and is_visible(field, prior_render, process_step, viewer)
+                if key not in values or (not field_visible and not has_analysis_value(values.get(key))):
+                    values[key] = prior_values[key]
+
         owns_document = user_owns_document(request.user, doc) or getattr(request.user, "has_admin_access", False)
         owner_only_conditional_edit = process_step.strip().lower() != "returned"
         locked_keys = set()
@@ -1619,6 +1681,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             })
 
         if doc.is_office_doc():
+            self._render_legacy_lpo_preview(doc)
+            doc.refresh_from_db(fields=["preview_pdf", "preview_status"])
             if not doc.preview_status:
                 self._queue_office_preview(doc)
             doc.refresh_from_db()
@@ -1635,7 +1699,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             return Response({
                 "viewer": viewer,
                 "url": url,
-                "raw_url": raw_link("", False),
+                "raw_url": raw_link(
+                    "",
+                    str(getattr(doc.document_type, "code", "") or "").strip().upper() == "LPO"
+                    and bool(doc.preview_pdf),
+                ),
                 "signed_file_urls_enabled": signed_urls_enabled,
                 "preview_status": preview_status,
                 "preview_error": preview_error,
@@ -2591,6 +2659,13 @@ echo "✓ DocVault LibreOffice integration installed."
             return response
 
         # Office documents: use the preview PDF.
+        if (
+            doc.is_office_doc()
+            and str(getattr(doc.document_type, "code", "") or "").strip().upper() == "LPO"
+            and not doc.preview_pdf
+        ):
+            self._render_legacy_lpo_preview(doc)
+            doc.refresh_from_db(fields=["preview_pdf", "preview_status"])
         if doc.is_office_doc() and doc.preview_pdf:
             try:
                 with doc.preview_pdf.open("rb") as fh:

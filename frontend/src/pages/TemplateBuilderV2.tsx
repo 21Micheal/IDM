@@ -1322,6 +1322,8 @@ export const FINANCE_FIELD_ROLES = [
   { value: "transaction_date", label: "Transaction date" },
   { value: "description", label: "Description" },
   { value: "supplier_code", label: "Supplier code (PO)" },
+  { value: "item_code", label: "Item code (PO)" },
+  { value: "purchase_transaction_type", label: "Purchase transaction type (PO)" },
   { value: "po_number", label: "Purchase order number" },
   { value: "product_group", label: "Product group (PO)" },
 ];
@@ -1338,6 +1340,7 @@ export const FINANCE_COLUMN_ROLES = [
   { value: "description", label: "Description" },
   { value: "analysis", label: "Analysis code" },
   { value: "item_code", label: "Item code" },
+  { value: "supplier_code", label: "Supplier code (PO)" },
   { value: "product_group", label: "Product group" },
   { value: "uom", label: "Unit of measure" },
   { value: "quantity", label: "Quantity" },
@@ -1559,7 +1562,36 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
 
   const poNumberSpec = valueSpec(byRole("po_number"));
   const supplierSpec = valueSpec(byRole("supplier_code"));
+  const itemFieldSpec = valueSpec(byRole("item_code"));
+  const purchaseTransactionTypeFieldSpec = valueSpec(byRole("purchase_transaction_type"));
   const productGroupSpec = valueSpec(byRole("product_group"));
+
+  const poTables = fields.filter((f) => f.type === "table").map((f) => ({
+    field: f,
+    columns: f.columns ?? [],
+    amount: (f.columns ?? []).find((c) => c.sunsystems?.role === "line_amount"),
+    quantity: (f.columns ?? []).find((c) => c.sunsystems?.role === "quantity"),
+    unitPrice: (f.columns ?? []).find((c) => c.sunsystems?.role === "unit_price"),
+  }));
+  const firstMappedTableColumn = (predicate: (column: TableColumn) => boolean) => {
+    for (const table of poTables) {
+      if (!table.amount && !(table.quantity && table.unitPrice)) continue;
+      const column = table.columns.find(predicate);
+      if (column) return { tableKey: table.field.key, column };
+    }
+    return undefined;
+  };
+  const supplierTableSources = poTables.flatMap((table) => {
+    if (!table.amount && !(table.quantity && table.unitPrice)) return [];
+    const column = table.columns.find((c) =>
+      c.sunsystems?.role === "supplier_code" || c.type === "sunsystems_account",
+    );
+    return column ? [{ tableKey: table.field.key, column }] : [];
+  });
+  const supplierTableSpec = supplierTableSources.length
+    ? { sources: supplierTableSources.map(({ tableKey, column }) => ({ table: tableKey, row_field: column.key })) }
+    : undefined;
+  const descriptionTableSource = firstMappedTableColumn((c) => c.sunsystems?.role === "description");
 
   // Analysis Dimensions 1-10 for the purchase order: the form's ten-slot
   // analysis panel maps slot N -> AnalysisN, each with its configured
@@ -1593,7 +1625,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     if (f.type !== "table") continue;
     const cols = f.columns ?? [];
     const amtCol = cols.find((c) => c.sunsystems?.role === "line_amount");
-    const itemCol = cols.find((c) => c.sunsystems?.role === "item_code");
+    const itemCol = cols.find((c) => c.sunsystems?.role === "item_code")
+      ?? cols.find((c) => c.type === "external" && c.external?.source === "items")
+      ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "item");
     const productGroupCol = cols.find((c) => c.sunsystems?.role === "product_group");
     const qtyCol = cols.find((c) => c.sunsystems?.role === "quantity");
     const upCol = cols.find((c) => c.sunsystems?.role === "unit_price");
@@ -1608,7 +1642,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       account_code: acctCol ? { row_field: acctCol.key } : { const: f.sunsystems?.account ?? ui.accountCode ?? "" },
       ...(itemCol
         ? { item_code: { row_field: itemCol.key } }
-        : (ui.itemCode ? { item_code: { const: ui.itemCode } } : {})),
+        : itemFieldSpec
+          ? { item_code: itemFieldSpec }
+          : (ui.itemCode ? { item_code: { const: ui.itemCode } } : {})),
       ...(productGroupCol
         ? { product_group: { row_field: productGroupCol.key } }
         : (productGroupSpec ? { product_group: productGroupSpec } : {})),
@@ -1645,9 +1681,26 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           // A bound supplier field wins, but an empty one falls back to the
           // configured constant so an unfilled RFQ cannot block posting.
           supplier_code: supplierSpec
-            ? { ...supplierSpec, default: ui.supplierCode || "81105" }
-            : { const: ui.supplierCode || "81105" },
-          ...(descSpec ? { comment: descSpec } : (ui.poComment ? { comment: { const: ui.poComment } } : {})),
+            ? supplierSpec
+            : supplierTableSpec
+              ? supplierTableSpec
+              : { const: ui.supplierCode || "81105" },
+          ...(supplierSpec && supplierTableSpec ? {
+            supplier_code_fallback: supplierTableSpec,
+          } : {}),
+          ...((supplierSpec || supplierTableSpec) && ui.supplierCode
+            ? { supplier_code_default: { const: ui.supplierCode } }
+            : {}),
+          ...(descSpec
+            ? { comment: descSpec }
+            : descriptionTableSource
+              ? { comment: { table: descriptionTableSource.tableKey, row_field: descriptionTableSource.column.key } }
+              : (ui.poComment ? { comment: { const: ui.poComment } } : {})),
+          ...(purchaseTransactionTypeFieldSpec
+            ? { transaction_type: { ...purchaseTransactionTypeFieldSpec, default: ui.purchaseTransactionType || "" } }
+            : ui.purchaseTransactionType
+              ? { transaction_type: { const: ui.purchaseTransactionType } }
+              : {}),
           invoice_address_code: { const: ui.invoiceAddressCode || "0000000000" },
           ...(dateSpec ? { date: dateSpec } : {}),
           ...(currencySpec ? { currency: currencySpec } : {}),
@@ -1961,7 +2014,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                     date: Calendar, datetime: Calendar, time: Clock, select: List,
                     boolean: CheckSquare, email: Mail, phone: Phone, reference: Link2,
                     user: UserIcon, file: Paperclip, image: ImageIcon, multi_select: List,
-                    url: UrlIcon, percentage: Percent, external: Package,
+                    url: UrlIcon, percentage: Percent, external: Package, sunsystems_account: Building2,
                   } as Record<TableColumnType, React.ElementType>)[(c.type ?? "text") as TableColumnType] ?? Type;
                   return (
                     <div
@@ -7169,6 +7222,9 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 <>
                   <div className="space-y-1.5"><span className={label}>Supplier code</span>
                     <input className={cn(iCls, "font-mono")} value={ui.supplierCode ?? "81105"} onChange={(e) => setUi({ supplierCode: e.target.value })} placeholder="81105" /></div>
+                  <div className="space-y-1.5"><span className={label}>Purchase transaction type</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.purchaseTransactionType ?? ""} onChange={(e) => setUi({ purchaseTransactionType: e.target.value })} placeholder="SunSystems purchase type / definition code" />
+                    <p className="text-[10px] text-[#8C969E]">Your SunSystems response says a reference definition is required. Product Group is a line value; this is the header purchase type.</p></div>
                   <div className="space-y-1.5"><span className={label}>Invoice address</span>
                     <input className={cn(iCls, "font-mono")} value={ui.invoiceAddressCode ?? "0000000000"} onChange={(e) => setUi({ invoiceAddressCode: e.target.value })} placeholder="0000000000" /></div>
                   <div className="space-y-1.5"><span className={label}>PO number (fixed)</span>
