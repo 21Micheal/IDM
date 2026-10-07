@@ -266,6 +266,7 @@ export default function ExternalSelect({
       <button
         ref={triggerRef}
         type="button"
+        data-external-select-trigger="true"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
         className={`flex w-full items-center justify-between gap-2 border border-[#AEB5BB] bg-white text-left outline-none transition-colors focus:border-[#287EAD] focus:ring-2 focus:ring-[#287EAD]/15 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400 ${heightCls}`}

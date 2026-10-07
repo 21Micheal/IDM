@@ -58,7 +58,7 @@ def lpo_participation_filter(user):
 
 
 def user_generated_lpo_for_document(user: User, doc: Document) -> bool:
-    """Whether this user generated the LPO linked to/from this document."""
+    """Whether this user generated the LPO represented by this document."""
     if not user or not getattr(user, "is_authenticated", False):
         return False
     document_type = getattr(doc, "document_type", None)
@@ -259,8 +259,6 @@ def user_can_download_document(user: User, doc: Document) -> bool:
     # Must be involved AND have DOWNLOAD on the type.
     if not user_is_involved_with_document(user, doc):
         return False
-    if user_generated_lpo_for_document(user, doc):
-        return True
     perms = user.get_all_permissions_for_doctype(document_type_id, document=doc)
     return GroupAction.DOWNLOAD.value in perms
 

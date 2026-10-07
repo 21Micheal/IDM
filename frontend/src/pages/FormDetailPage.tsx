@@ -35,7 +35,7 @@ import { format } from "date-fns";
 import {
   ArrowLeft, Send, Loader2, Edit2, Info, FileCode, Eye, EyeOff, Check, X, Save,
   MessageSquare, Download, AlertTriangle, ShieldCheck, PanelRightOpen, PanelRightClose,
-  TrendingUp, TrendingDown, CheckCircle2,
+  TrendingUp, TrendingDown, CheckCircle2, Printer,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -47,6 +47,7 @@ import SignaturePlacementModal, {
   SignaturePlacementResult,
 } from "@/components/signatures/SignaturePlacementModal";
 import InvoiceAttachmentsPanel from "@/components/templates/InvoiceAttachmentsPanel";
+import LpoPdfPreview from "@/components/documents/LpoPdfPreview";
 
 const AUDIT_PAGE_SIZE = 5;
 
@@ -211,20 +212,16 @@ export default function FormDetailPage() {
 
   const lpoPdfQuery = useQuery({
     queryKey: ["lpo-pdf", generatedLpoId],
-    queryFn: () => documentsAPI.downloadAsPdf(generatedLpoId!).then((r) => r.data as Blob),
+    queryFn: () => documentsAPI.previewUrl(generatedLpoId!).then((r) => r.data),
+    enabled: Boolean(generatedLpoId),
+    refetchInterval: (query) => query.state.data?.viewer === "processing" ? 1_500 : false,
+  });
+  const lpoDocumentQuery = useQuery({
+    queryKey: ["generated-lpo-document", generatedLpoId],
+    queryFn: () => documentsAPI.get(generatedLpoId!).then((r) => r.data),
     enabled: Boolean(generatedLpoId),
   });
-  const [lpoPdfUrl, setLpoPdfUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!lpoPdfQuery.data) {
-      setLpoPdfUrl(null);
-      return;
-    }
-    const url = URL.createObjectURL(lpoPdfQuery.data);
-    setLpoPdfUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [lpoPdfQuery.data]);
+  const lpoPdfUrl = lpoPdfQuery.data?.viewer === "pdfjs" ? lpoPdfQuery.data.url : null;
 
   useEffect(() => {
     if (!doc) return;
@@ -433,6 +430,8 @@ export default function FormDetailPage() {
   const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
   const hasAdminAccess = Boolean(user?.has_admin_access);
   const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
+  const canDownload = hasAdminAccess || (doc.permissions ?? []).includes("download");
+  const canDownloadLpo = hasAdminAccess || (lpoDocumentQuery.data?.permissions ?? []).includes("download");
   const canComment = hasAdminAccess || (doc.permissions ?? []).includes("comment");
   const canApprove = hasAdminAccess || (doc.permissions ?? []).includes("approve");
   const hasConditionalEditability = formHasConditionalEditability(formData.sections);
@@ -491,6 +490,128 @@ export default function FormDetailPage() {
   const retryLpoPreview = async () => {
     await lpoPdfQuery.refetch();
   };
+  const handlePrintRequisition = async () => {
+    if (!canDownload) return;
+    try {
+      await documentsAPI.filePrintEvent(doc.id);
+      const source = document.getElementById("requisition-printable");
+      if (!source) throw new Error("Printable requisition is not available.");
+
+      document.getElementById("requisition-print-root")?.remove();
+      const printRoot = document.createElement("main");
+      printRoot.id = "requisition-print-root";
+      printRoot.setAttribute("aria-label", "Requisition print preview");
+      const heading = document.createElement("header");
+      heading.className = "requisition-print-heading";
+      const title = document.createElement("h1");
+      title.textContent = doc.title || "Requisition";
+      const reference = document.createElement("p");
+      reference.textContent = doc.reference_number || "";
+      heading.append(title, reference);
+      printRoot.appendChild(heading);
+
+      const formCopy = source.cloneNode(true) as HTMLElement;
+      formCopy.removeAttribute("id");
+      formCopy.querySelector(".requisition-print-heading")?.remove();
+      const originalInputs = source.querySelectorAll<HTMLInputElement>("input");
+      const copiedInputs = formCopy.querySelectorAll<HTMLInputElement>("input");
+      originalInputs.forEach((input, index) => {
+        const copy = copiedInputs[index];
+        if (!copy) return;
+        copy.value = input.value;
+        copy.checked = input.checked;
+      });
+      const originalTextareas = source.querySelectorAll<HTMLTextAreaElement>("textarea");
+      const copiedTextareas = formCopy.querySelectorAll<HTMLTextAreaElement>("textarea");
+      originalTextareas.forEach((field, index) => {
+        if (copiedTextareas[index]) copiedTextareas[index].value = field.value;
+      });
+      const originalSelects = source.querySelectorAll<HTMLSelectElement>("select");
+      const copiedSelects = formCopy.querySelectorAll<HTMLSelectElement>("select");
+      originalSelects.forEach((field, index) => {
+        const copy = copiedSelects[index];
+        if (!copy) return;
+        Array.from(copy.options).forEach((option, optionIndex) => {
+          option.selected = field.options[optionIndex]?.selected ?? false;
+        });
+      });
+      formCopy.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
+        const type = input.type.toLowerCase();
+        if (type === "hidden" || type === "file") {
+          input.remove();
+          return;
+        }
+        if (type === "radio" && !input.checked) {
+          input.remove();
+          return;
+        }
+        const value = type === "checkbox"
+          ? (input.checked ? "Yes" : "No")
+          : type === "radio"
+            ? "✓"
+            : type === "date" && input.value
+              ? (() => {
+                  const [year, month, day] = input.value.split("-");
+                  return `${day}/${month}/${year}`;
+                })()
+              : input.value.trim();
+        const text = document.createElement("span");
+        text.className = "requisition-print-value";
+        text.textContent = value || "—";
+        input.replaceWith(text);
+      });
+      formCopy.querySelectorAll<HTMLTextAreaElement>("textarea").forEach((field) => {
+        const text = document.createElement("span");
+        text.className = "requisition-print-value";
+        text.textContent = field.value.trim() || "—";
+        field.replaceWith(text);
+      });
+      formCopy.querySelectorAll<HTMLSelectElement>("select").forEach((field) => {
+        const text = document.createElement("span");
+        text.className = "requisition-print-value";
+        const selected = Array.from(field.selectedOptions).map((option) => option.label).filter(Boolean).join(", ");
+        text.textContent = !selected || /^select\b/i.test(selected) ? "—" : selected;
+        field.replaceWith(text);
+      });
+      formCopy.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="listbox"], button[data-external-select-trigger]').forEach((button) => {
+        const label = button.textContent?.trim() ?? "";
+        const text = document.createElement("span");
+        text.className = "requisition-print-value";
+        text.textContent = /^select\b/i.test(label) ? "—" : label || "—";
+        button.replaceWith(text);
+      });
+      formCopy.querySelectorAll("button").forEach((button) => button.remove());
+      printRoot.appendChild(formCopy);
+      document.body.appendChild(printRoot);
+
+      document.body.classList.add("requisition-print-enabled");
+      const cleanup = () => {
+        document.body.classList.remove("requisition-print-enabled");
+        printRoot.remove();
+      };
+      window.addEventListener("afterprint", cleanup, { once: true });
+      window.print();
+      window.setTimeout(cleanup, 60_000);
+    } catch {
+      toast.error("Download permission is required to print this requisition.");
+    }
+  };
+  const handleDownloadLpo = async () => {
+    if (!generatedLpoId || !canDownloadLpo) return;
+    try {
+      const response = await documentsAPI.downloadAsPdf(generatedLpoId);
+      const blobUrl = URL.createObjectURL(new Blob([response.data], { type: "application/pdf" }));
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = `Purchase_Order_${generatedLpoReference || "LPO"}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1_000);
+    } catch {
+      toast.error("Could not download the LPO. Check your Download permission and retry.");
+    }
+  };
   const saveForm = () => {
     const missing = requiredFieldLabels(formData.sections ?? [], formValues, {
       groupNames: user?.group_names ?? [],
@@ -531,6 +652,32 @@ export default function FormDetailPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
+      <style>{`@page { size: A4 landscape; margin: 0; }
+      @media print {
+        body * { visibility: hidden !important; }
+        body:not(.requisition-print-enabled) * { display: none !important; }
+        body.requisition-print-enabled > #root { display: none !important; }
+        body.requisition-print-enabled #requisition-print-root,
+        body.requisition-print-enabled #requisition-print-root * { visibility: visible !important; }
+        body.requisition-print-enabled #requisition-print-root { display: block !important; position: static !important; width: 100% !important; padding: 12mm !important; color: #1f2933 !important; background: white !important; font-family: Arial, sans-serif !important; }
+        #requisition-print-root * { color: #1f2933 !important; }
+        #requisition-print-root .requisition-print-heading { display: block !important; margin-bottom: 8mm; border-bottom: 2px solid #287ead; padding-bottom: 4mm; }
+        #requisition-print-root .requisition-print-heading h1 { margin: 0; font-size: 20pt; }
+        #requisition-print-root .requisition-print-heading p { margin: 2mm 0 0; color: #52606a; font-size: 10pt; }
+        #requisition-print-root .overflow-hidden, #requisition-print-root .overflow-x-auto, #requisition-print-root .overflow-auto { overflow: visible !important; }
+        #requisition-print-root .min-w-full { min-width: 0 !important; width: 100% !important; }
+        #requisition-print-root table { width: 100% !important; table-layout: fixed !important; border-collapse: collapse !important; }
+        #requisition-print-root th, #requisition-print-root td { width: auto !important; min-width: 0 !important; padding: 5pt 4pt !important; border: 1px solid #aeb5bb !important; white-space: normal !important; overflow-wrap: anywhere !important; font-size: 8pt !important; }
+        #requisition-print-root th { background: #eef3f7 !important; color: #263746 !important; }
+        #requisition-print-root tr { break-inside: avoid; }
+        #requisition-print-root thead { display: table-header-group; }
+        #requisition-print-root h3, #requisition-print-root h4 { break-after: avoid; }
+        #requisition-print-root input, #requisition-print-root textarea, #requisition-print-root select { display: none !important; }
+        #requisition-print-root button, #requisition-print-root [role="button"] { display: none !important; }
+        #requisition-print-root .requisition-print-value { display: block !important; min-height: 1em; color: #1f2933 !important; font-size: 9pt !important; font-weight: 400 !important; opacity: 1 !important; }
+        #requisition-print-root .grid { gap: 4mm !important; }
+        #requisition-print-root .shadow-sm { box-shadow: none !important; }
+      }`}</style>
       <WorkspaceCommandBar>
         <button
           onClick={() => navigate("/list")}
@@ -621,20 +768,22 @@ export default function FormDetailPage() {
                     <FileCode className="h-3.5 w-3.5" /> Journal XML
                   </button>
                 )}
+                {canDownload && (
+                  <button type="button" onClick={() => void handlePrintRequisition()}
+                    className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
+                    <Printer className="h-3.5 w-3.5" /> Print requisition
+                  </button>
+                )}
                 {generatedLpos.length > 1 && (
-                  <select aria-label="Select LPO to download" value={generatedLpoId} onChange={(event) => setSelectedLpoId(event.target.value)} className="max-w-44 border border-[#C8CDD1] bg-white px-2 py-1.5 text-xs text-[#1F2933]">
+                  <select aria-label="Select LPO" value={generatedLpoId} onChange={(event) => setSelectedLpoId(event.target.value)} className="max-w-44 border border-[#C8CDD1] bg-white px-2 py-1.5 text-xs text-[#1F2933]">
                     {generatedLpos.map((lpo, index) => <option key={lpo.id} value={lpo.id}>{lpo.table_label || `LPO ${index + 1}`} · {lpo.reference || index + 1}</option>)}
                   </select>
                 )}
-                {generatedLpoId && (lpoPdfUrl ? (
-                  <a href={lpoPdfUrl} download={`Purchase_Order_${generatedLpoReference || "LPO"}.pdf`} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99]">
+                {generatedLpoId && canDownloadLpo && (
+                  <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99]">
                     <Download className="h-3.5 w-3.5" /> Download LPO
-                  </a>
-                ) : (
-                  <button type="button" disabled className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#5E6870] disabled:opacity-70">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Preparing LPO
                   </button>
-                ))}
+                )}
                 {generatedLpoId && (
                   <button type="button" onClick={() => { setLpoMinimized(false); setLpoModalOpen(true); }} className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
                     <Eye className="h-3.5 w-3.5" /> Open LPO
@@ -692,6 +841,7 @@ export default function FormDetailPage() {
                   />
                 );
               })()}
+              <div id="requisition-printable" className="bg-white">
               <TemplateForm
                 sections={formData.sections ?? []}
                 values={formEditing ? formValues : (formData.values ?? {})}
@@ -704,7 +854,8 @@ export default function FormDetailPage() {
                   setTargetSignatureField(fieldKey ?? null);
                   setIsSigningOpen(true);
                 }}
-              />
+                />
+              </div>
             </div>
           </div>
 
@@ -982,16 +1133,26 @@ export default function FormDetailPage() {
                 <p className="text-xs text-[#5E6870]">Generated LPO document</p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                {canDownloadLpo && (
+                  <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99]">
+                    <Download className="h-3.5 w-3.5" /> Download PDF
+                  </button>
+                )}
                 <button type="button" aria-label="Minimize LPO" onClick={() => setLpoMinimized(true)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><PanelRightClose className="h-4 w-4" /></button>
                 <button type="button" aria-label="Close LPO" onClick={() => setLpoModalOpen(false)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><X className="h-4 w-4" /></button>
               </div>
             </div>
             <div className="min-h-[50vh] flex-1 bg-[#E9EEF1]">
               {lpoPdfUrl ? (
-                <iframe title={`LPO ${generatedLpoReference || "preview"}`} src={lpoPdfUrl} className="h-[72vh] w-full bg-white" />
-              ) : lpoPdfQuery.isError ? (
+                <LpoPdfPreview
+                  url={lpoPdfUrl}
+                  title={`Purchase Order ${generatedLpoReference || "LPO"}`}
+                  canPrint={canDownloadLpo}
+                  onPrint={() => documentsAPI.filePrintEvent(generatedLpoId!).then(() => undefined)}
+                />
+              ) : lpoPdfQuery.isError || lpoPdfQuery.data?.preview_status === "failed" ? (
                 <div className="flex h-[50vh] flex-col items-center justify-center gap-2 px-6 text-center text-sm text-[#5E6870]">
-                  <p>Could not load the LPO PDF. Retry, or reload the page to try again.</p>
+                  <p>{lpoPdfQuery.data?.preview_error || "Could not load the LPO PDF. Retry, or reload the page to try again."}</p>
                   <button type="button" onClick={retryLpoPreview} className="border border-[#AEB5BB] bg-white px-3 py-2 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">Retry preview</button>
                 </div>
               ) : (

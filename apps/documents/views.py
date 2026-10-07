@@ -1807,6 +1807,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="file_print_event")
     def file_print_event(self, request, pk=None):
         doc = self.get_object()
+        if not user_can_download_document(request.user, doc):
+            return Response({"detail": "Download permission is required to print this document."}, status=403)
         self.record_audit(AuditEvent.DOCUMENT_PRINTED, doc, {})
         return Response({"ok": True})
 

@@ -35,8 +35,8 @@ export const ANALYSIS_DIMENSIONS: AnalysisDimension[] = [
   { id: "21", name: "Stock Sub-Category" },
   { id: "08", name: "Strategic Intervention" },
   { id: "22", name: "TIN NUMBER" },
-  { id: "06", name: "Target" },
-  { id: "09", name: "Tax" },
+  { id: "09", name: "Target" },
+  { id: "06", name: "Tax" },
   { id: "23", name: "VAT REGISTRATION NUMBER" },
 ];
 
@@ -47,11 +47,11 @@ export const ANALYSIS_PANEL_SLOTS: string[] = [
   "12", // 3 Objective
   "03", // 4 Priority
   "08", // 5 Strategic Intervention
-  "06", // 6 Target
+  "09", // 6 Target
   "10", // 7 Activity
   "11", // 8 Donor Activity
   "07", // 9 Staff
-  "09", // 10 Tax
+  "06", // 10 Tax
 ];
 
 export function analysisDimensionName(id: string | undefined): string {
