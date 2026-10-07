@@ -666,7 +666,7 @@ function RuleFormFields({ values, routeKind, isRequisitionWorkflow, disabledPhas
   isRequisitionWorkflow: boolean;
   /* Procurement stages that cannot be configured yet (the preceding stage has
    * no routing rule). RFQ needs Requisition; LPO needs RFQ (or Requisition for
-   * Travel requisitions, which skip RFQ). */
+   * Travel requisitions configured to skip RFQ when General/Imprest lines are unused). */
   disabledPhases?: WorkflowPhase[];
   onChange: (patch: Partial<RuleFormValues>) => void;
 }) {
@@ -706,7 +706,7 @@ function RuleFormFields({ values, routeKind, isRequisitionWorkflow, disabledPhas
           {isRequisitionWorkflow && disabledPhases.length > 0 && (
             <p className="text-[11px] text-amber-600 mt-1">
               Configure the earlier procurement stage first — a later stage cannot start until the
-              preceding one is approved. (Travel requisitions skip RFQ, so LPO is also unlocked once
+              preceding one is approved. (Travel requisitions can skip RFQ when the General/Imprest table is unused, so LPO is also unlocked once
               Requisition is configured.)
             </p>
           )}
@@ -1952,7 +1952,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
 
   // Stage-aware gating: a later procurement stage may only be configured once
   // its predecessor has a routing rule. LPO is additionally unlocked by a
-  // Requisition rule because Travel requisitions skip RFQ.
+  // Requisition rule because Travel requisitions may skip RFQ.
   const configuredPhases = new Set(
     (rules ?? []).map((r) => (r.phase || defaultPhase).trim().toLowerCase()),
   );

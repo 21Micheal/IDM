@@ -313,8 +313,7 @@ def requisition_type_config(document: Document) -> tuple[str, str]:
 
 
 def is_travel_requisition(document: Document) -> bool:
-    """True when the requisition-type field holds the configured Travel value.
-    Travel requisitions skip the RFQ stage (Requisition → LPO)."""
+    """True when the requisition-type field holds the configured Travel value."""
     if not is_procurement_document(document):
         return False
     field, travel_value = requisition_type_config(document)
@@ -330,12 +329,49 @@ def is_travel_requisition(document: Document) -> bool:
     return str(raw).strip().lower() == travel_value.strip().lower()
 
 
+def travel_requisition_skips_rfq(document: Document) -> bool:
+    """Whether this Travel requisition can bypass RFQ.
+
+    A populated optional General/Imprest lines table requires RFQ even when the
+    requisition type is Travel. Empty rows created by rendering a table do not
+    count as use; at least one cell must contain a value.
+    """
+    if not is_travel_requisition(document):
+        return False
+    form = (document.metadata or {}).get("form") or {}
+    values = form.get("values") or {}
+    sections = form.get("sections") or []
+    table_keys = []
+    for section in sections if isinstance(sections, list) else []:
+        if not isinstance(section, dict):
+            continue
+        for field in section.get("fields") or []:
+            if (
+                isinstance(field, dict)
+                and field.get("type") == "table"
+                and field.get("workflowRole") == "rfq_required_lines"
+                and field.get("key")
+            ):
+                table_keys.append(str(field["key"]).strip())
+    for key in table_keys:
+        rows = values.get(key) if isinstance(values, dict) else None
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict) and any(
+                value is not None and value != "" and value != [] and value != {}
+                for value in row.values()
+            ):
+                return False
+    return True
+
+
 def next_procurement_stage(document: Document) -> str | None:
     """The stage the document is ready to start next, or ``None``.
 
     Mirrors ``can_start_procurement_workflow_stage``: the previous stage must be
     complete and the document approved, with no workflow still running. Travel
-    requisitions skip RFQ and go straight from Requisition to LPO."""
+    requisitions skip RFQ when their optional General/Imprest table is unused."""
     if not is_procurement_document(document):
         return None
     if (document.status or "").strip() != DocumentStatus.APPROVED:
@@ -348,7 +384,7 @@ def next_procurement_stage(document: Document) -> str | None:
     if phase not in PROCUREMENT_WORKFLOW_STAGES or phase not in completed:
         return None
     if phase == "requisition":
-        return "lpo" if is_travel_requisition(document) else "rfq"
+        return "lpo" if travel_requisition_skips_rfq(document) else "rfq"
     index = PROCUREMENT_WORKFLOW_STAGES.index(phase)
     if index + 1 < len(PROCUREMENT_WORKFLOW_STAGES):
         return PROCUREMENT_WORKFLOW_STAGES[index + 1]
@@ -368,11 +404,12 @@ def can_start_procurement_workflow_stage(document: Document, stage: str, *, user
             DocumentStatus.DRAFT, DocumentStatus.RETURNED, "Returned for Review",
         }
 
-    # Travel requisitions skip RFQ: LPO follows Requisition directly.
-    travel = is_travel_requisition(document)
-    if normalized == "rfq" and travel:
+    # Travel requisitions skip RFQ only when the optional General/Imprest table
+    # has not been used.
+    skips_rfq = travel_requisition_skips_rfq(document)
+    if normalized == "rfq" and skips_rfq:
         return False
-    if normalized == "lpo" and travel:
+    if normalized == "lpo" and skips_rfq:
         previous = "requisition"
     else:
         previous = PROCUREMENT_WORKFLOW_STAGES[PROCUREMENT_WORKFLOW_STAGES.index(normalized) - 1]

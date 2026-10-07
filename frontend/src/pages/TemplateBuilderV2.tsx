@@ -480,7 +480,7 @@ export interface TemplateField {
   colSpan?: number;
   width?: number;
   columns?: TableColumn[];
-  workflowRole?: "requisition_lines" | "retirement_expenses";
+  workflowRole?: "requisition_lines" | "rfq_required_lines" | "retirement_expenses";
   defaultValue?: string;
   minRows?: number;
   multi?: boolean;
@@ -4737,6 +4737,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                   options={[
                     { value: "", label: "General table" },
                     { value: "requisition_lines", label: "Requisition lines" },
+                    { value: "rfq_required_lines", label: "General / Imprest lines (RFQ when used)" },
                     { value: "retirement_expenses", label: "Retirement expenses" },
                   ]}
                   className={inputCls}
@@ -7051,8 +7052,8 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
           <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
             <h2 className="text-sm font-bold text-[#1F2933]">Requisition type &amp; stage gating</h2>
             <p className="text-xs text-[#5E6870] mt-0.5">
-              Pick the dropdown that identifies the requisition type. Requisitions whose type equals the
-              travel value skip the RFQ stage and move from Requisition straight to LPO.
+              Pick the dropdown that identifies the requisition type. Travel requisitions skip RFQ only
+              when the optional General / Imprest table is unused.
             </p>
           </div>
           <div className="space-y-4 p-5">
@@ -7091,7 +7092,7 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
                 </datalist>
               )}
               <p className="text-[10px] text-[#8C969E] mt-1">
-                A requisition whose type matches this value skips RFQ: Requisition → LPO.
+                If the type matches this value and no table is marked “General / Imprest lines (RFQ when used)” has entered rows, the workflow skips RFQ.
               </p>
             </div>
           </div>
