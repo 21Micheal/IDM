@@ -24,7 +24,7 @@ class DocumentTemplateSerializer(serializers.ModelSerializer):
             "id", "name", "description", "type", "kind", "category", "tags",
             "document_type", "document_type_id", "document_type_name", "document_type_code",
             "sections", "design", "placeholders", "sunsystems", "workflow_type",
-            "requisition_type_field", "travel_type_value",
+            "requisition_type_field", "travel_type_value", "travel_retirement",
             "file", "file_name",
             "use_count", "is_active",
             "created_by", "created_at", "updated_at",

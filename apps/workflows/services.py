@@ -1254,6 +1254,14 @@ class WorkflowService:
     def _is_active_group_member(group, user):
         if not group or not user:
             return False
+        if not group.is_active or not user.is_active:
+            return False
+        # Some groups designate an approver without adding a matching
+        # UserGroupMembership row. Treat the active group head as eligible for
+        # group-specific assignment; ordinary group assignments still use the
+        # explicit membership query below.
+        if group.head_id == user.id:
+            return True
         now = timezone.now()
         return User.objects.filter(
             id=user.id,
@@ -1337,6 +1345,14 @@ class WorkflowService:
                 except Exception:
                     logger.exception(
                         "Could not auto-advance procurement stage for %s", doc.id
+                    )
+            else:
+                try:
+                    from apps.documents.builder_workflow import open_travel_retirement_phase
+                    open_travel_retirement_phase(doc)
+                except Exception:
+                    logger.exception(
+                        "Could not open travel retirement phase for %s", doc.id
                     )
             return
 

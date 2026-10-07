@@ -995,12 +995,27 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             can_start_procurement_workflow_stage,
             can_submit_request_workflow,
             can_submit_retirement_workflow,
+            is_travel_requisition,
+            overdue_travel_retirement_for_user,
             is_procurement_document,
             set_procurement_workflow_stage,
         )
 
         self._prepare_builder_workflow_phase(doc)
         doc.refresh_from_db(fields=["metadata", "updated_at"])
+
+        # Keep this check before the explicit procurement-stage branch too:
+        # new requisitions enter through workflow_stage="requisition" and
+        # return from that branch before the legacy submit checks below.
+        if is_travel_requisition(doc):
+            overdue = overdue_travel_retirement_for_user(
+                request.user, exclude_document_id=doc.id,
+            )
+            if overdue:
+                return Response(
+                    {"detail": f"Travel requisition blocked: retirement for {overdue.reference_number} is overdue. Submit that retirement before raising another travel requisition."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         requested_stage = str(request.data.get("workflow_stage") or "").strip().lower()
         if requested_stage:

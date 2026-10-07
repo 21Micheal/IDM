@@ -691,7 +691,23 @@ class DocumentListSerializer(serializers.ModelSerializer):
                     variance = compute_retirement_variance(obj)
                 except Exception:
                     variance = None
-        return {"values": values, "retirement_variance": variance}
+        retirement = None
+        try:
+            from apps.documents.builder_workflow import _retirement_workflow_statuses, retirement_status
+            cache_key = "_retirement_workflow_statuses"
+            statuses = self.context.get(cache_key)
+            if statuses is None:
+                root_instance = getattr(self.root, "instance", None)
+                if isinstance(root_instance, (list, tuple)):
+                    document_ids = [item.id for item in root_instance if getattr(item, "id", None)]
+                else:
+                    document_ids = [obj.id]
+                statuses = _retirement_workflow_statuses(document_ids)
+                self.context[cache_key] = statuses
+            retirement = retirement_status(obj, workflow_status=statuses.get(obj.id))
+        except Exception:
+            retirement = None
+        return {"values": values, "retirement_variance": variance, "retirement": retirement}
 
     def get_relationship_count(self, obj):
         outgoing = getattr(obj, "visible_outgoing_relationship_count", None)

@@ -49,8 +49,8 @@ import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOp
 
 type ColType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
-  | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "url" | "percentage" | "multi_select" | "image" | "external" | "sunsystems_account";
+  | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
+  | "url" | "percentage" | "rating" | "multi_select" | "image" | "external" | "sunsystems_account";
 
 type Column = {
   id?: string; key?: string; label?: string; required?: boolean;
@@ -759,6 +759,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
       );
     }
     case "select":
+    case "radio":
       const selectOptions = [
         { value: "", label: "—" },
         ...(col.options ?? []).map((o) => ({ value: o, label: o })),
@@ -774,6 +775,22 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           disabled={dis}
         />
       );
+    case "rating": {
+      const maxStars = Math.max(1, Math.min(10, col.max ?? 5));
+      const current = Number(sval) || 0;
+      return (
+        <div className="flex items-center gap-0.5" aria-label={`Rating ${current} of ${maxStars}`}>
+          {Array.from({ length: maxStars }, (_, index) => index + 1).map((rating) => (
+            <button key={rating} type="button" disabled={dis} aria-label={`${rating} of ${maxStars}`}
+              aria-pressed={rating === current}
+              onClick={() => onChange(rating === current ? "0" : String(rating))}
+              className={`rounded p-0.5 ${dis ? "cursor-default" : "hover:scale-110"}`}>
+              <Star className={`h-4 w-4 ${rating <= current ? "fill-amber-400 text-amber-400" : "text-muted-foreground/40"}`} />
+            </button>
+          ))}
+        </div>
+      );
+    }
     case "boolean":
       return <input type="checkbox" checked={sval === "true"} disabled={dis} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-primary" />;
     case "textarea":

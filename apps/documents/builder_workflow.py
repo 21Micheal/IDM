@@ -1,6 +1,11 @@
 """Built-template workflow helpers."""
 from __future__ import annotations
 
+from datetime import date, timedelta
+
+from django.db.models import Q
+from django.utils import timezone
+
 from apps.documents.models import Document, DocumentStatus
 
 
@@ -33,6 +38,134 @@ def is_built_form_document(document: Document) -> bool:
     return isinstance(form, dict) and bool(form.get("sections"))
 
 
+def travel_retirement_config(document: Document) -> dict:
+    form = ((document.metadata or {}).get("form") or {})
+    config = form.get("travel_retirement")
+    return config if isinstance(config, dict) and config.get("enabled") else {}
+
+
+def travel_retirement_due_date(document: Document) -> date | None:
+    """Return the configured retirement due date, or None if not resolvable."""
+    config = travel_retirement_config(document)
+    returned = travel_return_date(document)
+    if returned is None:
+        return None
+    try:
+        days = max(0, int(config.get("deadlineDays", config.get("deadline_days", 7))))
+    except (TypeError, ValueError):
+        return None
+    return returned + timedelta(days=days)
+
+
+def travel_return_date(document: Document) -> date | None:
+    config = travel_retirement_config(document)
+    field_key = str(config.get("returnDateField") or config.get("return_date_field") or "").strip()
+    values = ((document.metadata or {}).get("form") or {}).get("values") or {}
+    if not field_key or not isinstance(values, dict):
+        return None
+    raw = values.get(field_key)
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _retirement_workflow_statuses(document_ids):
+    if not document_ids:
+        return {}
+    try:
+        from apps.workflows.models import WorkflowInstance
+
+        rows = WorkflowInstance.objects.filter(
+                document_id__in=document_ids,
+                rule__phase="retirement",
+            ).order_by("document_id", "-created_at").values_list("document_id", "status")
+        result = {}
+        for document_id, status in rows:
+            result.setdefault(document_id, status)
+        return result
+    except Exception:
+        return {}
+
+
+def retirement_status(document: Document, *, workflow_status=None) -> dict | None:
+    """Mapping-driven status summary used by requisition registers."""
+    config = travel_retirement_config(document)
+    if not config or not is_travel_requisition(document):
+        return None
+    due = travel_retirement_due_date(document)
+    phase = str((((document.metadata or {}).get("form") or {}).get("workflow_phase") or "")).lower()
+    status = workflow_status
+    if status is None:
+        status = _retirement_workflow_statuses([document.id]).get(document.id)
+
+    if phase != "retirement":
+        label = "LPO pending"
+        kind = "not_started"
+    elif status == "in_progress":
+        label, kind = "Awaiting Finance", "awaiting_finance"
+    elif status == "returned":
+        label, kind = "Returned for revision", "returned"
+    elif status == "rejected":
+        label, kind = "Retirement rejected", "rejected"
+    elif status == "approved":
+        variance = None
+        try:
+            from apps.sunsystems.variance import compute_retirement_variance
+            variance = compute_retirement_variance(document)
+        except Exception:
+            pass
+        scenario = (variance or {}).get("scenario")
+        labels = {
+            "exact": ("Exact", "exact"),
+            "under": ("Refund due", "refund_due"),
+            "over": ("Top-up due", "top_up_due"),
+        }
+        label, kind = labels.get(scenario, ("Retired", "retired"))
+    elif not travel_return_date(document):
+        label, kind = "Return date missing", "return_date_missing"
+    elif due and timezone.localdate() > due:
+        label, kind = "Retirement overdue", "overdue"
+    elif travel_return_date(document) and timezone.localdate() < travel_return_date(document):
+        label, kind = "Not yet returned", "not_due"
+    else:
+        label, kind = "Retirement due", "due"
+
+    return {
+        "status": kind,
+        "label": label,
+        "due_date": due.isoformat() if due else None,
+        "variance": ((document.metadata or {}).get("form") or {}).get("retirement_variance"),
+    }
+
+
+def overdue_travel_retirement_for_user(user, *, exclude_document_id=None) -> Document | None:
+    """Find a user's travel requisition with an overdue, unsubmitted retirement."""
+    if not user or not getattr(user, "is_authenticated", False):
+        return None
+    docs = Document.objects.filter(
+        Q(uploaded_by=user) | Q(owned_by=user),
+        metadata__form__workflow_type="requisition",
+        metadata__form__workflow_phase="retirement",
+    ).exclude(deleted_at__isnull=False).only("id", "metadata", "reference_number", "document_type_id")
+    if exclude_document_id:
+        docs = docs.exclude(pk=exclude_document_id)
+    docs = list(docs.distinct())
+    submitted = _retirement_workflow_statuses([doc.id for doc in docs])
+    today = timezone.localdate()
+    for doc in docs:
+        if submitted.get(doc.id):
+            continue
+        if not is_travel_requisition(doc):
+            continue
+        due = travel_retirement_due_date(doc)
+        if due and today > due:
+            return doc
+    return None
+
+
 def infer_builder_workflow_phase(document: Document) -> str | None:
     """Return ``request`` / ``retirement`` for builder forms, else ``None``."""
     if not is_built_form_document(document):
@@ -41,6 +174,13 @@ def infer_builder_workflow_phase(document: Document) -> str | None:
     if is_procurement_document(document):
         form = (document.metadata or {}).get("form") or {}
         stage = str(form.get("workflow_phase") or "requisition").strip().lower()
+        if (
+            stage == "retirement"
+            and travel_retirement_config(document)
+            and is_travel_requisition(document)
+            and "lpo" in completed_procurement_stages(document)
+        ):
+            return "retirement"
         return stage if stage in PROCUREMENT_WORKFLOW_STAGES else "requisition"
 
     phase = "request"
@@ -117,6 +257,26 @@ def set_procurement_workflow_stage(document: Document, stage: str) -> None:
     meta["form"] = form
     document.metadata = meta
     document.save(update_fields=["metadata", "updated_at"])
+
+
+def open_travel_retirement_phase(document: Document) -> bool:
+    """Open the retirement phase after the requisition's LPO is approved."""
+    if (
+        not is_procurement_document(document)
+        or not is_travel_requisition(document)
+        or not travel_retirement_config(document)
+        or "lpo" not in completed_procurement_stages(document)
+    ):
+        return False
+    meta = dict(document.metadata or {})
+    form = dict(meta.get("form") or {})
+    if form.get("workflow_phase") == "retirement":
+        return False
+    form["workflow_phase"] = "retirement"
+    meta["form"] = form
+    document.metadata = meta
+    document.save(update_fields=["metadata", "updated_at"])
+    return True
 
 
 def completed_procurement_stages(document: Document) -> list[str]:
@@ -376,6 +536,10 @@ def builder_process_step(document: Document) -> str:
         if status == DocumentStatus.REJECTED:
             return f"{phase}_rejected"
         if status == DocumentStatus.APPROVED:
+            if phase == "retirement":
+                return "fully_approved" if retirement_workflow_completed(document) or retirement_journal_posted(document) else "retirement_approved"
+            if phase == "lpo" and travel_retirement_config(document) and is_travel_requisition(document) and "lpo" in completed_procurement_stages(document):
+                return "lpo_approved"
             return "fully_approved" if phase == "lpo" and phase in completed_procurement_stages(document) else f"{phase}_approved"
         return status
 
@@ -433,11 +597,19 @@ def can_submit_retirement_workflow(document: Document, *, user=None) -> bool:
         return False
 
     form = (document.metadata or {}).get("form") or {}
+    if is_procurement_document(document):
+        if not travel_retirement_config(document) or not is_travel_requisition(document) or "lpo" not in completed_procurement_stages(document):
+            return False
     phase = (form.get("workflow_phase") or infer_builder_workflow_phase(document) or "request").strip().lower()
     if phase != "retirement":
         return False
     if (document.status or "").strip() != DocumentStatus.APPROVED:
         return False
+
+    if is_procurement_document(document):
+        returned = travel_return_date(document)
+        if returned is not None and timezone.localdate() < returned:
+            return False
 
     # Check if retirement workflow is already in progress or completed
     try:
@@ -482,6 +654,10 @@ def can_submit_request_workflow(document: Document, *, user=None) -> bool:
             "Returned for Review",
         ):
             return False
+
+        if user is not None and is_travel_requisition(document):
+            if overdue_travel_retirement_for_user(user, exclude_document_id=document.id):
+                return False
 
     if user is not None and not user_may_submit_document(user, document):
         return False

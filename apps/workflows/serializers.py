@@ -270,16 +270,25 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"assignee_type": "Invalid assignment mode."})
 
         if assignee_type == "group_specific" and assignee_group and assignee_user:
-            if not UserGroup.objects.filter(
+            active_member = UserGroup.objects.filter(
                 id=assignee_group.id,
                 memberships__user__id=assignee_user.id,
                 is_active=True,
             ).filter(
                 Q(memberships__expires_at__isnull=True) |
                 Q(memberships__expires_at__gt=timezone.now())
-            ).exists():
+            ).exists()
+            # A group's designated approver is a valid specific assignee even
+            # when the administrator has not also created a membership row.
+            designated_approver = (
+                assignee_group.is_active
+                and assignee_group.head_id == assignee_user.id
+                and assignee_user.is_active
+            )
+            if not active_member and not designated_approver:
+                step_name = str(attrs.get("name") or "Approval step").strip()
                 raise serializers.ValidationError(
-                    {"assignee_user": "The selected user is not an active member of the selected group."}
+                    {"assignee_user": f"{step_name}: {assignee_user.get_full_name() or assignee_user.email} is not an active member of {assignee_group.name} and is not its designated approver."}
                 )
 
         allow_approve      = attrs.get("allow_approve",      getattr(self.instance, "allow_approve",      True))
@@ -326,6 +335,7 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
 
 
 class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(read_only=True)
     steps = WorkflowStepWriteSerializer(many=True)
     retire_siblings = serializers.BooleanField(
         required=False,
@@ -341,7 +351,7 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkflowTemplate
         fields = [
-            "name", "description", "target_type", "document_type", "is_active",
+            "id", "name", "description", "target_type", "document_type", "is_active",
             "notify_uploader_on_approval", "email_templates", "definition", "steps",
             "retire_siblings",
         ]

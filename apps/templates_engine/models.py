@@ -102,6 +102,14 @@ class DocumentTemplate(models.Model):
         default="Travel",
         help_text="Requisition-type value that skips the RFQ stage (Requisition → LPO).",
     )
+    # Optional travel retirement lifecycle layered onto a requisition. Kept
+    # separate from `workflow_type`: requisitions retain their procurement
+    # path and may open a retirement phase after LPO approval.
+    travel_retirement = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Optional travel retirement settings (return-date field and policy deadline).",
+    )
 
     # How many times this template has been used to create a document
     use_count = models.PositiveIntegerField(default=0)

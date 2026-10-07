@@ -1734,6 +1734,7 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
             # survive later template edits (see is_travel_requisition).
             "requisition_type_field": getattr(template, "requisition_type_field", "") or "",
             "travel_type_value": getattr(template, "travel_type_value", "Travel") or "Travel",
+            "travel_retirement": getattr(template, "travel_retirement", {}) or {},
             "sections": template.sections,
             "values": values,
         }

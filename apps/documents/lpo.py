@@ -375,7 +375,13 @@ def _supplier_details(values: dict, meta: dict, sections: list, *, table_key=Non
         return code, name, email, phone, address
     # Fall back to the configured constant so the printed LPO still names a
     # supplier when only the mapping knows it.
-    po = ((meta.get("sunsystems") or {}).get("journal") or {}).get("purchase_order") or {}
+    sunsystems_config = meta.get("sunsystems") or {}
+    # New templates keep the LPO profile separate from the ledger journal;
+    # older snapshots nest it under ``journal.purchase_order``.
+    po = (
+        ((sunsystems_config.get("purchase_order") or {}).get("purchase_order") or {})
+        or ((sunsystems_config.get("journal") or {}).get("purchase_order") or {})
+    )
     # Resolve configured header, table-row and default sources in the same
     # order as PurchaseOrder posting. In particular, a selected table supplier
     # must beat the configured default supplier.

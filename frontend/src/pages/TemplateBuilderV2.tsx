@@ -111,8 +111,8 @@ export interface CalcConfig {
 
 export type TableColumnType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
-  | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "percentage" | "url" | "multi_select" | "image" | "external" | "sunsystems_account";
+  | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
+  | "percentage" | "rating" | "url" | "multi_select" | "image" | "external" | "sunsystems_account";
 
 export interface TableColumn {
   id: string;
@@ -480,6 +480,7 @@ export interface TemplateField {
   colSpan?: number;
   width?: number;
   columns?: TableColumn[];
+  workflowRole?: "requisition_lines" | "retirement_expenses";
   defaultValue?: string;
   minRows?: number;
   multi?: boolean;
@@ -593,6 +594,9 @@ export interface ExternalTemplateSource {
  * bindings (compileSunSystems); this is the editable source of truth. */
 export interface SunSystemsUi {
   journalEnabled?: boolean;
+  /** Independent profiles; absent values keep the legacy postingKind behavior. */
+  ledgerJournalEnabled?: boolean;
+  purchaseOrderEnabled?: boolean;
   postingKind?: "journal" | "purchase_order";
   journalStages?: {
     stage: number;
@@ -636,8 +640,15 @@ export interface SunSystemsUi {
 export interface SunSystemsConfig {
   ui?: SunSystemsUi;
   journal?: Record<string, unknown>;
+  purchase_order?: Record<string, unknown>;
   budget?: Record<string, unknown>;
   connection?: Record<string, unknown>;
+}
+
+export interface TravelRetirementConfig {
+  enabled?: boolean;
+  returnDateField?: string;
+  deadlineDays?: number;
 }
 
 export interface TemplateSection {
@@ -694,6 +705,7 @@ export interface Template {
    * type, and the value (default "Travel") that skips the RFQ stage. */
   requisition_type_field?: string;
   travel_type_value?: string;
+  travel_retirement?: TravelRetirementConfig;
 }
 
 export type EditableTemplate = Omit<Template, "type"> & { type?: Template["type"] };
@@ -1414,7 +1426,14 @@ function buildSampleValues(template: Template): Record<string, unknown> {
 function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const ss = template.sunsystems ?? {};
   const ui: SunSystemsUi = ss.ui ?? {};
-  if (!ui.journalEnabled && !ui.budgetEnabled) return ss;
+  const separateProfiles = ui.ledgerJournalEnabled !== undefined || ui.purchaseOrderEnabled !== undefined;
+  const ledgerJournalEnabled = separateProfiles
+    ? Boolean(ui.ledgerJournalEnabled)
+    : Boolean(ui.journalEnabled && (ui.postingKind ?? "journal") === "journal");
+  const purchaseOrderEnabled = separateProfiles
+    ? Boolean(ui.purchaseOrderEnabled)
+    : Boolean(ui.journalEnabled && ui.postingKind === "purchase_order");
+  if (!ledgerJournalEnabled && !purchaseOrderEnabled && !ui.budgetEnabled) return ss;
 
   const fields = template.sections.flatMap((s) => s.fields ?? []);
   const byRole = (role: string) => fields.find((f) => f.sunsystems?.role === role);
@@ -1458,6 +1477,12 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       const amountCol = cols.find((c) => c.sunsystems?.role === "line_amount");
       if (!amountCol) continue;
       const retirement = amountCol.sunsystems?.retirement;
+      // In a combined requisition, only the explicitly marked expense table
+      // owns the retirement spend mapping. Other table bindings remain part
+      // of the requisition/LPO profile.
+      if (template.travel_retirement?.enabled && f.workflowRole !== "retirement_expenses" && retirement?.enabled) {
+        continue;
+      }
       if (retirement?.enabled) {
         // Imprest/retirement reconciliation: post a fixed set of lines based
         // on comparing SUM(this column) against an issued/requested amount,
@@ -1566,7 +1591,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const purchaseTransactionTypeFieldSpec = valueSpec(byRole("purchase_transaction_type"));
   const productGroupSpec = valueSpec(byRole("product_group"));
 
-  const poTables = fields.filter((f) => f.type === "table").map((f) => ({
+  const poTables = fields.filter((f) => f.type === "table" && f.workflowRole !== "retirement_expenses").map((f) => ({
     field: f,
     columns: f.columns ?? [],
     amount: (f.columns ?? []).find((c) => c.sunsystems?.role === "line_amount"),
@@ -1623,6 +1648,8 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const poLines: Record<string, unknown>[] = [];
   for (const f of fields) {
     if (f.type !== "table") continue;
+    // Retirement expense rows reconcile the advance; they are not PO lines.
+    if (f.workflowRole === "retirement_expenses") continue;
     const cols = f.columns ?? [];
     const amtCol = cols.find((c) => c.sunsystems?.role === "line_amount");
     const itemCol = cols.find((c) => c.sunsystems?.role === "item_code")
@@ -1656,9 +1683,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     });
   }
 
-  const journal = ui.journalEnabled
-    ? postingKind === "purchase_order"
-      ? {
+  const purchaseOrderMapping = {
         enabled: true,
         // The procurement hook fires the synthetic "fully_approved" trigger when
         // the LPO phase completes (intermediate approvals never post).
@@ -1709,11 +1734,16 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           ...(Object.keys(poAnalysis).length ? { analysis: poAnalysis } : {}),
           lines: poLines,
         },
-      }
-      : {
-        enabled: true,
-        stages: journalStages,
-      }
+      };
+
+  const legacyJournal = postingKind === "purchase_order"
+    ? purchaseOrderMapping
+    : { enabled: true, stages: journalStages };
+  const journal = separateProfiles
+    ? (ledgerJournalEnabled ? { enabled: true, stages: journalStages } : { enabled: false })
+    : (ui.journalEnabled ? legacyJournal : { enabled: false });
+  const purchase_order = separateProfiles
+    ? (purchaseOrderEnabled ? purchaseOrderMapping : { enabled: false })
     : { enabled: false };
 
   const byBudgetRole = (r: string) => fields.find((f) => budgetRoleOf(f) === r);
@@ -1727,7 +1757,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     }
     : { enabled: false };
 
-  return { ...ss, ui, journal, budget };
+  return { ...ss, ui, journal, purchase_order, budget };
 }
 
 function outputTemplate(template: Template, keepId: boolean, resolved: Record<string, ResolvedTableRef> = {}): Template {
@@ -2516,6 +2546,7 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
   { value: "datetime", label: "Date & Time" },
   { value: "time", label: "Time" },
   { value: "select", label: "Dropdown" },
+  { value: "radio", label: "Radio choices" },
   { value: "boolean", label: "Checkbox" },
   { value: "email", label: "Email" },
   { value: "phone", label: "Phone" },
@@ -2524,6 +2555,7 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
   { value: "file", label: "File / Attachment" },
   { value: "image", label: "Image" },
   { value: "percentage", label: "Percentage" },
+  { value: "rating", label: "Rating" },
   { value: "url", label: "URL / Link" },
   { value: "multi_select", label: "Multi-select" },
   { value: "external", label: "External" },
@@ -2955,7 +2987,7 @@ function ColumnConfigModal({
   const [autoKey, setAutoKey] = useState(() => looksAutoGenerated(column.key));
 
   const set = (patch: Partial<TableColumn>) => setDraft((d) => ({ ...d, ...patch }));
-  const isDropdown = draft.type === "select";
+  const isDropdown = draft.type === "select" || draft.type === "radio";
   // Sibling columns whose value can hold a currency code (drives this cell's symbol).
   const currencySourceColumns = siblingColumns.filter(
     (c) => c.id !== draft.id && c.key && ["select", "text"].includes(c.type ?? "text"),
@@ -4697,10 +4729,26 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
             <ButtonEditor field={field} onUpdate={onUpdate} allFields={allFields} />
           )}
           {isTable && (
-            <InspectorRow label="Minimum rows shown">
-              <input type="number" min={1} max={20} value={field.minRows ?? 2}
-                onChange={(e) => onUpdate({ minRows: Number(e.target.value) })} className={inputCls} />
-            </InspectorRow>
+            <>
+              <InspectorRow label="Table purpose" hint="Identifies the table in the requisition and retirement lifecycle.">
+                <CustomListbox
+                  value={field.workflowRole ?? ""}
+                  onChange={(value) => onUpdate({ workflowRole: (value || undefined) as TemplateField["workflowRole"] })}
+                  options={[
+                    { value: "", label: "General table" },
+                    { value: "requisition_lines", label: "Requisition lines" },
+                    { value: "retirement_expenses", label: "Retirement expenses" },
+                  ]}
+                  className={inputCls}
+                  buttonClassName="w-full"
+                  ariaLabel="Table purpose"
+                />
+              </InspectorRow>
+              <InspectorRow label="Minimum rows shown">
+                <input type="number" min={1} max={20} value={field.minRows ?? 2}
+                  onChange={(e) => onUpdate({ minRows: Number(e.target.value) })} className={inputCls} />
+              </InspectorRow>
+            </>
           )}
           {hasOptions && (
             <InspectorRow label="Options">
@@ -5945,15 +5993,17 @@ export interface TableCalcRegistryEntry {
 }
 
 /** Build the { bareColKey / "table.col": value } fallback entries derived
- *  from each table's FIRST row — see buildCalcScope's docstring. Bare keys
+ *  from each table's first populated cell — see buildCalcScope's docstring. Bare keys
  *  follow "first table wins"when more than one table has a same-named
  *  column; dotted keys are always unambiguous. */
 function firstRowScopeEntries(registry: Record<string, TableCalcRegistryEntry>): Record<string, CalcValue> {
   const scope: Record<string, CalcValue> = {};
   for (const [tableKey, entry] of Object.entries(registry)) {
-    const firstRow = entry.rows[0] ?? {};
     for (const [colKey, colType] of Object.entries(entry.colTypeByKey)) {
-      const value = coerceScopeValue(colType, firstRow[colKey]);
+      // A plain column reference means the first populated cell. This lets a
+      // top-level calculated field follow a selection made on any table row.
+      const raw = entry.rows.find((row) => row[colKey] !== undefined && row[colKey] !== null && row[colKey] !== "")?.[colKey];
+      const value = coerceScopeValue(colType, raw);
       if (!(colKey in scope)) scope[colKey] = value; // first table wins
       scope[`${tableKey}.${colKey}`] = value;
     }
@@ -7047,6 +7097,57 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
           </div>
         </div>
       )}
+      {template.workflow_type === "requisition" && (
+        <div className="border border-[#C8CDD2] bg-white shadow-sm">
+          <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+            <h2 className="text-sm font-bold text-[#1F2933]">Travel retirement</h2>
+            <p className="mt-0.5 text-xs text-[#5E6870]">
+              After the LPO is approved, open a retirement stage on this requisition and enforce the travel policy deadline.
+            </p>
+          </div>
+          <div className="space-y-4 p-5">
+            <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-[#1F2933]">
+              <input type="checkbox" checked={Boolean(template.travel_retirement?.enabled)}
+                onChange={(e) => onCommit({ travel_retirement: {
+                  ...(template.travel_retirement ?? {}), enabled: e.target.checked,
+                } })}
+                className="h-4 w-4 accent-[#287EAD]" />
+              Enable travel retirement after LPO approval
+            </label>
+            {template.travel_retirement?.enabled && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Travel return date field</label>
+                  <CustomListbox
+                    value={template.travel_retirement.returnDateField ?? ""}
+                    onChange={(val) => onCommit({ travel_retirement: { ...template.travel_retirement, returnDateField: val } })}
+                    options={[
+                      { value: "", label: "Select a date field" },
+                      ...template.sections.flatMap((section) => section.fields ?? [])
+                        .filter((field) => field.key && (field.type === "date" || field.type === "datetime"))
+                        .map((field) => ({ value: field.key, label: `${field.label || field.key} (${field.key})` })),
+                    ]}
+                    className={iCls}
+                    buttonClassName="w-full"
+                    ariaLabel="Travel return date field"
+                  />
+                  <p className="text-[10px] text-[#8C969E]">The deadline is calculated from this field’s date.</p>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Days after return</label>
+                  <input type="number" min={0} step={1} className={iCls}
+                    value={template.travel_retirement.deadlineDays ?? 7}
+                    onChange={(e) => onCommit({ travel_retirement: {
+                      ...template.travel_retirement,
+                      deadlineDays: Math.max(0, Math.floor(Number(e.target.value) || 0)),
+                    } })} />
+                  <p className="text-[10px] text-[#8C969E]">An overdue, unsubmitted retirement blocks the traveller from submitting another travel requisition.</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       <div className="border border-[#C8CDD2] bg-white shadow-sm">
         <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
           <h2 className="text-sm font-bold text-[#1F2933]">Template summary</h2>
@@ -7097,11 +7198,18 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
   const journalFieldLines = fields.filter((f) => f.type !== "table" && isJournalLineSource(f)).length;
   const journalTableLines = fields.filter((f) => f.type === "table" && isJournalLineSource(f)).length;
   const postingKind = ui.postingKind ?? "journal";
+  const legacyPostingMode = ui.ledgerJournalEnabled === undefined && ui.purchaseOrderEnabled === undefined;
+  const ledgerJournalEnabled = legacyPostingMode
+    ? Boolean(ui.journalEnabled && postingKind === "journal")
+    : Boolean(ui.ledgerJournalEnabled);
+  const purchaseOrderEnabled = legacyPostingMode
+    ? Boolean(ui.journalEnabled && postingKind === "purchase_order")
+    : Boolean(ui.purchaseOrderEnabled);
   const purchaseAmountLabel = roleLabel("journal_amount");
   const poNumberLabel = roleLabel("po_number");
   const poSupplierLabel = roleLabel("supplier_code");
   const poLineTables = fields.filter(
-    (f) => f.type === "table" && (f.columns ?? []).some((c) =>
+    (f) => f.type === "table" && f.workflowRole !== "retirement_expenses" && (f.columns ?? []).some((c) =>
       ["line_amount", "item_code", "quantity", "unit_price"].includes(c.sunsystems?.role ?? "")),
   );
   const analysisPanelField = fields.find(
@@ -7188,18 +7296,27 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
           </div>
         )}
 
-        {/* Journal posting */}
+        {/* Posting profiles are independently enabled so an LPO can be
+            generated from requisition lines while a retirement journal is
+            configured separately. */}
         <div className="flex items-center justify-between border-t border-[#EEF0F2] pt-4">
           <div>
             <p className="text-sm font-semibold text-[#1F2933]">Journal posting</p>
-            <p className="text-xs text-[#5E6870]">Post a ledger journal to SunSystems on final approval.</p>
+            <p className="text-xs text-[#5E6870]">Configure a ledger journal profile for the workflow.</p>
           </div>
-          <Toggle on={!!ui.journalEnabled} onClick={() => setUi({ journalEnabled: !ui.journalEnabled })} />
+          <Toggle on={ledgerJournalEnabled} onClick={() => setUi({ ledgerJournalEnabled: !ledgerJournalEnabled })} />
         </div>
-        {ui.journalEnabled && (
+        <div className="flex items-center justify-between border-t border-[#EEF0F2] pt-4">
+          <div>
+            <p className="text-sm font-semibold text-[#1F2933]">Purchase order / LPO</p>
+            <p className="text-xs text-[#5E6870]">Build the LPO from requisition table lines.</p>
+          </div>
+          <Toggle on={purchaseOrderEnabled} onClick={() => setUi({ purchaseOrderEnabled: !purchaseOrderEnabled })} />
+        </div>
+        {(ledgerJournalEnabled || purchaseOrderEnabled) && (
           <div className="space-y-3 border-l-2 border-[#287EAD]/30 pl-4">
             <div className="space-y-1.5">
-              <span className={label}>Posting type</span>
+              <span className={label}>Profile to configure</span>
               <CustomListbox
                 value={postingKind}
                 onChange={(val) => setUi({ postingKind: val as "journal" | "purchase_order" })}
@@ -7211,6 +7328,7 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 buttonClassName="w-full"
                 ariaLabel="Posting type"
               />
+              <p className="text-[10px] text-[#8C969E]">The two profiles are saved separately. Select one here to edit its connection defaults and view its field bindings.</p>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5"><span className={label}>Business unit</span>

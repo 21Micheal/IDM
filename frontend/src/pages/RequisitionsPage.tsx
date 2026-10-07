@@ -262,6 +262,7 @@ export default function RequisitionsPage() {
                 {showDepartmentColumn && <th className="px-5 py-3 font-medium">Department</th>}
                 <th className="px-5 py-3 font-medium">Amount</th>
                 <th className="px-5 py-3 font-medium">Status</th>
+                <th className="px-5 py-3 font-medium">Travel retirement</th>
                 <th className="px-5 py-3 font-medium">LPO</th>
                 <th className="px-5 py-3 font-medium">Created</th>
               </tr>
@@ -284,6 +285,22 @@ export default function RequisitionsPage() {
                   {showDepartmentColumn && <td className="px-5 py-3 text-[#5E6870]">{getReqDepartment(doc)}</td>}
                   <td className="px-5 py-3 text-[#1F2933]">{formatMoney(getReqAmount(doc), doc.currency)}</td>
                   <td className="px-5 py-3"><StatusBadge status={doc.status} /></td>
+                  <td className="px-5 py-3 text-xs">
+                    {doc.form_summary?.retirement ? (
+                      <span className={cn(
+                        "inline-flex rounded-full border px-2 py-1 font-semibold",
+                        doc.form_summary.retirement.status === "overdue" || doc.form_summary.retirement.status === "top_up_due"
+                          ? "border-red-200 bg-red-50 text-red-700"
+                          : doc.form_summary.retirement.status === "refund_due"
+                            ? "border-amber-200 bg-amber-50 text-amber-700"
+                            : doc.form_summary.retirement.status === "exact"
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                              : "border-slate-200 bg-slate-50 text-slate-600",
+                      )} title={doc.form_summary.retirement.due_date ? `Due ${doc.form_summary.retirement.due_date}` : undefined}>
+                        {doc.form_summary.retirement.label}
+                      </span>
+                    ) : <span className="text-[#9AA5B1]">—</span>}
+                  </td>
                   <td className="px-5 py-3">
                     <div className="flex flex-wrap gap-1.5">
                       {getLpoDocuments(doc).map((lpo, index) => (

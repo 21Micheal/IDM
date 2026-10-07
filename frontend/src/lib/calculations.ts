@@ -451,14 +451,16 @@ export type RowAggregateRegistryEntry = {
   colTypeByKey: Record<string, string | undefined>;
 };
 
-/** { bareColKey / "table.col": value } fallbacks from each table's FIRST row.
+/** { bareColKey / "table.col": value } fallbacks from each table's first populated cell.
  *  Bare keys follow "first table wins"; dotted keys are unambiguous. */
 function firstRowScopeEntries(registry: Record<string, RowAggregateRegistryEntry>): Record<string, CalcValue> {
   const scope: Record<string, CalcValue> = {};
   for (const [tableKey, entry] of Object.entries(registry)) {
-    const firstRow = entry.rows[0] ?? {};
     for (const [colKey, colType] of Object.entries(entry.colTypeByKey)) {
-      const value = coerceScopeValue(colType, firstRow[colKey]);
+      // Plain column references resolve to the first populated cell so that
+      // selections in later rows are visible to top-level calculated fields.
+      const raw = entry.rows.find((row) => row[colKey] !== undefined && row[colKey] !== null && row[colKey] !== "")?.[colKey];
+      const value = coerceScopeValue(colType, raw);
       if (!(colKey in scope)) scope[colKey] = value;
       scope[`${tableKey}.${colKey}`] = value;
     }

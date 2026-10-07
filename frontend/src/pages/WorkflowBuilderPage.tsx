@@ -282,6 +282,8 @@ interface GroupMembershipApiItem {
   full_name?: string;
   email?: string;
   job_description?: string;
+  is_active?: boolean;
+  expires_at?: string | null;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -670,7 +672,7 @@ function RuleFormFields({ values, routeKind, isRequisitionWorkflow, disabledPhas
 }) {
   const phaseOptions = WORKFLOW_PHASES
     .filter((phase) => {
-      if (isRequisitionWorkflow) return ["requisition", "rfq", "lpo"].includes(phase.value);
+      if (isRequisitionWorkflow) return ["requisition", "rfq", "lpo", "retirement"].includes(phase.value);
       if (routeKind === "payment_run") return phase.value === "payment_run";
       if (routeKind === "form") return ["request", "retirement"].includes(phase.value);
       return phase.value === "request";
@@ -792,7 +794,11 @@ function StepEditPanel({
     queryFn: async () => {
       const r = await groupsAPI.members(step.assignee_group!);
       const raw: GroupMembershipApiItem[] = r.data?.results ?? r.data ?? [];
-      return raw.map((item) => item?.user ?? item).filter((u): u is AppUser => Boolean(u?.id && u?.email));
+      const now = Date.now();
+      return raw
+        .filter((item) => item?.is_active !== false && (!item?.expires_at || new Date(item.expires_at).getTime() > now))
+        .map((item) => item?.user ?? item)
+        .filter((u): u is AppUser => Boolean(u?.id && u?.email));
     },
     enabled: !!step.assignee_group,
   });

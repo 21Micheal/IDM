@@ -450,7 +450,7 @@ export default function FormDetailPage() {
   // should be editable by the owner/admin without requiring the template to have
   // conditional editability rules. Builder-defined field-level editableWhen rules
   // still apply normally through TemplateForm — this only controls the "Edit form" button.
-  const isProcurementApprovedStage = ["requisition_approved", "rfq_approved", "lpo_approved"].includes(step);
+  const isProcurementApprovedStage = ["requisition_approved", "rfq_approved", "lpo_approved", "retirement_approved"].includes(step);
   const canEditForm = (canEdit || hasActiveApprovalTask)
     && !isFinalFormProcessStep(step)
     && (hasActiveApprovalTask
@@ -468,7 +468,8 @@ export default function FormDetailPage() {
     && (!isRetirementPhase || doc.status === "returned")
     && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
   // Only allow retirement submission if template has multiple stages configured (Stage 2 exists)
-  const hasRetirementStage = availableStages.includes(2);
+  const hasRetirementStage = availableStages.includes(2)
+    || Boolean(doc.metadata?.form?.travel_retirement?.enabled);
   const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage && (canApprove || isOwnerOrSubmitter);
   // Server-computed, travel-aware: requisition -> (rfq | lpo for Travel) -> lpo.
   const procurementNextStage = doc.builder_next_stage ?? null;
