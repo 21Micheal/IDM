@@ -43,6 +43,16 @@ export default function Layout({
   const { user, logout } = useAuthStore();
   const [collapsed, setCollapsed] = useState(false);
 
+  // Auto-collapse the sidebar when entering the workflow builder so the
+  // canvas has maximum horizontal space, and restore it on exit.
+  useEffect(() => {
+    if (location.pathname.startsWith("/workflow/builder")) {
+      setCollapsed(true);
+    } else {
+      setCollapsed(false);
+    }
+  }, [location.pathname]);
+
   // Notifications count
   const { data: notificationsData } = useQuery({
     queryKey: ["notifications", "unread-count"],

@@ -226,10 +226,9 @@
   }
 
   .admin-shell {
-    min-height: calc(100vh - 3.5rem);
-    margin: -1.5rem;
-    padding: 1.25rem 2rem 2rem 1.25rem;
-    background: #ededed;
+    min-height: 100%;
+    padding: 1.5rem 2rem 3rem 1.5rem;
+    background: #f4f6f8;
     color: #1f2933;
     font-size: 13px;
   }
@@ -284,6 +283,20 @@
 
   .admin-shell .badge {
     border-radius: 0;
+  }
+
+  /* Flatten design-system borders/shadows inside admin-shell */
+  .admin-shell .border-border {
+    border-color: #c8cdd2;
+  }
+  .admin-shell .bg-muted {
+    background: #f5f7f8;
+  }
+  .admin-shell .text-muted-foreground {
+    color: #5e6870;
+  }
+  .admin-shell .shadow-sm {
+    box-shadow: none !important;
   }
 
   .admin-page-header {

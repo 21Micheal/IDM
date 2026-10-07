@@ -1157,6 +1157,8 @@ export type JournalPostingRecord = {
   posted_at: string | null;
   created_at: string;
   updated_at: string;
+  request_xml?: string;
+  response_xml?: string;
 };
 
 

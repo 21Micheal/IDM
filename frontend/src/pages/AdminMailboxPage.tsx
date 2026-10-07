@@ -373,189 +373,301 @@ export default function AdminMailboxPage() {
   const types = typesQuery.data ?? [];
   const detail = detailQuery.data;
   const canCreate = name.trim().length > 0;
-
   const recentEmails = useMemo(() => detail?.recent_emails ?? [], [detail]);
 
+  const [detailTab, setDetailTab] = useState<"emails" | "stats">("emails");
+
   return (
-    <div className="mx-auto max-w-5xl space-y-6 p-6">
-      <header className="flex items-center gap-3">
-        <Inbox className="h-6 w-6 text-[#287EAD]" />
-        <div>
-          <h1 className="text-xl font-semibold text-[#1F2933]">Email Ingestion</h1>
-          <p className="text-sm text-[#6E767D]">
-            Watch an IMAP or Microsoft 365 mailbox and import attachments as draft documents into
-            the review queue.
-          </p>
-        </div>
-      </header>
+    <div className="admin-shell flex flex-col gap-4" style={{ height: "100%" }}>
 
-      {/* ── Mailbox connection ──────────────────────────────────────────── */}
-      <section className={panelCls}>
-        <div className={panelHeaderCls}>
-          <PlugZap className="h-4 w-4 text-[#287EAD]" />
-          <h2 className="text-sm font-semibold text-[#1F2933]">Mailbox Connection</h2>
-          <span className="text-xs text-[#6E767D]">
-            Blank fields fall back to server-configured defaults.
-          </span>
-        </div>
-        <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-2">
+      {/* ── Page header ── */}
+      <div className="admin-page-header flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <Inbox className="h-5 w-5 text-[#287EAD]" />
           <div>
-            <label className={labelCls}>Protocol</label>
-            <CustomListbox
-              value={protocol}
-              onChange={(v) => changeProtocol(v as MailboxProtocol)}
-              options={[
-                { value: "imap", label: "IMAP" },
-                { value: "graph", label: "Microsoft Graph (Microsoft 365 / Outlook)" },
-              ]}
-              buttonClassName={inputCls}
-              className="w-full"
-              ariaLabel="Mailbox protocol"
-            />
+            <h1 className="admin-page-title">Email Ingestion</h1>
+            <p className="admin-page-subtitle">
+              Watch IMAP or Microsoft 365 mailboxes and import attachments as draft documents.
+            </p>
           </div>
-          <div className="hidden md:block" />
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            className={btnGhost}
+            onClick={() => { resetForm(); setIsNewMailboxModalOpen(true); }}
+          >
+            <Plus className="h-4 w-4" /> New mailbox
+          </button>
+          <button
+            className={btnGhost}
+            onClick={() => mailboxesQuery.refetch()}
+            disabled={mailboxesQuery.isFetching}
+          >
+            <RefreshCw className={clsx("h-4 w-4", mailboxesQuery.isFetching && "animate-spin")} />
+            Refresh
+          </button>
+        </div>
+      </div>
 
-          {protocol === "imap" ? (
-            <>
-              <div>
-                <label className={labelCls}>Host</label>
-                <input
-                  className={inputCls}
-                  value={connection.host ?? ""}
-                  onChange={(e) => setField("host", e.target.value)}
-                  placeholder="imap.example.com"
-                />
+      {/* ── Main two-column layout ── */}
+      <div className="flex min-h-0 flex-1 gap-4">
+
+        {/* LEFT — Mailbox list (scrollable) */}
+        <div className="flex w-72 flex-shrink-0 flex-col border border-[#C8CDD2] bg-white">
+          <div className={panelHeaderCls}>
+            <Mail className="h-4 w-4 text-[#287EAD]" />
+            <h2 className="text-xs font-bold uppercase tracking-wider text-[#1F2933]">
+              Mailboxes ({mailboxes.length})
+            </h2>
+          </div>
+          <div className="flex-1 overflow-y-auto divide-y divide-[#E5E7EB]">
+            {mailboxesQuery.isLoading ? (
+              <div className="flex items-center gap-2 p-4 text-xs text-[#6E767D]">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading…
               </div>
-              <div>
-                <label className={labelCls}>Port</label>
-                <input
-                  className={inputCls}
-                  type="number"
-                  min={1}
-                  value={connection.port ?? 993}
-                  onChange={(e) => setField("port", Number(e.target.value))}
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Username</label>
-                <input
-                  className={inputCls}
-                  value={connection.username ?? ""}
-                  onChange={(e) => setField("username", e.target.value)}
-                  placeholder="invoices@example.com"
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Password</label>
-                <input
-                  className={inputCls}
-                  type="password"
-                  value={connection.password ?? ""}
-                  placeholder="•••••• (leave blank to keep stored)"
-                  onChange={(e) => setField("password", e.target.value)}
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Folder</label>
-                <input
-                  className={inputCls}
-                  value={connection.folder ?? "INBOX"}
-                  onChange={(e) => setField("folder", e.target.value)}
-                />
-              </div>
-              <div className="flex items-end gap-4">
-                <label className="flex items-center gap-2 text-sm text-[#1F2933]">
-                  <input
-                    type="checkbox"
-                    checked={connection.use_ssl ?? true}
-                    onChange={(e) => setField("use_ssl", e.target.checked)}
-                  />
-                  Use SSL
-                </label>
-                <label className="flex items-center gap-2 text-sm text-[#1F2933]">
-                  <input
-                    type="checkbox"
-                    checked={connection.verify_tls ?? true}
-                    onChange={(e) => setField("verify_tls", e.target.checked)}
-                  />
-                  Verify TLS
-                </label>
-              </div>
-            </>
+            ) : mailboxes.length === 0 ? (
+              <p className="p-4 text-xs text-center text-[#6E767D]">
+                No mailboxes yet.<br />
+                <button
+                  className="mt-2 text-[#287EAD] underline text-xs"
+                  onClick={() => { resetForm(); setIsNewMailboxModalOpen(true); }}
+                >
+                  Create one
+                </button>
+              </p>
+            ) : (
+              mailboxes.map((box) => (
+                <div
+                  key={box.id}
+                  onClick={() => { setSelectedId(box.id); setDetailTab("emails"); }}
+                  className={clsx(
+                    "cursor-pointer px-4 py-3 hover:bg-[#F5F9FC] transition-colors",
+                    selectedId === box.id && "bg-[#EEF6FB] border-l-2 border-[#287EAD]",
+                  )}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="text-xs font-semibold text-[#1F2933] truncate">{box.name}</p>
+                    <span className={clsx("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium", POLL_STATUS_STYLES[box.poll_status])}>
+                      {box.poll_status}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-[10px] text-[#6E767D] truncate">
+                    {box.default_document_type_name ?? "Unclassified"} · {box.auto_poll ? `Every ${Math.max(1, Math.round((box.poll_interval_seconds || 300) / 60))}m` : "Manual"}
+                  </p>
+                  <div className="mt-1.5 flex items-center gap-2 text-[10px]">
+                    <span className="text-[#16A34A]">✓ {box.last_imported_count}</span>
+                    <span className="text-[#6E767D]">⊘ {box.last_skipped_count}</span>
+                    <span className="text-[#DC2626]">✗ {box.last_failed_count}</span>
+                    <div className="ml-auto flex gap-1" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        className="p-1 text-[#6E767D] hover:text-[#287EAD] transition-colors"
+                        onClick={() => startEdit(box.id)}
+                        title="Edit"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        className="p-1 text-[#6E767D] hover:text-[#287EAD] transition-colors disabled:opacity-40"
+                        disabled={pollMutation.isPending || box.poll_status === "polling" || !box.is_active}
+                        onClick={() => pollMutation.mutate(box.id)}
+                        title="Poll now"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        className="p-1 text-[#6E767D] hover:text-red-600 transition-colors disabled:opacity-40"
+                        disabled={deleteMutation.isPending}
+                        onClick={() => { if (confirm(`Delete mailbox "${box.name}"?`)) deleteMutation.mutate(box.id); }}
+                        title="Delete"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                      <label className="flex items-center p-1 cursor-pointer" onClick={(e) => e.stopPropagation()} title={box.is_active ? "Active" : "Inactive"}>
+                        <input
+                          type="checkbox"
+                          checked={box.is_active}
+                          disabled={toggleActiveMutation.isPending}
+                          onChange={(e) => toggleActiveMutation.mutate({ id: box.id, is_active: e.target.checked })}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* RIGHT — Detail panel (tabbed) */}
+        <div className="flex min-w-0 flex-1 flex-col border border-[#C8CDD2] bg-white">
+          {!selectedId ? (
+            <div className="flex flex-1 flex-col items-center justify-center text-center p-10 text-[#6E767D]">
+              <Inbox className="h-10 w-10 mb-3 text-[#C8CDD2]" />
+              <p className="text-sm font-medium text-[#1F2933]">Select a mailbox</p>
+              <p className="text-xs mt-1">Click a mailbox on the left to view ingestion logs and statistics.</p>
+            </div>
           ) : (
             <>
-              <div>
-                <label className={labelCls}>Tenant ID</label>
-                <input
-                  className={inputCls}
-                  value={connection.tenant_id ?? ""}
-                  onChange={(e) => setField("tenant_id", e.target.value)}
-                  placeholder="Azure AD directory (tenant) id"
-                />
+              {/* Detail header */}
+              <div className={clsx(panelHeaderCls, "justify-between")}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <Mail className="h-4 w-4 text-[#287EAD] shrink-0" />
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-[#1F2933] truncate">
+                    {detail?.name ?? "…"}
+                  </h2>
+                  {detail && (
+                    <span className={clsx("shrink-0 rounded px-2 py-0.5 text-[10px] font-medium", POLL_STATUS_STYLES[detail.poll_status])}>
+                      {detail.poll_status}
+                    </span>
+                  )}
+                </div>
+                {detail?.last_polled_at && (
+                  <span className="shrink-0 text-[10px] text-[#6E767D]">
+                    Last polled {new Date(detail.last_polled_at).toLocaleString()}
+                  </span>
+                )}
               </div>
-              <div>
-                <label className={labelCls}>Client ID</label>
-                <input
-                  className={inputCls}
-                  value={connection.client_id ?? ""}
-                  onChange={(e) => setField("client_id", e.target.value)}
-                  placeholder="App registration (client) id"
-                />
+
+              {/* Sub-tab bar */}
+              <div className="flex border-b border-[#C8CDD2] bg-[#F5F7F8]">
+                {([
+                  { id: "emails" as const, label: "Recent Emails", icon: Mail },
+                  { id: "stats"  as const, label: "Statistics",    icon: BarChart3 },
+                ]).map(({ id, label, icon: Icon }) => (
+                  <button
+                    key={id}
+                    onClick={() => setDetailTab(id)}
+                    className={clsx(
+                      "flex items-center gap-1.5 px-4 py-2.5 text-xs font-bold transition-colors border-b-2 -mb-px",
+                      detailTab === id
+                        ? "border-[#287EAD] text-[#287EAD] bg-white"
+                        : "border-transparent text-[#5E6870] hover:text-[#1F2933]"
+                    )}
+                  >
+                    <Icon className="h-3.5 w-3.5" /> {label}
+                  </button>
+                ))}
               </div>
-              <div>
-                <label className={labelCls}>Client Secret</label>
-                <input
-                  className={inputCls}
-                  type="password"
-                  value={connection.client_secret ?? ""}
-                  placeholder="•••••• (leave blank to keep stored)"
-                  onChange={(e) => setField("client_secret", e.target.value)}
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Mailbox (user)</label>
-                <input
-                  className={inputCls}
-                  value={connection.mailbox ?? ""}
-                  onChange={(e) => setField("mailbox", e.target.value)}
-                  placeholder="invoices@your-tenant.com"
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Folder</label>
-                <input
-                  className={inputCls}
-                  value={connection.folder ?? "inbox"}
-                  onChange={(e) => setField("folder", e.target.value)}
-                  placeholder="inbox"
-                />
-              </div>
-              <div className="flex items-end">
-                <p className="text-xs text-[#6E767D]">
-                  App-only access: the Azure app registration needs the application permission
-                  <span className="font-medium"> Mail.Read</span> with admin consent.
-                </p>
-              </div>
+
+              {/* Recent Emails tab */}
+              {detailTab === "emails" && (
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  {detailQuery.isLoading ? (
+                    <div className="flex items-center gap-2 p-6 text-sm text-[#6E767D]">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+                    </div>
+                  ) : (
+                    <>
+                      {detail?.last_error && (
+                        <p className="border-b border-[#FECACA] bg-[#FEF2F2] px-4 py-2 text-xs text-[#991B1B] shrink-0">
+                          {detail.last_error}
+                          {(detail.consecutive_failures ?? 0) > 1 && (
+                            <span className="font-semibold"> · {detail.consecutive_failures} consecutive failed polls</span>
+                          )}
+                        </p>
+                      )}
+                      {detail?.email_counts && (
+                        <div className="flex flex-wrap gap-4 border-b border-[#E5E7EB] px-4 py-2 text-xs shrink-0">
+                          <span className="text-[#1F2933] font-semibold">{detail.email_counts.total} emails seen</span>
+                          <span className="text-[#16A34A]">✓ {detail.email_counts.imported} imported</span>
+                          {detail.email_counts.partial > 0 && <span className="text-[#854D0E]">◐ {detail.email_counts.partial} partial</span>}
+                          <span className="text-[#6E767D]">⊘ {detail.email_counts.skipped} skipped</span>
+                          <span className="text-[#DC2626]">✗ {detail.email_counts.failed} failed</span>
+                        </div>
+                      )}
+                      <div className="flex-1 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="sticky top-0 bg-[#F5F7F8] text-left uppercase tracking-wide text-[#6E767D] border-b border-[#C8CDD2]">
+                            <tr>
+                              <th className="px-4 py-2">From</th>
+                              <th className="px-4 py-2">Subject</th>
+                              <th className="px-4 py-2">Status</th>
+                              <th className="px-4 py-2">Docs</th>
+                              <th className="px-4 py-2">Detail</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {recentEmails.length === 0 ? (
+                              <tr>
+                                <td className="px-4 py-6 text-[#6E767D] text-center" colSpan={5}>No emails ingested yet.</td>
+                              </tr>
+                            ) : (
+                              recentEmails.map((email) => (
+                                <tr key={email.id} className="border-t border-[#E5E7EB] hover:bg-[#F9FAFB]">
+                                  <td className="px-4 py-2 text-[#374151]">{email.sender || "—"}</td>
+                                  <td className="px-4 py-2 text-[#374151]">{email.subject || "—"}</td>
+                                  <td className="px-4 py-2">
+                                    <span className={clsx("rounded px-2 py-0.5 text-[10px] font-medium", EMAIL_STATUS_STYLES[email.status] ?? "bg-[#E5E7EB] text-[#374151]")}>
+                                      {email.status}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-2 text-[#6E767D]">{email.documents_created}/{email.attachment_count}</td>
+                                  <td className="px-4 py-2 text-[#6E767D]">{email.detail}</td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Statistics tab */}
+              {detailTab === "stats" && (
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold text-[#5E6870] uppercase tracking-wider">Ingestion activity</p>
+                    <CustomListbox
+                      value={String(statsDays)}
+                      onChange={(v) => setStatsDays(Number(v))}
+                      options={[
+                        { value: "7",  label: "Last 7 days" },
+                        { value: "30", label: "Last 30 days" },
+                        { value: "90", label: "Last 90 days" },
+                      ]}
+                      buttonClassName="h-8 border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933] text-left"
+                      ariaLabel="Ingestion statistics time range"
+                    />
+                  </div>
+                  {statsQuery.data && (
+                    <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs border border-[#E5E7EB] bg-[#F9FAFB] px-4 py-2.5">
+                      <span className="text-[#1F2933] font-semibold">{statsQuery.data.totals.documents} documents</span>
+                      <span className="text-[#16A34A]">✓ {statsQuery.data.totals.imported} imported</span>
+                      <span className="text-[#6E767D]">⊘ {statsQuery.data.totals.skipped} skipped</span>
+                      <span className="text-[#DC2626]">✗ {statsQuery.data.totals.failed} failed</span>
+                      <span className="text-[#6E767D]">{statsQuery.data.totals.total} emails seen</span>
+                    </div>
+                  )}
+                  <div className="h-64 w-full">
+                    {statsQuery.isLoading ? (
+                      <div className="flex h-full items-center justify-center">
+                        <Loader2 className="h-6 w-6 animate-spin text-[#5E6870]" />
+                      </div>
+                    ) : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={statsQuery.data?.daily ?? []} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" />
+                          <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#6E767D" }} tickFormatter={(d: string) => d.slice(5)} interval="preserveStartEnd" minTickGap={24} />
+                          <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: "#6E767D" }} width={32} />
+                          <Tooltip />
+                          <Legend wrapperStyle={{ fontSize: 12 }} />
+                          <Bar dataKey="imported" stackId="a" name="Imported" fill="#16A34A" />
+                          <Bar dataKey="skipped"  stackId="a" name="Skipped"  fill="#CBD5E1" />
+                          <Bar dataKey="failed"   stackId="a" name="Failed"   fill="#DC2626" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
-        <div className="flex justify-end gap-2 border-t border-[#C8CDD2] px-4 py-3">
-          <button
-            className={btnGhost}
-            disabled={testMutation.isPending}
-            onClick={() => testMutation.mutate()}
-          >
-            {testMutation.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <PlugZap className="h-4 w-4" />
-            )}
-            Test connection
-          </button>
-        </div>
-      </section>
+      </div>
 
-      {/* ── New / edit mailbox dialog ──────────────────────────────────────── */}
+      {/* ── New / edit mailbox dialog ── */}
       <Dialog open={isNewMailboxModalOpen} onOpenChange={setIsNewMailboxModalOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
@@ -769,286 +881,7 @@ export default function AdminMailboxPage() {
         </DialogContent>
       </Dialog>
 
-      {/* ── Ingestion statistics ────────────────────────────────────────── */}
-      <section className={panelCls}>
-        <div className={clsx(panelHeaderCls, "justify-between")}>
-          <span className="flex items-center gap-2">
-            <BarChart3 className="h-4 w-4 text-[#287EAD]" />
-            <h2 className="text-sm font-semibold text-[#1F2933]">Ingestion statistics</h2>
-          </span>
-          <CustomListbox
-            value={String(statsDays)}
-            onChange={(v) => setStatsDays(Number(v))}
-            options={[
-              { value: "7", label: "Last 7 days" },
-              { value: "30", label: "Last 30 days" },
-              { value: "90", label: "Last 90 days" },
-            ]}
-            buttonClassName="h-8 border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933] text-left"
-            ariaLabel="Ingestion statistics time range"
-          />
-        </div>
-        <div className="space-y-4 p-4">
-          {statsQuery.data && (
-            <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
-              <span className="text-[#1F2933]">
-                <span className="font-semibold">{statsQuery.data.totals.documents}</span> documents
-              </span>
-              <span className="text-[#16A34A]">✓ {statsQuery.data.totals.imported} imported</span>
-              <span className="text-[#6E767D]">⊘ {statsQuery.data.totals.skipped} skipped</span>
-              <span className="text-[#DC2626]">✗ {statsQuery.data.totals.failed} failed</span>
-              <span className="text-[#6E767D]">{statsQuery.data.totals.total} emails seen</span>
-            </div>
-          )}
-          <div className="h-64 w-full">
-            {statsQuery.isLoading ? (
-              <div className="flex h-full items-center justify-center">
-                <Loader2 className="h-6 w-6 animate-spin text-[#5E6870]" />
-              </div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={statsQuery.data?.daily ?? []} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" />
-                  <XAxis
-                    dataKey="date"
-                    tick={{ fontSize: 11, fill: "#6E767D" }}
-                    tickFormatter={(d: string) => d.slice(5)}
-                    interval="preserveStartEnd"
-                    minTickGap={24}
-                  />
-                  <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: "#6E767D" }} width={32} />
-                  <Tooltip />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  <Bar dataKey="imported" stackId="a" name="Imported" fill="#16A34A" />
-                  <Bar dataKey="skipped" stackId="a" name="Skipped" fill="#CBD5E1" />
-                  <Bar dataKey="failed" stackId="a" name="Failed" fill="#DC2626" />
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </div>
-        </div>
-      </section>
-
-      {/* ── Mailboxes list ──────────────────────────────────────────────── */}
-      <section className={panelCls}>
-        <div className={clsx(panelHeaderCls, "justify-between")}>
-          <span className="flex items-center gap-2">
-            <RefreshCw className="h-4 w-4 text-[#287EAD]" />
-            <h2 className="text-sm font-semibold text-[#1F2933]">Mailboxes</h2>
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              className={btnPrimary}
-              onClick={() => {
-                resetForm();
-                setIsNewMailboxModalOpen(true);
-              }}
-            >
-              <Plus className="h-4 w-4" />
-              New mailbox
-            </button>
-            <button
-              className={btnGhost}
-              onClick={() => mailboxesQuery.refetch()}
-              disabled={mailboxesQuery.isFetching}
-            >
-              <RefreshCw className={clsx("h-4 w-4", mailboxesQuery.isFetching && "animate-spin")} />
-              Refresh
-            </button>
-          </div>
-        </div>
-        {mailboxes.length === 0 ? (
-          <p className="p-6 text-center text-sm text-[#6E767D]">No mailboxes yet.</p>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-[#F5F7F8] text-left text-xs uppercase tracking-wide text-[#6E767D]">
-              <tr>
-                <th className="px-4 py-2">Name</th>
-                <th className="px-4 py-2">Default type</th>
-                <th className="px-4 py-2">Active</th>
-                <th className="px-4 py-2">Auto poll</th>
-                <th className="px-4 py-2">Status & timing</th>
-                <th className="px-4 py-2 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {mailboxes.map((box) => (
-                <tr
-                  key={box.id}
-                  className={clsx(
-                    "border-t border-[#E5E7EB] hover:bg-[#F9FAFB] cursor-pointer",
-                    selectedId === box.id && "bg-[#EFF6FB]",
-                  )}
-                  onClick={() => setSelectedId(box.id)}
-                >
-                  <td className="px-4 py-2 font-medium text-[#1F2933]">{box.name}</td>
-                  <td className="px-4 py-2 text-[#6E767D]">
-                    {box.default_document_type_name ?? "Unclassified"}
-                  </td>
-                  <td className="px-4 py-2" onClick={(e) => e.stopPropagation()}>
-                    <label className="inline-flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={box.is_active}
-                        disabled={toggleActiveMutation.isPending}
-                        onChange={(e) =>
-                          toggleActiveMutation.mutate({ id: box.id, is_active: e.target.checked })
-                        }
-                      />
-                    </label>
-                  </td>
-                  <td className="px-4 py-2 text-[#6E767D]">
-                    {box.auto_poll
-                      ? `Every ${Math.max(1, Math.round((box.poll_interval_seconds || 300) / 60))}m`
-                      : "Manual"}
-                  </td>
-                  <td className="px-4 py-2">
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={clsx(
-                            "rounded px-2 py-0.5 text-xs font-medium",
-                            POLL_STATUS_STYLES[box.poll_status],
-                          )}
-                        >
-                          {box.poll_status}
-                        </span>
-                        <span className="text-[#16A34A]">✓{box.last_imported_count}</span>
-                        <span className="text-[#6E767D]">⊘{box.last_skipped_count}</span>
-                        <span className="text-[#DC2626]">✗{box.last_failed_count}</span>
-                      </div>
-                      {box.last_polled_at && (
-                        <span className="text-xs text-[#6E767D]">
-                          Last poll: {new Date(box.last_polled_at).toLocaleString()}
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-2">
-                    <div className="flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        className={btnGhost}
-                        onClick={() => startEdit(box.id)}
-                        title="Edit mailbox"
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </button>
-                      <button
-                        className={btnGhost}
-                        disabled={pollMutation.isPending || box.poll_status === "polling" || !box.is_active}
-                        onClick={() => pollMutation.mutate(box.id)}
-                        title="Poll now"
-                      >
-                        <RefreshCw className="h-4 w-4" />
-                      </button>
-                      <button
-                        className={btnGhost}
-                        disabled={deleteMutation.isPending}
-                        onClick={() => {
-                          if (confirm(`Delete mailbox "${box.name}"?`)) deleteMutation.mutate(box.id);
-                        }}
-                        title="Delete mailbox"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
-
-      {/* ── Mailbox detail / recent emails ──────────────────────────────── */}
-      {detail && (
-        <section className={panelCls}>
-          <div className={clsx(panelHeaderCls, "justify-between")}>
-            <span className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold text-[#1F2933]">{detail.name} — recent emails</h2>
-              <span
-                className={clsx(
-                  "rounded px-2 py-0.5 text-xs font-medium",
-                  POLL_STATUS_STYLES[detail.poll_status],
-                )}
-              >
-                {detail.poll_status}
-              </span>
-            </span>
-            {detail.last_polled_at && (
-              <span className="text-xs text-[#6E767D]">
-                Last polled {new Date(detail.last_polled_at).toLocaleString()}
-              </span>
-            )}
-          </div>
-          <div className="space-y-3 p-4">
-            {detail.last_error && (
-              <p className="border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-sm text-[#991B1B]">
-                {detail.last_error}
-                {(detail.consecutive_failures ?? 0) > 1 && (
-                  <span className="font-medium"> · {detail.consecutive_failures} consecutive failed polls</span>
-                )}
-              </p>
-            )}
-            {detail.email_counts && (
-              <div className="flex flex-wrap gap-4 text-sm">
-                <span className="text-[#1F2933]">
-                  <span className="font-semibold">{detail.email_counts.total}</span> emails seen
-                </span>
-                <span className="text-[#16A34A]">✓ {detail.email_counts.imported} imported</span>
-                {detail.email_counts.partial > 0 && (
-                  <span className="text-[#854D0E]">◐ {detail.email_counts.partial} partial</span>
-                )}
-                <span className="text-[#6E767D]">⊘ {detail.email_counts.skipped} skipped</span>
-                <span className="text-[#DC2626]">✗ {detail.email_counts.failed} failed</span>
-              </div>
-            )}
-            <div className="max-h-72 overflow-auto border border-[#E5E7EB]">
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-[#F5F7F8] text-left uppercase tracking-wide text-[#6E767D]">
-                  <tr>
-                    <th className="px-3 py-2">From</th>
-                    <th className="px-3 py-2">Subject</th>
-                    <th className="px-3 py-2">Status</th>
-                    <th className="px-3 py-2">Docs</th>
-                    <th className="px-3 py-2">Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recentEmails.length === 0 ? (
-                    <tr>
-                      <td className="px-3 py-3 text-[#6E767D]" colSpan={5}>
-                        No emails ingested yet.
-                      </td>
-                    </tr>
-                  ) : (
-                    recentEmails.map((email) => (
-                      <tr key={email.id} className="border-t border-[#E5E7EB]">
-                        <td className="px-3 py-1.5 text-[#374151]">{email.sender || "—"}</td>
-                        <td className="px-3 py-1.5 text-[#374151]">{email.subject || "—"}</td>
-                        <td className="px-3 py-1.5">
-                          <span
-                            className={clsx(
-                              "rounded px-2 py-0.5 text-xs font-medium",
-                              EMAIL_STATUS_STYLES[email.status] ?? "bg-[#E5E7EB] text-[#374151]",
-                            )}
-                          >
-                            {email.status}
-                          </span>
-                        </td>
-                        <td className="px-3 py-1.5 text-[#6E767D]">
-                          {email.documents_created}/{email.attachment_count}
-                        </td>
-                        <td className="px-3 py-1.5 text-[#6E767D]">{email.detail}</td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-      )}
     </div>
   );
 }
+

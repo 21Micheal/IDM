@@ -288,7 +288,7 @@ export default function NewRequisitionPage() {
   // ── Loading state ──────────────────────────────────────────────────────────
   if (loadingTemplates) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#F0F2F5]">
+      <div className="flex h-full items-center justify-center bg-[#F0F2F5]">
         <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
       </div>
     );
@@ -296,7 +296,7 @@ export default function NewRequisitionPage() {
 
   if (templates.length === 0) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#F0F2F5] p-6">
+      <div className="flex h-full items-center justify-center bg-[#F0F2F5] p-6">
         <div className="w-full max-w-md border border-[#C8CDD2] bg-white p-8 shadow-sm">
           <div className="flex items-start gap-3">
             <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-amber-50">
@@ -325,10 +325,10 @@ export default function NewRequisitionPage() {
 
   // ── Main render ────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-[#F0F2F5] pb-20">
+    <div className="min-h-full bg-[#F0F2F5] pb-20">
 
       {/* ── Top Navigation Bar ── */}
-      <div className="sticky top-0 z-30 border-b border-[#D9DDE2] bg-white shadow-sm">
+      <div className="sticky top-0 z-10 border-b border-[#D9DDE2] bg-white shadow-sm">
         <div className="flex w-full items-center justify-between gap-4 px-6 py-3">
 
           {/* Left: back button */}

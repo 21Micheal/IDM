@@ -48,6 +48,7 @@ import SignaturePlacementModal, {
 } from "@/components/signatures/SignaturePlacementModal";
 import InvoiceAttachmentsPanel from "@/components/templates/InvoiceAttachmentsPanel";
 import LpoPdfPreview from "@/components/documents/LpoPdfPreview";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 const AUDIT_PAGE_SIZE = 5;
 
@@ -776,9 +777,16 @@ export default function FormDetailPage() {
                   </button>
                 )}
                 {generatedLpos.length > 1 && (
-                  <select aria-label="Select LPO" value={generatedLpoId} onChange={(event) => setSelectedLpoId(event.target.value)} className="max-w-44 border border-[#C8CDD1] bg-white px-2 py-1.5 text-xs text-[#1F2933]">
-                    {generatedLpos.map((lpo, index) => <option key={lpo.id} value={lpo.id}>{lpo.table_label || `LPO ${index + 1}`} · {lpo.reference || index + 1}</option>)}
-                  </select>
+                  <CustomListbox
+                    value={generatedLpoId ?? ""}
+                    onChange={(val) => setSelectedLpoId(val)}
+                    options={generatedLpos.map((lpo, index) => ({
+                      value: lpo.id,
+                      label: `${lpo.table_label || `LPO ${index + 1}`} · ${lpo.reference || index + 1}`,
+                    }))}
+                    buttonClassName="max-w-44 border border-[#C8CDD1] bg-white px-2 py-1.5 text-xs text-[#1F2933] text-left hover:border-[#287EAD] transition-colors"
+                    ariaLabel="Select LPO"
+                  />
                 )}
                 {generatedLpoId && canDownloadLpo && (
                   <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99]">
@@ -1082,7 +1090,7 @@ export default function FormDetailPage() {
               onBeforeApprove={savePendingFormEditsBeforeApproval}
               onCompleted={() => {
                 setWorkflowActionCompleted(false);
-                const phase = String(formData?.workflow_phase ?? doc?.builder_workflow_phase ?? "").toLowerCase();
+                const phase = String((formData as any)?.workflow_phase ?? doc?.builder_workflow_phase ?? "").toLowerCase();
                 const lpoApprovalSteps = (workflowData?.steps ?? []).filter((step) =>
                   step.kind === "task"
                     && /^approver-\d+$/.test(step.id)
