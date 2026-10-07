@@ -13,10 +13,12 @@ const toNum = (v: unknown) => {
   const n = parseFloat(String(v ?? "").replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
 };
-const money = (currency: string, n: number) =>
-  `${currency} ${n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+const money = (currency: string, n: number) => {
+  const amount = n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  return currency ? `${currency} ${amount}` : amount;
+};
 
-export default function BudgetBanner({ amount, budget, currency = "KSh", accountCode }: Props) {
+export default function BudgetBanner({ amount, budget, currency = "", accountCode }: Props) {
   const requested = toNum(amount);
   const budgetConfigured = budget !== null && budget !== "" && budget !== undefined;
 

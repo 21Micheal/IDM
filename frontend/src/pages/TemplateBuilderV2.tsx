@@ -5878,7 +5878,13 @@ function buildCalcScope(
   const scope: Record<string, CalcValue> = registry ? firstRowScopeEntries(registry) : {};
   for (const f of allFields) {
     if (!f.key) continue;
-    scope[f.key] = coerceScopeValue(f.type, values[f.id]);
+    const value = values[f.id];
+    // The designer preview may not have a live value yet. Match form defaults
+    // so formulas can use configured numeric defaults from the first render.
+    scope[f.key] = coerceScopeValue(
+      f.type,
+      value === undefined || value === null || value === "" ? f.defaultValue : value,
+    );
   }
   return scope;
 }

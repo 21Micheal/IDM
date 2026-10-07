@@ -443,6 +443,7 @@ export interface TemplateField {
   key?: string;
   id?: string;
   type?: string;
+  defaultValue?: unknown;
 }
 
 export type RowAggregateRegistryEntry = {
@@ -474,7 +475,11 @@ export function buildCalcScope(
   const scope: Record<string, CalcValue> = registry ? firstRowScopeEntries(registry) : {};
   for (const f of allFields) {
     if (!f.key) continue;
-    scope[f.key] = coerceScopeValue(f.type, values[f.key]);
+    const value = values[f.key];
+    scope[f.key] = coerceScopeValue(
+      f.type,
+      value === undefined || value === null || value === "" ? f.defaultValue : value,
+    );
   }
   return scope;
 }

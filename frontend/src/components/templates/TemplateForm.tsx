@@ -1838,8 +1838,9 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       parseAmount(field.defaultValue);
     const requested = resolveNumericSource(ss.monitoredAmountField, allValues, allFields) ?? 0;
     const budgetNum = budget ?? 0;
-    const currency = field.currencySymbol || "KSh";
-    const formattedBudget = `${currency} ${budgetNum.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+    const currency = field.currencySymbol?.trim() ?? "";
+    const formattedAmount = budgetNum.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    const formattedBudget = currency ? `${currency} ${formattedAmount}` : formattedAmount;
 
     return (
       <div className="min-w-0" style={style}>
