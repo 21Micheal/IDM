@@ -79,6 +79,7 @@ configured data, not hard-coded here — see :func:`_expand_retirement_lines`.
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field as dc_field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterator
@@ -179,6 +180,26 @@ def resolve_value(spec: Any, values: dict, row: dict | None = None, *, default: 
 
 def resolve_amount(spec: Any, values: dict, row: dict | None = None) -> Decimal:
     """Resolve a ValueSpec to a Decimal amount (0 when blank/unparseable)."""
+    aggregate = spec.get("sum_matching_rows") if isinstance(spec, dict) else None
+    if isinstance(aggregate, dict):
+        rows = (values or {}).get(aggregate.get("table"))
+        if not isinstance(rows, list):
+            return Decimal("0")
+        match_values = {
+            _to_str(value).strip().casefold()
+            for value in (aggregate.get("values") or [])
+            if _to_str(value).strip()
+        }
+        if not match_values:
+            return Decimal("0")
+        total = Decimal("0")
+        for table_row in rows:
+            if not isinstance(table_row, dict):
+                continue
+            item = _to_str(table_row.get(aggregate.get("match_column"))).strip().casefold()
+            if item in match_values:
+                total += resolve_amount({"row_field": aggregate.get("amount_column")}, values, table_row)
+        return total
     text = resolve_value(spec, values, row, default="0")
     text = re.sub(r"[,\s]", "", text)
     if text in ("", "-"):
@@ -344,6 +365,76 @@ def _iter_po_lines(specs: list[dict], values: dict, warnings: list[str]) -> Iter
             if not any(value not in (None, "", [], {}) for value in row.values()):
                 continue
             yield spec, row
+
+
+def expand_purchase_order_postings(
+    mapping: dict,
+    values: dict,
+    *,
+    lpo_documents: list[dict] | None = None,
+) -> list[dict]:
+    """Split a PO profile into deterministic table + transaction/product groups.
+
+    Every source table becomes its own PO posting. Within a table, lines sharing
+    PurchaseTransactionType and ProductGroup are included in one request.
+    ``lpo_documents`` supplies the already-generated printable LPO reference for
+    each table.
+    """
+    po = (mapping or {}).get("purchase_order") or {}
+    specs = _po_line_specs(po)
+    references = {
+        str(item.get("table_key") or ""): str(item.get("reference") or "")
+        for item in (lpo_documents or []) if isinstance(item, dict)
+    }
+    grouped: dict[tuple[str, str, str], dict] = {}
+    for spec in specs:
+        table_key = str(spec.get("repeat_over") or "")
+        rows = values.get(table_key) if table_key else [None]
+        if table_key and not isinstance(rows, list):
+            continue
+        txn_spec = spec.get("purchase_transaction_type")
+        product_spec = spec.get("product_group") or po.get("product_group")
+        for row in rows or []:
+            if row is not None and not isinstance(row, dict):
+                continue
+            if row is not None and not any(value not in (None, "", [], {}) for value in row.values()):
+                continue
+            transaction_type = resolve_value(txn_spec, values, row) or resolve_value(po.get("transaction_type"), values, row)
+            product_group = resolve_value(product_spec, values, row)
+            key = (table_key, transaction_type.strip(), product_group.strip())
+            entry = grouped.setdefault(key, {"spec": spec, "rows": []})
+            entry["rows"].append(row)
+
+    expanded = []
+    for (table_key, transaction_type, product_group), entry in grouped.items():
+        current = deepcopy(mapping)
+        current_po = current.setdefault("purchase_order", {})
+        spec = deepcopy(entry["spec"])
+        current_po["lines"] = [spec]
+        if transaction_type:
+            current_po["transaction_type"] = {"const": transaction_type}
+        if table_key:
+            current_values = dict(values)
+            for configured_spec in specs:
+                other_table = configured_spec.get("repeat_over")
+                if other_table and other_table != table_key:
+                    current_values[other_table] = []
+            current_values[table_key] = entry["rows"]
+        else:
+            current_values = dict(values)
+        reference = references.get(table_key) or resolve_value(current_po.get("reference"), current_values)
+        if reference:
+            current_po["reference"] = {"const": reference}
+        desc_spec = spec.get("description")
+        if desc_spec and table_key and isinstance(desc_spec, dict) and desc_spec.get("row_field"):
+            current_po["comment"] = {"table": table_key, "row_field": desc_spec["row_field"]}
+        current["_posting_values"] = current_values
+        current["_posting_label"] = " / ".join(
+            value for value in (str(spec.get("table_label") or table_key), transaction_type, product_group) if value
+        ) or "LPO"
+        current["label"] = current["_posting_label"]
+        expanded.append(current)
+    return expanded
 
 
 def _po_line_amount(spec: dict, values: dict, row: dict | None, quantity: Decimal, unit_price: Decimal) -> Decimal:
@@ -700,6 +791,14 @@ def _iter_lines(mapping: dict, values: dict, warnings: list[str]) -> Iterator[tu
                 continue
             for row in rows:
                 if isinstance(row, dict):
+                    where = line_spec.get("where")
+                    if where is not None:
+                        if not isinstance(where, dict) or not where.get("row_field"):
+                            continue
+                        actual = _to_str(row.get(where["row_field"])).strip().casefold()
+                        expected = _to_str(where.get("equals")).strip().casefold()
+                        if actual != expected:
+                            continue
                     yield line_spec, row
         else:
             yield line_spec, None

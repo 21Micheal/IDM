@@ -72,8 +72,9 @@ function StageRow({
   const hasError      = posting.status === "failed" && errorMessages.length > 0;
   const rawXml        = posting.response_xml || "";
   const hasSummary    = Boolean(posting.error || posting.message);
-  // For LPOs, always use "LPO" regardless of stage. For journals, use stage labels.
-  const stageLabel    = isPO ? "LPO" : posting.stage === 1 ? "Stage 1-Initial" : posting.stage === 2 ? "Stage 2-Retirement" : posting.stage_label || `Stage ${posting.stage}`;
+  const stageLabel    = isPO
+    ? (posting.stage_label || "LPO")
+    : posting.stage === 1 ? "Stage 1-Initial" : posting.stage === 2 ? "Stage 2-Retirement" : posting.stage_label || `Stage ${posting.stage}`;
 
   const onRetry = useCallback(async () => {
     setRetrying(true);
@@ -274,7 +275,7 @@ export default function JournalPostingCard({
 
   // Merge server data with local overrides (local wins while fresher).
   const postings: JournalPosting[] = (serverPostings ?? [])
-    .filter((p) => !availableStages || availableStages.includes(p.stage))
+    .filter((p) => p.stage >= 1000 || !availableStages || availableStages.includes(p.stage))
     .map((server) => {
       const local = localPostings[server.stage];
       if (!local) return server;
@@ -317,11 +318,13 @@ export default function JournalPostingCard({
       <div className="flex items-center gap-2 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
         <Receipt className="h-4 w-4 text-[#287EAD]" />
         <p className="text-sm font-bold text-[#1F2933]">
-          {isPO ? "SunSystems LPO" : "SunSystems Journal"}
+          {postings.some((posting) => posting.component === "PurchaseOrder") && postings.some((posting) => posting.component !== "PurchaseOrder")
+            ? "SunSystems postings"
+            : isPO ? "SunSystems LPO" : "SunSystems Journal"}
         </p>
         {multiStage && (
           <span className="ml-auto text-[10px] text-[#5E6870] font-medium">
-            {postings.filter((p) => p.status === "posted").length}/{postings.length} stages posted
+            {postings.filter((p) => p.status === "posted").length}/{postings.length} postings completed
           </span>
         )}
       </div>
@@ -329,7 +332,8 @@ export default function JournalPostingCard({
       {/* stages — side-by-side when multi, single column otherwise */}
       <div className={multiStage ? "grid grid-cols-1 sm:grid-cols-2 divide-x divide-[#E8EAEC]" : "max-w-md p-4"}>
         {postings.map((posting, idx) => {
-          const prevPosted = idx === 0 || postings[idx - 1]?.status === "posted";
+          const previousJournalPosting = [...postings.slice(0, idx)].reverse().find((row) => row.stage < 1000);
+          const prevPosted = posting.stage >= 1000 || !previousJournalPosting || previousJournalPosting.status === "posted";
           return (
             <div key={posting.id} className={multiStage ? "p-4" : ""}>
               <StageRow

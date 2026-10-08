@@ -74,6 +74,16 @@ def get_journal_mapping(document, stage: int = 1) -> dict | None:
     Stage mappings inherit the parent config's ``enabled`` flag when not
     explicitly set on the stage object.
     """
+    # Dynamic stage range reserved for individual PurchaseOrder requests.
+    # Each generated LPO table / transaction group gets a stable stage number
+    # so existing JournalPosting audit + retry surfaces can track it.
+    if int(stage) >= 1000:
+        postings = get_purchase_order_postings(document)
+        index = int(stage) - 1000
+        if 0 <= index < len(postings):
+            return postings[index]["mapping"]
+        return None
+
     cfg = get_journal_config(document)
     if not cfg:
         return None
@@ -93,6 +103,29 @@ def get_all_stages(document) -> list[dict]:
     if not cfg:
         return []
     return sorted(_get_stages(cfg), key=lambda s: int(s.get("stage", 1)))
+
+
+def get_purchase_order_postings(document) -> list[dict]:
+    """Return deterministic table + transaction/product-group PO requests."""
+    config = get_sunsystems_config(document).get("purchase_order")
+    if not isinstance(config, dict) or not config.get("enabled"):
+        # Backward-compatible templates nested their PO mapping under journal.
+        legacy = get_journal_config(document) or {}
+        if not legacy.get("enabled") or str(legacy.get("component") or "").lower() != "purchaseorder":
+            return []
+        config = legacy
+    from .mapping import expand_purchase_order_postings
+
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    expanded = expand_purchase_order_postings(
+        config,
+        get_form_values(document),
+        lpo_documents=form.get("lpo_documents") or [],
+    )
+    return [
+        {"stage": 1000 + index, "label": item.get("_posting_label") or f"LPO {index + 1}", "mapping": item}
+        for index, item in enumerate(expanded)
+    ]
 
 
 def get_budget_mapping(document) -> dict | None:
@@ -147,7 +180,8 @@ def refresh_sunsystems_config_from_template(document) -> bool:
 
 def journal_posting_enabled(document) -> bool:
     cfg = get_journal_config(document)
-    return bool(cfg and cfg.get("enabled"))
+    po_cfg = get_sunsystems_config(document).get("purchase_order")
+    return bool((cfg and cfg.get("enabled")) or (isinstance(po_cfg, dict) and po_cfg.get("enabled")))
 
 
 def post_triggers(document) -> dict[str, int]:
@@ -197,6 +231,27 @@ def find_stage_to_post(document, outcome: str) -> int | None:
         if trigger == outcome and stage_num not in posted:
             return stage_num
     return None
+
+
+def find_stages_to_post(document, outcomes: list[str]) -> list[int]:
+    """Return every unposted journal stage whose trigger is in outcomes."""
+    cfg = get_journal_config(document)
+    if not cfg or not cfg.get("enabled"):
+        return []
+    try:
+        from .models import JournalPosting, JournalPostingStatus
+        posted = set(JournalPosting.objects.filter(
+            document=document, status=JournalPostingStatus.POSTED,
+        ).values_list("stage", flat=True))
+    except Exception:
+        posted = set()
+    triggers = {str(outcome).strip() for outcome in outcomes}
+    return [
+        int(stage.get("stage", 1))
+        for stage in sorted(_get_stages(cfg), key=lambda item: int(item.get("stage", 1)))
+        if str(stage.get("post_on") or "approved").strip() in triggers
+        and int(stage.get("stage", 1)) not in posted
+    ]
 
 
 def post_trigger(document, default: str = "approved") -> str:

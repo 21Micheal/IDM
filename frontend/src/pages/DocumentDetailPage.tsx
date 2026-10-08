@@ -738,6 +738,9 @@ export default function DocumentDetailPage() {
 
   const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
+  const purchaseOrderEnabled = Boolean((doc.metadata as any)?.sunsystems?.purchase_order?.enabled)
+    || String((doc.metadata as any)?.sunsystems?.journal?.component ?? "").toLowerCase() === "purchaseorder";
+  const sunSystemsPostingEnabled = journalEnabled || purchaseOrderEnabled;
   // Extract available journal stages for multi-stage posting
   const journalStages = (doc.metadata as any)?.sunsystems?.journal?.stages as Array<{ stage: number; enabled?: boolean }> | undefined;
   const availableStages = journalStages
@@ -1314,11 +1317,11 @@ export default function DocumentDetailPage() {
           )}
 
           {/* ── Journal status ── */}
-          {journalEnabled && (
+          {sunSystemsPostingEnabled && (
             <div className="space-y-3">
               <JournalPostingCard
                 documentId={doc.id}
-                expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(doc.status)}
+                expectPosting={sunSystemsPostingEnabled && ["request_approved", "fully_approved"].includes(doc.status)}
                 watchKey={`${doc.status}:${doc.updated_at}`}
                 availableStages={availableStages}
               />

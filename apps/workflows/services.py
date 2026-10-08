@@ -1459,29 +1459,29 @@ class WorkflowService:
         idempotent — a stage that is already POSTED is never re-posted.
         """
         try:
-            from apps.sunsystems.config import find_stage_to_post, get_journal_mapping, journal_posting_enabled
-            if not journal_posting_enabled(document):
-                return
-
+            from apps.sunsystems.config import (
+                find_stages_to_post,
+                get_journal_mapping,
+                get_purchase_order_postings,
+                get_sunsystems_config,
+            )
             phase = WorkflowService._document_workflow_phase(document)
             outcomes = [outcome]
             from apps.documents.builder_workflow import completed_procurement_stages, is_procurement_document
             if is_procurement_document(document):
-                # Intermediate approvals never post. LPO completion emits the
-                # only procurement posting trigger.
+                # Intermediate approvals never post. At final LPO approval,
+                # trigger the Imprest request journal and the separate PO
+                # table/group requests together.
                 outcomes = ["fully_approved"] if outcome == "approved" and phase == "lpo" and "lpo" in completed_procurement_stages(document) else []
             elif phase == "retirement" and outcome == "approved":
                 outcomes = ["retirement_approved", "approved"]
 
-            for trigger in outcomes:
-                stage = find_stage_to_post(document, trigger)
-                if stage is None:
-                    continue
+            for stage in find_stages_to_post(document, outcomes):
                 from apps.sunsystems.models import JournalPosting, JournalPostingStatus
 
                 posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
                 if not created:
-                    return
+                    continue
                 mapping = get_journal_mapping(document, stage=stage) or {}
                 posting.status = JournalPostingStatus.PENDING
                 posting.stage_label = str(mapping.get("label") or posting.stage_label or "").strip()
@@ -1494,7 +1494,27 @@ class WorkflowService:
                 _queue_after_commit(
                     lambda did=doc_id, s=stage: post_journal_for_document.delay(did, s)
                 )
-                return
+
+            if is_procurement_document(document) and outcome == "approved" and phase == "lpo" and "lpo" in completed_procurement_stages(document):
+                sunsystems = get_sunsystems_config(document)
+                po_profile = sunsystems.get("purchase_order") or {}
+                legacy_journal = sunsystems.get("journal") or {}
+                is_legacy_po = str(legacy_journal.get("component") or "").lower() == "purchaseorder"
+                if isinstance(po_profile, dict) and po_profile.get("enabled") or is_legacy_po:
+                    for item in get_purchase_order_postings(document):
+                        stage = int(item["stage"])
+                        posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
+                        if not created:
+                            continue
+                        posting.status = JournalPostingStatus.PENDING
+                        posting.stage_label = str(item.get("label") or f"LPO {stage - 999}")[:64]
+                        posting.message = "Queued for SunSystems posting."
+                        posting.error = ""
+                        posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
+                        doc_id = str(document.id)
+                        _queue_after_commit(
+                            lambda did=doc_id, current_stage=stage: post_journal_for_document.delay(did, current_stage)
+                        )
         except Exception:
             logger.exception(
                 "Failed to enqueue SunSystems journal for document %s (outcome=%s)",

@@ -77,7 +77,7 @@ def post_journal_for_document(
     if stage_label and not posting.stage_label:
         posting.stage_label = stage_label
 
-    values = get_form_values(document)
+    values = mapping.get("_posting_values") if isinstance(mapping.get("_posting_values"), dict) else get_form_values(document)
     conn = effective_connection(get_connection_override(document))
     config = SunSystemsConfig.from_mapping(conn)
 
@@ -98,6 +98,13 @@ def post_journal_for_document(
             budget_code_default=config.budget_code,
         )
     except MappingError as exc:
+        if str(exc) == "Journal mapping produced no ledger lines.":
+            _mark(
+                posting,
+                JournalPostingStatus.SKIPPED,
+                message="No form rows matched this posting configuration; nothing was sent to SunSystems.",
+            )
+            return posting
         _mark(posting, JournalPostingStatus.FAILED, error=f"Mapping error: {exc}")
         return posting
 

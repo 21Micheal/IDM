@@ -460,6 +460,9 @@ export default function FormDetailPage() {
 
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
+  const purchaseOrderEnabled = Boolean(doc.metadata?.sunsystems?.purchase_order?.enabled)
+    || String(doc.metadata?.sunsystems?.journal?.component ?? "").toLowerCase() === "purchaseorder";
+  const sunSystemsPostingEnabled = journalEnabled || purchaseOrderEnabled;
   const journalStages = doc.metadata?.sunsystems?.journal?.stages as Array<{ stage: number; enabled?: boolean }> | undefined;
   const availableStages = journalStages?.filter((s) => s.enabled !== false).map((s) => s.stage).sort((a, b) => a - b) || [1];
 
@@ -948,14 +951,14 @@ export default function FormDetailPage() {
             />
           )}
 
-          {(isWorkflowActiveOrCompleted(step) || journalEnabled) && (
-            <div className={cn("grid gap-3", isWorkflowActiveOrCompleted(step) && journalEnabled ? "lg:grid-cols-2" : "")}>
+          {(isWorkflowActiveOrCompleted(step) || sunSystemsPostingEnabled) && (
+            <div className={cn("grid gap-3", isWorkflowActiveOrCompleted(step) && sunSystemsPostingEnabled ? "lg:grid-cols-2" : "")}>
               {isWorkflowActiveOrCompleted(step) && (
                 <ApprovalStagesTable steps={workflowData?.steps ?? []} isLoading={workflowDataLoading} phase={doc.builder_workflow_phase} />
               )}
               <JournalPostingCard
                 documentId={doc.id}
-                expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(step)}
+                expectPosting={sunSystemsPostingEnabled && ["request_approved", "fully_approved"].includes(step)}
                 watchKey={`${step}:${doc.updated_at}`}
                 availableStages={availableStages}
               />

@@ -175,10 +175,12 @@ export interface FieldFinanceBinding {
   role?: string;
   dc?: "D" | "C";           // for role "journal_amount"
   account?: string;         // SunSystems account code for that line
+  accountSource?: AccountCodeSource;
   /** Offsetting (counter) account that automatically creates the balancing entry.
    *  e.g. set account=71001 dc=D counterAccount=10101 counterDc=C to get both
    *  legs of an imprest advance from a single amount field. */
   counterAccount?: string;
+  counterAccountSource?: AccountCodeSource;
   counterDc?: "D" | "C";
   // Budget role (live-check side) — independent of the journal role, so one
   // amount field can both post a journal line AND be the budget-checked amount.
@@ -192,6 +194,10 @@ export interface FieldFinanceBinding {
 export interface ColumnFinanceBinding {
   role?: string;            // see FINANCE_COLUMN_ROLES
   account?: string;         // for role "account_code": a constant fallback account.
+  accountSource?: AccountCodeSource;
+  counterAccount?: string;
+  counterAccountSource?: AccountCodeSource;
+  counterDc?: "D" | "C";
   // for role "line_amount": THIS line's own default/
   // fallback account (used when the table has no
   // separate "account_code"-role column).
@@ -208,7 +214,21 @@ export interface ColumnFinanceBinding {
    * configurable set of journal lines instead of one line per row. See
    * RetirementConfig below and compileSunSystems' table handling. */
   retirement?: RetirementConfig;
+  imprestRequest?: ImprestRequestConfig;
 }
+
+export interface ImprestRequestConfig {
+  enabled: boolean;
+  transactionType?: string;
+  account?: string;
+  accountSource?: AccountCodeSource;
+  dc?: "D" | "C";
+  counterAccount?: string;
+  counterAccountSource?: AccountCodeSource;
+  counterDc?: "D" | "C";
+}
+
+export type AccountCodeSource = "manual" | "account_code" | "supplier_code";
 
 /* Where a retirement-scenario line's amount comes from: the original
  * issued/requested figure, the actual total spent (summed from the table's
@@ -217,6 +237,7 @@ export type RetirementAmountSource = "issued" | "spent" | "variance";
 
 export interface RetirementLine {
   account: string;
+  accountSource?: AccountCodeSource;
   dc: "D" | "C";
   amountSource: RetirementAmountSource;
 }
@@ -1333,6 +1354,7 @@ export const FINANCE_FIELD_ROLES = [
   { value: "reference", label: "Transaction reference" },
   { value: "transaction_date", label: "Transaction date" },
   { value: "description", label: "Description" },
+  { value: "account_code", label: "Account code" },
   { value: "supplier_code", label: "Supplier code (PO)" },
   { value: "item_code", label: "Item code (PO)" },
   { value: "purchase_transaction_type", label: "Purchase transaction type (PO)" },
@@ -1354,6 +1376,7 @@ export const FINANCE_COLUMN_ROLES = [
   { value: "item_code", label: "Item code" },
   { value: "supplier_code", label: "Supplier code (PO)" },
   { value: "product_group", label: "Product group" },
+  { value: "purchase_transaction_type", label: "Purchase transaction type" },
   { value: "uom", label: "Unit of measure" },
   { value: "quantity", label: "Quantity" },
   { value: "unit_price", label: "Unit price" },
@@ -1437,6 +1460,15 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
 
   const fields = template.sections.flatMap((s) => s.fields ?? []);
   const byRole = (role: string) => fields.find((f) => f.sunsystems?.role === role);
+  const accountSpec = (source: AccountCodeSource | undefined, manual: string | undefined, columns?: TableColumn[]) => {
+    if (source === "account_code" || source === "supplier_code") {
+      const column = columns?.find((candidate) => candidate.sunsystems?.role === source);
+      if (column) return { row_field: column.key };
+      const fieldSpec = valueSpec(byRole(source));
+      if (fieldSpec) return fieldSpec;
+    }
+    return { const: manual ?? "" };
+  };
 
   const currencyField = byRole("currency");
   const currencySpec = valueSpec(currencyField) ?? (ui.currencyConst ? { const: ui.currencyConst } : undefined);
@@ -1454,18 +1486,18 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       // Primary line
       lines.push({
         _fieldKey: f.key,
-        account: { const: b.account ?? "" },
+        account: accountSpec(b.accountSource, b.account),
         dc: b.dc ?? "D",
         amount: { field: f.key },
         ...(descSpec ? { description: descSpec } : {}),
       });
       // Counter (offsetting) line — automatic double-entry when counterAccount is set.
       // e.g. Dr 71001 advance_amount → also Cr 10101 same amount (imprest advance).
-      if (b.counterAccount) {
+      if (b.counterAccount || (b.counterAccountSource && b.counterAccountSource !== "manual")) {
         const counterDc = b.counterDc ?? (b.dc === "D" ? "C" : "D");
         lines.push({
           _fieldKey: f.key,
-          account: { const: b.counterAccount },
+          account: accountSpec(b.counterAccountSource, b.counterAccount),
           dc: counterDc,
           amount: { field: f.key },
           ...(descSpec ? { description: descSpec } : {}),
@@ -1491,7 +1523,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         // which interprets this exact shape at posting time.
         const toScenario = (s: RetirementScenario) => ({
           lines: s.lines.map((l) => ({
-            account: { const: l.account ?? "" },
+            account: accountSpec(l.accountSource, l.account),
             dc: l.dc ?? "D",
             amount_source: l.amountSource ?? "spent",
           })),
@@ -1510,6 +1542,41 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         });
         continue;
       }
+      const imprestRequest = amountCol.sunsystems?.imprestRequest;
+      if (
+        template.workflow_type === "requisition"
+        && f.workflowRole === "rfq_required_lines"
+        && imprestRequest?.enabled
+      ) {
+        const transactionTypeCol = cols.find((c) => c.sunsystems?.role === "purchase_transaction_type");
+        const requestFilter = {
+          row_field: transactionTypeCol?.key ?? "",
+          equals: (imprestRequest.transactionType || "CAS_IMPREST").trim(),
+        };
+        const amountSpec = { row_field: amountCol.key };
+        lines.push({
+          _fieldKey: f.key,
+          repeat_over: f.key,
+          where: requestFilter,
+          account: accountSpec(imprestRequest.accountSource, imprestRequest.account, cols),
+          dc: imprestRequest.dc ?? "D",
+          amount: amountSpec,
+          ...(descSpec ? { description: descSpec } : {}),
+        });
+        const counterAccount = imprestRequest.counterAccount;
+        if (counterAccount || (imprestRequest.counterAccountSource && imprestRequest.counterAccountSource !== "manual")) {
+          lines.push({
+            _fieldKey: f.key,
+            repeat_over: f.key,
+            where: requestFilter,
+            account: accountSpec(imprestRequest.counterAccountSource, counterAccount, cols),
+            dc: imprestRequest.counterDc ?? (imprestRequest.dc === "C" ? "D" : "C"),
+            amount: amountSpec,
+            ...(descSpec ? { description: descSpec } : {}),
+          });
+        }
+        continue;
+      }
       const acctCol = cols.find((c) => c.sunsystems?.role === "account_code");
       const descCol = cols.find((c) => c.sunsystems?.role === "description");
       const analysis: Record<string, unknown> = {};
@@ -1524,12 +1591,23 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         // role is "Line amount") take priority; the table-level default
         // (set via the table field's Journal role card) is the fallback for
         // templates that haven't been re-configured since this was added.
-        account: acctCol ? { row_field: acctCol.key } : { const: amountCol.sunsystems?.account ?? b.account ?? "" },
+        account: accountSpec(amountCol.sunsystems?.accountSource ?? b.accountSource ?? (acctCol ? "account_code" : "manual"), amountCol.sunsystems?.account ?? b.account, cols),
         dc: amountCol.sunsystems?.dc ?? b.dc ?? "D",
         amount: { row_field: amountCol.key },
         description: descCol ? { row_field: descCol.key } : descSpec,
         ...(Object.keys(analysis).length ? { analysis } : {}),
       });
+      if (amountCol.sunsystems?.counterAccount || b.counterAccount || (amountCol.sunsystems?.counterAccountSource && amountCol.sunsystems.counterAccountSource !== "manual") || (b.counterAccountSource && b.counterAccountSource !== "manual")) {
+        lines.push({
+          _fieldKey: f.key,
+          repeat_over: f.key,
+          account: accountSpec(amountCol.sunsystems.counterAccountSource ?? b.counterAccountSource, amountCol.sunsystems.counterAccount ?? b.counterAccount, cols),
+          dc: amountCol.sunsystems.counterDc ?? b.counterDc ?? (amountCol.sunsystems.dc === "C" || b.dc === "C" ? "D" : "C"),
+          amount: { row_field: amountCol.key },
+          description: descCol ? { row_field: descCol.key } : descSpec,
+          ...(Object.keys(analysis).length ? { analysis } : {}),
+        });
+      }
     }
   }
 
@@ -1656,6 +1734,8 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       ?? cols.find((c) => c.type === "external" && c.external?.source === "items")
       ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "item");
     const productGroupCol = cols.find((c) => c.sunsystems?.role === "product_group");
+    const transactionTypeCol = cols.find((c) => c.sunsystems?.role === "purchase_transaction_type");
+    const descriptionCol = cols.find((c) => c.sunsystems?.role === "description");
     const qtyCol = cols.find((c) => c.sunsystems?.role === "quantity");
     const upCol = cols.find((c) => c.sunsystems?.role === "unit_price");
     const acctCol = cols.find((c) => c.sunsystems?.role === "account_code");
@@ -1666,6 +1746,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     for (const c of analysisCols) lineAnalysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
     poLines.push({
       repeat_over: f.key,
+      table_label: f.label || f.key,
       account_code: acctCol ? { row_field: acctCol.key } : { const: f.sunsystems?.account ?? ui.accountCode ?? "" },
       ...(itemCol
         ? { item_code: { row_field: itemCol.key } }
@@ -1675,6 +1756,8 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       ...(productGroupCol
         ? { product_group: { row_field: productGroupCol.key } }
         : (productGroupSpec ? { product_group: productGroupSpec } : {})),
+      ...(transactionTypeCol ? { purchase_transaction_type: { row_field: transactionTypeCol.key } } : {}),
+      ...(descriptionCol ? { description: { row_field: descriptionCol.key } } : {}),
       ...(curCol ? { currency: { row_field: curCol.key } } : (currencySpec ? { currency: currencySpec } : {})),
       quantity: qtyCol ? { row_field: qtyCol.key } : { const: ui.quantity || "1" },
       ...(upCol ? { unit_price: { row_field: upCol.key } } : {}),
@@ -2899,6 +2982,89 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
   );
 }
 
+function ImprestRequestConfigEditor({ column, siblingColumns, onChange }: {
+  column: TableColumn;
+  siblingColumns: TableColumn[];
+  onChange: (config: ImprestRequestConfig | undefined) => void;
+}) {
+  const config = column.sunsystems?.imprestRequest;
+  const hasTransactionTypeColumn = siblingColumns.some((candidate) => candidate.sunsystems?.role === "purchase_transaction_type");
+  const hasAccountColumn = siblingColumns.some((candidate) => candidate.sunsystems?.role === "account_code");
+  const hasSupplierColumn = siblingColumns.some((candidate) => candidate.sunsystems?.role === "supplier_code");
+  const iCls = "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
+  return (
+    <Row label="Imprest request amount" hint="Sum this amount column only for rows whose Purchase transaction type matches the Imprest type. This aggregate posts with the LPO approval.">
+      <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
+        <ToggleYesNo value={!!config?.enabled} onChange={(enabled) =>
+          onChange(enabled ? { ...(config ?? {}), enabled: true } : undefined)
+        } />
+        {config?.enabled && (
+          <>
+            <input className={cn(iCls, "font-mono")} value={config.transactionType ?? "CAS_IMPREST"}
+              onChange={(e) => onChange({ ...config, enabled: true, transactionType: e.target.value })}
+              placeholder="Imprest purchase transaction type" />
+            <p className="text-[10px] text-[#5E6870]">Default: CAS_IMPREST. Only rows with this transaction type contribute to the request amount.</p>
+            <div className="grid grid-cols-[1fr_110px] gap-2">
+              <div className="space-y-1">
+                <AccountCodeSourcePicker value={config.accountSource ?? "manual"}
+                  onChange={(accountSource) => onChange({ ...config, enabled: true, accountSource })} />
+                <input className={cn(iCls, "font-mono")} value={config.account ?? ""}
+                onChange={(e) => onChange({ ...config, enabled: true, account: e.target.value })}
+                placeholder="Manual debit account / fallback" />
+              </div>
+              <CustomListbox value={config.dc ?? "D"}
+                onChange={(dc) => onChange({ ...config, enabled: true, dc: dc as "D" | "C" })}
+                options={[{ value: "D", label: "Debit" }, { value: "C", label: "Credit" }]}
+                className={iCls} buttonClassName="w-full" ariaLabel="Imprest request debit or credit" />
+            </div>
+            <div className="grid grid-cols-[1fr_110px] gap-2">
+              <div className="space-y-1">
+                <AccountCodeSourcePicker value={config.counterAccountSource ?? "manual"}
+                  onChange={(counterAccountSource) => onChange({ ...config, enabled: true, counterAccountSource })} />
+                <input className={cn(iCls, "font-mono")} value={config.counterAccount ?? ""}
+                onChange={(e) => onChange({ ...config, enabled: true, counterAccount: e.target.value })}
+                placeholder="Manual credit account / fallback" />
+              </div>
+              <CustomListbox value={config.counterDc ?? (config.dc === "C" ? "D" : "C")}
+                onChange={(counterDc) => onChange({ ...config, enabled: true, counterDc: counterDc as "D" | "C" })}
+                options={[{ value: "D", label: "Debit" }, { value: "C", label: "Credit" }]}
+                className={iCls} buttonClassName="w-full" ariaLabel="Imprest request counter debit or credit" />
+            </div>
+            {!hasTransactionTypeColumn && <p className="text-[10px] text-amber-600">Map a table column to Purchase transaction type to identify qualifying rows.</p>}
+            {(config.accountSource ?? "manual") === "manual" && !config.account?.trim() && <p className="text-[10px] text-amber-600">Set the debit account or choose a mapped account source.</p>}
+            {(config.counterAccountSource ?? "manual") === "manual" && !config.counterAccount?.trim() && <p className="text-[10px] text-amber-600">Set the credit account or choose a mapped account source.</p>}
+            {config.accountSource === "account_code" && !hasAccountColumn && <p className="text-[10px] text-amber-600">Map a table column to Account code for the debit account.</p>}
+            {config.accountSource === "supplier_code" && !hasSupplierColumn && <p className="text-[10px] text-amber-600">Map a table column to Supplier code for the debit account.</p>}
+            {config.counterAccountSource === "account_code" && !hasAccountColumn && <p className="text-[10px] text-amber-600">Map a table column to Account code for the credit account.</p>}
+            {config.counterAccountSource === "supplier_code" && !hasSupplierColumn && <p className="text-[10px] text-amber-600">Map a table column to Supplier code for the credit account.</p>}
+          </>
+        )}
+      </div>
+    </Row>
+  );
+}
+
+function AccountCodeSourcePicker({ value, onChange }: {
+  value: AccountCodeSource;
+  onChange: (value: AccountCodeSource) => void;
+}) {
+  const cls = "h-8 w-full border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933] outline-none focus:border-[#287EAD]";
+  return (
+    <CustomListbox
+      value={value}
+      onChange={(next) => onChange(next as AccountCodeSource)}
+      options={[
+        { value: "manual", label: "Manual account" },
+        { value: "account_code", label: "Use Account code field/column" },
+        { value: "supplier_code", label: "Use selected Supplier code" },
+      ]}
+      className={cls}
+      buttonClassName="w-full"
+      ariaLabel="Account code source"
+    />
+  );
+}
+
 function RetirementScenarioEditor({ label, hint, scenario, onChange }: {
   label: string;
   hint: string;
@@ -2931,9 +3097,13 @@ function RetirementScenarioEditor({ label, hint, scenario, onChange }: {
       <div className="space-y-1.5">
         {scenario.lines.map((line, idx) => (
           <div key={idx} className="grid grid-cols-[1fr_90px_1fr_auto] gap-1.5 items-center">
-            <input className={cn(iCls, "font-mono")} value={line.account}
-              onChange={(e) => updateLine(idx, { account: e.target.value })}
-              placeholder="Account code" />
+            <div className="space-y-1">
+              <AccountCodeSourcePicker value={line.accountSource ?? "manual"}
+                onChange={(accountSource) => updateLine(idx, { accountSource })} />
+              <input className={cn(iCls, "font-mono")} value={line.account}
+                onChange={(e) => updateLine(idx, { account: e.target.value })}
+                placeholder="Manual account / fallback" />
+            </div>
             <CustomListbox
               value={line.dc}
               onChange={(val) => updateLine(idx, { dc: val as "D" | "C" })}
@@ -2968,11 +3138,12 @@ function RetirementScenarioEditor({ label, hint, scenario, onChange }: {
 }
 
 function ColumnConfigModal({
-  column, siblingColumns = [], formFields = [], processSteps = [], onClose, onSave, onDelete,
+  column, siblingColumns = [], formFields = [], tableField, processSteps = [], onClose, onSave, onDelete,
 }: {
   column: TableColumn;
   siblingColumns?: TableColumn[];
   formFields?: TemplateField[];
+  tableField?: TemplateField;
   processSteps?: ProcessStepOption[];
   onClose: () => void;
   onSave: (col: TableColumn) => void;
@@ -3198,10 +3369,33 @@ function ColumnConfigModal({
                         ariaLabel="Debit/Credit"
                       />
                     </Row>
-                    <Row label="Default account" hint="Used unless a separate 'Account code' column is set on this table.">
+                    <Row label="Account source">
+                      <AccountCodeSourcePicker value={draft.sunsystems?.accountSource ?? (siblingColumns.some((candidate) => candidate.sunsystems?.role === "account_code") ? "account_code" : "manual")}
+                        onChange={(accountSource) => set({ sunsystems: { ...(draft.sunsystems ?? {}), accountSource } })} />
+                    </Row>
+                    <Row label="Manual account / fallback" hint="Used when the selected source is manual, or its mapped column is unavailable.">
                       <input className={cn(iCls, "font-mono")} value={draft.sunsystems?.account ?? ""}
                         onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), account: e.target.value } })}
                         placeholder="e.g. 37400" />
+                    </Row>
+                  </div>
+                  <div className="border border-dashed border-[#C8CDD2] p-2">
+                    <div className="grid grid-cols-2 gap-2">
+                      <Row label="Counter account source">
+                        <AccountCodeSourcePicker value={draft.sunsystems?.counterAccountSource ?? "manual"}
+                          onChange={(counterAccountSource) => set({ sunsystems: { ...(draft.sunsystems ?? {}), counterAccountSource } })} />
+                      </Row>
+                      <Row label="Counter D/C">
+                        <CustomListbox value={draft.sunsystems?.counterDc ?? (draft.sunsystems?.dc === "C" ? "D" : "C")}
+                          onChange={(counterDc) => set({ sunsystems: { ...(draft.sunsystems ?? {}), counterDc: counterDc as "D" | "C" }})}
+                          options={[{ value: "D", label: "Debit" }, { value: "C", label: "Credit" }]}
+                          className={iCls} buttonClassName="w-full" ariaLabel="Counter D/C" />
+                      </Row>
+                    </div>
+                    <Row label="Counter account">
+                      <input className={cn(iCls, "font-mono")} value={draft.sunsystems?.counterAccount ?? ""}
+                        onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), counterAccount: e.target.value } })}
+                        placeholder="Optional manual counter account" />
                     </Row>
                   </div>
                   <RetirementConfigEditor
@@ -3209,6 +3403,13 @@ function ColumnConfigModal({
                     formFields={formFields}
                     onChange={(retirement) => set({ sunsystems: { ...(draft.sunsystems ?? {}), retirement } })}
                   />
+                  {tableField?.workflowRole === "rfq_required_lines" && (
+                    <ImprestRequestConfigEditor
+                      column={draft}
+                      siblingColumns={siblingColumns}
+                      onChange={(imprestRequest) => set({ sunsystems: { ...(draft.sunsystems ?? {}), imprestRequest } })}
+                    />
+                  )}
                 </>
               )}
               {(isNumeric || draft.type === "date" || draft.type === "text") && (
@@ -3707,7 +3908,11 @@ function FinanceBindingFields({ field, onUpdate }: {
                 ariaLabel="Debit/Credit"
               />
             </InspectorRow>
-            <InspectorRow label={isTable ? "Default account" : "Account code"} hint={isTable ? "Used unless a column is 'Account code'." : undefined}>
+            <InspectorRow label="Account source">
+              <AccountCodeSourcePicker value={binding.accountSource ?? "manual"}
+                onChange={(accountSource) => setB({ accountSource })} />
+            </InspectorRow>
+            <InspectorRow label={isTable ? "Default account" : "Manual account / fallback"} hint={isTable ? "Used unless the line amount column selects a row account source." : undefined}>
               <input className={cn(inputCls, "font-mono")} value={binding.account ?? ""} onChange={(e) => setB({ account: e.target.value })} placeholder="e.g. 71001" />
             </InspectorRow>
           </div>
@@ -3716,6 +3921,10 @@ function FinanceBindingFields({ field, onUpdate }: {
               <p className="text-[10px] font-semibold uppercase text-[#5E6870]">Counter entry (double-entry offset)</p>
               <p className="text-[10px] text-[#8C969E]">Automatically posts the balancing leg from the same amount — e.g. Dr 71001 / Cr 10101 for an imprest advance.</p>
               <div className="grid grid-cols-2 gap-2 mt-1.5">
+                <InspectorRow label="Counter account source">
+                  <AccountCodeSourcePicker value={binding.counterAccountSource ?? "manual"}
+                    onChange={(counterAccountSource) => setB({ counterAccountSource })} />
+                </InspectorRow>
                 <InspectorRow label="Counter account">
                   <input className={cn(inputCls, "font-mono")} value={binding.counterAccount ?? ""}
                     onChange={(e) => {
@@ -7602,8 +7811,13 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
     editableWhen: renameGroup(c.editableWhen),
     calc: renameCalc(c.calc),
     currencyFromColumn: c.currencyFromColumn === oldKey ? newKey : c.currencyFromColumn,
-    sunsystems: c.sunsystems?.retirement?.issuedAmountField === oldKey
-      ? { ...c.sunsystems, retirement: { ...c.sunsystems.retirement, issuedAmountField: newKey } }
+    sunsystems: c.sunsystems
+      ? {
+        ...c.sunsystems,
+        ...(c.sunsystems.retirement?.issuedAmountField === oldKey
+          ? { retirement: { ...c.sunsystems.retirement, issuedAmountField: newKey } }
+          : {}),
+      }
       : c.sunsystems,
   });
   const renameField = (f: TemplateField): TemplateField => ({
@@ -8091,7 +8305,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
     const sec = template.sections.find((s) => s.id === configuringColumn.sectionId);
     const fld = sec?.fields.find((f) => f.id === configuringColumn.fieldId);
     const col = fld?.columns?.find((c) => c.id === configuringColumn.colId);
-    return col ? { ...configuringColumn, column: col, columns: fld?.columns ?? [] } : null;
+    return col ? { ...configuringColumn, column: col, columns: fld?.columns ?? [], tableField: fld } : null;
   }, [configuringColumn, template]);
 
   return (
@@ -8274,6 +8488,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
         <ColumnConfigModal
           column={configCol.column}
           siblingColumns={configCol.columns}
+          tableField={configCol.tableField}
           formFields={template.sections.flatMap((s) => s.fields).filter((f) => f.key && f.type !== "table")}
           processSteps={processSteps}
           onClose={() => setConfiguringColumn(null)}
