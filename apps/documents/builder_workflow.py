@@ -330,40 +330,8 @@ def is_travel_requisition(document: Document) -> bool:
 
 
 def travel_requisition_skips_rfq(document: Document) -> bool:
-    """Whether this Travel requisition can bypass RFQ.
-
-    A populated optional General/Imprest lines table requires RFQ even when the
-    requisition type is Travel. Empty rows created by rendering a table do not
-    count as use; at least one cell must contain a value.
-    """
-    if not is_travel_requisition(document):
-        return False
-    form = (document.metadata or {}).get("form") or {}
-    values = form.get("values") or {}
-    sections = form.get("sections") or []
-    table_keys = []
-    for section in sections if isinstance(sections, list) else []:
-        if not isinstance(section, dict):
-            continue
-        for field in section.get("fields") or []:
-            if (
-                isinstance(field, dict)
-                and field.get("type") == "table"
-                and field.get("workflowRole") == "rfq_required_lines"
-                and field.get("key")
-            ):
-                table_keys.append(str(field["key"]).strip())
-    for key in table_keys:
-        rows = values.get(key) if isinstance(values, dict) else None
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            if isinstance(row, dict) and any(
-                value is not None and value != "" and value != [] and value != {}
-                for value in row.values()
-            ):
-                return False
-    return True
+    """Travel requisitions always bypass RFQ, even when General/Imprest lines exist."""
+    return is_travel_requisition(document)
 
 
 def next_procurement_stage(document: Document) -> str | None:
@@ -371,7 +339,7 @@ def next_procurement_stage(document: Document) -> str | None:
 
     Mirrors ``can_start_procurement_workflow_stage``: the previous stage must be
     complete and the document approved, with no workflow still running. Travel
-    requisitions skip RFQ when their optional General/Imprest table is unused."""
+    requisitions always skip RFQ."""
     if not is_procurement_document(document):
         return None
     if (document.status or "").strip() != DocumentStatus.APPROVED:
@@ -404,8 +372,7 @@ def can_start_procurement_workflow_stage(document: Document, stage: str, *, user
             DocumentStatus.DRAFT, DocumentStatus.RETURNED, "Returned for Review",
         }
 
-    # Travel requisitions skip RFQ only when the optional General/Imprest table
-    # has not been used.
+    # Travel requisitions always skip RFQ, even if General/Imprest rows were entered.
     skips_rfq = travel_requisition_skips_rfq(document)
     if normalized == "rfq" and skips_rfq:
         return False

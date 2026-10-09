@@ -1,19 +1,14 @@
-"""Automatic LPO (purchase order) document generation.
+"""Generate printable LPOs after SunSystems accepts their PurchaseOrders.
 
-When a requisition's LPO approval phase completes, the platform should produce
-the printable "Purchase Order" document and post the matching PurchaseOrder to
-SunSystems. This module owns the first half: rendering the LPO document from the
-built document template and linking it back to the requisition.
-
-It deliberately does *not* talk to SunSystems; :mod:`apps.sunsystems.journal`
-does that. The generated LPO reference is injected into the requisition's form
-values (``__lpo_number`` / ``__lpo_date``) so the posting mapping can reference
-it without either side reaching into the other.
+The PurchaseOrder response supplies the authoritative LPO number. This module
+uses that number in the PDF and links each generated document to its requisition;
+the DMS document itself keeps its own unique internal reference.
 """
 from __future__ import annotations
 
 import logging
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
 
@@ -55,29 +50,48 @@ def find_lpo_template():
     return template, (template.document_type or doc_type)
 
 
-def generate_lpo_for_document(document, actor=None):
-    """Generate (once) the LPO document for an approved requisition.
+@transaction.atomic
+def generate_lpo_for_document(
+    document,
+    actor=None,
+    *,
+    purchase_order_reference=None,
+    posting_stage=None,
+    table_key=None,
+    table_label=None,
+    values_override=None,
+):
+    """Generate an LPO document, using the SSC reference when supplied.
 
-    Idempotent: a second call returns the previously generated document. Returns
-    the :class:`Document` or ``None`` when no LPO template is configured.
+    Calls associated with a posting stage are idempotent and can render that
+    posting's subset of table rows. Returns ``None`` when no template is set.
     """
     from apps.documents.models import Document, DocumentRelationship
+    document = Document.objects.select_for_update().get(pk=document.pk)
 
     meta = dict(getattr(document, "metadata", None) or {})
     form = dict(meta.get("form") or {})
-    existing_id = form.get("lpo_document_id")
-    if existing_id:
-        existing = Document.objects.filter(pk=existing_id).first()
-        if existing:
-            return existing
-    existing_ids = [
-        item.get("id") for item in (form.get("lpo_documents") or [])
-        if isinstance(item, dict) and item.get("id")
-    ] or form.get("lpo_document_ids") or []
-    if existing_ids:
-        existing_docs = list(Document.objects.filter(pk__in=existing_ids).order_by("created_at"))
-        if existing_docs:
-            return existing_docs[0]
+    records = [item for item in (form.get("lpo_documents") or []) if isinstance(item, dict)]
+    if purchase_order_reference:
+        match = next((item for item in records if (
+            (posting_stage is not None and str(item.get("posting_stage")) == str(posting_stage))
+            or str(item.get("reference") or "") == str(purchase_order_reference)
+        )), None)
+        if match:
+            existing = Document.objects.filter(pk=match.get("id")).first()
+            if existing:
+                return existing
+    else:
+        existing_id = form.get("lpo_document_id")
+        if existing_id:
+            existing = Document.objects.filter(pk=existing_id).first()
+            if existing:
+                return existing
+        existing_ids = [item.get("id") for item in records if item.get("id")] or form.get("lpo_document_ids") or []
+        if existing_ids:
+            existing_docs = list(Document.objects.filter(pk__in=existing_ids).order_by("created_at"))
+            if existing_docs:
+                return existing_docs[0]
 
     template, doc_type = find_lpo_template()
     if template is None or doc_type is None:
@@ -92,60 +106,100 @@ def generate_lpo_for_document(document, actor=None):
     form = dict(meta.get("form") or {})
     sections = form.get("sections") or []
     values = dict(form.get("values") or {})
-    tables = _requisition_tables(sections, values)
+    render_values = dict(values_override) if isinstance(values_override, dict) else values
+    tables = _requisition_tables(sections, render_values)
+    if table_key:
+        tables = [table for table in tables if str(table.get("key") or "") == str(table_key)]
     if not tables:
-        tables = [{"key": None, "label": "Requisition", "columns": []}]
+        tables = [{"key": table_key, "label": table_label or "Requisition", "columns": []}]
 
-    lpo_docs = []
-    lpo_records = []
-    for table in tables:
-        lpo_reference = _generate_unique_reference(doc_type)
-        merge_values = build_lpo_merge_values(
-            document, lpo_reference, doc_type=doc_type, actor=user,
-            table_key=table.get("key"),
+    table = tables[0]
+    lpo_reference = str(purchase_order_reference or _generate_unique_reference(doc_type)).strip()
+    # Keep the repository's globally-unique document identifier separate from
+    # the SunSystems PO reference shown in the PDF. The finance system owns the
+    # latter, and its numbering may overlap the local document-type sequence.
+    document_reference = _generate_unique_reference(doc_type) if purchase_order_reference else lpo_reference
+    merge_values = build_lpo_merge_values(
+        document, lpo_reference, doc_type=doc_type, actor=user,
+        table_key=table.get("key"), values_override=render_values,
+    )
+    title = f"Purchase Order {lpo_reference}"
+    lpo_doc = generate_document_from_template_sync(
+        template,
+        merge_values,
+        fmt="pdf",
+        title=title,
+        user=user,
+        type_id=doc_type.id,
+        reference_number=document_reference,
+    )
+    try:
+        DocumentRelationship.objects.get_or_create(
+            source_document=document,
+            target_document=lpo_doc,
+            relation_type=DocumentRelationship.RelationType.REFERENCES,
+            defaults={"created_by": user, "note": "Generated after SunSystems PurchaseOrder posting"},
         )
-        title = f"Purchase Order {lpo_reference}"
-        lpo_doc = generate_document_from_template_sync(
-            template,
-            merge_values,
-            fmt="pdf",
-            title=title,
-            user=user,
-            type_id=doc_type.id,
-            reference_number=lpo_reference,
-        )
-        try:
-            DocumentRelationship.objects.get_or_create(
-                source_document=document,
-                target_document=lpo_doc,
-                relation_type=DocumentRelationship.RelationType.REFERENCES,
-                defaults={"created_by": user, "note": "Generated on LPO approval"},
-            )
-        except Exception:
-            logger.exception("Could not link LPO %s to requisition %s", lpo_doc.pk, document.pk)
-        lpo_docs.append(lpo_doc)
-        lpo_records.append({
-            "id": str(lpo_doc.id),
-            "reference": lpo_doc.reference_number,
-            "table_key": table.get("key") or "",
-            "table_label": table.get("label") or "Requisition",
-        })
+    except Exception:
+        logger.exception("Could not link LPO %s to requisition %s", lpo_doc.pk, document.pk)
 
     now = _today_str()
-    values["__lpo_number"] = lpo_docs[0].reference_number
+    if not values.get("__lpo_number"):
+        values["__lpo_number"] = lpo_reference
     values["__lpo_date"] = now
     values["__requisition_number"] = document.reference_number or values.get("__requisition_number", "")
     form["values"] = values
-    form["lpo_document_id"] = str(lpo_docs[0].id)
-    form["lpo_reference"] = lpo_docs[0].reference_number
-    form["lpo_documents"] = lpo_records
+    lpo_record = {
+        "id": str(lpo_doc.id),
+        "reference": lpo_reference,
+        "document_reference": lpo_doc.reference_number,
+        "table_key": table.get("key") or "",
+        "table_label": table_label or table.get("label") or "Requisition",
+    }
+    if posting_stage is not None:
+        lpo_record["posting_stage"] = int(posting_stage)
+    if not any(item.get("id") == lpo_record["id"] for item in records):
+        records.append(lpo_record)
+    form["lpo_documents"] = records
+    if records:
+        form["lpo_document_id"] = records[0].get("id")
+        form["lpo_reference"] = records[0].get("reference")
     meta["form"] = form
     document.metadata = meta
     document.save(update_fields=["metadata", "updated_at"])
-    return lpo_docs[0]
+    return lpo_doc
 
 
-def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None, table_key=None) -> dict:
+def generate_lpo_for_posting(document, posting, actor=None):
+    """Render the PO posting's PDF using the reference returned by SunSystems."""
+    reference = str(getattr(posting, "journal_number", "") or "").strip()
+    if not reference:
+        logger.warning(
+            "SunSystems accepted PO stage %s for %s without returning its PO reference; LPO PDF deferred",
+            getattr(posting, "stage", "?"), document.pk,
+        )
+        return None
+
+    from apps.sunsystems.config import get_journal_mapping
+
+    mapping = get_journal_mapping(document, stage=int(posting.stage)) or {}
+    po = mapping.get("purchase_order") or {}
+    specs = po.get("lines") or []
+    spec = specs[0] if specs and isinstance(specs[0], dict) else {}
+    table_key = str(spec.get("repeat_over") or "") or None
+    values = mapping.get("_posting_values")
+    return generate_lpo_for_document(
+        document,
+        actor=actor,
+        purchase_order_reference=reference,
+        posting_stage=posting.stage,
+        table_key=table_key,
+        table_label=(spec.get("table_label") or mapping.get("_posting_label") or posting.stage_label),
+        values_override=values if isinstance(values, dict) else None,
+    )
+
+
+def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None, table_key=None, values_override=None) -> dict:
     """Build the flat designer merge-field values for the LPO document.
 
     Keys are dotted exactly as the designer emits them (``lpo.number``,
@@ -155,7 +209,7 @@ def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None
 
     meta = dict(getattr(document, "metadata", None) or {})
     form = dict(meta.get("form") or {})
-    values = dict(form.get("values") or {})
+    values = dict(values_override) if isinstance(values_override, dict) else dict(form.get("values") or {})
     sections = form.get("sections") or []
 
     lines = _build_line_items(values, sections, table_key=table_key)

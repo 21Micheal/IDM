@@ -169,14 +169,14 @@ function StageRow({
         {/* action buttons — summary/response open as popups */}
         {!retrying && (
           <div className="flex items-center gap-2 flex-wrap">
-            {posting.status === "failed" && (
+            {(posting.status === "failed" || posting.status === "skipped") && (
               <button
                 type="button"
                 onClick={onRetry}
                 className="inline-flex items-center gap-1.5 border border-[#287EAD] px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                Retry
+                {posting.status === "skipped" ? "Configure & retry" : "Retry"}
               </button>
             )}
             {hasSummary && (

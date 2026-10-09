@@ -190,6 +190,8 @@ export interface FieldFinanceBinding {
   // Budget banner field references (for the new budget field type)
   budgetAmountField?: string;
   monitoredAmountField?: string;
+  /** Marks qualifying table rows for the requisition-stage Imprest advance. */
+  imprestRequest?: ImprestRequestConfig;
 }
 export interface ColumnFinanceBinding {
   role?: string;            // see FINANCE_COLUMN_ROLES
@@ -220,12 +222,13 @@ export interface ColumnFinanceBinding {
 export interface ImprestRequestConfig {
   enabled: boolean;
   transactionType?: string;
-  account?: string;
+  journalType?: string;
+  postingType?: string;
+  parameters?: Record<string, string>;
   accountSource?: AccountCodeSource;
-  dc?: "D" | "C";
-  counterAccount?: string;
+  account?: string;
   counterAccountSource?: AccountCodeSource;
-  counterDc?: "D" | "C";
+  counterAccount?: string;
 }
 
 export type AccountCodeSource = "manual" | "account_code" | "supplier_code";
@@ -261,6 +264,8 @@ export interface RetirementScenario {
  * _expand_retirement_lines) interprets at posting time. */
 export interface RetirementConfig {
   enabled: boolean;
+  /** Use either a numeric form field or the CAS_IMPREST-filtered requisition total. */
+  issuedAmountMode?: "field" | "imprest_request_total";
   issuedAmountField?: string; // top-level field KEY holding the issued amount
   exact: RetirementScenario;
   under: RetirementScenario;
@@ -1528,10 +1533,29 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
             amount_source: l.amountSource ?? "spent",
           })),
         });
+        let issuedAmountSpec: Record<string, unknown> = retirement.issuedAmountField
+          ? { field: retirement.issuedAmountField }
+          : { const: "0" };
+        if (retirement.issuedAmountMode === "imprest_request_total") {
+          const requestTable = fields.find((candidate) => candidate.type === "table" && candidate.workflowRole === "rfq_required_lines");
+          const requestAmountColumn = requestTable?.columns?.find((candidate) => candidate.sunsystems?.role === "line_amount");
+          const requestTypeColumn = requestTable?.columns?.find((candidate) => candidate.sunsystems?.role === "purchase_transaction_type");
+          const requestConfig = requestTable?.sunsystems?.imprestRequest ?? requestAmountColumn?.sunsystems?.imprestRequest;
+          if (requestTable && requestAmountColumn && requestTypeColumn && requestConfig?.enabled) {
+            issuedAmountSpec = {
+              sum_matching_rows: {
+                table: requestTable.key,
+                amount_column: requestAmountColumn.key,
+                match_column: requestTypeColumn.key,
+                values: [(requestConfig.transactionType || "CAS_IMPREST").trim()],
+              },
+            };
+          }
+        }
         lines.push({
           _fieldKey: f.key,
           retirement: {
-            issued_amount: retirement.issuedAmountField ? { field: retirement.issuedAmountField } : { const: "0" },
+            issued_amount: issuedAmountSpec,
             spent_amount: { table: f.key, column: amountCol.key },
             scenarios: {
               exact: toScenario(retirement.exact),
@@ -1542,39 +1566,14 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         });
         continue;
       }
-      const imprestRequest = amountCol.sunsystems?.imprestRequest;
+      const imprestRequest = f.sunsystems?.imprestRequest ?? amountCol.sunsystems?.imprestRequest;
       if (
         template.workflow_type === "requisition"
         && f.workflowRole === "rfq_required_lines"
         && imprestRequest?.enabled
       ) {
-        const transactionTypeCol = cols.find((c) => c.sunsystems?.role === "purchase_transaction_type");
-        const requestFilter = {
-          row_field: transactionTypeCol?.key ?? "",
-          equals: (imprestRequest.transactionType || "CAS_IMPREST").trim(),
-        };
-        const amountSpec = { row_field: amountCol.key };
-        lines.push({
-          _fieldKey: f.key,
-          repeat_over: f.key,
-          where: requestFilter,
-          account: accountSpec(imprestRequest.accountSource, imprestRequest.account, cols),
-          dc: imprestRequest.dc ?? "D",
-          amount: amountSpec,
-          ...(descSpec ? { description: descSpec } : {}),
-        });
-        const counterAccount = imprestRequest.counterAccount;
-        if (counterAccount || (imprestRequest.counterAccountSource && imprestRequest.counterAccountSource !== "manual")) {
-          lines.push({
-            _fieldKey: f.key,
-            repeat_over: f.key,
-            where: requestFilter,
-            account: accountSpec(imprestRequest.counterAccountSource, counterAccount, cols),
-            dc: imprestRequest.counterDc ?? (imprestRequest.dc === "C" ? "D" : "C"),
-            amount: amountSpec,
-            ...(descSpec ? { description: descSpec } : {}),
-          });
-        }
+        // This amount is handled by the requisition-stage Imprest advance
+        // journal generated from the shared PurchaseOrder field bindings.
         continue;
       }
       const acctCol = cols.find((c) => c.sunsystems?.role === "account_code");
@@ -1601,8 +1600,8 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         lines.push({
           _fieldKey: f.key,
           repeat_over: f.key,
-          account: accountSpec(amountCol.sunsystems.counterAccountSource ?? b.counterAccountSource, amountCol.sunsystems.counterAccount ?? b.counterAccount, cols),
-          dc: amountCol.sunsystems.counterDc ?? b.counterDc ?? (amountCol.sunsystems.dc === "C" || b.dc === "C" ? "D" : "C"),
+          account: accountSpec(amountCol.sunsystems?.counterAccountSource ?? b.counterAccountSource, amountCol.sunsystems?.counterAccount ?? b.counterAccount, cols),
+          dc: amountCol.sunsystems?.counterDc ?? b.counterDc ?? (amountCol.sunsystems?.dc === "C" || b.dc === "C" ? "D" : "C"),
           amount: { row_field: amountCol.key },
           description: descCol ? { row_field: descCol.key } : descSpec,
           ...(Object.keys(analysis).length ? { analysis } : {}),
@@ -1738,9 +1737,17 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     const descriptionCol = cols.find((c) => c.sunsystems?.role === "description");
     const qtyCol = cols.find((c) => c.sunsystems?.role === "quantity");
     const upCol = cols.find((c) => c.sunsystems?.role === "unit_price");
-    const acctCol = cols.find((c) => c.sunsystems?.role === "account_code");
+    const acctCol = cols.find((c) => c.sunsystems?.role === "account_code")
+      ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "account code");
+    const imprestAccountCol = acctCol ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "account code");
+    const supplierCol = cols.find((c) => c.sunsystems?.role === "supplier_code" || c.type === "sunsystems_account");
     const curCol = cols.find((c) => c.sunsystems?.role === "currency");
     const analysisCols = cols.filter((c) => c.sunsystems?.role === "analysis");
+    const imprestRequest = f.sunsystems?.imprestRequest ?? amtCol?.sunsystems?.imprestRequest;
+    const imprestAccountSource = amtCol?.sunsystems?.accountSource ?? imprestRequest?.accountSource;
+    const imprestManualAccount = amtCol?.sunsystems?.account ?? imprestRequest?.account;
+    const imprestCounterAccountSource = amtCol?.sunsystems?.counterAccountSource ?? imprestRequest?.counterAccountSource;
+    const imprestManualCounterAccount = amtCol?.sunsystems?.counterAccount ?? imprestRequest?.counterAccount;
     if (!amtCol && !(qtyCol && upCol)) continue;
     const lineAnalysis: Record<string, unknown> = {};
     for (const c of analysisCols) lineAnalysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
@@ -1757,6 +1764,40 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         ? { product_group: { row_field: productGroupCol.key } }
         : (productGroupSpec ? { product_group: productGroupSpec } : {})),
       ...(transactionTypeCol ? { purchase_transaction_type: { row_field: transactionTypeCol.key } } : {}),
+      ...(imprestRequest?.enabled && f.workflowRole === "rfq_required_lines"
+        ? {
+            imprest_request_transaction_type: (imprestRequest.transactionType || "CAS_IMPREST").trim(),
+            ...(imprestAccountSource === "account_code" && imprestAccountCol
+              ? { imprest_request_account: { row_field: imprestAccountCol.key } }
+              : imprestAccountSource === "supplier_code" && supplierCol
+                ? { imprest_request_account: { row_field: supplierCol.key } }
+                : imprestAccountSource === "manual" && imprestManualAccount
+                  ? { imprest_request_account: { const: imprestManualAccount } }
+                  : {}),
+            ...(imprestCounterAccountSource === "account_code" && imprestAccountCol
+              ? { imprest_request_counter_account: { row_field: imprestAccountCol.key } }
+              : imprestCounterAccountSource === "supplier_code" && supplierCol
+                ? { imprest_request_counter_account: { row_field: supplierCol.key } }
+                : imprestCounterAccountSource === "manual" && imprestManualCounterAccount
+                  ? { imprest_request_counter_account: { const: imprestManualCounterAccount } }
+                  : {}),
+            imprest_request_parameters: {
+              JournalType: imprestRequest.journalType || "FGJ",
+              PostingType: imprestRequest.postingType || "2",
+              AllowBalTran: "1",
+              AllowPostToSuspended: "N",
+              LoadOnly: "N",
+              PostProvisional: "N",
+              PostToHold: "N",
+              ReportingAccount: "999",
+              ReportErrorsOnly: "Y",
+              SuppressSubstitutedMessages: "Y",
+              SuspenseAccount: "999",
+              TransactionAmountAccount: "999",
+              ...(imprestRequest.parameters ?? {}),
+            },
+          }
+        : {}),
       ...(descriptionCol ? { description: { row_field: descriptionCol.key } } : {}),
       ...(curCol ? { currency: { row_field: curCol.key } } : (currencySpec ? { currency: currencySpec } : {})),
       quantity: qtyCol ? { row_field: qtyCol.key } : { const: ui.quantity || "1" },
@@ -2925,6 +2966,12 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
 }) {
   const retirement = column.sunsystems?.retirement;
   const amountFieldOptions = formFields.filter((f) => f.key && (f.type === "number" || f.type === "currency" || CALCULATED_TYPES.has(f.type)));
+  const imprestTable = formFields.find((f) => f.type === "table" && f.workflowRole === "rfq_required_lines");
+  const imprestAmountColumn = imprestTable?.columns?.find((c) => c.sunsystems?.role === "line_amount");
+  const imprestTransactionColumn = imprestTable?.columns?.find((c) => c.sunsystems?.role === "purchase_transaction_type");
+  const imprestConfig = imprestTable?.sunsystems?.imprestRequest ?? imprestAmountColumn?.sunsystems?.imprestRequest;
+  const hasImprestTotalSource = !!(imprestTable && imprestAmountColumn && imprestTransactionColumn && imprestConfig?.enabled);
+  const IMPREST_TOTAL_SOURCE = "__imprest_request_total__";
 
   const iCls =
     "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
@@ -2947,19 +2994,28 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
             <div>
               <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Issued / requested amount field</span>
               <CustomListbox
-                value={retirement.issuedAmountField ?? ""}
-                onChange={(val) => onChange({ ...retirement, issuedAmountField: val || undefined })}
+                value={retirement.issuedAmountMode === "imprest_request_total" ? IMPREST_TOTAL_SOURCE : retirement.issuedAmountField ?? ""}
+                onChange={(val) => onChange(val === IMPREST_TOTAL_SOURCE
+                  ? { ...retirement, issuedAmountMode: "imprest_request_total", issuedAmountField: undefined }
+                  : { ...retirement, issuedAmountMode: "field", issuedAmountField: val || undefined })}
                 options={[
                   { value: "", label: "— choose a field —" },
                   ...amountFieldOptions.map((f) => ({ value: f.key, label: `${f.label} (${f.key})` })),
+                  ...(hasImprestTotalSource ? [{ value: IMPREST_TOTAL_SOURCE, label: `CAS_IMPREST row total (${imprestTable?.label || imprestTable?.key})` }] : []),
                 ]}
-                className={cn(iCls, "mt-1", !retirement.issuedAmountField && amountFieldOptions.length > 0 && "border-amber-400")}
+                className={cn(iCls, "mt-1", !retirement.issuedAmountField && retirement.issuedAmountMode !== "imprest_request_total" && amountFieldOptions.length > 0 && "border-amber-400")}
                 buttonClassName="w-full"
                 ariaLabel="Issued amount field"
               />
-              {amountFieldOptions.length === 0 ? (
+              {retirement.issuedAmountMode === "imprest_request_total" && (
+                <p className="mt-1 text-[10px] text-[#5E6870]">Issued amount is calculated by summing the Line amount column only for rows whose Purchase transaction type is {imprestConfig?.transactionType || "CAS_IMPREST"}.</p>
+              )}
+              {!hasImprestTotalSource && imprestTable && (
+                <p className="mt-1 text-[10px] text-amber-600">To use the request total, enable Imprest request posting on the General / Imprest table and map its Line amount and Purchase transaction type columns.</p>
+              )}
+              {amountFieldOptions.length === 0 && !hasImprestTotalSource ? (
                 <p className="mt-1 text-[10px] text-amber-600">Add a Number or Currency field elsewhere on the form to hold the issued/requested amount.</p>
-              ) : !retirement.issuedAmountField && (
+              ) : !retirement.issuedAmountField && retirement.issuedAmountMode !== "imprest_request_total" && (
                 <p className="mt-1 flex items-center gap-1 text-[10px] text-amber-600">
                   <AlertCircle className="h-3 w-3 flex-shrink-0" />
                   Without this, issued is treated as 0 and every submission posts as a full overspend.
@@ -2982,66 +3038,86 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
   );
 }
 
-function ImprestRequestConfigEditor({ column, siblingColumns, onChange }: {
-  column: TableColumn;
+function ImprestRequestConfigEditor({ field, siblingColumns, onChange }: {
+  field: TemplateField;
   siblingColumns: TableColumn[];
   onChange: (config: ImprestRequestConfig | undefined) => void;
 }) {
-  const config = column.sunsystems?.imprestRequest;
+  const amountColumn = siblingColumns.find((candidate) => candidate.sunsystems?.role === "line_amount");
+  const config = field.sunsystems?.imprestRequest ?? amountColumn?.sunsystems?.imprestRequest;
   const hasTransactionTypeColumn = siblingColumns.some((candidate) => candidate.sunsystems?.role === "purchase_transaction_type");
-  const hasAccountColumn = siblingColumns.some((candidate) => candidate.sunsystems?.role === "account_code");
-  const hasSupplierColumn = siblingColumns.some((candidate) => candidate.sunsystems?.role === "supplier_code");
   const iCls = "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
-  return (
-    <Row label="Imprest request amount" hint="Sum this amount column only for rows whose Purchase transaction type matches the Imprest type. This aggregate posts with the LPO approval.">
-      <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
-        <ToggleYesNo value={!!config?.enabled} onChange={(enabled) =>
-          onChange(enabled ? { ...(config ?? {}), enabled: true } : undefined)
-        } />
+  const parameterDefaults: Record<string, string> = {
+    AllowBalTran: "1",
+    AllowPostToSuspended: "N",
+    LoadOnly: "N",
+    PostProvisional: "N",
+    PostToHold: "N",
+    ReportingAccount: "999",
+    ReportErrorsOnly: "Y",
+    SuppressSubstitutedMessages: "Y",
+    SuspenseAccount: "999",
+    TransactionAmountAccount: "999",
+  };
+  const enableConfig = (enabled: boolean) => onChange(enabled ? {
+    ...(config ?? {}),
+    enabled: true,
+    journalType: config?.journalType || "FGJ",
+    postingType: config?.postingType || "2",
+    parameters: { ...parameterDefaults, ...(config?.parameters ?? {}) },
+  } : undefined);
+  return <>
+    <div className="space-y-2">
+      <div>
+        <p className="text-sm font-medium text-[#1F2933]">Imprest request posting</p>
+        <p className="mt-0.5 text-[10px] text-[#8C969E]">At requisition approval, post the advance journal for matching rows. Common line mappings come from the Purchase Order profile.</p>
+      </div>
+      <div className="space-y-3 border border-[#C8CDD2] bg-white p-3">
+        <ToggleYesNo value={!!config?.enabled} onChange={enableConfig} />
         {config?.enabled && (
           <>
-            <input className={cn(iCls, "font-mono")} value={config.transactionType ?? "CAS_IMPREST"}
-              onChange={(e) => onChange({ ...config, enabled: true, transactionType: e.target.value })}
-              placeholder="Imprest purchase transaction type" />
-            <p className="text-[10px] text-[#5E6870]">Default: CAS_IMPREST. Only rows with this transaction type contribute to the request amount.</p>
-            <div className="grid grid-cols-[1fr_110px] gap-2">
-              <div className="space-y-1">
-                <AccountCodeSourcePicker value={config.accountSource ?? "manual"}
-                  onChange={(accountSource) => onChange({ ...config, enabled: true, accountSource })} />
-                <input className={cn(iCls, "font-mono")} value={config.account ?? ""}
-                onChange={(e) => onChange({ ...config, enabled: true, account: e.target.value })}
-                placeholder="Manual debit account / fallback" />
-              </div>
-              <CustomListbox value={config.dc ?? "D"}
-                onChange={(dc) => onChange({ ...config, enabled: true, dc: dc as "D" | "C" })}
-                options={[{ value: "D", label: "Debit" }, { value: "C", label: "Credit" }]}
-                className={iCls} buttonClassName="w-full" ariaLabel="Imprest request debit or credit" />
+            <div className="grid grid-cols-2 gap-3">
+              <label className="space-y-1 text-xs font-semibold text-[#475569]">Purchase transaction type filter
+                <input className={cn(iCls, "font-mono")} value={config.transactionType ?? "CAS_IMPREST"}
+                  onChange={(e) => onChange({ ...config, enabled: true, transactionType: e.target.value })} />
+                <span className="block text-[10px] font-normal text-[#8C969E]">Selects qualifying rows; default CAS_IMPREST. This is not the Ledger Journal Type.</span>
+              </label>
+              <label className="space-y-1 text-xs font-semibold text-[#475569]">Ledger Journal Type (JournalType)
+                <input className={cn(iCls, "font-mono")} value={config.journalType ?? "FGJ"}
+                  onChange={(e) => onChange({ ...config, enabled: true, journalType: e.target.value })} />
+                <span className="block text-[10px] font-normal text-[#8C969E]">Must be a journal type configured in SunSystems (for example, IMP).</span>
+              </label>
+              <label className="space-y-1 text-xs font-semibold text-[#475569]">Posting behavior (PostingType)
+                <input className={cn(iCls, "font-mono")} value={config.postingType ?? "2"}
+                  onChange={(e) => onChange({ ...config, enabled: true, postingType: e.target.value })} />
+                <span className="block text-[10px] font-normal text-[#8C969E]">2 = post if no errors.</span>
+              </label>
             </div>
-            <div className="grid grid-cols-[1fr_110px] gap-2">
-              <div className="space-y-1">
-                <AccountCodeSourcePicker value={config.counterAccountSource ?? "manual"}
-                  onChange={(counterAccountSource) => onChange({ ...config, enabled: true, counterAccountSource })} />
-                <input className={cn(iCls, "font-mono")} value={config.counterAccount ?? ""}
-                onChange={(e) => onChange({ ...config, enabled: true, counterAccount: e.target.value })}
-                placeholder="Manual credit account / fallback" />
+            <div className="border-t border-[#E1E5E8] pt-3">
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-[#5E6870]">Other Ledger Posting Parameters</p>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+              {Object.entries(parameterDefaults).map(([name, defaultValue]) => (
+                <label key={name} className="space-y-1 text-xs font-semibold text-[#475569]">{name}
+                  <input className={cn(iCls, "font-mono")} value={config.parameters?.[name] ?? defaultValue}
+                    onChange={(e) => onChange({
+                      ...config,
+                      enabled: true,
+                      parameters: { ...parameterDefaults, ...(config.parameters ?? {}), [name]: e.target.value },
+                    })} />
+                  {name === "PostProvisional" && (config.parameters?.[name] ?? defaultValue).toUpperCase() === "Y" && (
+                    <span className="block font-normal text-amber-700">Y requires provisional postings to be enabled for the ledger. Use N if the ledger prohibits rough book postings.</span>
+                  )}
+                </label>
+              ))}
               </div>
-              <CustomListbox value={config.counterDc ?? (config.dc === "C" ? "D" : "C")}
-                onChange={(counterDc) => onChange({ ...config, enabled: true, counterDc: counterDc as "D" | "C" })}
-                options={[{ value: "D", label: "Debit" }, { value: "C", label: "Credit" }]}
-                className={iCls} buttonClassName="w-full" ariaLabel="Imprest request counter debit or credit" />
             </div>
+            {!amountColumn && <p className="text-[10px] text-amber-600">Map a table column to Line amount so the advance total can be calculated.</p>}
             {!hasTransactionTypeColumn && <p className="text-[10px] text-amber-600">Map a table column to Purchase transaction type to identify qualifying rows.</p>}
-            {(config.accountSource ?? "manual") === "manual" && !config.account?.trim() && <p className="text-[10px] text-amber-600">Set the debit account or choose a mapped account source.</p>}
-            {(config.counterAccountSource ?? "manual") === "manual" && !config.counterAccount?.trim() && <p className="text-[10px] text-amber-600">Set the credit account or choose a mapped account source.</p>}
-            {config.accountSource === "account_code" && !hasAccountColumn && <p className="text-[10px] text-amber-600">Map a table column to Account code for the debit account.</p>}
-            {config.accountSource === "supplier_code" && !hasSupplierColumn && <p className="text-[10px] text-amber-600">Map a table column to Supplier code for the debit account.</p>}
-            {config.counterAccountSource === "account_code" && !hasAccountColumn && <p className="text-[10px] text-amber-600">Map a table column to Account code for the credit account.</p>}
-            {config.counterAccountSource === "supplier_code" && !hasSupplierColumn && <p className="text-[10px] text-amber-600">Map a table column to Supplier code for the credit account.</p>}
           </>
         )}
       </div>
-    </Row>
-  );
+    </div>
+  </>;
 }
 
 function AccountCodeSourcePicker({ value, onChange }: {
@@ -3096,7 +3172,7 @@ function RetirementScenarioEditor({ label, hint, scenario, onChange }: {
       </div>
       <div className="space-y-1.5">
         {scenario.lines.map((line, idx) => (
-          <div key={idx} className="grid grid-cols-[1fr_90px_1fr_auto] gap-1.5 items-center">
+          <div key={idx} className="grid min-w-0 grid-cols-[minmax(0,1fr)_90px_minmax(0,1fr)_auto] gap-1.5 items-center">
             <div className="space-y-1">
               <AccountCodeSourcePicker value={line.accountSource ?? "manual"}
                 onChange={(accountSource) => updateLine(idx, { accountSource })} />
@@ -3167,14 +3243,18 @@ function ColumnConfigModal({
   const isText = draft.type === "text" || draft.type === "textarea" || draft.type === "email" || draft.type === "phone";
   const isCalcCol = !!draft.calc;
   const keyDuplicate = siblingColumns.some((c) => c.id !== draft.id && c.key === draft.key);
+  const needsWideModal = !!draft.sunsystems?.retirement?.enabled;
 
   const iCls =
     "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
     "placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-2xl overflow-hidden border border-[#C8CDD2] bg-white shadow-2xl">
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-2 sm:p-3">
+      <div className={cn(
+        "flex max-h-[96vh] w-full min-w-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white shadow-2xl",
+        needsWideModal ? "w-[min(98vw,1400px)] max-w-none" : "max-w-2xl",
+      )}>
         {/* Header */}
         <div className="flex items-stretch border-b border-[#C8CDD2]">
           <div className="flex flex-1 items-center gap-2 px-5 py-3">
@@ -3197,7 +3277,7 @@ function ColumnConfigModal({
         </div>
 
         {/* Body */}
-        <div className="max-h-[70vh] overflow-y-auto p-6">
+        <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-4 sm:p-6">
           {tab === "field" && (
             <div className="space-y-4">
               <Row label="Label" required>
@@ -3403,13 +3483,6 @@ function ColumnConfigModal({
                     formFields={formFields}
                     onChange={(retirement) => set({ sunsystems: { ...(draft.sunsystems ?? {}), retirement } })}
                   />
-                  {tableField?.workflowRole === "rfq_required_lines" && (
-                    <ImprestRequestConfigEditor
-                      column={draft}
-                      siblingColumns={siblingColumns}
-                      onChange={(imprestRequest) => set({ sunsystems: { ...(draft.sunsystems ?? {}), imprestRequest } })}
-                    />
-                  )}
                 </>
               )}
               {(isNumeric || draft.type === "date" || draft.type === "text") && (
@@ -3582,11 +3655,11 @@ function ConfirmDeleteDialog({ open, title, message, confirmLabel = "Delete", on
 
 function Row({ label, required, hint, children }: { label: string; required?: boolean; hint?: string; children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-[180px_1fr] items-start gap-4">
+    <div className="grid min-w-0 grid-cols-[minmax(120px,180px)_minmax(0,1fr)] items-start gap-3 sm:gap-4">
       <label className="pt-2 text-sm font-medium text-[#1F2933]">
         {label}{required && <span className="ml-0.5 text-red-500">*</span>}
       </label>
-      <div>
+      <div className="min-w-0">
         {children}
         {hint && <p className="mt-1 text-[10px] text-[#8C969E]">{hint}</p>}
       </div>
@@ -4946,7 +5019,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                   options={[
                     { value: "", label: "General table" },
                     { value: "requisition_lines", label: "Requisition lines" },
-                    { value: "rfq_required_lines", label: "General / Imprest lines (RFQ when used)" },
+                    { value: "rfq_required_lines", label: "General / Imprest lines" },
                     { value: "retirement_expenses", label: "Retirement expenses" },
                   ]}
                   className={inputCls}
@@ -4954,6 +5027,15 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                   ariaLabel="Table purpose"
                 />
               </InspectorRow>
+              {field.workflowRole === "rfq_required_lines" && (
+                <ImprestRequestConfigEditor
+                  field={field}
+                  siblingColumns={field.columns ?? []}
+                  onChange={(imprestRequest) => onUpdate({
+                    sunsystems: { ...(field.sunsystems ?? {}), imprestRequest },
+                  })}
+                />
+              )}
               <InspectorRow label="Minimum rows shown">
                 <input type="number" min={1} max={20} value={field.minRows ?? 2}
                   onChange={(e) => onUpdate({ minRows: Number(e.target.value) })} className={inputCls} />
@@ -7261,8 +7343,8 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
           <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
             <h2 className="text-sm font-bold text-[#1F2933]">Requisition type &amp; stage gating</h2>
             <p className="text-xs text-[#5E6870] mt-0.5">
-              Pick the dropdown that identifies the requisition type. Travel requisitions skip RFQ only
-              when the optional General / Imprest table is unused.
+              Pick the dropdown that identifies the requisition type. Travel requisitions always skip RFQ,
+              whether or not the optional General / Imprest table has rows.
             </p>
           </div>
           <div className="space-y-4 p-5">
@@ -7301,7 +7383,7 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
                 </datalist>
               )}
               <p className="text-[10px] text-[#8C969E] mt-1">
-                If the type matches this value and no table is marked “General / Imprest lines (RFQ when used)” has entered rows, the workflow skips RFQ.
+                If the requisition type matches this value, the workflow skips RFQ.
               </p>
             </div>
           </div>

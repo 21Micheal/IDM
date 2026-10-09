@@ -6,12 +6,12 @@ from requests.auth import HTTPBasicAuth
 # ------------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------------
-SECURITY_WSDL = "http://sunsrv02.flaxem.int:81/sunsystems-connect/wsdl/SecurityProvider?wsdl"
-EXECUTOR_WSDL = "http://sunsrv02.flaxem.int:81/sunsystems-connect/wsdl/ComponentExecutor?wsdl"
+SECURITY_WSDL = "http://sunsrv02.flaxem.int:8090/sunsystems-connect/wsdl/SecurityProvider?wsdl"
+EXECUTOR_WSDL = "http://sunsrv02.flaxem.int:8090/sunsystems-connect/wsdl/ComponentExecutor?wsdl"
 
 USERNAME = "ZZZ"
-PASSWORD = ""
-BUSINESS_UNIT = "PK1"
+PASSWORD = "1234"
+BUSINESS_UNIT = "TST"
 
 # ------------------------------------------------------------------
 # SESSION (optional but recommended)

@@ -37,6 +37,7 @@ Legacy (single-stage) mappings that have no ``stages`` key are treated as stage 
 transparently, preserving backwards compatibility.
 """
 from __future__ import annotations
+from copy import deepcopy
 
 
 def get_sunsystems_config(document) -> dict:
@@ -74,12 +75,16 @@ def get_journal_mapping(document, stage: int = 1) -> dict | None:
     Stage mappings inherit the parent config's ``enabled`` flag when not
     explicitly set on the stage object.
     """
-    # Dynamic stage range reserved for individual PurchaseOrder requests.
-    # Each generated LPO table / transaction group gets a stable stage number
-    # so existing JournalPosting audit + retry surfaces can track it.
+    # Dynamic stages track generated requisition-stage Imprest journals and
+    # LPO PurchaseOrders through the existing posting/retry surface.
     if int(stage) >= 1000:
-        postings = get_purchase_order_postings(document)
-        index = int(stage) - 1000
+        purpose = "imprest_request" if int(stage) >= 20000 else "lpo"
+        postings = (
+            get_imprest_request_postings(document)
+            if purpose == "imprest_request"
+            else get_purchase_order_postings(document)
+        )
+        index = int(stage) - (20000 if purpose == "imprest_request" else 1000)
         if 0 <= index < len(postings):
             return postings[index]["mapping"]
         return None
@@ -106,7 +111,7 @@ def get_all_stages(document) -> list[dict]:
 
 
 def get_purchase_order_postings(document) -> list[dict]:
-    """Return deterministic table + transaction/product-group PO requests."""
+    """Return table + transaction/product-group PO requests for a workflow stage."""
     config = get_sunsystems_config(document).get("purchase_order")
     if not isinstance(config, dict) or not config.get("enabled"):
         # Backward-compatible templates nested their PO mapping under journal.
@@ -116,16 +121,169 @@ def get_purchase_order_postings(document) -> list[dict]:
         config = legacy
     from .mapping import expand_purchase_order_postings
 
+    mapping_config = deepcopy(config)
     form = ((getattr(document, "metadata", None) or {}).get("form") or {})
     expanded = expand_purchase_order_postings(
-        config,
+        mapping_config,
         get_form_values(document),
         lpo_documents=form.get("lpo_documents") or [],
     )
     return [
-        {"stage": 1000 + index, "label": item.get("_posting_label") or f"LPO {index + 1}", "mapping": item}
+        {
+            "stage": 1000 + index,
+            "label": "LPO / " + (item.get("_posting_label") or f"Purchase Order {index + 1}"),
+            "mapping": item,
+        }
         for index, item in enumerate(expanded)
     ]
+
+
+def get_imprest_request_postings(document) -> list[dict]:
+    """Build balanced Ledger Import postings for CAS_IMPREST table rows.
+
+    The PurchaseOrder profile remains the source of common field bindings
+    (description, currency, date, analysis, business unit, and requisition
+    reference). Each qualifying row produces a debit/credit pair for its line
+    amount, so the journal total is the sum of CAS_IMPREST rows only.
+    """
+    config = get_sunsystems_config(document).get("purchase_order")
+    if not isinstance(config, dict) or not config.get("enabled"):
+        legacy = get_journal_config(document) or {}
+        if not legacy.get("enabled") or str(legacy.get("component") or "").lower() != "purchaseorder":
+            return []
+        config = legacy
+
+    from .mapping import _po_line_specs, _po_line_amount, resolve_amount, resolve_value
+
+    po = config.get("purchase_order") or {}
+    values = get_form_values(document)
+    sunsystems = get_sunsystems_config(document)
+    ui = sunsystems.get("ui") if isinstance(sunsystems.get("ui"), dict) else {}
+    imprest_groups: dict[str, dict] = {}
+    for spec in _po_line_specs(po):
+        table_key = str(spec.get("repeat_over") or "")
+        if not table_key or not spec.get("imprest_request_transaction_type"):
+            continue
+        rows = values.get(table_key)
+        if not isinstance(rows, list):
+            continue
+        expected_type = str(spec["imprest_request_transaction_type"]).strip().casefold()
+        group = imprest_groups.setdefault(table_key, {"spec": spec, "rows": []})
+        for row in rows:
+            if not isinstance(row, dict) or not any(value not in (None, "", [], {}) for value in row.values()):
+                continue
+            actual_type = resolve_value(spec.get("purchase_transaction_type"), values, row).strip().casefold()
+            if actual_type == expected_type:
+                group["rows"].append(row)
+
+    postings = []
+    for table_key, group in imprest_groups.items():
+        spec = group["spec"]
+        rows = group["rows"]
+        if not rows:
+            continue
+        supplier_spec = po.get("supplier_code")
+        supplier_fallback = po.get("supplier_code_fallback")
+        lines = []
+        for row in rows:
+            quantity = resolve_amount(spec.get("quantity") or {"const": "1"}, values, row)
+            unit_price = resolve_amount(spec.get("unit_price"), values, row)
+            amount = _po_line_amount(spec, values, row, quantity, unit_price)
+            if amount <= 0:
+                continue
+            # The Imprest table has its own debit/counter-account source
+            # controls. Prefer those over the PO line's account binding, which
+            # may intentionally be a fixed fallback for LPO posting.
+            debit_account = (
+                spec.get("imprest_request_account")
+                or spec.get("account_code")
+                or spec.get("account")
+                or po.get("account_code")
+            )
+            # Supplier table selectors should resolve against this same row;
+            # scalar supplier mappings and their configured fallbacks remain
+            # shared with the PurchaseOrder profile.
+            credit_account = spec.get("imprest_request_counter_account") or supplier_spec
+            if not resolve_value(credit_account, values, row):
+                row_supplier = None
+                for candidate_spec in (supplier_spec, supplier_fallback):
+                    if isinstance(candidate_spec, dict) and isinstance(candidate_spec.get("sources"), list):
+                        row_supplier = next(
+                            (candidate for candidate in candidate_spec["sources"] if candidate.get("table") == table_key),
+                            None,
+                        )
+                        if row_supplier:
+                            break
+                if row_supplier:
+                    credit_account = {"row_field": row_supplier.get("row_field")}
+                else:
+                    credit_account = po.get("supplier_code_default") or supplier_fallback or supplier_spec
+
+            def row_spec(value_spec):
+                if isinstance(value_spec, dict) and value_spec.get("table") == table_key and value_spec.get("row_field"):
+                    return {"row_field": value_spec["row_field"]}
+                return value_spec
+
+            def row_value(value_spec):
+                return resolve_value(row_spec(value_spec), values, row)
+
+            common = {
+                "amount": {"const": str(amount)},
+                "currency": {"const": row_value(spec.get("currency") or po.get("currency") or config.get("currency"))},
+                "date": {"const": row_value(spec.get("date") or po.get("date") or config.get("date"))},
+                "description": {"const": row_value(spec.get("description") or po.get("comment") or po.get("description"))},
+            }
+            analysis = {}
+            for slot, po_analysis in (po.get("analysis") or {}).items():
+                code = po_analysis.get("code") if isinstance(po_analysis, dict) else po_analysis
+                if code is not None:
+                    analysis[str(slot)] = {"const": row_value(code)}
+            for slot, code in (spec.get("analysis") or {}).items():
+                analysis[str(slot)] = {"const": row_value(code)}
+            if analysis:
+                common["analysis"] = analysis
+            lines.extend([
+                {**common, "account": {"const": row_value(debit_account)}, "dc": "D"},
+                {**common, "account": {"const": row_value(credit_account)}, "dc": "C"},
+            ])
+
+        if not lines:
+            continue
+        parameters = {
+            "JournalType": ui.get("journalType") or "FGJ",
+            "PostingType": "2",
+            "AllowBalTran": "1",
+            "AllowPostToSuspended": "N",
+            "LoadOnly": "N",
+            "PostProvisional": "N",
+            "PostToHold": "N",
+            "ReportingAccount": "999",
+            "ReportErrorsOnly": "Y",
+            "SuppressSubstitutedMessages": "Y",
+            "SuspenseAccount": "999",
+            "TransactionAmountAccount": "999",
+        }
+        parameters.update(config.get("parameters") or {})
+        parameters.update(spec.get("imprest_request_parameters") or {})
+        parameters["JournalType"] = str(parameters.get("JournalType") or ui.get("journalType") or "FGJ").strip()
+        parameters["PostingType"] = str(parameters.get("PostingType") or ui.get("postingType") or "2").strip()
+
+        journal = {
+            "enabled": True,
+            "component": "Journal",
+            "method": "Import",
+            "context": deepcopy(config.get("context") or {}),
+            "parameters": parameters,
+            "reference": {"const": resolve_value(po.get("second_reference") or po.get("reference"), values)},
+            "validate_balance": True,
+            "lines": lines,
+        }
+        postings.append({
+            "stage": 20000 + len(postings),
+            "label": f"Imprest request / {spec.get('table_label') or table_key}",
+            "mapping": journal,
+        })
+    return postings
 
 
 def get_budget_mapping(document) -> dict | None:

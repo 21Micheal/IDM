@@ -1316,8 +1316,6 @@ class WorkflowService:
                 except Exception:
                     pass
 
-            # Generate the printable LPO document first: it reserves the LPO
-            # number that the SunSystems PurchaseOrder posting then references.
             last_approver_action = (
                 WorkflowTaskAction.objects.filter(
                     task__workflow_instance=instance,
@@ -1329,9 +1327,7 @@ class WorkflowService:
                 .first()
             )
             lpo_actor = last_approver_action.actor if last_approver_action else instance.started_by
-            WorkflowService._maybe_generate_lpo_document(doc, outcome=outcome, actor=lpo_actor)
-
-            WorkflowService._maybe_post_sunsystems_journal(doc, outcome)
+            WorkflowService._maybe_post_sunsystems_journal(doc, outcome, actor=lpo_actor)
 
             # A fully-approved procurement stage opens the next stage on its
             # own (Requisition -> RFQ -> LPO; Travel skips RFQ). The requestor
@@ -1421,13 +1417,10 @@ class WorkflowService:
 
     @staticmethod
     def _maybe_generate_lpo_document(document, *, outcome: str = "approved", actor=None):
-        """Generate the printable LPO document when the LPO phase completes.
+        """Legacy compatibility helper for explicit/manual LPO generation.
 
-        Only procurement requisitions whose LPO stage was just fully approved
-        qualify. Idempotent — the relation is stored on the requisition, and a
-        second call returns the already-generated document. Generation failure
-        must never block the workflow (or the SunSystems posting), so it is
-        caught and logged.
+        The approval path does not call this: normal LPO PDFs are rendered by
+        the SunSystems posting handler after it receives the assigned PO number.
         """
         try:
             from apps.documents.builder_workflow import (
@@ -1449,7 +1442,7 @@ class WorkflowService:
             return None
 
     @staticmethod
-    def _maybe_post_sunsystems_journal(document, outcome: str) -> None:
+    def _maybe_post_sunsystems_journal(document, outcome: str, actor=None) -> None:
         """Post any journal stages whose ``post_on`` trigger matches this outcome.
 
         Supports multi-stage imprest flows: stage 1 fires on "approved", stage 2
@@ -1459,6 +1452,13 @@ class WorkflowService:
         idempotent — a stage that is already POSTED is never re-posted.
         """
         try:
+            # These are used by the procurement-specific dispatch blocks
+            # below even when there are no ordinary journal stages to post.
+            # Importing them only inside the loop makes them local variables
+            # that remain unbound when ``outcomes`` is empty (the normal case
+            # for legacy PurchaseOrder mappings).
+            from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+            from apps.sunsystems.tasks import post_journal_for_document
             from apps.sunsystems.config import (
                 find_stages_to_post,
                 get_journal_mapping,
@@ -1466,19 +1466,24 @@ class WorkflowService:
                 get_sunsystems_config,
             )
             phase = WorkflowService._document_workflow_phase(document)
+            posting_actor_id = str(actor.pk) if actor and getattr(actor, "pk", None) else None
             outcomes = [outcome]
             from apps.documents.builder_workflow import completed_procurement_stages, is_procurement_document
             if is_procurement_document(document):
+                sunsystems = get_sunsystems_config(document)
+                legacy_journal = sunsystems.get("journal") or {}
+                is_legacy_po = str(legacy_journal.get("component") or "").lower() == "purchaseorder"
                 # Intermediate approvals never post. At final LPO approval,
-                # trigger the Imprest request journal and the separate PO
-                # table/group requests together.
+                # legacy PO mappings are dispatched below through the grouped
+                # PurchaseOrder path, while non-PO journal stages may still use
+                # their configured full-approval trigger.
                 outcomes = ["fully_approved"] if outcome == "approved" and phase == "lpo" and "lpo" in completed_procurement_stages(document) else []
+                if is_legacy_po:
+                    outcomes = []
             elif phase == "retirement" and outcome == "approved":
                 outcomes = ["retirement_approved", "approved"]
 
             for stage in find_stages_to_post(document, outcomes):
-                from apps.sunsystems.models import JournalPosting, JournalPostingStatus
-
                 posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
                 if not created:
                     continue
@@ -1488,19 +1493,54 @@ class WorkflowService:
                 posting.message = "Queued for SunSystems posting."
                 posting.error = ""
                 posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
-                from apps.sunsystems.tasks import post_journal_for_document
-
                 doc_id = str(document.id)
                 _queue_after_commit(
-                    lambda did=doc_id, s=stage: post_journal_for_document.delay(did, s)
+                    lambda did=doc_id, s=stage, aid=posting_actor_id: post_journal_for_document.delay(did, s, aid)
                 )
 
-            if is_procurement_document(document) and outcome == "approved" and phase == "lpo" and "lpo" in completed_procurement_stages(document):
-                sunsystems = get_sunsystems_config(document)
-                po_profile = sunsystems.get("purchase_order") or {}
-                legacy_journal = sunsystems.get("journal") or {}
-                is_legacy_po = str(legacy_journal.get("component") or "").lower() == "purchaseorder"
-                if isinstance(po_profile, dict) and po_profile.get("enabled") or is_legacy_po:
+            procurement_document = is_procurement_document(document)
+            sunsystems = get_sunsystems_config(document) if procurement_document else {}
+            po_profile = sunsystems.get("purchase_order") or {}
+            legacy_journal = sunsystems.get("journal") or {}
+            is_legacy_po = str(legacy_journal.get("component") or "").lower() == "purchaseorder"
+            has_po_mapping = (isinstance(po_profile, dict) and po_profile.get("enabled")) or is_legacy_po
+
+            # The Imprest advance journal reuses common bindings from the PO
+            # profile and posts as soon as requisition approval completes.
+            if (
+                has_po_mapping
+                and outcome == "approved"
+                and phase == "requisition"
+                and "requisition" in completed_procurement_stages(document)
+            ):
+                from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+                from apps.sunsystems.config import get_imprest_request_postings
+
+                for item in get_imprest_request_postings(document):
+                    stage = int(item["stage"])
+                    posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
+                    if not created:
+                        continue
+                    posting.status = JournalPostingStatus.PENDING
+                    posting.stage_label = str(item.get("label") or "Imprest request")[:64]
+                    posting.message = "Queued for requisition-stage Imprest posting."
+                    posting.error = ""
+                    posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
+                    doc_id = str(document.id)
+                    _queue_after_commit(
+                        lambda did=doc_id, current_stage=stage, aid=posting_actor_id: post_journal_for_document.delay(did, current_stage, aid)
+                    )
+
+            # The LPO approval may advance the persisted form phase to
+            # retirement before this hook runs (for example, when the
+            # workflow completion handler or another signal has already
+            # opened the retirement phase). Completion of the LPO stage is
+            # the durable signal; relying on the current phase can silently
+            # skip the posting after the final approver approves.
+            lpo_stage_completed = "lpo" in completed_procurement_stages(document)
+            if is_procurement_document(document) and outcome == "approved" and lpo_stage_completed:
+                if has_po_mapping:
                     for item in get_purchase_order_postings(document):
                         stage = int(item["stage"])
                         posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
@@ -1513,7 +1553,7 @@ class WorkflowService:
                         posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
                         doc_id = str(document.id)
                         _queue_after_commit(
-                            lambda did=doc_id, current_stage=stage: post_journal_for_document.delay(did, current_stage)
+                            lambda did=doc_id, current_stage=stage, aid=posting_actor_id: post_journal_for_document.delay(did, current_stage, aid)
                         )
         except Exception:
             logger.exception(

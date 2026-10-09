@@ -140,10 +140,6 @@ def resolve_value(spec: Any, values: dict, row: dict | None = None, *, default: 
 
     if "const" in spec:
         raw = spec.get("const")
-    elif "row_field" in spec:
-        raw = (row or {}).get(spec["row_field"]) if row is not None else None
-    elif "field" in spec:
-        raw = (values or {}).get(spec["field"])
     elif "table" in spec:
         rows = (values or {}).get(spec["table"])
         raw = None
@@ -155,6 +151,10 @@ def resolve_value(spec: Any, values: dict, row: dict | None = None, *, default: 
                 if candidate not in (None, "", [], {}):
                     raw = candidate
                     break
+    elif "row_field" in spec:
+        raw = (row or {}).get(spec["row_field"]) if row is not None else None
+    elif "field" in spec:
+        raw = (values or {}).get(spec["field"])
     elif "source" in spec:
         # System-generated values injected by the runtime before posting, e.g.
         # the LPO number created when the LPO phase completes. Stored under a
@@ -273,7 +273,13 @@ def build_journal_ssc(
 
     method_ctx = ET.SubElement(ssc, "MethodContext")
     params_el = ET.SubElement(method_ctx, "LedgerPostingParameters")
-    for name, spec in (mapping.get("parameters") or {}).items():
+    posting_parameters = dict(mapping.get("parameters") or {})
+    # Ledger Import requires a posting choice. Keep older saved mappings that
+    # predate the Imprest parameter controls postable with SunSystems' standard
+    # post-if-no-errors behavior unless an administrator supplied a value.
+    if not resolve_value(posting_parameters.get("PostingType"), values).strip():
+        posting_parameters["PostingType"] = {"const": "2"}
+    for name, spec in posting_parameters.items():
         # Parameter keys are the literal SunSystems element names (e.g.
         # "JournalType"); their values resolve as ValueSpecs/literals.
         ET.SubElement(params_el, str(name)).text = resolve_value(spec, values)
@@ -377,15 +383,10 @@ def expand_purchase_order_postings(
 
     Every source table becomes its own PO posting. Within a table, lines sharing
     PurchaseTransactionType and ProductGroup are included in one request.
-    ``lpo_documents`` supplies the already-generated printable LPO reference for
-    each table.
+    SunSystems assigns each PurchaseOrderReference in its response.
     """
     po = (mapping or {}).get("purchase_order") or {}
     specs = _po_line_specs(po)
-    references = {
-        str(item.get("table_key") or ""): str(item.get("reference") or "")
-        for item in (lpo_documents or []) if isinstance(item, dict)
-    }
     grouped: dict[tuple[str, str, str], dict] = {}
     for spec in specs:
         table_key = str(spec.get("repeat_over") or "")
@@ -422,9 +423,10 @@ def expand_purchase_order_postings(
             current_values[table_key] = entry["rows"]
         else:
             current_values = dict(values)
-        reference = references.get(table_key) or resolve_value(current_po.get("reference"), current_values)
-        if reference:
-            current_po["reference"] = {"const": reference}
+        # SunSystems assigns the PurchaseOrderReference. The response's
+        # PurchaseOrderReference is then used for the printable LPO, so never
+        # send the application's LPO document-type sequence as the PO number.
+        current_po.pop("reference", None)
         desc_spec = spec.get("description")
         if desc_spec and table_key and isinstance(desc_spec, dict) and desc_spec.get("row_field"):
             current_po["comment"] = {"table": table_key, "row_field": desc_spec["row_field"]}
@@ -519,8 +521,6 @@ def build_purchase_order_ssc(
     header_analysis = dict(po.get("analysis") or {})
 
     missing = []
-    if not reference:
-        missing.append("reference")
     if not supplier_code:
         missing.append("supplier_code")
     if missing:
@@ -542,7 +542,8 @@ def build_purchase_order_ssc(
     # element when the template leaves it unset (the requisition LPO flow does).
     if transaction_type:
         ET.SubElement(order_el, "PurchaseTransactionType").text = transaction_type
-    ET.SubElement(order_el, "PurchaseOrderReference").text = reference
+    if reference:
+        ET.SubElement(order_el, "PurchaseOrderReference").text = reference
     if second_reference:
         ET.SubElement(order_el, "SecondReference").text = second_reference
     ET.SubElement(order_el, "SupplierCode").text = supplier_code
@@ -656,6 +657,7 @@ def classify_retirement(retirement: dict, values: dict, warnings: list[str] | No
     issued_spec = retirement.get("issued_amount") or {}
     issued = resolve_amount(issued_spec, values)
     issued_field_key = issued_spec.get("field") if isinstance(issued_spec, dict) else None
+    issued_sum_spec = issued_spec.get("sum_matching_rows") if isinstance(issued_spec, dict) else None
     if issued_field_key and issued_field_key not in (values or {}):
         # The configured field key doesn't exist in the submitted values at
         # all — as opposed to existing with a blank/zero value. This is the
@@ -670,6 +672,16 @@ def classify_retirement(retirement: dict, values: dict, warnings: list[str] | No
             f"Retirement panel's 'Issued / requested amount field' still points at "
             f"a field that exists on this form (it may have been renamed)."
         )
+    elif isinstance(issued_sum_spec, dict):
+        table_key = issued_sum_spec.get("table")
+        amount_column = issued_sum_spec.get("amount_column")
+        match_column = issued_sum_spec.get("match_column")
+        rows = (values or {}).get(table_key)
+        if not table_key or not amount_column or not match_column or not isinstance(rows, list):
+            _warnings.append(
+                "Retirement's CAS_IMPREST issued amount source is incomplete or its source table is missing; "
+                "issued amount treated as 0. Check the General / Imprest table mappings."
+            )
     elif not issued_field_key:
         # No field was ever selected in the Retirement panel — the mapping
         # compiled a bare {"const": "0"} fallback. Same silent-zero risk as
@@ -980,16 +992,9 @@ _PO_SUCCESS_STATUSES = {"success", "ok", "accepted", "created", "amended"}
 _PO_ERROR_STATUSES = {"fail", "failed", "error", "rejected"}
 # Attribute names that may carry the PO reference on the <PurchaseOrder> element.
 _PO_REFERENCE_ATTRS = (
-    "Reference", "reference", "PurchaseOrderReference",
-    "purchaseorderreference", "OrderNo", "orderno",
+    "PurchaseOrderReference", "purchaseorderreference", "OrderNo", "orderno",
+    "Reference", "reference",
 )
-# Element local-names that may contain the PO reference as text content.
-_PO_REFERENCE_ELEMENTS = {
-    "purchaseordernumber", "purchaseorderreference",
-    "ordernumber", "ordreference", "reference",
-}
-
-
 def parse_posting_response(component: str, xml: str) -> JournalResult:
     """Parse a SunSystems Connect Execute response for the given component.
 
@@ -1025,7 +1030,7 @@ def parse_posting_response(component: str, xml: str) -> JournalResult:
     has_error = False
     reference: str | None = None
 
-    # ── Pass 1: status + reference from <PurchaseOrder> element ────────────────
+    # ── Pass 1: posting status ─────────────────────────────────────────────────
     for el in root.iter():
         if _localname(el.tag) != "purchaseorder":
             continue
@@ -1039,25 +1044,37 @@ def parse_posting_response(component: str, xml: str) -> JournalResult:
             has_success = True
         elif status_raw in _PO_ERROR_STATUSES or rejected == "true":
             has_error = True
-        if reference is None:
+    # ── Pass 2: assigned PO reference from child text elements ─────────────────
+    # Prefer the explicit PurchaseOrderReference element. Some SSC responses
+    # also include a generic Reference attribute containing a row index (for
+    # example Reference="1"), which is not the generated order number.
+    if reference is None:
+        elements = list(root.iter())
+        for wanted in ("purchaseorderreference", "purchaseordernumber", "ordernumber", "ordreference"):
+            for el in elements:
+                name = _localname(el.tag)
+                text = (el.text or "").strip()
+                if name == wanted and text:
+                    reference = text
+                    break
+            if reference:
+                break
+
+    # Fall back to explicit PO-reference attributes, then the tenant-specific
+    # generic Reference attribute when the response omits the named field.
+    if reference is None:
+        for el in root.iter():
+            if _localname(el.tag) != "purchaseorder":
+                continue
             for attr in _PO_REFERENCE_ATTRS:
                 val = (el.attrib.get(attr) or "").strip()
                 if val:
                     reference = val
                     break
-
-    # ── Pass 2: reference from child text elements ──────────────────────────────
-    if reference is None:
-        for el in root.iter():
-            name = _localname(el.tag)
-            text = (el.text or "").strip()
-            if text and name in _PO_REFERENCE_ELEMENTS:
-                # Don't pick up the *sent* reference — only the echoed/assigned one.
-                # Skip if the element is a direct child of the request payload.
-                reference = text
+            if reference:
                 break
 
-    # ── Pass 3: structured messages + derived error flag ───────────────────────
+    # ── Pass 3: structured messages + derived error flag ──────────────────────
     structured, msg_has_error = _extract_structured_messages(root)
     if msg_has_error:
         has_error = True

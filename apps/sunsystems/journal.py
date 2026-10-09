@@ -57,6 +57,7 @@ def post_journal_for_document(
     posting, _ = JournalPosting.objects.get_or_create(document=document, stage=stage)
 
     if posting.status == JournalPostingStatus.POSTED:
+        _maybe_generate_lpo_after_posting(document, posting, actor)
         return posting
 
     mapping = get_journal_mapping(document, stage=stage)
@@ -141,6 +142,13 @@ def post_journal_for_document(
     message_text = result.message
     if warning_prefix:
         message_text = f"{warning_prefix} | {message_text}" if message_text else warning_prefix
+    if (
+        result.ok
+        and str(build.component or "").strip().lower() == "purchaseorder"
+        and not result.journal_number
+    ):
+        missing_reference = "SunSystems accepted the PurchaseOrder but returned no PO reference; the LPO PDF could not be generated."
+        message_text = f"{message_text} | {missing_reference}" if message_text else missing_reference
     posting.message = message_text
     if result.ok:
         posting.journal_number = result.journal_number or ""
@@ -154,6 +162,7 @@ def post_journal_for_document(
             message=message_text,
         )
         _write_back_to_document(document, posting)
+        _maybe_generate_lpo_after_posting(document, posting, actor)
         try:
             from apps.documents.builder_workflow import sync_retirement_variance
 
@@ -173,6 +182,26 @@ def post_journal_for_document(
             message=message_text,
         )
     return posting
+
+
+def _maybe_generate_lpo_after_posting(document, posting, actor=None) -> None:
+    """Create the printable LPO only after SSC returns its assigned PO number."""
+    if not (1000 <= int(posting.stage) < 20000):
+        return
+    if str(posting.component or "").strip().lower() != "purchaseorder":
+        return
+    try:
+        from apps.documents.lpo import generate_lpo_for_posting
+
+        generate_lpo_for_posting(document, posting, actor=actor or posting.posted_by)
+    except Exception:
+        # The external PO is already committed. Keep the posting successful and
+        # log PDF generation separately so it can be recovered without reposting.
+        logger.exception(
+            "SunSystems PO %s was posted, but its LPO PDF could not be generated for %s",
+            posting.journal_number,
+            document.pk,
+        )
 
 
 def _mark(posting: JournalPosting, status: str, **fields) -> None:
