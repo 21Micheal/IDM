@@ -235,6 +235,55 @@ def form_has_editable_fields(document: Document, user=None) -> bool:
     return False
 
 
+def retirement_editable_section_ids(document: Document, user=None) -> set[str]:
+    """Return visible retirement-expense sections editable after LPO approval.
+
+    The retirement expense table is a sub-process of a requisition and must stay
+    locked while the LPO workflow is active. Once LPO is approved, its
+    section-level group visibility rule is the access boundary for scoped edits.
+    """
+    if user is None or not getattr(user, "is_authenticated", False):
+        return set()
+    try:
+        from apps.documents.builder_workflow import builder_process_step, completed_procurement_stages
+        if "requisition" not in completed_procurement_stages(document):
+            return set()
+        if builder_process_step(document) != "lpo_approved":
+            return set()
+        form = (document.metadata or {}).get("form")
+        if not isinstance(form, dict):
+            return set()
+        from apps.documents.form_attachments import descriptors_to_names
+        from apps.templates_engine.conditions import is_editable, is_visible
+        values = form.get("values") if isinstance(form.get("values"), dict) else {}
+        rendered = descriptors_to_names(values)
+        process_step = builder_process_step(document)
+        viewer = viewer_for_user(user)
+        result = set()
+        for section in form.get("sections") or []:
+            if not isinstance(section, dict) or section.get("hidden") or section.get("readonly"):
+                continue
+            fields = section.get("fields") or []
+            if not any(isinstance(field, dict) and field.get("workflowRole") == "retirement_expenses" for field in fields):
+                continue
+            if not is_visible(section, rendered, process_step, viewer) or not is_editable(section, rendered, process_step, viewer):
+                continue
+            if not any(
+                isinstance(field, dict)
+                and field.get("key")
+                and not field.get("hidden")
+                and not field.get("readonly")
+                and is_visible(field, rendered, process_step, viewer)
+                and is_editable(field, rendered, process_step, viewer)
+                for field in fields
+            ):
+                continue
+            result.add(str(section.get("id") or section.get("key") or ""))
+        return result
+    except Exception:
+        return set()
+
+
 def user_owns_document(user, document: Document) -> bool:
     """True when ``user`` is the uploader or designated owner of ``document``."""
     if user is None:
@@ -274,6 +323,9 @@ def document_allows_form_edit(document: Document, *, user=None) -> bool:
     if user is not None and getattr(user, "has_admin_access", False):
         return True
 
+    if retirement_editable_section_ids(document, user=user):
+        return True
+
     stage = resolve_access_stage(document)
 
     if stage == ACCESS_STAGE_CREATION:
@@ -281,7 +333,7 @@ def document_allows_form_edit(document: Document, *, user=None) -> bool:
 
     try:
         from apps.documents.builder_workflow import builder_process_step
-        if builder_process_step(document) in {"fully_approved", "retirement_rejected"}:
+        if builder_process_step(document) in {"retirement_approved", "fully_approved", "retirement_rejected"}:
             return False
     except Exception:
         pass

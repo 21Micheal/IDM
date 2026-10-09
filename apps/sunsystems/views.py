@@ -46,6 +46,10 @@ from .config import (
     get_budget_mapping,
     get_connection_override,
     get_form_values,
+    get_all_stages,
+    get_purchase_order_postings,
+    get_imprest_request_postings,
+    get_imprest_retirement_postings,
     get_journal_mapping,
     redact_connection,
 )
@@ -150,7 +154,9 @@ def _journal_mapping_and_values(data: dict):
             if mapping is None:
                 mapping = get_journal_mapping(doc, stage=stage)
             if not values:
-                values = get_form_values(doc)
+                # A dynamic LPO posting is expanded to one table/type group.
+                # Use its grouped values so the preview matches that exact PO.
+                values = (mapping or {}).get("_posting_values") or get_form_values(doc)
             if not connection:
                 connection = get_connection_override(doc)
 
@@ -170,27 +176,69 @@ class JournalPreviewView(APIView):
         serializer.is_valid(raise_exception=True)
         mapping, values, connection = _journal_mapping_and_values(serializer.validated_data)
 
-        if not mapping or not mapping.get("enabled"):
+        # Return the document's real posting choices with every preview. PO
+        # stages are expanded dynamically (one per table/transaction group), so
+        # the client cannot reliably infer them from the template metadata.
+        payload_options = []
+        document_id = serializer.validated_data.get("document_id")
+        if document_id:
+            from apps.documents.models import Document
+            document = Document.objects.filter(pk=document_id).first()
+            if document:
+                payload_options.extend(
+                    {"stage": int(item.get("stage", 1)), "label": item.get("label") or f"Stage {item.get('stage', 1)}", "component": (get_journal_mapping(document, int(item.get("stage", 1))) or {}).get("component") or "Journal"}
+                    for item in get_all_stages(document)
+                    if (
+                        (stage_mapping := get_journal_mapping(document, int(item.get("stage", 1))))
+                        and (
+                            stage_mapping.get("enabled")
+                            or any(isinstance(line, dict) and line.get("retirement") for line in stage_mapping.get("lines", []))
+                        )
+                    )
+                )
+                payload_options.extend(
+                    {"stage": int(item["stage"]), "label": item["label"], "component": "PurchaseOrder"}
+                    for item in get_purchase_order_postings(document)
+                )
+                payload_options.extend(
+                    {"stage": int(item["stage"]), "label": item["label"], "component": "Journal"}
+                    for item in get_imprest_request_postings(document)
+                )
+                payload_options.extend(
+                    {"stage": int(item["stage"]), "label": item["label"], "component": "Journal"}
+                    for item in get_imprest_retirement_postings(document)
+                )
+                payload_options.sort(key=lambda item: item["stage"])
+
+        retirement_preview = bool(
+            mapping
+            and any(isinstance(line, dict) and line.get("retirement") for line in mapping.get("lines", []))
+        )
+        if not mapping or (not mapping.get("enabled") and not retirement_preview):
             return Response({
                 "ok": False, "enabled": False,
                 "error": "Journal posting is not configured for this form.",
+                "payload_options": payload_options,
             })
 
         config = SunSystemsConfig.from_mapping(effective_connection(connection))
         try:
             build = build_sunsystems_ssc(
-                {**mapping, "validate_balance": False},  # preview always renders
+                {**mapping, "enabled": True, "validate_balance": False},  # preview renders configured retirement lines even when the parent journal switch is off
                 values,
                 business_unit_default=config.business_unit,
                 budget_code_default=config.budget_code,
                 pretty=True,
             )
         except MappingError as exc:
-            return Response({"ok": False, "enabled": True, "error": str(exc)})
+            return Response({"ok": False, "enabled": True, "error": str(exc), "payload_options": payload_options})
 
         soap_xml = build_executor_envelope(
             "{{SECURITY_TOKEN}}", build.component, build.method, build.ssc_xml, config=config
         )
+        warnings = list(build.warnings)
+        if retirement_preview and not mapping.get("enabled"):
+            warnings.insert(0, "This retirement mapping is present but disabled in the journal settings; it may not be posted until that stage is enabled.")
         return Response({
             "ok": True,
             "enabled": True,
@@ -203,7 +251,8 @@ class JournalPreviewView(APIView):
             "debit_total": str(build.debit_total),
             "credit_total": str(build.credit_total),
             "balanced": build.balanced,
-            "warnings": build.warnings,
+            "payload_options": payload_options,
+            "warnings": warnings,
             "error": None,
         })
 

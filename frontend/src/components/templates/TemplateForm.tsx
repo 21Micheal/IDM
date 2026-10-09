@@ -104,6 +104,7 @@ type Field = {
   id?: string; key?: string; type?: string; label?: string;
   placeholder?: string; help_text?: string; helpText?: string;
   required?: boolean; colSpan?: number; width?: number;
+  workflowRole?: string;
   options?: string[]; columns?: Column[]; minRows?: number;
   currencySymbol?: string; currencyFromField?: string; referenceSource?: string; tooltip?: string; regex?: string;
   min?: number; max?: number; minLength?: number; maxLength?: number;
@@ -236,6 +237,57 @@ function sectionVisibleToViewer(section: Section, viewer?: FormViewer): boolean 
   if (viewer.isAdmin) return true;
   const names = new Set(viewer.groupNames ?? []);
   return groups.some((g) => Boolean(g.name) && names.has(g.name as string));
+}
+
+function isRetirementExpenseSection(section: Section): boolean {
+  return (section.fields ?? []).some((field) => field.workflowRole === "retirement_expenses");
+}
+
+/** Whether this viewer has at least one visible section and field editable by the form rules. */
+export function hasVisibleEditableSection(
+  sections: unknown[],
+  values: TemplateFormValues,
+  processStep: string,
+  viewer?: FormViewer,
+): boolean {
+  const list = activeSections(materializeSections((Array.isArray(sections) ? sections : []) as Section[]), values);
+  const allFields = list.flatMap((section) => section.fields ?? []);
+  return list.some((section) =>
+    !section.hidden
+    && !section.readonly
+    && sectionVisibleToViewer(section, viewer)
+    && evalVisible(section, values, allFields, processStep, null, viewer)
+    && evalEditableForViewer(section, values, allFields, processStep, viewer)
+    && (section.fields ?? []).some((field) =>
+      Boolean(field.key)
+      && !field.hidden
+      && !field.readonly
+      && evalVisible(field, values, allFields, processStep, null, viewer)
+      && evalEditableForViewer(field, values, allFields, processStep, viewer)
+    )
+  );
+}
+
+/** Whether this viewer can see an editable retirement expense section. */
+export function hasVisibleRetirementEditSection(
+  sections: unknown[],
+  values: TemplateFormValues,
+  processStep: string,
+  viewer?: FormViewer,
+): boolean {
+  const list = activeSections(materializeSections((Array.isArray(sections) ? sections : []) as Section[]), values);
+  const allFields = list.flatMap((section) => section.fields ?? []);
+  return list.some((section) =>
+    isRetirementExpenseSection(section)
+    && evalVisible(section, values, allFields, processStep, null, viewer)
+    && sectionVisibleToViewer(section, viewer)
+    && evalEditableForViewer(section, values, allFields, processStep, viewer)
+    && (section.fields ?? []).some((field) =>
+      field.key
+      && evalVisible(field, values, allFields, processStep, null, viewer)
+      && evalEditableForViewer(field, values, allFields, processStep, viewer)
+    )
+  );
 }
 
 export type TemplateFormValues = Record<string, unknown>;
@@ -495,7 +547,13 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
     const e = (expected || "").trim().toLowerCase();
     if (a === e) return true;
     const aliases: Record<string, string[]> = {
-      approved: ["approved", "request_approved", "requisition_approved", "rfq_approved", "fully_approved"],
+      approved: ["approved", "request_approved", "requisition_approved", "rfq_approved", "lpo_approved", "retirement_pending", "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved"],
+      // Requisition approval remains a completed milestone while downstream
+      // LPO or retirement workflows are active.
+      requisition_approved: ["requisition_approved", "request_approved", "lpo_pending", "lpo_approved", "retirement_pending", "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved"],
+      // LPO approval remains true throughout the retirement lifecycle.
+      lpo_approved: ["lpo_approved", "retirement_pending", "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved"],
+      retirement_approved: ["retirement_approved", "fully_approved"],
       pending_approval: ["pending_approval", "request_pending", "retirement_pending", "requisition_pending", "rfq_pending", "lpo_pending"],
       returned: ["returned", "retirement_returned", "requisition_returned", "rfq_returned", "lpo_returned"],
       rejected: ["rejected", "retirement_rejected", "requisition_rejected", "rfq_rejected", "lpo_rejected"],
@@ -2205,7 +2263,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections, onLaunchSignatureModal }: {
+function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections, retirementOnlyEdit = false, retirementSectionReadOnly = false, onLaunchSignatureModal }: {
   sections: unknown[];
   values: TemplateFormValues;
   onChange: (key: string, value: unknown) => void;
@@ -2215,6 +2273,8 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // conditions. Absent (a brand-new form) is treated as "draft".
   documentStatus?: string;
   canEditConditionalSections?: boolean;
+  retirementOnlyEdit?: boolean;
+  retirementSectionReadOnly?: boolean;
   onLaunchSignatureModal?: (fieldKey?: string) => void;
 }) {
   const rawSections = (Array.isArray(sections) ? sections : []) as Section[];
@@ -2386,7 +2446,9 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
           evalVisible(f, liveValues as TemplateFormValues, allFields, processStep, null, viewer)
         );
         // Editability cascades: a read-only/locked section locks all its fields.
-        const sectionEditable = evalEditableForViewer(section, liveValues as TemplateFormValues, allFields, processStep, viewer);
+        const sectionEditable = evalEditableForViewer(section, liveValues as TemplateFormValues, allFields, processStep, viewer)
+          && (!retirementOnlyEdit || isRetirementExpenseSection(section))
+          && (!retirementSectionReadOnly || !isRetirementExpenseSection(section));
         const sectionLocked = !readOnly && !sectionEditable;
         return (
           <div key={section.id ?? si} className="overflow-hidden" style={{ border: "1px solid #C8CDD2", backgroundColor: "#FFFFFF" }}>

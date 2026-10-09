@@ -578,9 +578,16 @@ def build_purchase_order_ssc(
         )
         ET.SubElement(line_el, "UserLineNumber").text = str(line_count)
 
-        quantity_str = resolve_value(
-            spec.get("quantity") or po.get("quantity"), values, row, default="1",
-        ) or "1"
+        # A mapped table cell takes precedence when populated. Empty cells fall
+        # through to a form-level quantity role, then the builder's configured
+        # default, and finally one unit for legacy templates.
+        quantity_str = resolve_value(spec.get("quantity"), values, row)
+        if not quantity_str:
+            quantity_str = resolve_value(po.get("quantity"), values, row)
+        if not quantity_str:
+            ui_config = mapping.get("ui") if isinstance(mapping.get("ui"), dict) else {}
+            quantity_str = resolve_value(ui_config.get("quantity"), values, row)
+        quantity_str = quantity_str or "1"
         quantity = resolve_amount({"const": quantity_str}, values, row)
         unit_price = (
             resolve_amount(spec.get("unit_price"), values, row)
@@ -793,6 +800,12 @@ def _iter_lines(mapping: dict, values: dict, warnings: list[str]) -> Iterator[tu
         retirement = line_spec.get("retirement")
         if retirement:
             for expanded_spec in _expand_retirement_lines(retirement, values, warnings):
+                # Reconciliation lines share the surrounding line's common
+                # transaction attributes (date, currency, description, and
+                # analysis) just like ordinary journal lines do.
+                for attribute in ("currency", "date", "description", "analysis"):
+                    if attribute in line_spec:
+                        expanded_spec[attribute] = line_spec[attribute]
                 yield expanded_spec, None
             continue
         repeat = line_spec.get("repeat_over")

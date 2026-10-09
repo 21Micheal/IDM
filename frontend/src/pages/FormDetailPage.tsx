@@ -22,7 +22,7 @@ import { extractApiError } from "@/lib/apiError";
 import { useParams, useNavigate, useLocation, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
-import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import TemplateForm, { hasVisibleEditableSection, hasVisibleRetirementEditSection, requiredFieldLabels } from "@/components/templates/TemplateForm";
 import BudgetBanner from "@/components/templates/BudgetBanner";
 import JournalPostingCard from "@/components/templates/JournalPostingCard";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
@@ -52,24 +52,16 @@ import CustomListbox from "@/components/ui/CustomListbox";
 
 const AUDIT_PAGE_SIZE = 5;
 
-function formHasConditionalEditability(sections?: unknown[]): boolean {
-  const list = Array.isArray(sections) ? sections : [];
-  return list.some((section: any) => {
-    if (section?.editableWhen) return true;
-    return Array.isArray(section?.fields) && section.fields.some((field: any) => Boolean(field?.editableWhen));
-  });
-}
-
 function isApprovalLockedStatus(status?: string): boolean {
   return ["pending_approval", "request_pending", "retirement_pending", "requisition_pending", "rfq_pending", "lpo_pending", "on_hold"].includes(status || "");
 }
 
 function isWorkflowActiveOrCompleted(status?: string): boolean {
-  return isApprovalLockedStatus(status) || ["approved", "request_approved", "requisition_approved", "rfq_approved", "fully_approved"].includes(status || "");
+  return isApprovalLockedStatus(status) || ["approved", "request_approved", "requisition_approved", "rfq_approved", "lpo_approved", "retirement_approved", "fully_approved"].includes(status || "");
 }
 
 function isFinalFormProcessStep(step?: string): boolean {
-  return ["fully_approved", "retirement_rejected", "requisition_rejected", "rfq_rejected", "lpo_rejected"].includes(step || "");
+  return ["retirement_approved", "fully_approved", "retirement_rejected", "requisition_rejected", "rfq_rejected", "lpo_rejected"].includes(step || "");
 }
 
 function formatBytes(b: number) {
@@ -226,16 +218,14 @@ export default function FormDetailPage() {
 
   useEffect(() => {
     if (!doc) return;
-    const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
     const hasAdminAccess = Boolean(user?.has_admin_access);
     const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
-    const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
     const formProcessStep = doc.builder_process_step || doc.status;
-    const isPostApprovalEditable = ["request_approved", "requisition_approved", "rfq_approved"].includes(formProcessStep) || (!doc.builder_process_step && doc.status === "approved");
-    const canEditForm = canEdit
-      && !isApprovalLockedStatus(formProcessStep)
-      && !isFinalFormProcessStep(formProcessStep)
-      && (doc.status !== "approved" || (isPostApprovalEditable && hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
+    const viewer = {
+      groupNames: user?.group_names ?? [],
+      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      canEditConditionalSections: canEdit,
+    };
 
     // Always sync form values from the server to get attachment descriptors
     // This ensures images show correctly after submission (storage_path instead of filename)
@@ -243,15 +233,22 @@ export default function FormDetailPage() {
       setFormValues({ ...(formData?.values ?? {}) });
     }
 
-    // Auto-enter edit mode when form has conditional editability and user is at a stage
-    // where conditional editing should be allowed (request_approved for retirement, etc.)
-    if (!formEditing && hasConditionalEditability && (isPostApprovalEditable || canEditForm)) {
+    // Post-approval edits are driven by the form's visible/editable rules for
+    // this viewer. The page-level Edit form action is only for drafts.
+    const hasConfiguredEditableSection = hasVisibleEditableSection(
+      formData?.sections ?? [],
+      formData?.values ?? {},
+      formProcessStep,
+      viewer,
+    );
+    const isEditableApprovalStep = ["request_approved", "requisition_approved", "rfq_approved", "lpo_approved", "retirement_approved"].includes(formProcessStep);
+    if (!formEditing && canEdit && isEditableApprovalStep && !isFinalFormProcessStep(formProcessStep) && hasConfiguredEditableSection) {
       setFormValues({ ...(formData?.values ?? {}) });
       formDirtyRef.current = false;
       setFormEditing(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc, user]);
+  }, [doc, user, formData?.sections, formData?.values]);
 
   const { data: myTasks } = useQuery({
     queryKey: ["workflow", "my-tasks"],
@@ -314,7 +311,7 @@ export default function FormDetailPage() {
   });
 
   const submitMutation = useMutation({
-    mutationFn: async (workflowStage?: "requisition" | "rfq" | "lpo") => {
+    mutationFn: async (workflowStage?: "requisition" | "rfq" | "lpo" | "retirement") => {
       if (formEditing && formDirtyRef.current) {
         const shouldSave = window.confirm("You have unsaved changes in the form. Save them before submitting?");
         if (shouldSave) {
@@ -435,7 +432,6 @@ export default function FormDetailPage() {
   const canDownloadLpo = hasAdminAccess || (lpoDocumentQuery.data?.permissions ?? []).includes("download");
   const canComment = hasAdminAccess || (doc.permissions ?? []).includes("comment");
   const canApprove = hasAdminAccess || (doc.permissions ?? []).includes("approve");
-  const hasConditionalEditability = formHasConditionalEditability(formData.sections);
   const hasActiveApprovalTask = Boolean(activeTask && activeTask.status === "in_progress");
 
   function formProcessStep() {
@@ -446,17 +442,20 @@ export default function FormDetailPage() {
   }
 
   const step = formProcessStep();
-  const isPostApprovalEditable = ["request_approved", "requisition_approved", "rfq_approved"].includes(step) || (!doc.builder_process_step && doc.status === "approved");
-  // For procurement stages (rfq_approved, requisition_approved, etc.), the form
-  // should be editable by the owner/admin without requiring the template to have
-  // conditional editability rules. Builder-defined field-level editableWhen rules
-  // still apply normally through TemplateForm — this only controls the "Edit form" button.
-  const isProcurementApprovedStage = ["requisition_approved", "rfq_approved", "lpo_approved", "retirement_approved"].includes(step);
-  const canEditForm = (canEdit || hasActiveApprovalTask)
-    && !isFinalFormProcessStep(step)
-    && (hasActiveApprovalTask
-      || (!isApprovalLockedStatus(step)
-        && (doc.status !== "approved" || isProcurementApprovedStage || (isPostApprovalEditable && hasConditionalEditability && canEditConditionalSections()))));
+  const completedStages = doc.metadata?.form?.completed_workflow_stages;
+  const requisitionApproved = Array.isArray(completedStages) && completedStages.includes("requisition");
+  const lpoApproved = Array.isArray(completedStages) && completedStages.includes("lpo");
+  const canEditRetirementSection = canEdit
+    && requisitionApproved
+    && lpoApproved
+    && step === "lpo_approved"
+    && hasVisibleRetirementEditSection(formData.sections ?? [], formData.values ?? {}, step, {
+      groupNames: user?.group_names ?? [],
+      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+    });
+  const retirementOnlyEdit = canEditRetirementSection && isApprovalLockedStatus(step) && !hasActiveApprovalTask;
+  const retirementSectionReadOnly = !lpoApproved;
+  const canEditForm = doc.status === "draft" && canEdit;
 
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
@@ -467,6 +466,10 @@ export default function FormDetailPage() {
   const availableStages = journalStages?.filter((s) => s.enabled !== false).map((s) => s.stage).sort((a, b) => a - b) || [1];
 
   const isRetirementPhase = doc.builder_workflow_phase === "retirement";
+  const isRetirementSubmitted = isRetirementPhase && step === "retirement_pending";
+  const isLpoWorkflowStep = ["lpo_pending", "lpo_approved", "retirement_pending", "retirement_approved", "fully_approved"].includes(step);
+  const canPreviewSunSystemsPayload = journalEnabled || (purchaseOrderEnabled && isLpoWorkflowStep);
+  const payloadInitialStage = isRetirementSubmitted ? 2 : (purchaseOrderEnabled && isLpoWorkflowStep ? 1000 : 1);
   const isRetirementFinalized = isRetirementPhase && isFinalFormProcessStep(step);
   const canSubmitRequest = ["draft", "returned"].includes(doc.status)
     && (!isRetirementPhase || doc.status === "returned")
@@ -474,20 +477,28 @@ export default function FormDetailPage() {
   // Only allow retirement submission if template has multiple stages configured (Stage 2 exists)
   const hasRetirementStage = availableStages.includes(2)
     || Boolean(doc.metadata?.form?.travel_retirement?.enabled);
-  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage && (canApprove || isOwnerOrSubmitter);
+  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage
+    && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
+  const canInitiateRetirement = canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit");
+  const showRetirementSubmit = Boolean(doc.metadata?.form?.travel_retirement?.enabled)
+    && requisitionApproved
+    && canInitiateRetirement
+    && hasVisibleRetirementEditSection(formData.sections ?? [], formData.values ?? {}, step, {
+      groupNames: user?.group_names ?? [],
+      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+    });
   // Server-computed, travel-aware: requisition -> (rfq | lpo for Travel) -> lpo.
   const procurementNextStage = doc.builder_next_stage ?? null;
   const canSubmitProcurementStage = Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
-  const canSubmit = canSubmitRequest || canSubmitRetirement || canSubmitProcurementStage;
+  const canSubmit = canSubmitRequest || canSubmitProcurementStage;
   const submitLabel = canSubmitProcurementStage
     ? `Submit ${procurementNextStage!.toUpperCase()}`
-    : canSubmitRetirement
-    ? "Submit retirement"
     : doc.status === "returned"
       ? "Resubmit"
       : "Submit for approval";
 
   const startFormEdit = () => {
+    if (doc.status !== "draft" || !canEdit) return;
     setFormValues({ ...(formData.values ?? {}) });
     formDirtyRef.current = false;
     setFormEditing(true);
@@ -764,13 +775,28 @@ export default function FormDetailPage() {
                     <Send className="h-3.5 w-3.5" /> {submitLabel}
                   </button>
                 )}
-                {journalEnabled && (
+                {showRetirementSubmit && (
+                  <button
+                    type="button"
+                    onClick={() => submitMutation.mutate("retirement")}
+                    disabled={submitMutation.isPending || !canSubmitRetirement}
+                    title={canSubmitRetirement ? "Submit this form to the configured Retirement workflow case" : "Available after LPO approval and on or after the configured travel return date"}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50",
+                      canSubmitRetirement ? "bg-[#287EAD] text-white hover:bg-[#1E6F99]" : "border border-[#AEB5BB] bg-[#F5F7F8] text-[#5E6870]",
+                    )}
+                  >
+                    {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                    Submit retirement
+                  </button>
+                )}
+                {canPreviewSunSystemsPayload && (
                   <button type="button" onClick={() => setShowJournalXml((s) => !s)}
                     className={cn(
                       "inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]",
                       showJournalXml && "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/50",
                     )}>
-                    <FileCode className="h-3.5 w-3.5" /> Journal XML
+                    <FileCode className="h-3.5 w-3.5" /> {isRetirementSubmitted ? "Retirement XML" : purchaseOrderEnabled && isLpoWorkflowStep ? "LPO XML" : "Journal XML"}
                   </button>
                 )}
                 {canDownload && (
@@ -862,6 +888,8 @@ export default function FormDetailPage() {
                 documentId={doc.id}
                 documentStatus={step}
                 canEditConditionalSections={canEditConditionalSections()}
+                retirementOnlyEdit={retirementOnlyEdit}
+                retirementSectionReadOnly={retirementSectionReadOnly}
                 onLaunchSignatureModal={(fieldKey?: string) => {
                   setTargetSignatureField(fieldKey ?? null);
                   setIsSigningOpen(true);
@@ -877,6 +905,7 @@ export default function FormDetailPage() {
               values={formEditing ? formValues : undefined}
               title={doc.title}
               availableStages={availableStages}
+              initialStage={payloadInitialStage}
               onClose={() => setShowJournalXml(false)}
             />
           )}

@@ -78,13 +78,14 @@ def get_journal_mapping(document, stage: int = 1) -> dict | None:
     # Dynamic stages track generated requisition-stage Imprest journals and
     # LPO PurchaseOrders through the existing posting/retry surface.
     if int(stage) >= 1000:
-        purpose = "imprest_request" if int(stage) >= 20000 else "lpo"
+        purpose = "imprest_retirement" if int(stage) >= 30000 else "imprest_request" if int(stage) >= 20000 else "lpo"
         postings = (
-            get_imprest_request_postings(document)
-            if purpose == "imprest_request"
+            get_imprest_retirement_postings(document) if purpose == "imprest_retirement"
+            else get_imprest_request_postings(document) if purpose == "imprest_request"
             else get_purchase_order_postings(document)
         )
-        index = int(stage) - (20000 if purpose == "imprest_request" else 1000)
+        offset = 30000 if purpose == "imprest_retirement" else 20000 if purpose == "imprest_request" else 1000
+        index = int(stage) - offset
         if 0 <= index < len(postings):
             return postings[index]["mapping"]
         return None
@@ -122,6 +123,13 @@ def get_purchase_order_postings(document) -> list[dict]:
     from .mapping import expand_purchase_order_postings
 
     mapping_config = deepcopy(config)
+    _apply_analysis_panel_mapping(mapping_config, document)
+    # Separate PO profiles do not carry the builder's shared UI defaults.
+    # Preserve them here so line-level blanks can fall back to the configured
+    # order quantity (and other legacy UI defaults) during SSC compilation.
+    ui_config = get_sunsystems_config(document).get("ui")
+    if isinstance(ui_config, dict):
+        mapping_config.setdefault("ui", deepcopy(ui_config))
     form = ((getattr(document, "metadata", None) or {}).get("form") or {})
     expanded = expand_purchase_order_postings(
         mapping_config,
@@ -153,6 +161,8 @@ def get_imprest_request_postings(document) -> list[dict]:
             return []
         config = legacy
 
+    config = deepcopy(config)
+    _apply_analysis_panel_mapping(config, document)
     from .mapping import _po_line_specs, _po_line_amount, resolve_amount, resolve_value
 
     po = config.get("purchase_order") or {}
@@ -286,6 +296,178 @@ def get_imprest_request_postings(document) -> list[dict]:
     return postings
 
 
+def _apply_analysis_panel_mapping(mapping: dict, document) -> dict:
+    """Make the configured Analysis Codes panel authoritative for PO slots.
+
+    Older templates may also contain a single-dimension external field (such
+    as Cost Centre) that overwrote a panel slot when the builder compiled the
+    mapping. Rebuild the PO analysis bindings from the saved panel definition
+    so LPO and both Imprest paths all resolve the same configured slot values.
+    """
+    if not isinstance(mapping, dict):
+        return mapping
+    meta = getattr(document, "metadata", None) or {}
+    form = meta.get("form") if isinstance(meta.get("form"), dict) else {}
+    sections = form.get("sections") if isinstance(form.get("sections"), list) else []
+    panel = next(
+        (
+            field for section in sections if isinstance(section, dict)
+            for field in section.get("fields", []) if isinstance(field, dict)
+            and field.get("type") == "external"
+            and (field.get("external") or {}).get("source") == "analysis_codes"
+            and (field.get("external") or {}).get("mode") != "single"
+        ),
+        None,
+    )
+    if not panel:
+        return mapping
+
+    external = panel.get("external") or {}
+    slots = external.get("slots")
+    if not isinstance(slots, list) or len(slots) != 10:
+        slots = ["04", "05", "06", "03", "08", "09", "10", "11", "07", "12"]
+    field_key = panel.get("key")
+    ui = get_sunsystems_config(document).get("ui") or {}
+    po = mapping.get("purchase_order")
+    if not isinstance(po, dict):
+        po = mapping
+    analysis = {
+        str(index): {"category": {"const": str(dimension)}, "code": {"field": field_key, "key": str(index)}}
+        for index, dimension in enumerate(slots, start=1)
+    }
+    # Keep the explicit, system-wide Analysis 10 override when configured.
+    if str(ui.get("analysis10Code") or "").strip():
+        current = analysis["10"]
+        if str(ui.get("analysis10Category") or "").strip():
+            current["category"] = {"const": str(ui["analysis10Category"]).strip()}
+        current["code"] = {"const": str(ui["analysis10Code"]).strip()}
+    po["analysis"] = analysis
+    return mapping
+
+
+def get_imprest_retirement_postings(document) -> list[dict]:
+    """Build retirement ledger imports from the form's retirement table rules.
+
+    Retirement rules live on the retirement table's amount column, separately
+    from the PO/request profiles. Reuse the request journal's common context,
+    parameters, reference, date, description and analysis bindings, then replace
+    its lines with the configured exact/under/over reconciliation.
+    """
+    meta = getattr(document, "metadata", None) or {}
+    form = meta.get("form") if isinstance(meta.get("form"), dict) else {}
+    sections = form.get("sections") if isinstance(form.get("sections"), list) else []
+    values = get_form_values(document)
+    po_postings = get_imprest_request_postings(document)
+    po_config = get_sunsystems_config(document).get("purchase_order") or {}
+    po = po_config.get("purchase_order") if isinstance(po_config, dict) else {}
+    if not isinstance(po, dict):
+        po = {}
+
+    # Prefer the exact common ledger bindings already resolved for the
+    # Imprest request. This keeps retirement in sync with the shared PO config.
+    request_mapping = po_postings[0]["mapping"] if po_postings else None
+    base_line = (request_mapping or {}).get("lines", [{}])[0]
+    if not isinstance(base_line, dict):
+        base_line = {}
+
+    postings: list[dict] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        for table in section.get("fields") or []:
+            if not isinstance(table, dict) or table.get("type") != "table":
+                continue
+            if table.get("workflowRole") != "retirement_expenses":
+                continue
+            columns = table.get("columns") if isinstance(table.get("columns"), list) else []
+            amount_column = next((c for c in columns if (c.get("sunsystems") or {}).get("role") == "line_amount"), None)
+            retirement = (amount_column or {}).get("sunsystems", {}).get("retirement")
+            rows = values.get(table.get("key"))
+            if not isinstance(retirement, dict) or not retirement.get("enabled") or not isinstance(rows, list) or not rows:
+                continue
+
+            account_column = next((c for c in columns if (c.get("sunsystems") or {}).get("role") == "account_code"), None)
+            supplier_column = next((c for c in columns if (c.get("sunsystems") or {}).get("role") == "supplier_code"), None)
+            first_row = next((row for row in rows if isinstance(row, dict) and any(v not in (None, "", [], {}) for v in row.values())), {})
+
+            def scenario_account(line: dict) -> dict:
+                source = str(line.get("accountSource") or "manual").strip().lower()
+                col = account_column if source == "account_code" else supplier_column if source == "supplier_code" else None
+                if col:
+                    return {"const": str(first_row.get(col.get("key")) or "")}
+                return {"const": str(line.get("account") or "")}
+
+            scenarios = {}
+            for scenario_name in ("exact", "under", "over"):
+                configured = retirement.get(scenario_name) or {}
+                scenarios[scenario_name] = {
+                    "lines": [
+                        {
+                            "account": scenario_account(line),
+                            "dc": line.get("dc") or "D",
+                            "amount_source": line.get("amountSource") or "spent",
+                        }
+                        for line in configured.get("lines", [])
+                        if isinstance(line, dict)
+                    ]
+                }
+
+            issued_amount: dict = {"const": "0"}
+            if str(retirement.get("issuedAmountMode") or "field") == "imprest_request_total" or not retirement.get("issuedAmountField"):
+                for spec in (po.get("lines") or []):
+                    request_table = str(spec.get("repeat_over") or "")
+                    transaction_type = str(spec.get("imprest_request_transaction_type") or "").strip()
+                    if not request_table or not transaction_type:
+                        continue
+                    amount_spec = spec.get("amount") or spec.get("unit_price") or spec.get("quantity")
+                    amount_column_key = amount_spec.get("row_field") if isinstance(amount_spec, dict) else None
+                    type_spec = spec.get("purchase_transaction_type")
+                    match_column_key = type_spec.get("row_field") if isinstance(type_spec, dict) else None
+                    if amount_column_key and match_column_key:
+                        issued_amount = {
+                            "sum_matching_rows": {
+                                "table": request_table,
+                                "amount_column": amount_column_key,
+                                "match_column": match_column_key,
+                                "values": [transaction_type],
+                            }
+                        }
+                        break
+            elif retirement.get("issuedAmountField"):
+                issued_amount = {"field": retirement["issuedAmountField"]}
+
+            retirement_line = {
+                "retirement": {
+                    "issued_amount": issued_amount,
+                    "spent_amount": {"table": table.get("key"), "column": amount_column.get("key")},
+                    "scenarios": scenarios,
+                }
+            }
+            currency_column = next(
+                (c for c in columns if (c.get("sunsystems") or {}).get("role") == "currency" or str(c.get("label") or "").strip().casefold() == "currency"),
+                None,
+            )
+            line_defaults = {key: base_line[key] for key in ("currency", "date", "description", "analysis") if key in base_line}
+            if currency_column:
+                line_defaults["currency"] = {"const": str(first_row.get(currency_column.get("key")) or "")}
+            retirement_line.update(line_defaults)
+            postings.append({
+                "stage": 30000 + len(postings),
+                "label": f"Imprest retirement / {table.get('label') or table.get('key')}",
+                "mapping": {
+                    "enabled": True,
+                    "component": "Journal",
+                    "method": "Import",
+                    "context": deepcopy((request_mapping or {}).get("context") or po_config.get("context") or {}),
+                    "parameters": deepcopy((request_mapping or {}).get("parameters") or {}),
+                    "reference": deepcopy((request_mapping or {}).get("reference") or po.get("second_reference") or po.get("reference") or {"const": getattr(document, "reference_number", "")}),
+                    "validate_balance": True,
+                    "lines": [retirement_line],
+                },
+            })
+    return postings
+
+
 def get_budget_mapping(document) -> dict | None:
     mapping = get_sunsystems_config(document).get("budget")
     return mapping if isinstance(mapping, dict) else None
@@ -329,6 +511,34 @@ def refresh_sunsystems_config_from_template(document) -> bool:
     ss_mapping = getattr(template, "sunsystems", None) if template else None
     if not isinstance(ss_mapping, dict) or not ss_mapping:
         return False
+
+    ss_mapping = deepcopy(ss_mapping)
+    ui = ss_mapping.get("ui") if isinstance(ss_mapping.get("ui"), dict) else {}
+    analysis10_code = str(ui.get("analysis10Code") or "").strip()
+    analysis10_category = str(ui.get("analysis10Category") or "").strip()
+    if analysis10_code:
+        # The explicit Analysis 10 control in the builder is a posting config
+        # override. Older saved templates may still have a dynamic Analysis 10
+        # binding to the form's analysis panel, so apply the latest UI override
+        # when refreshing a document for retry.
+        for profile_key in ("purchase_order", "journal"):
+            profile = ss_mapping.get(profile_key)
+            if not isinstance(profile, dict):
+                continue
+            po = profile.get("purchase_order")
+            if not isinstance(po, dict) and str(profile.get("component") or "").lower() == "purchaseorder":
+                po = profile
+            if not isinstance(po, dict):
+                continue
+            analysis = po.get("analysis")
+            analysis = dict(analysis) if isinstance(analysis, dict) else {}
+            current = analysis.get("10")
+            slot = dict(current) if isinstance(current, dict) else {}
+            if analysis10_category:
+                slot["category"] = {"const": analysis10_category}
+            slot["code"] = {"const": analysis10_code}
+            analysis["10"] = slot
+            po["analysis"] = analysis
 
     meta["sunsystems"] = ss_mapping
     document.metadata = meta

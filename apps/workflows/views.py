@@ -252,6 +252,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                 add(f"{stage}_rejected", f"{stage_label} rejected",
                     stage=stage, generic=True)
             add("fully_approved", "Fully approved", stage="lpo", generic=True)
+            add("retirement_ready", "Retirement ready for submission", stage="retirement", generic=True)
             add("retirement_pending", "Retirement approval in progress", stage="retirement", generic=True)
             add("retirement_approved", "Retirement approved", stage="retirement", generic=True)
             add("retirement_returned", "Retirement returned for rework", stage="retirement", generic=True)

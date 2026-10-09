@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { sunsystemsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 type Props = {
   documentId?: string;
@@ -27,6 +28,7 @@ type Props = {
   onClose: () => void;
   /** Available stages for multi-stage journal posting (e.g., [1, 2] for request/retirement). */
   availableStages?: number[];
+  initialStage?: number;
 };
 
 type View = "ssc" | "soap";
@@ -41,17 +43,29 @@ function decodeHtmlEntities(text: string): string {
   return textArea.value;
 }
 
-export default function JournalPayloadModal({ documentId, templateId, values, mapping, sample, title, onClose, availableStages }: Props) {
+export default function JournalPayloadModal({ documentId, templateId, values, mapping, sample, title, onClose, availableStages, initialStage = 1 }: Props) {
   const [view, setView] = useState<View>("ssc");
-  const [stage, setStage] = useState<number>(1);
+  const [stage, setStage] = useState<number>(initialStage);
 
   const { data, isLoading, isError } = useQuery({
-    queryKey: ["sunsystems-journal-preview", documentId, templateId, JSON.stringify(values ?? {}), JSON.stringify(mapping ?? null), stage],
+    queryKey: ["sunsystems-payload-preview-v2", documentId, templateId, JSON.stringify(values ?? {}), JSON.stringify(mapping ?? null), stage],
     queryFn: () =>
       sunsystemsAPI
         .journalPreview({ document_id: documentId, template_id: templateId, values, mapping: mapping ?? undefined, stage })
         .then((r) => r.data),
   });
+
+  // If the page opened on a journal stage that is absent from this document,
+  // recover to the first configured posting (commonly the first generated LPO).
+  useEffect(() => {
+    const options = data?.payload_options ?? [];
+    if (!isLoading && data && !data.ok && options.length && !options.some((option) => option.stage === stage)) {
+      const preferred = initialStage === 2
+        ? options.find((option) => option.label.toLowerCase().includes("retirement"))
+        : options.find((option) => option.component.toLowerCase() === "purchaseorder");
+      setStage((preferred ?? options[0]).stage);
+    }
+  }, [data, initialStage, isLoading, stage]);
 
   // Close on Escape.
   useEffect(() => {
@@ -99,7 +113,7 @@ export default function JournalPayloadModal({ documentId, templateId, values, ma
         <div className="flex flex-shrink-0 items-center justify-between border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-3 text-white">
           <div>
             <p className="text-[10px] font-semibold uppercase tracking-widest text-white/60">SunSystems</p>
-            <h2 className="text-sm font-bold">Journal payload preview</h2>
+            <h2 className="text-sm font-bold">SunSystems payload preview</h2>
           </div>
           <button onClick={onClose} className="rounded p-1.5 text-white/70 hover:bg-white/15 hover:text-white">
             <X className="h-5 w-5" />
@@ -118,14 +132,28 @@ export default function JournalPayloadModal({ documentId, templateId, values, ma
             <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
               <AlertTriangle className="h-8 w-8 text-amber-500" />
               <p className="text-sm font-semibold text-[#1F2933]">
-                {data?.enabled === false ? "Journal posting isn't configured" : "Couldn't build the payload"}
+                {data?.enabled === false ? "Posting isn't configured for this selection" : "Couldn't build the payload"}
               </p>
               <p className="max-w-md text-xs text-[#5E6870]">
                 {data?.error ||
                   (data?.enabled === false
-                    ? "Enable journal posting and bind at least one amount field in the template, then try again."
-                    : "Check the journal mapping in the template builder.")}
+                    ? "Check that the selected posting is configured in the template."
+                    : "Check the SunSystems mapping in the template builder.")}
               </p>
+              {(data?.payload_options?.length ?? 0) > 0 && (
+                <div className="mt-3 flex max-w-2xl flex-wrap justify-center gap-2">
+                  <span className="w-full text-xs text-[#5E6870]">Available payloads:</span>
+                  {data!.payload_options!.map((option) => (
+                    <button
+                      key={option.stage}
+                      onClick={() => setStage(option.stage)}
+                      className="border border-[#AEB5BB] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -138,10 +166,12 @@ export default function JournalPayloadModal({ documentId, templateId, values, ma
                 </span>
                 {data.business_unit && <span className="text-[#5E6870]">BU <b className="text-[#1F2933]">{data.business_unit}</b></span>}
                 <span className="text-[#5E6870]">{data.line_count} line{data.line_count !== 1 ? "s" : ""}</span>
-                <span className={`inline-flex items-center gap-1 rounded px-2 py-0.5 font-semibold ${balanced ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>
-                  {balanced ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Scale className="h-3.5 w-3.5" />}
-                  Dr {data.debit_total} / Cr {data.credit_total}{balanced ? " · balanced" : " · unbalanced"}
-                </span>
+                {String(data.component).toLowerCase() !== "purchaseorder" && (
+                  <span className={`inline-flex items-center gap-1 rounded px-2 py-0.5 font-semibold ${balanced ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>
+                    {balanced ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Scale className="h-3.5 w-3.5" />}
+                    Dr {data.debit_total} / Cr {data.credit_total}{balanced ? " · balanced" : " · unbalanced"}
+                  </span>
+                )}
               </div>
 
               {sample && (
@@ -157,20 +187,23 @@ export default function JournalPayloadModal({ documentId, templateId, values, ma
               )}
 
               {/* Toolbar */}
-              <div className="flex flex-shrink-0 items-center justify-between border-b border-[#EEF0F2] px-5 py-2">
-                <div className="flex items-center gap-3">
+              <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#EEF0F2] px-5 py-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-3">
                   {/* Stage toggle for multi-stage workflows */}
-                  {(availableStages ?? []).length > 1 && (
-                    <div className="inline-flex overflow-hidden rounded border border-[#C8CDD2]">
-                      {availableStages!.map((s) => (
-                        <button
-                          key={s}
-                          onClick={() => setStage(s)}
-                          className={`px-3 py-1.5 text-xs font-semibold ${stage === s ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]"}`}
-                        >
-                          Stage {s}
-                        </button>
-                      ))}
+                  {((data.payload_options?.length ?? 0) > 1 || (availableStages ?? []).length > 1) && (
+                    <div className="flex items-center gap-2 text-xs font-semibold text-[#5E6870]">
+                      <span>Payload</span>
+                      <CustomListbox
+                        value={String(stage)}
+                        onChange={(value) => setStage(Number(value))}
+                        options={(data.payload_options?.length ? data.payload_options : availableStages!.map((s) => ({ stage: s, label: `Stage ${s}`, component: "Journal" }))).map((option) => ({
+                          value: String(option.stage),
+                          label: option.label,
+                        }))}
+                        className="min-w-[240px] max-w-[min(380px,45vw)]"
+                        buttonClassName="w-full border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-left text-xs font-semibold text-[#1F2933]"
+                        ariaLabel="Select SunSystems payload"
+                      />
                     </div>
                   )}
                   {/* XML view toggle */}
@@ -181,7 +214,7 @@ export default function JournalPayloadModal({ documentId, templateId, values, ma
                         onClick={() => setView(v)}
                         className={`px-3 py-1.5 text-xs font-semibold ${view === v ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]"}`}
                       >
-                        {v === "ssc" ? "Journal (SSC)" : "Full SOAP request"}
+                        {v === "ssc" ? "SSC payload" : "Full SOAP request"}
                       </button>
                     ))}
                   </div>

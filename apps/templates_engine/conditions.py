@@ -203,6 +203,43 @@ def match_operator(operator, sv: str, expected: str) -> bool:
     return True
 
 
+def _process_step_matches(actual: str, expected: str) -> bool:
+    """Match lifecycle milestones that remain true after the workflow advances.
+
+    Requisition and LPO approvals remain completed milestones while later
+    procurement and retirement steps are active. Visibility rules for retirement
+    sections commonly target these earlier approvals.
+    """
+    actual = (actual or "").strip().lower()
+    expected = (expected or "").strip().lower()
+    if actual == expected:
+        return True
+    downstream_requisition_approved = {
+        "request_approved",
+        "lpo_pending",
+        "lpo_approved",
+        "retirement_pending",
+        "retirement_returned",
+        "retirement_rejected",
+        "retirement_approved",
+        "fully_approved",
+    }
+    downstream_lpo_approved = {
+        "lpo_approved",
+        "retirement_pending",
+        "retirement_returned",
+        "retirement_rejected",
+        "retirement_approved",
+        "fully_approved",
+    }
+    return (
+        (expected == "requisition_approved" and actual in downstream_requisition_approved)
+        or (expected == "lpo_approved" and actual in downstream_lpo_approved)
+        or (expected == "approved" and actual in downstream_requisition_approved)
+        or (expected == "retirement_approved" and actual == "fully_approved")
+    )
+
+
 def eval_condition(cond: dict, values: dict, process_step: str, viewer=None) -> bool:
     operator = cond.get("operator")
     expected = cond.get("value") or ""
@@ -214,6 +251,10 @@ def eval_condition(cond: dict, values: dict, process_step: str, viewer=None) -> 
         return _match_user_group(cond, viewer)
 
     if cond.get("source") == "process_step":
+        if operator == "equals":
+            return _process_step_matches(process_step, expected)
+        if operator == "not_equals":
+            return not _process_step_matches(process_step, expected)
         candidates = [process_step]
     else:
         candidates = _condition_values(cond.get("fieldKey"), values)

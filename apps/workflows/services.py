@@ -1283,6 +1283,7 @@ class WorkflowService:
 
         doc = instance.document
         if doc is not None:
+            completion_phase = WorkflowService._document_workflow_phase(doc)
             doc.status = outcome_status_for(doc.document_type, outcome)
             update_fields = ["status", "updated_at"]
             try:
@@ -1291,6 +1292,13 @@ class WorkflowService:
                     update_fields.append("metadata")
             except Exception:
                 logger.exception("Could not record procurement workflow completion for %s", doc.id)
+            if completion_phase == "retirement" and outcome in {"approved", "rejected"}:
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["retirement_workflow_status"] = outcome
+                metadata["form"] = form
+                doc.metadata = metadata
+                update_fields.append("metadata")
             WorkflowService._save_document(doc, update_fields=update_fields)
 
             # Does an intermediate procurement stage follow this approval?
@@ -1463,6 +1471,7 @@ class WorkflowService:
                 find_stages_to_post,
                 get_journal_mapping,
                 get_purchase_order_postings,
+                get_imprest_retirement_postings,
                 get_sunsystems_config,
             )
             phase = WorkflowService._document_workflow_phase(document)
@@ -1477,8 +1486,11 @@ class WorkflowService:
                 # legacy PO mappings are dispatched below through the grouped
                 # PurchaseOrder path, while non-PO journal stages may still use
                 # their configured full-approval trigger.
-                outcomes = ["fully_approved"] if outcome == "approved" and phase == "lpo" and "lpo" in completed_procurement_stages(document) else []
-                if is_legacy_po:
+                if outcome == "approved" and phase == "retirement":
+                    outcomes = ["retirement_approved", "approved"]
+                else:
+                    outcomes = ["fully_approved"] if outcome == "approved" and phase == "lpo" and "lpo" in completed_procurement_stages(document) else []
+                if is_legacy_po and phase != "retirement":
                     outcomes = []
             elif phase == "retirement" and outcome == "approved":
                 outcomes = ["retirement_approved", "approved"]
@@ -1532,6 +1544,26 @@ class WorkflowService:
                         lambda did=doc_id, current_stage=stage, aid=posting_actor_id: post_journal_for_document.delay(did, current_stage, aid)
                     )
 
+            # Retirement reconciliations are compiled from the retirement
+            # table's exact/under/over rules, independently of the ordinary
+            # journal profile. They post only after the retirement workflow is
+            # approved and do not affect the LPO lifecycle.
+            if procurement_document and outcome == "approved" and phase == "retirement":
+                for item in get_imprest_retirement_postings(document):
+                    stage = int(item["stage"])
+                    posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
+                    if not created:
+                        continue
+                    posting.status = JournalPostingStatus.PENDING
+                    posting.stage_label = str(item.get("label") or "Imprest retirement")[:64]
+                    posting.message = "Queued for retirement reconciliation posting."
+                    posting.error = ""
+                    posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
+                    doc_id = str(document.id)
+                    _queue_after_commit(
+                        lambda did=doc_id, current_stage=stage, aid=posting_actor_id: post_journal_for_document.delay(did, current_stage, aid)
+                    )
+
             # The LPO approval may advance the persisted form phase to
             # retirement before this hook runs (for example, when the
             # workflow completion handler or another signal has already
@@ -1539,7 +1571,7 @@ class WorkflowService:
             # the durable signal; relying on the current phase can silently
             # skip the posting after the final approver approves.
             lpo_stage_completed = "lpo" in completed_procurement_stages(document)
-            if is_procurement_document(document) and outcome == "approved" and lpo_stage_completed:
+            if is_procurement_document(document) and outcome == "approved" and phase == "lpo" and lpo_stage_completed:
                 if has_po_mapping:
                     for item in get_purchase_order_postings(document):
                         stage = int(item["stage"])

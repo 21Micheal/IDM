@@ -891,6 +891,7 @@ export type JournalPreviewResult = {
   credit_total?: string;
   balanced?: boolean;
   warnings?: string[];
+  payload_options?: Array<{ stage: number; label: string; component: string }>;
   error?: string | null;
 };
 

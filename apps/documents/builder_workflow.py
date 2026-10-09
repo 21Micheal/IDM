@@ -85,6 +85,13 @@ def _retirement_workflow_statuses(document_ids):
         result = {}
         for document_id, status in rows:
             result.setdefault(document_id, status)
+        # V2 CASE workflows do not have a WorkflowRule.phase foreign key.
+        # Persisted lifecycle status supplies the same summary for those runs.
+        for document in Document.objects.filter(pk__in=document_ids).only("id", "metadata"):
+            form = ((document.metadata or {}).get("form") or {})
+            status = str(form.get("retirement_workflow_status") or "").strip().lower()
+            if status:
+                result[document.id] = status
         return result
     except Exception:
         return {}
@@ -277,6 +284,56 @@ def open_travel_retirement_phase(document: Document) -> bool:
     document.metadata = meta
     document.save(update_fields=["metadata", "updated_at"])
     return True
+
+
+def has_retirement_workflow_route(document: Document) -> bool:
+    """Whether a legacy retirement rule or v2 ``context.phase`` CASE exists."""
+    try:
+        from apps.workflows.models import WorkflowRule
+        if WorkflowRule.objects.filter(
+            document_type=document.document_type,
+            phase="retirement",
+            is_active=True,
+        ).exists():
+            return True
+    except Exception:
+        pass
+
+    try:
+        template = document.document_type.workflow_template
+        definition = template.definition or {}
+        if (
+            not template.is_active
+            or template.target_type != "document"
+            or definition.get("version") != 2
+        ):
+            return False
+
+        def has_case(blocks):
+            for block in blocks or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("kind") == "switch":
+                    values = (block.get("field_id") == "context.phase")
+                    if values:
+                        for case in block.get("cases") or []:
+                            case_values = case.get("values") or []
+                            if any(str(value).strip().lower() == "retirement" for value in case_values):
+                                return True
+                nested = []
+                nested.extend(block.get("blocks") or [])
+                nested.extend(block.get("default_blocks") or [])
+                for case in block.get("cases") or []:
+                    nested.extend(case.get("blocks") or [])
+                for branch in block.get("branches") or []:
+                    nested.extend(branch.get("blocks") or [])
+                if has_case(nested):
+                    return True
+            return False
+
+        return has_case(definition.get("blocks"))
+    except Exception:
+        return False
 
 
 def completed_procurement_stages(document: Document) -> list[str]:
@@ -511,6 +568,9 @@ def retirement_workflow_completed(document: Document) -> bool:
     """True once the retirement approval cycle has completed successfully."""
     if not is_built_form_document(document):
         return False
+    form = ((document.metadata or {}).get("form") or {})
+    if str(form.get("retirement_workflow_status") or "").strip().lower() == "approved":
+        return True
     try:
         from apps.workflows.models import WorkflowInstance
 
@@ -541,7 +601,15 @@ def builder_process_step(document: Document) -> str:
             return f"{phase}_rejected"
         if status == DocumentStatus.APPROVED:
             if phase == "retirement":
-                return "fully_approved" if retirement_workflow_completed(document) or retirement_journal_posted(document) else "retirement_approved"
+                if retirement_journal_posted(document):
+                    return "fully_approved"
+                if retirement_workflow_completed(document):
+                    return "retirement_approved"
+                # The requisition's LPO is approved, but the traveller has not
+                # submitted retirement yet. Keep the current process step on
+                # the completed LPO milestone until a retirement workflow
+                # actually starts (which will then report retirement_pending).
+                return "lpo_approved" if "lpo" in completed_procurement_stages(document) else "retirement_ready"
             if phase == "lpo" and travel_retirement_config(document) and is_travel_requisition(document) and "lpo" in completed_procurement_stages(document):
                 return "lpo_approved"
             return "fully_approved" if phase == "lpo" and phase in completed_procurement_stages(document) else f"{phase}_approved"
@@ -587,20 +655,13 @@ def can_submit_retirement_workflow(document: Document, *, user=None) -> bool:
     if not is_built_form_document(document):
         return False
 
-    # Explicitly check that this document type has a retirement workflow rule configured
-    try:
-        from apps.workflows.models import WorkflowRule
-        has_retirement_rule = WorkflowRule.objects.filter(
-            document_type=document.document_type,
-            phase="retirement",
-            is_active=True,
-        ).exists()
-        if not has_retirement_rule:
-            return False
-    except Exception:
+    # v2 workflows route by context.phase CASE and do not need a legacy rule row.
+    if not has_retirement_workflow_route(document):
         return False
-
     form = (document.metadata or {}).get("form") or {}
+    retirement_status_value = str(form.get("retirement_workflow_status") or "").strip().lower()
+    if retirement_status_value in {"in_progress", "approved"}:
+        return False
     if is_procurement_document(document):
         if not travel_retirement_config(document) or not is_travel_requisition(document) or "lpo" not in completed_procurement_stages(document):
             return False

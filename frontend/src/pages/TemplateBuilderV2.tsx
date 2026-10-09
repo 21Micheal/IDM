@@ -1665,6 +1665,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const poNumberSpec = valueSpec(byRole("po_number"));
   const supplierSpec = valueSpec(byRole("supplier_code"));
   const itemFieldSpec = valueSpec(byRole("item_code"));
+  const quantityFieldSpec = valueSpec(byRole("quantity"));
   const purchaseTransactionTypeFieldSpec = valueSpec(byRole("purchase_transaction_type"));
   const productGroupSpec = valueSpec(byRole("product_group"));
 
@@ -1714,10 +1715,24 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     });
   }
   for (const f of fields) {
-    if (f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode === "single" && f.external?.dimension) {
+    // When the ten-slot Analysis Codes panel exists, it is the single source
+    // of truth for PO analysis values. A separate single-dimension control
+    // (for example Cost Centre) must not overwrite the panel's same slot.
+    if (!panelField && f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode === "single" && f.external?.dimension) {
       const slot = ANALYSIS_PANEL_SLOTS.indexOf(f.external.dimension) + 1;
       if (slot > 0) poAnalysis[String(slot)] = { category: { const: f.external.dimension }, code: { field: f.key } };
     }
+  }
+  // Analysis 10 is also available as an explicit PO configuration value. When
+  // set, honor it over the Analysis Codes panel's slot 10 so the builder's
+  // posting config controls retries and new requisitions consistently.
+  if (ui.analysis10Code?.trim()) {
+    const current = poAnalysis["10"] as Record<string, unknown> | undefined;
+    poAnalysis["10"] = {
+      ...(current ?? {}),
+      ...(ui.analysis10Category?.trim() ? { category: { const: ui.analysis10Category.trim() } } : {}),
+      code: { const: ui.analysis10Code.trim() },
+    };
   }
 
   // PurchaseOrder lines: one per requisition table that carries a value source
@@ -1800,7 +1815,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         : {}),
       ...(descriptionCol ? { description: { row_field: descriptionCol.key } } : {}),
       ...(curCol ? { currency: { row_field: curCol.key } } : (currencySpec ? { currency: currencySpec } : {})),
-      quantity: qtyCol ? { row_field: qtyCol.key } : { const: ui.quantity || "1" },
+      quantity: qtyCol
+        ? { row_field: qtyCol.key, default: ui.quantity || "1" }
+        : { const: ui.quantity || "1" },
       ...(upCol ? { unit_price: { row_field: upCol.key } } : {}),
       ...(amtCol ? { amount: { row_field: amtCol.key } } : {}),
       ...(Object.keys(lineAnalysis).length ? { analysis: lineAnalysis } : {}),
@@ -1853,6 +1870,11 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           invoice_address_code: { const: ui.invoiceAddressCode || "0000000000" },
           ...(dateSpec ? { date: dateSpec } : {}),
           ...(currencySpec ? { currency: currencySpec } : {}),
+          // A populated table quantity column wins; empty/missing row values
+          // fall back to the form-level quantity mapping or configured default.
+          quantity: quantityFieldSpec
+            ? { ...quantityFieldSpec, default: ui.quantity || "1" }
+            : { const: ui.quantity || "1" },
           vlab_base_num: { const: ui.vlabBase || "7" },
           vlab_trans_num: { const: ui.vlabTrans || "9" },
           ...(Object.keys(poAnalysis).length ? { analysis: poAnalysis } : {}),

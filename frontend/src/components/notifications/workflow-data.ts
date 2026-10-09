@@ -73,6 +73,7 @@ type WorkflowTemplateStepRecord = {
   assignee_type?: string;
   assignee_group_name?: string | null;
   assignee_user_name?: string | null;
+  assignee_user_auto?: boolean;
   notify_user_name?: string | null;
   notify_email?: string;
   instructions?: string;
@@ -85,9 +86,8 @@ type WorkflowTemplateRecord = {
   steps?: WorkflowTemplateStepRecord[];
 };
 
-/** Ordered procurement stages. Kept in sync with the backend's
- *  ``PROCUREMENT_WORKFLOW_STAGES``. */
-export const PROCUREMENT_PHASE_ORDER: WorkflowPhase[] = ["requisition", "rfq", "lpo"];
+/** Display order for procurement and its retirement sub-process. */
+export const PROCUREMENT_PHASE_ORDER: WorkflowPhase[] = ["requisition", "rfq", "lpo", "retirement"];
 
 export const PHASE_LABELS: Record<string, string> = {
   requisition: "Requisition",
@@ -331,7 +331,12 @@ function buildApproverWorkflow(
     const latestAction = latestActionForHistory(allHistory);
     const statuses = items.map((item) => mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action));
     const rawStatus: WorkflowStep["status"] = items.length ? resolveStepStatus(statuses) : "pending";
-    const taskWithAssignee = items.find((item) => item.task.assigned_to) ?? items[0];
+    // Future tasks may already carry a provisional auto-selected approver.
+    // Show that assignee only after the step becomes active or has been acted
+    // on; before then, show the configured group instead of a stale person.
+    const taskWithAssignee = rawStatus === "pending"
+      ? undefined
+      : items.find((item) => item.task.assigned_to);
     const rawName = templateStep.name?.trim() || items[0]?.task.step?.name?.trim() || `${ordinal(index + 1)} Approver`;
     const name = isNotification ? (rawName || "Notification") : (rawName || `${ordinal(index + 1)} Approver`);
 
@@ -341,15 +346,14 @@ function buildApproverWorkflow(
       || items[0]?.task.step?.notify_email
       || "Recipient";
 
+    const configuredApprover = templateStep.assignee_user_auto
+      ? templateStep.assignee_group_name || formatAssigneeType(templateStep.assignee_type)
+      : templateStep.assignee_user_name
+        || templateStep.assignee_group_name
+        || formatAssigneeType(templateStep.assignee_type);
     const approver = isNotification
       ? recipientLabel
-      : (
-        formatPerson(taskWithAssignee?.task.assigned_to) ||
-        templateStep.assignee_user_name ||
-        templateStep.assignee_group_name ||
-        formatAssigneeType(templateStep.assignee_type) ||
-        "Unassigned"
-      );
+      : (formatPerson(taskWithAssignee?.task.assigned_to) || configuredApprover || "Unassigned");
 
     return {
       id: isNotification ? `notification-${stepOrder}` : `approver-${stepOrder}`,

@@ -1018,6 +1018,29 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 )
 
         requested_stage = str(request.data.get("workflow_stage") or "").strip().lower()
+        if requested_stage == "retirement":
+            if not can_submit_retirement_workflow(doc, user=request.user):
+                return Response(
+                    {"detail": "Retirement is not ready to submit. Complete LPO approval and reach the configured return date first."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            from apps.workflows.services import WorkflowService, WorkflowError
+            try:
+                WorkflowService.start(doc, request.user)
+            except WorkflowError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            doc.refresh_from_db()
+            if doc.status != DocumentStatus.APPROVED:
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["retirement_workflow_status"] = "in_progress"
+                metadata["form"] = form
+                doc.metadata = metadata
+                doc.save(update_fields=["metadata", "updated_at"])
+            self.record_audit("document.submitted", doc, {"workflow_stage": "retirement"})
+            doc.refresh_from_db()
+            return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
+
         if requested_stage:
             if not is_procurement_document(doc):
                 return Response(
@@ -1319,12 +1342,16 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # tampered request can't slip past. Locked fields are reverted to their
         # stored value; conditions are evaluated against the STORED values (a user
         # can't unlock a field within the same request that edits it).
-        from apps.documents.builder_workflow import builder_process_step
-        from apps.documents.access import viewer_for_user
+        from apps.documents.builder_workflow import builder_process_step, completed_procurement_stages
+        from apps.documents.access import viewer_for_user, retirement_editable_section_ids
+        from apps.documents.access import user_has_active_approval_task
         from apps.templates_engine.conditions import is_editable, is_visible
         process_step = builder_process_step(doc)
         viewer = viewer_for_user(request.user)
         prior_render = descriptors_to_names(prior_values)
+        lpo_approved = "lpo" in completed_procurement_stages(doc)
+        retirement_edit_ids = retirement_editable_section_ids(doc, user=request.user)
+        retirement_only_edit = bool(retirement_edit_ids) and not user_has_active_approval_task(request.user, doc)
 
         # Analysis code fields are often visible only to one approval group.
         # A later reviewer may therefore submit the rest of the form without
@@ -1358,13 +1385,33 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         locked_keys = set()
         for section in sections:
+            section_id = str(section.get("id") or section.get("key") or "")
+            section_fields = section.get("fields", [])
+            is_retirement_section = any(
+                isinstance(field, dict) and field.get("workflowRole") == "retirement_expenses"
+                for field in section_fields
+            )
+            if is_retirement_section and not lpo_approved:
+                locked_keys.update(
+                    f.get("key") for f in section_fields
+                    if isinstance(f, dict) and f.get("key")
+                )
+                continue
+            if retirement_only_edit and section_id not in retirement_edit_ids:
+                locked_keys.update(
+                    f.get("key") for f in section_fields
+                    if isinstance(f, dict) and f.get("key")
+                )
+                continue
             section_editable = is_editable(section, prior_render, process_step, viewer)
-            for f in section.get("fields", []):
+            section_visible = is_visible(section, prior_render, process_step, viewer)
+            for f in section_fields:
                 key = f.get("key")
                 if not key:
                     continue
                 field_editable = is_editable(f, prior_render, process_step, viewer)
-                if not (section_editable and field_editable):
+                field_visible = is_visible(f, prior_render, process_step, viewer)
+                if not (section_editable and field_editable) or (retirement_only_edit and not (section_visible and field_visible)):
                     locked_keys.add(key)
         for key in locked_keys:
             if key in prior_values:
