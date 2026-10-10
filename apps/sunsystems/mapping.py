@@ -563,6 +563,9 @@ def build_purchase_order_ssc(
             spec.get("account_code") or spec.get("account") or po.get("account_code"), values, row
         )
         ET.SubElement(line_el, "CurrencyCode").text = currency
+        unit_of_measure = resolve_value(spec.get("uom") or spec.get("unit_of_measure"), values, row)
+        if unit_of_measure:
+            ET.SubElement(line_el, "UnitOfMeasure").text = unit_of_measure
         ET.SubElement(line_el, "ItemCode").text = resolve_value(
             spec.get("item_code") or po.get("item_code"), values, row,
         )

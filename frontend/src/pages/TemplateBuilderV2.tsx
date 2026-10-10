@@ -1757,6 +1757,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     const imprestAccountCol = acctCol ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "account code");
     const supplierCol = cols.find((c) => c.sunsystems?.role === "supplier_code" || c.type === "sunsystems_account");
     const curCol = cols.find((c) => c.sunsystems?.role === "currency");
+    const uomCol = cols.find((c) => c.sunsystems?.role === "uom");
     const analysisCols = cols.filter((c) => c.sunsystems?.role === "analysis");
     const imprestRequest = f.sunsystems?.imprestRequest ?? amtCol?.sunsystems?.imprestRequest;
     const imprestAccountSource = amtCol?.sunsystems?.accountSource ?? imprestRequest?.accountSource;
@@ -1815,6 +1816,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         : {}),
       ...(descriptionCol ? { description: { row_field: descriptionCol.key } } : {}),
       ...(curCol ? { currency: { row_field: curCol.key } } : (currencySpec ? { currency: currencySpec } : {})),
+      ...(uomCol ? { uom: { row_field: uomCol.key } } : {}),
       quantity: qtyCol
         ? { row_field: qtyCol.key, default: ui.quantity || "1" }
         : { const: ui.quantity || "1" },
