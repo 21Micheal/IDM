@@ -1418,6 +1418,44 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 values[key] = prior_values[key]
             else:
                 values.pop(key, None)
+        # Multi-file field slots are stored as ``field_key~index``. Apply the
+        # parent field's visibility/editability rule to every uploaded slot.
+        for key in list(values):
+            parent_key = str(key).split("~", 1)[0]
+            if parent_key in locked_keys:
+                if key in prior_values:
+                    values[key] = prior_values[key]
+                else:
+                    values.pop(key, None)
+
+        # Manual supplier uploads count as that supplier's RFQ response. The
+        # configured multi-file field still receives the actual file descriptors
+        # through the normal form attachment path above.
+        manual_supplier_code = str(request.data.get("rfq_supplier_code") or "").strip()
+        if manual_supplier_code:
+            from apps.documents.rfq import mark_supplier_response, rfq_state
+
+            rfq = dict(rfq_state(meta_form))
+            file_names = [
+                descriptor.get("name")
+                for name, descriptor in attachments.items()
+                if name.startswith(f"{rfq.get('attachment_field', '')}~")
+                and isinstance(descriptor, dict)
+                and isinstance(values.get(name), dict)
+                and values[name].get("storage_path")
+                and descriptor.get("storage_path") != (prior_attachments.get(name) or {}).get("storage_path")
+            ]
+            if not file_names or not mark_supplier_response(
+                rfq,
+                manual_supplier_code,
+                source="manual",
+                files=[{"name": name} for name in file_names],
+            ):
+                return Response(
+                    {"detail": "Upload a file for a supplier invited to this RFQ."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            meta_form["rfq_response"] = rfq
 
         # Re-derive picked reference/user labels server-side from their ids.
         values = reconcile_references(values, sections, default_reference_resolver)
@@ -2963,6 +3001,143 @@ echo "✓ DocVault LibreOffice integration installed."
             context={**self.get_serializer_context(), "document_id": str(doc.id)},
         )
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get", "post"], url_path="rfq")
+    def rfq(self, request, pk=None):
+        """Show RFQ response status or send the configured supplier invitation."""
+        doc = self.get_object()
+        meta = doc.metadata if isinstance(doc.metadata, dict) else {}
+        form = meta.get("form") if isinstance(meta.get("form"), dict) else {}
+        from apps.documents.rfq import (
+            all_supplier_responses_received,
+            multi_attachment_field,
+            rfq_state,
+            supplier_codes_from_values,
+        )
+
+        current = rfq_state(form)
+        if request.method == "GET":
+            return Response({
+                "sent_at": current.get("sent_at"),
+                "suppliers": current.get("suppliers") or [],
+                "all_received": all_supplier_responses_received(current),
+                "attachment_field": current.get("attachment_field") or multi_attachment_field(form),
+            })
+
+        if str(form.get("workflow_phase") or "").strip().lower() != "rfq":
+            return Response({"detail": "Supplier invitations can only be sent during the RFQ stage."}, status=400)
+        from apps.documents.access import user_has_active_approval_task
+        if not user_has_active_approval_task(request.user, doc):
+            return Response({"detail": "An active RFQ approver can send supplier invitations."}, status=403)
+
+        from apps.workflows.models import WorkflowInstance
+        instance = WorkflowInstance.objects.filter(
+            document=doc, status="in_progress",
+        ).select_related("template").order_by("-created_at").first()
+        if not instance:
+            return Response({"detail": "There is no active RFQ workflow."}, status=400)
+        step = instance.template.steps.filter(
+            step_type="notification",
+            notify_recipient_type="supplier",
+        ).exclude(notify_supplier_field__isnull=True).exclude(notify_supplier_field="").order_by("order").first()
+        if not step:
+            return Response({"detail": "Configure a supplier notification step in the workflow builder first."}, status=400)
+
+        values = form.get("values") if isinstance(form.get("values"), dict) else {}
+        supplier_codes = supplier_codes_from_values(values, step.notify_supplier_field)
+        if not supplier_codes:
+            return Response({"detail": "Select at least one supplier in the configured form field before sending the RFQ."}, status=400)
+        attachment_field = current.get("attachment_field") or multi_attachment_field(form)
+        if not attachment_field:
+            return Response({"detail": "Add a Multiple Attachments field to the form for supplier quotations and invoices."}, status=400)
+
+        from apps.workflows.services import WorkflowService
+        contacts = WorkflowService._resolve_supplier_contacts(doc, step.notify_supplier_field)
+        by_code = {str(contact.get("code") or "").strip().casefold(): contact for contact in contacts}
+        existing = {str(item.get("code") or "").strip().casefold(): item
+                    for item in (current.get("suppliers") or []) if isinstance(item, dict)}
+        tracking, send_to = [], []
+        for code in supplier_codes:
+            prior = existing.get(code.casefold(), {})
+            contact = by_code.get(code.casefold(), {})
+            email = str(contact.get("email") or prior.get("email") or "").strip()
+            item = {
+                "code": code,
+                "name": str(contact.get("name") or prior.get("name") or code),
+                "email": email,
+                "status": "received" if prior.get("status") == "received" else ("sent" if email else "awaiting_manual"),
+                "sent_at": prior.get("sent_at"),
+                "received_at": prior.get("received_at"),
+                "response_source": prior.get("response_source"),
+                "files": prior.get("files") or [],
+            }
+            if email and item["status"] != "received":
+                item["sent_at"] = timezone.now().isoformat()
+                send_to.append(email)
+            tracking.append(item)
+
+        reply_to = ""
+        if send_to:
+            reply_mailbox = Mailbox.objects.filter(is_active=True).order_by(
+                models.Case(
+                    models.When(name__icontains="supplier", then=0),
+                    default=1,
+                    output_field=models.IntegerField(),
+                ),
+                "created_at",
+            ).first()
+            if not reply_mailbox:
+                return Response({"detail": "Configure an active supplier invoice mailbox before sending RFQs."}, status=400)
+            if reply_mailbox.protocol == "graph":
+                from apps.documents.graph_client import merge_connection_with_defaults as merge_mail_connection
+                mail_config = merge_mail_connection(reply_mailbox.connection)
+                reply_to = str(mail_config.get("mailbox") or "").strip()
+            else:
+                from apps.documents.imap_client import merge_connection_with_defaults as merge_mail_connection
+                mail_config = merge_mail_connection(reply_mailbox.connection)
+                reply_to = str(mail_config.get("username") or "").strip()
+            if "@" not in reply_to:
+                return Response({"detail": "The supplier invoice mailbox needs a reply-to email address."}, status=400)
+
+        token = str(current.get("reply_token") or secrets.token_hex(20))
+        current.update({
+            "reply_token": token,
+            "supplier_field": step.notify_supplier_field,
+            "attachment_field": attachment_field,
+            "sent_at": timezone.now().isoformat(),
+            "suppliers": tracking,
+        })
+        form = dict(form)
+        form["rfq_response"] = current
+        meta = dict(meta)
+        meta["form"] = form
+        doc.metadata = meta
+        doc.save(update_fields=["metadata", "updated_at"])
+
+        from apps.notifications.tasks import send_workflow_notification_step_email
+        for email in send_to:
+            send_workflow_notification_step_email.delay(
+                recipient_user_id=None,
+                recipient_email=None,
+                recipient_emails=[email],
+                subject=step.notification_subject,
+                message=step.notification_message,
+                document_id=str(doc.pk),
+                step_name=step.name,
+                template_id=str(step.template_id),
+                include_items_table=bool(step.notify_include_items_table),
+                table_field_key=step.notify_table_field or None,
+                table_column_keys=step.notify_table_columns,
+                reply_to=reply_to,
+                rfq_reply_token=token,
+            )
+        return Response({
+            "sent_count": len(send_to),
+            "sent_at": current["sent_at"],
+            "suppliers": tracking,
+            "all_received": all_supplier_responses_received(current),
+            "attachment_field": attachment_field,
+        })
 
     @action(detail=True, methods=["delete"], url_path=r"relationships/(?P<relationship_id>[^/.]+)")
     def relationship_detail(self, request, pk=None, relationship_id=None):

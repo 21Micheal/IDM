@@ -3,7 +3,7 @@ apps/notifications/tasks.py
 All notification tasks — in-app + email for every workflow event.
 """
 from celery import shared_task
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives, send_mail
 from django.conf import settings
 from django.db import IntegrityError
 import logging
@@ -28,6 +28,7 @@ def _send_email_to_address(
     *,
     include_footer: bool = True,
     html_message: str | None = None,
+    reply_to: str | None = None,
 ) -> None:
     """Send email to a raw address (no User record required)."""
     if not email:
@@ -41,14 +42,26 @@ def _send_email_to_address(
                 f"{_email_footer(link).strip().replace(chr(10), '<br>')}</p>"
                 if include_footer else ""
             )
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-            html_message=html,
-        )
+        if reply_to:
+            outgoing = EmailMultiAlternatives(
+                subject=subject,
+                body=message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[email],
+                reply_to=[reply_to],
+            )
+            if html:
+                outgoing.attach_alternative(html, "text/html")
+            outgoing.send(fail_silently=False)
+        else:
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                fail_silently=False,
+                html_message=html,
+            )
     except Exception as exc:
         logger.warning("Email send failed to %s: %s", email, exc)
 
@@ -461,6 +474,9 @@ def send_workflow_notification_step_email(
     template_id: str | None = None,
     include_items_table: bool = False,
     table_field_key: str | None = None,
+    table_column_keys: list[str] | None = None,
+    reply_to: str | None = None,
+    rfq_reply_token: str | None = None,
 ) -> None:
     """
     Send the email configured on a workflow notification step.
@@ -502,6 +518,7 @@ def send_workflow_notification_step_email(
         step_name=step_name,
         include_items_table=include_table,
         table_field_key=table_field_key or None,
+        table_column_keys=table_column_keys,
     )
 
     # Optional template-level override (step subject/body remain the default).
@@ -524,10 +541,13 @@ def send_workflow_notification_step_email(
                     step_name=step_name,
                     include_items_table=include_table,
                     table_field_key=table_field_key or None,
+                    table_column_keys=table_column_keys,
                 )
 
     subject = render_placeholders(subject or "", ctx)
     message = render_placeholders(message or "", ctx)
+    if rfq_reply_token:
+        subject = f"[RFQ-REPLY:{rfq_reply_token}] {subject}".strip()
 
     # If the toggle is on but the body never referenced {items_table}, append it.
     if include_table and ctx.get("items_table") and "{items_table}" not in (message or ""):
@@ -535,7 +555,7 @@ def send_workflow_notification_step_email(
         # Here we append the raw HTML table for toggle-only mode.
         from apps.workflows.notification_content import build_items_table_html
         table_html = ctx.get("items_table") or (
-            build_items_table_html(document, table_field_key) if document else ""
+            build_items_table_html(document, table_field_key, table_column_keys) if document else ""
         )
         if table_html and table_html not in message:
             message = f"{message.rstrip()}\n\n{table_html}"
@@ -579,6 +599,7 @@ def send_workflow_notification_step_email(
                     link="",
                     include_footer=False,
                     html_message=html_body,
+                    reply_to=reply_to,
                 )
         return
 

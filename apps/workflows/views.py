@@ -472,6 +472,47 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": "Approve is not permitted for this step."}, status=403)
         self._check_permission(task, request.user)
 
+        # Supplier quotations must be collected before finance can advance the
+        # RFQ phase to LPO. The configured supplier notification step is sent
+        # manually from the form; every selected supplier must reply or have a
+        # response attached manually before approval succeeds.
+        document = task.workflow_instance.document
+        form = ((getattr(document, "metadata", None) or {}).get("form") or {}) if document else {}
+        if str(form.get("workflow_phase") or "").strip().lower() == "rfq":
+            supplier_step = task.workflow_instance.template.steps.filter(
+                step_type="notification", notify_recipient_type="supplier",
+            ).exclude(notify_supplier_field__isnull=True).exclude(notify_supplier_field="").exists()
+            if supplier_step:
+                from apps.documents.rfq import (
+                    all_supplier_responses_received,
+                    rfq_state,
+                    supplier_codes_from_values,
+                )
+
+                response_state = rfq_state(form)
+                if not response_state.get("suppliers"):
+                    return Response({"detail": "Send the RFQ to suppliers before approving this stage."}, status=400)
+                selected_codes = {code.casefold() for code in supplier_codes_from_values(
+                    form.get("values") if isinstance(form.get("values"), dict) else {},
+                    response_state.get("supplier_field") or "",
+                )}
+                tracked_codes = {
+                    str(item.get("code") or "").casefold()
+                    for item in response_state.get("suppliers", [])
+                    if isinstance(item, dict)
+                }
+                if selected_codes != tracked_codes:
+                    return Response({"detail": "The selected suppliers changed after the RFQ was sent. Send the RFQ again before approving."}, status=400)
+                if not all_supplier_responses_received(response_state):
+                    waiting = [
+                        str(item.get("name") or item.get("code") or "Supplier")
+                        for item in response_state.get("suppliers", [])
+                        if isinstance(item, dict) and item.get("status") != "received"
+                    ]
+                    return Response({
+                        "detail": "Waiting for supplier responses: " + ", ".join(waiting),
+                    }, status=400)
+
         # Sejda-style multi-item signing (signature + optional name/date/text),
         # shared with the signature-request flow. `items` is a JSON array; an
         # ad-hoc drawn signature arrives as use_new_signature + signature_image.

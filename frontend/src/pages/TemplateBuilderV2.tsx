@@ -506,7 +506,7 @@ export interface TemplateField {
   colSpan?: number;
   width?: number;
   columns?: TableColumn[];
-  workflowRole?: "requisition_lines" | "rfq_required_lines" | "retirement_expenses";
+  workflowRole?: "requisition_lines" | "rfq_required_lines" | "retirement_expenses" | "rfq_supplier_attachments";
   defaultValue?: string;
   minRows?: number;
   multi?: boolean;
@@ -5065,6 +5065,21 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                   onChange={(e) => onUpdate({ minRows: Number(e.target.value) })} className={inputCls} />
               </InspectorRow>
             </>
+          )}
+          {field.type === "multi_file" && (
+            <InspectorRow label="Attachment purpose" hint="Use this field for supplier quotations and invoices received during RFQ.">
+              <CustomListbox
+                value={field.workflowRole === "rfq_supplier_attachments" ? field.workflowRole : ""}
+                onChange={(value) => onUpdate({ workflowRole: (value || undefined) as TemplateField["workflowRole"] })}
+                options={[
+                  { value: "", label: "General attachments" },
+                  { value: "rfq_supplier_attachments", label: "RFQ supplier responses" },
+                ]}
+                className={inputCls}
+                buttonClassName="w-full"
+                ariaLabel="Attachment purpose"
+              />
+            </InspectorRow>
           )}
           {hasOptions && (
             <InspectorRow label="Options">

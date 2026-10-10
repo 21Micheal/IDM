@@ -369,12 +369,17 @@ export const documentsAPI = {
     id: string,
     values: Record<string, unknown>,
     attachments: Array<{ field: string; file: File }> = [],
+    options: { rfqSupplierCode?: string } = {},
   ) => {
     if (attachments.length === 0) {
-      return api.post(`/documents/${id}/update_form/`, { values });
+      return api.post(`/documents/${id}/update_form/`, {
+        values,
+        ...(options.rfqSupplierCode ? { rfq_supplier_code: options.rfqSupplierCode } : {}),
+      });
     }
     const fd = new FormData();
     fd.append("values", JSON.stringify(values));
+    if (options.rfqSupplierCode) fd.append("rfq_supplier_code", options.rfqSupplierCode);
     for (const { field, file } of attachments) {
       fd.append(field, file, file.name);
     }
@@ -382,6 +387,9 @@ export const documentsAPI = {
       headers: { "Content-Type": undefined },
     });
   },
+
+  rfq: (id: string) => api.get(`/documents/${id}/rfq/`),
+  sendRfq: (id: string) => api.post(`/documents/${id}/rfq/`),
 
   downloadFormAttachment: (id: string, fieldKey: string) =>
     api.get(`/documents/${id}/form_attachment/${encodeURIComponent(fieldKey)}/`, {

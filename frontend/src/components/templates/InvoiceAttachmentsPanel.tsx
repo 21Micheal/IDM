@@ -1,316 +1,165 @@
-/**
- * InvoiceAttachmentsPanel
- *
- * Shown in FormDetailPage at the RFQ stage AFTER full approval (rfq_approved).
- * Compact, minimal design:
- *  - Existing attachments: inline thumbnail chips (icon · name · size · download)
- *  - Manual upload: a single small blue button (no wide dropzone)
- *  - Auto-ingested: compact inline list rows with an "Attach" button
- */
-import { useCallback, useRef, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CheckCircle2, Loader2, Mail, Paperclip, Upload } from "lucide-react";
 import { documentsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
-import { cn } from "@/lib/utils";
-import {
-  Loader2, Paperclip, Upload, FileText, CheckCircle2,
-  Inbox, Download, X,
-} from "lucide-react";
-import { format } from "date-fns";
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatBytes(b: number) {
-  if (b < 1024) return `${b} B`;
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-  return `${(b / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function fileExtColor(name: string): string {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (ext === "pdf") return "text-red-500";
-  if (["png", "jpg", "jpeg", "gif", "webp"].includes(ext)) return "text-violet-500";
-  if (["xls", "xlsx", "csv"].includes(ext)) return "text-emerald-600";
-  if (["doc", "docx"].includes(ext)) return "text-blue-500";
-  return "text-[#287EAD]";
-}
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-interface AttachmentDescriptor {
+type SupplierResponse = {
+  code: string;
   name: string;
-  url?: string;
-  file_size?: number;
-  content_type?: string;
-}
+  email?: string;
+  status: "sent" | "received" | "awaiting_manual";
+  response_source?: "email" | "manual";
+  files?: { name: string }[];
+};
 
-interface IngestedDoc {
-  id: string;
-  title: string;
-  reference_number?: string;
-  created_at: string;
-  file_name?: string;
-  file_size?: number;
-  uploaded_by?: { full_name?: string; email?: string };
-  metadata?: { ingestion?: { sender_email?: string; subject?: string } };
-}
+type RfqStatus = {
+  sent_at?: string;
+  suppliers: SupplierResponse[];
+  all_received: boolean;
+  attachment_field: string;
+};
 
 interface Props {
   documentId: string;
-  supplierCodes?: string[];
-  existingAttachments?: AttachmentDescriptor[];
-  onAttached?: () => void;
+  values: Record<string, unknown>;
+  onBeforeSend?: () => Promise<void>;
+  onUpdated?: () => void;
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
-
-export default function InvoiceAttachmentsPanel({
-  documentId,
-  supplierCodes = [],
-  existingAttachments = [],
-  onAttached,
-}: Props) {
+export default function InvoiceAttachmentsPanel({ documentId, values, onBeforeSend, onUpdated }: Props) {
   const qc = useQueryClient();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [attachingId, setAttachingId] = useState<string | null>(null);
-  const [pendingFiles, setPendingFiles] = useState<
-    { id: string; file: File; progress: "uploading" | "done" | "error" }[]
-  >([]);
-
-  // ── Query: recently ingested docs ────────────────────────────────────────────
-  const { data: ingestedDocs = [], isLoading: loadingIngested } = useQuery<IngestedDoc[]>({
-    queryKey: ["ingested-docs-recent", documentId],
-    queryFn: async () => {
-      const res = await documentsAPI.list({ is_form: false, ordering: "-created_at", page_size: 30 });
-      const all: IngestedDoc[] = res.data?.results ?? res.data ?? [];
-      return all.filter((d) => d.metadata?.ingestion || supplierCodes.length === 0);
-    },
-    staleTime: 30_000,
-    retry: false,
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [uploadingSupplier, setUploadingSupplier] = useState<string | null>(null);
+  const { data: status, isLoading } = useQuery<RfqStatus>({
+    queryKey: ["rfq", documentId],
+    queryFn: () => documentsAPI.rfq(documentId).then((response) => response.data),
+    refetchInterval: 10_000,
   });
 
-  // ── Mutation: attach ingested doc ────────────────────────────────────────────
-  const attachIngestedMutation = useMutation({
-    mutationFn: async (doc: IngestedDoc) => {
-      setAttachingId(doc.id);
-      return documentsAPI.updateForm(documentId, {
-        [`_linked_doc_${doc.id}`]: {
-          id: doc.id,
-          title: doc.file_name || doc.title,
-          linked_at: new Date().toISOString(),
-          sender: doc.metadata?.ingestion?.sender_email,
-        },
-      }, []);
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["rfq", documentId] });
+    qc.invalidateQueries({ queryKey: ["form", documentId] });
+    onUpdated?.();
+  };
+
+  const sendMutation = useMutation({
+    mutationFn: async () => {
+      await onBeforeSend?.();
+      return documentsAPI.sendRfq(documentId);
+    },
+    onSuccess: ({ data }) => {
+      toast.success(data.sent_count ? `RFQ sent to ${data.sent_count} supplier(s).` : "Supplier responses can be uploaded manually.");
+      refresh();
+    },
+    onError: (error: any) => toast.error(error?.response?.data?.detail || "Could not send the RFQ."),
+  });
+
+  const uploadMutation = useMutation({
+    mutationFn: async ({ supplier, files }: { supplier: SupplierResponse; files: File[] }) => {
+      const field = status?.attachment_field;
+      if (!field) throw new Error("No Multiple Attachments field is configured on this form.");
+      setUploadingSupplier(supplier.code);
+      const currentIndexes = Object.keys(values)
+        .filter((key) => key.startsWith(`${field}~`))
+        .map((key) => Number(key.slice(field.length + 1)))
+        .filter((index) => Number.isInteger(index) && index >= 0);
+      let nextIndex = currentIndexes.length ? Math.max(...currentIndexes) + 1 : 0;
+      const attachments = files.map((file) => ({ field: `attachment_${field}~${nextIndex++}`, file }));
+      return documentsAPI.updateForm(documentId, values, attachments, { rfqSupplierCode: supplier.code });
     },
     onSuccess: () => {
-      toast.success("Document attached to requisition.");
-      setAttachingId(null);
-      qc.invalidateQueries({ queryKey: ["form", documentId] });
-      onAttached?.();
+      toast.success("Supplier response attached.");
+      setUploadingSupplier(null);
+      refresh();
     },
-    onError: () => {
-      toast.error("Failed to attach document.");
-      setAttachingId(null);
+    onError: (error: any) => {
+      setUploadingSupplier(null);
+      toast.error(error?.response?.data?.detail || error?.message || "Could not upload the supplier response.");
     },
   });
 
-  // ── Manual upload ────────────────────────────────────────────────────────────
-  const uploadFiles = useCallback(
-    async (files: FileList | File[]) => {
-      const arr = Array.from(files);
-      if (arr.length === 0) return;
+  const chooseFiles = (supplier: SupplierResponse) => {
+    if (fileInput.current) {
+      fileInput.current.dataset.supplierCode = supplier.code;
+      fileInput.current.click();
+    }
+  };
 
-      const entries = arr.map((file) => ({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        file,
-        progress: "uploading" as const,
-      }));
-      setPendingFiles((prev) => [...prev, ...entries]);
-
-      for (const entry of entries) {
-        try {
-          await documentsAPI.updateForm(documentId, {}, [
-            { field: "supplier_attachments", file: entry.file },
-          ]);
-          setPendingFiles((prev) =>
-            prev.map((p) => (p.id === entry.id ? { ...p, progress: "done" } : p))
-          );
-          qc.invalidateQueries({ queryKey: ["form", documentId] });
-          onAttached?.();
-        } catch {
-          setPendingFiles((prev) =>
-            prev.map((p) => (p.id === entry.id ? { ...p, progress: "error" } : p))
-          );
-          toast.error(`Failed to upload ${entry.file.name}`);
-        }
-      }
-
-      setTimeout(() => {
-        setPendingFiles((prev) => prev.filter((p) => p.progress !== "done"));
-      }, 3000);
-    },
-    [documentId, qc, onAttached]
-  );
-
-  // ── Render ────────────────────────────────────────────────────────────────────
   return (
-    <div className="border border-[#C8CDD2] bg-white shadow-sm">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
-        <div className="flex items-center gap-2 min-w-0">
-          <Inbox className="h-4 w-4 text-[#287EAD] shrink-0" />
-          <div className="min-w-0">
-            <p className="text-xs font-bold text-[#1F2933]">Supplier Quotations &amp; Invoices</p>
-            <p className="text-[11px] text-[#8C969E]">Received from suppliers following RFQ notifications</p>
-          </div>
+    <section className="mt-6 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <Mail className="h-4 w-4 text-[#287EAD]" /> Supplier quotations and invoices
+          </h3>
+          <p className="mt-1 text-xs text-slate-500">
+            Send the configured RFQ email. Supplier replies with the reference in the subject are attached automatically; other responses can be uploaded here.
+          </p>
         </div>
-
-        {/* Upload button — compact, right-aligned */}
         <button
           type="button"
-          onClick={() => fileInputRef.current?.click()}
-          className="inline-flex shrink-0 items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-[#206D99] transition-colors"
+          onClick={() => sendMutation.mutate()}
+          disabled={sendMutation.isPending}
+          className="inline-flex items-center gap-2 rounded bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#216b95] disabled:cursor-not-allowed disabled:opacity-50"
         >
-          <Upload className="h-3 w-3" />
-          Attach files
+          {sendMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+          {status?.sent_at ? "Resend RFQ" : "Send RFQ"}
         </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.doc,.docx,.xls,.xlsx,.csv"
-          className="hidden"
-          onChange={(e) => e.target.files && uploadFiles(e.target.files)}
-        />
       </div>
 
-      <div className="p-3 space-y-3">
-        {/* ── Existing Attachments — inline thumbnail chips ── */}
-        {existingAttachments.length > 0 && (
-          <div>
-            <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#8C969E]">
-              Attached ({existingAttachments.length})
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {existingAttachments.map((att, i) => (
-                <div
-                  key={i}
-                  className="flex items-center gap-1.5 border border-[#E4E7EB] bg-[#F8FAFB] px-2.5 py-1.5 text-xs max-w-[220px]"
-                  title={att.name}
-                >
-                  <FileText className={cn("h-3.5 w-3.5 shrink-0", fileExtColor(att.name))} />
-                  <span className="truncate text-[#1F2933] font-medium flex-1 min-w-0">{att.name}</span>
-                  {att.file_size && (
-                    <span className="text-[10px] text-[#8C969E] shrink-0">{formatBytes(att.file_size)}</span>
-                  )}
-                  {att.url && (
-                    <a
-                      href={att.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="shrink-0 text-[#8C969E] hover:text-[#287EAD] transition-colors"
-                      title="Download"
-                    >
-                      <Download className="h-3 w-3" />
-                    </a>
-                  )}
+      {isLoading ? (
+        <div className="mt-4 flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Loading supplier responses…</div>
+      ) : status?.suppliers?.length ? (
+        <div className="mt-4 divide-y divide-slate-100 rounded border border-slate-100">
+          {status.suppliers.map((supplier) => {
+            const received = supplier.status === "received";
+            return (
+              <div key={supplier.code} className="flex flex-wrap items-center justify-between gap-3 px-3 py-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-medium text-slate-800">
+                    {received ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <Paperclip className="h-4 w-4 text-slate-400" />}
+                    <span>{supplier.name}</span><span className="text-xs text-slate-500">{supplier.code}</span>
+                  </div>
+                  <div className="mt-1 text-xs text-slate-500">
+                    {received ? `Response received${supplier.response_source ? ` (${supplier.response_source})` : ""}` : supplier.email ? `Waiting for ${supplier.email}` : "No email address; upload the response manually"}
+                    {supplier.files?.length ? ` · ${supplier.files.map((file) => file.name).join(", ")}` : ""}
+                  </div>
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* ── Upload progress chips ── */}
-        {pendingFiles.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {pendingFiles.map((p) => (
-              <div
-                key={p.id}
-                className={cn(
-                  "flex items-center gap-1.5 border px-2.5 py-1.5 text-xs",
-                  p.progress === "done"
-                    ? "border-emerald-200 bg-emerald-50"
-                    : p.progress === "error"
-                    ? "border-red-200 bg-red-50"
-                    : "border-[#E4E7EB] bg-white"
-                )}
-              >
-                {p.progress === "uploading" && <Loader2 className="h-3 w-3 animate-spin text-[#287EAD] shrink-0" />}
-                {p.progress === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
-                {p.progress === "error" && <X className="h-3 w-3 text-red-500 shrink-0" />}
-                <span className={cn(
-                  "truncate max-w-[140px]",
-                  p.progress === "done" ? "text-emerald-700" : p.progress === "error" ? "text-red-700" : "text-[#1F2933]"
-                )}>
-                  {p.file.name}
-                </span>
-                {p.progress !== "uploading" && (
-                  <button
-                    type="button"
-                    onClick={() => setPendingFiles((prev) => prev.filter((x) => x.id !== p.id))}
-                    className="shrink-0 text-[#8C969E] hover:text-[#1F2933]"
-                  >
-                    <X className="h-3 w-3" />
+                {(
+                  <button type="button" onClick={() => chooseFiles(supplier)} disabled={uploadingSupplier === supplier.code}
+                    className="inline-flex items-center gap-1.5 rounded border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                    {uploadingSupplier === supplier.code ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+                    {received ? "Add files" : "Upload response"}
                   </button>
                 )}
               </div>
-            ))}
-          </div>
-        )}
+            );
+          })}
+        </div>
+      ) : (
+        <p className="mt-4 rounded bg-slate-50 px-3 py-2 text-xs text-slate-600">Select suppliers in the requisition form, save the form, then send the RFQ. Responses are required before this stage can be approved.</p>
+      )}
 
-        {/* ── Auto-ingested suggestions ── */}
-        {(loadingIngested || ingestedDocs.length > 0) && (
-          <div>
-            <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#8C969E]">
-              From email ingestion
-            </p>
-            {loadingIngested ? (
-              <div className="flex items-center gap-2 py-2 text-xs text-[#8C969E]">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking ingested emails…
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {ingestedDocs.slice(0, 6).map((doc) => (
-                  <div
-                    key={doc.id}
-                    className="flex items-center gap-2 border border-[#E4E7EB] bg-white px-3 py-1.5 hover:border-[#287EAD]/40 hover:bg-[#F8FCFF] transition-colors"
-                  >
-                    <FileText className={cn("h-3.5 w-3.5 shrink-0", fileExtColor(doc.file_name || doc.title))} />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs font-medium text-[#1F2933]">{doc.file_name || doc.title}</p>
-                      <p className="text-[10px] text-[#8C969E]">
-                        {doc.metadata?.ingestion?.sender_email ? `${doc.metadata.ingestion.sender_email} · ` : ""}
-                        {format(new Date(doc.created_at), "dd MMM yyyy HH:mm")}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => attachIngestedMutation.mutate(doc)}
-                      disabled={attachingId === doc.id}
-                      className={cn(
-                        "inline-flex shrink-0 items-center gap-1 px-2 py-1 text-[11px] font-semibold transition-colors",
-                        attachingId === doc.id
-                          ? "cursor-not-allowed bg-[#EEF6FB] text-[#287EAD] opacity-60"
-                          : "bg-[#287EAD]/10 text-[#287EAD] hover:bg-[#287EAD] hover:text-white"
-                      )}
-                    >
-                      {attachingId === doc.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Paperclip className="h-3 w-3" />}
-                      Attach
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+      {status?.suppliers?.length ? (
+        <p className={`mt-3 text-xs font-medium ${status.all_received ? "text-emerald-700" : "text-amber-700"}`}>
+          {status.all_received ? "All selected suppliers have responded. Finance can approve this stage." : "Finance approval is held until every selected supplier has responded."}
+        </p>
+      ) : null}
 
-        {/* Empty state */}
-        {existingAttachments.length === 0 && pendingFiles.length === 0 && !loadingIngested && ingestedDocs.length === 0 && (
-          <p className="py-2 text-xs text-[#8C969E]">
-            No supplier documents attached yet. Use the <strong>Attach files</strong> button to upload quotations or invoices received from suppliers.
-          </p>
-        )}
-      </div>
-    </div>
+      <input
+        ref={fileInput}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(event) => {
+          const files = Array.from(event.currentTarget.files || []);
+          const code = event.currentTarget.dataset.supplierCode;
+          const supplier = status?.suppliers?.find((item) => item.code === code);
+          event.currentTarget.value = "";
+          if (supplier && files.length) uploadMutation.mutate({ supplier, files });
+        }}
+      />
+    </section>
   );
 }

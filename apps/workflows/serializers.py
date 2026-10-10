@@ -104,7 +104,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             # notification-step fields
             "notify_user", "notify_user_name", "notify_email", "notify_emails",
             "notification_subject", "notification_message",
-            "notify_include_items_table", "notify_table_field", "notify_recipient_type", "notify_supplier_field",
+            "notify_include_items_table", "notify_table_field", "notify_table_columns", "notify_recipient_type", "notify_supplier_field",
         ]
 
     def get_assignee_type(self, obj):
@@ -180,7 +180,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             # notification-step
             "notify_user", "notify_email", "notify_emails",
             "notification_subject", "notification_message",
-            "notify_include_items_table", "notify_table_field", "notify_recipient_type", "notify_supplier_field",
+            "notify_include_items_table", "notify_table_field", "notify_table_columns", "notify_recipient_type", "notify_supplier_field",
         ]
         extra_kwargs = {
             "instructions":            {"required": False, "allow_blank": True},
@@ -193,6 +193,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "notification_message":    {"required": False, "allow_blank": True},
             "notify_include_items_table": {"required": False},
             "notify_table_field":       {"required": False, "allow_null": True, "allow_blank": True},
+            "notify_table_columns":     {"required": False},
             "notify_recipient_type":   {"required": False, "allow_blank": True},
             "notify_supplier_field":   {"required": False, "allow_null": True, "allow_blank": True},
         }

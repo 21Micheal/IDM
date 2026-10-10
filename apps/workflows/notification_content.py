@@ -108,7 +108,11 @@ def list_form_table_fields(document) -> list[dict[str, Any]]:
     return tables
 
 
-def build_items_table_html(document, table_field_key: str | None = None) -> str:
+def build_items_table_html(
+    document,
+    table_field_key: str | None = None,
+    table_column_keys: list[str] | None = None,
+) -> str:
     """
     Build a styled HTML table from a form table field.
     If table_field_key is omitted, uses the first table with rows.
@@ -142,6 +146,11 @@ def build_items_table_html(document, table_field_key: str | None = None) -> str:
         # Infer columns from first row keys
         first = rows[0] if isinstance(rows[0], dict) else {}
         columns = [{"key": k, "label": k, "type": "text"} for k in first.keys() if not str(k).startswith("_")]
+    selected_columns = [str(key) for key in (table_column_keys or []) if str(key)]
+    if table_column_keys is not None:
+        columns = [column for column in columns if str(column.get("key")) in selected_columns]
+    if not columns:
+        return ""
 
     thead = "".join(
         f'<th style="border:1px solid #C8CDD2;background:#F0F4F7;padding:8px 10px;'
@@ -183,6 +192,7 @@ def build_notification_context(
     step_name: str = "",
     include_items_table: bool = False,
     table_field_key: str | None = None,
+    table_column_keys: list[str] | None = None,
 ) -> dict[str, str]:
     """Flatten document / payment-run / form values into string placeholders."""
     ctx: dict[str, str] = {
@@ -231,7 +241,7 @@ def build_notification_context(
             ctx[str(key)] = _format_scalar(value)
 
         if include_items_table:
-            ctx["items_table"] = build_items_table_html(document, table_field_key)
+            ctx["items_table"] = build_items_table_html(document, table_field_key, table_column_keys)
 
     return ctx
 

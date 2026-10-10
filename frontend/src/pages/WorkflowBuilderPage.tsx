@@ -69,6 +69,8 @@ interface WorkflowStep {
   notify_include_items_table?: boolean;
   /** Form table field key to render as the items/quotation table */
   notify_table_field?: string | null;
+  /** Selected columns to expose in the supplier notification table */
+  notify_table_columns?: string[] | null;
   /** Recipient type: "user" | "email" | "supplier" */
   notify_recipient_type?: "user" | "email" | "supplier";
   /** Form field key containing supplier codes (when notify_recipient_type is "supplier") */
@@ -497,6 +499,7 @@ function blankNotificationStep(): WorkflowStep {
     notification_message: "Hello,\n\nThis is an automated notification regarding the document workflow.\n\nThank you.",
     notify_include_items_table: false,
     notify_table_field: null,
+    notify_table_columns: null,
     notify_recipient_type: "email",
     notify_supplier_field: null,
   };
@@ -538,6 +541,7 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
   rest.notification_message         = "";
   rest.notify_include_items_table   = false;
   rest.notify_table_field           = null;
+  rest.notify_table_columns         = null;
   rest.notify_recipient_type        = undefined;
   rest.notify_supplier_field        = null;
 
@@ -1301,9 +1305,19 @@ function NotificationStepFields({
             }
             if (type === "table") {
               seen.add(key);
-              const columns = (f.columns ?? [])
+              const sourceColumns = (f.columns ?? [])
                 .filter((c: any) => c?.key || c?.id)
                 .filter((c: any) => !["file", "multi_file", "button", "signature"].includes(String(c?.type || "")))
+              for (const column of sourceColumns) {
+                if (column?.type === "sunsystems_account" || column?.sunsystems?.role === "supplier_code") {
+                  const columnKey = String(column.key || column.id);
+                  supplierFields.push({
+                    key: `${key}.${columnKey}`,
+                    label: `${label} — ${String(column.label || columnKey)}`,
+                  });
+                }
+              }
+              const columns = sourceColumns
                 .map((c: any) => ({ key: String(c.key || c.id), label: String(c.label || c.key || c.id) }));
               tableFields.push({ key, label, columns });
               continue;
@@ -1496,7 +1510,8 @@ function NotificationStepFields({
                   ariaLabel="Supplier field"
                 />
                 <p className="text-[11px] text-muted-foreground">
-                  Emails will be sent to the suppliers selected in this field when the notification fires.
+                  Use the form&apos;s <strong>Send RFQ</strong> action to email selected suppliers. Replies to the configured
+                  invoice mailbox are matched back to this requisition; the notification step will not advance the RFQ stage.
                 </p>
               </>
             )}
@@ -1665,7 +1680,13 @@ function NotificationStepFields({
               <>
                 <CustomListbox
                   value={step.notify_table_field ?? ""}
-                  onChange={(v) => onChange({ notify_table_field: v || null })}
+                  onChange={(v) => {
+                    const selectedTable = tableFields.find((table) => table.key === v);
+                    onChange({
+                      notify_table_field: v || null,
+                      notify_table_columns: selectedTable?.columns.map((column) => column.key) ?? [],
+                    });
+                  }}
                   options={[
                     { value: "", label: "Select table field" },
                     ...tableFields.map((t) => ({ value: t.key, label: t.label })),
@@ -1678,28 +1699,47 @@ function NotificationStepFields({
                   const selected = tableFields.find((t) => t.key === step.notify_table_field) ?? tableFields[0];
                   if (!selected) return null;
                   const cols = selected.columns.length ? selected.columns : [{ key: "col", label: "…" }];
+                  const selectedColumns = step.notify_table_columns ?? selected.columns.map((column) => column.key);
                   return (
-                    <div className="rounded border border-dashed border-sky-300 bg-sky-50 px-3 py-2">
+                    <div className="rounded border border-dashed border-sky-300 bg-sky-50 px-3 py-2 space-y-2">
                       <p className="text-[11px] text-sky-800 font-medium">
-                        Preview columns from “{selected.label}”:
+                        Choose the columns suppliers should receive from “{selected.label}”:
                       </p>
+                      <div className="grid gap-1 sm:grid-cols-2">
+                        {selected.columns.map((column) => (
+                          <label key={column.key} className="flex items-center gap-2 text-xs text-sky-900">
+                            <input
+                              type="checkbox"
+                              checked={selectedColumns.includes(column.key)}
+                              onChange={(event) => {
+                                const next = event.target.checked
+                                  ? [...selectedColumns, column.key]
+                                  : selectedColumns.filter((key) => key !== column.key);
+                                onChange({ notify_table_columns: next });
+                              }}
+                              className="h-3.5 w-3.5 accent-[#287EAD]"
+                            />
+                            {column.label}
+                          </label>
+                        ))}
+                      </div>
                       <div className="mt-1.5 overflow-x-auto rounded border border-sky-200 text-[10px]">
                         <div
                           className="grid bg-sky-100 font-semibold text-sky-700"
-                          style={{ gridTemplateColumns: `repeat(${cols.length}, minmax(4rem, 1fr))` }}
+                          style={{ gridTemplateColumns: `repeat(${Math.max(1, selected.columns.filter((column) => selectedColumns.includes(column.key)).length)}, minmax(4rem, 1fr))` }}
                         >
-                          {cols.map((c, i) => (
-                            <div key={c.key} className={clsx("px-2 py-1", i < cols.length - 1 && "border-r border-sky-200")}>
+                          {cols.filter((column) => selectedColumns.includes(column.key)).map((c, i, visibleColumns) => (
+                            <div key={c.key} className={clsx("px-2 py-1", i < visibleColumns.length - 1 && "border-r border-sky-200")}>
                               {c.label}
                             </div>
                           ))}
                         </div>
                         <div
                           className="grid text-sky-600"
-                          style={{ gridTemplateColumns: `repeat(${cols.length}, minmax(4rem, 1fr))` }}
+                          style={{ gridTemplateColumns: `repeat(${Math.max(1, selected.columns.filter((column) => selectedColumns.includes(column.key)).length)}, minmax(4rem, 1fr))` }}
                         >
-                          {cols.map((c, i) => (
-                            <div key={c.key} className={clsx("border-t border-sky-200 px-2 py-1 italic", i < cols.length - 1 && "border-r border-sky-200")}>
+                          {cols.filter((column) => selectedColumns.includes(column.key)).map((c, i, visibleColumns) => (
+                            <div key={c.key} className={clsx("border-t border-sky-200 px-2 py-1 italic", i < visibleColumns.length - 1 && "border-r border-sky-200")}>
                               from form…
                             </div>
                           ))}

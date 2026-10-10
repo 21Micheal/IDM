@@ -24,10 +24,12 @@ import hashlib
 import logging
 import mimetypes
 import os
+import re
 from email.message import Message
 from email.utils import getaddresses, parsedate_to_datetime
 
 from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
 
@@ -316,7 +318,8 @@ def import_email(mailbox: Mailbox, fetched, *, user) -> dict:
     # Sender allowlist: drop unwanted senders (newsletters etc.) cheaply, before
     # decoding attachments or storing the raw message. Still recorded so the
     # message is deduped and the decision is auditable.
-    if not mailbox.is_sender_allowed(sender):
+    is_rfq_reply = bool(re.search(r"\[RFQ-REPLY:[a-f0-9]{40}\]", subject, re.IGNORECASE))
+    if not mailbox.is_sender_allowed(sender) and not is_rfq_reply:
         IngestedEmail.objects.create(
             mailbox=mailbox,
             message_id=msg_id[:512],
@@ -353,6 +356,13 @@ def import_email(mailbox: Mailbox, fetched, *, user) -> dict:
         )
     except Exception:  # noqa: BLE001 - storing the .eml must not abort ingestion
         logger.exception("import_email: could not store raw .eml for %s", msg_id)
+
+    # RFQ responses are correlated by the reply token embedded in the outgoing
+    # subject and attached directly to the requisition's Multiple Attachments
+    # field. They must not enter the standalone document review queue.
+    rfq_result = _import_rfq_response(record, subject, sender, attachments)
+    if rfq_result is not None:
+        return rfq_result
 
     if not attachments:
         record.status = IngestedEmail.Status.SKIPPED
@@ -461,6 +471,104 @@ def import_email(mailbox: Mailbox, fetched, *, user) -> dict:
     return {"message_id": msg_id, "uid": fetched.uid, "status": record.status,
             "detail": record.detail, "documents_created": len(created),
             "bulk_upload_id": str(bulk_upload.id)}
+
+
+def _import_rfq_response(record, subject: str, sender: str, attachments) -> dict | None:
+    """Attach a correlated supplier reply to its requisition, if it is valid."""
+    match = re.search(r"\[RFQ-REPLY:([a-f0-9]{40})\]", subject or "", re.IGNORECASE)
+    if not match:
+        return None
+
+    from django.utils.text import get_valid_filename
+    from .rfq import mark_supplier_response, rfq_state
+
+    token = match.group(1)
+    document = Document.objects.filter(
+        metadata__form__rfq_response__reply_token=token,
+    ).first()
+    if not document:
+        record.status = IngestedEmail.Status.SKIPPED
+        record.detail = "RFQ reply token was not recognized."
+        record.save()
+        return {"message_id": record.message_id, "uid": record.imap_uid,
+                "status": record.status, "detail": record.detail}
+
+    metadata = document.metadata if isinstance(document.metadata, dict) else {}
+    form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+    state = dict(rfq_state(form))
+    suppliers = state.get("suppliers") if isinstance(state.get("suppliers"), list) else []
+    supplier = next((item for item in suppliers if isinstance(item, dict)
+                     and str(item.get("email") or "").strip().casefold() == sender.casefold()), None)
+    if not supplier:
+        record.status = IngestedEmail.Status.SKIPPED
+        record.detail = "RFQ reply sender does not match an invited supplier."
+        record.save()
+        return {"message_id": record.message_id, "uid": record.imap_uid,
+                "status": record.status, "detail": record.detail}
+    if not attachments:
+        record.status = IngestedEmail.Status.SKIPPED
+        record.detail = "Supplier reply had no permitted document attachments."
+        record.save()
+        return {"message_id": record.message_id, "uid": record.imap_uid,
+                "status": record.status, "detail": record.detail}
+
+    field_key = str(state.get("attachment_field") or "").strip()
+    if not field_key:
+        record.status = IngestedEmail.Status.FAILED
+        record.detail = "The requisition has no configured Multiple Attachments field."
+        record.save()
+        return {"message_id": record.message_id, "uid": record.imap_uid,
+                "status": record.status, "detail": record.detail}
+
+    values = dict(form.get("values") or {})
+    used = []
+    for key in values:
+        prefix = f"{field_key}~"
+        if str(key).startswith(prefix):
+            try:
+                used.append(int(str(key)[len(prefix):]))
+            except ValueError:
+                pass
+    index = max(used, default=-1) + 1
+    file_names = []
+    for filename, content, mime in attachments:
+        safe_name = get_valid_filename(filename or "supplier-response")
+        storage_path = default_storage.save(
+            f"documents/{document.pk}/form_attachments/rfq_{record.mailbox_id}_{record.imap_uid}_{index}_{safe_name}",
+            ContentFile(content),
+        )
+        values[f"{field_key}~{index}"] = {
+            "type": "file",
+            "name": filename or safe_name,
+            "size": len(content),
+            "content_type": mime or mimetypes.guess_type(filename or "")[0] or "",
+            "storage_path": storage_path,
+        }
+        file_names.append(filename or safe_name)
+        index += 1
+
+    mark_supplier_response(
+        state,
+        str(supplier.get("code") or ""),
+        source="email",
+        files=[{"name": name} for name in file_names],
+    )
+    form["values"] = values
+    from .form_attachments import rebuild_attachments
+    form["attachments"] = rebuild_attachments(values)
+    form["rfq_response"] = state
+    metadata["form"] = form
+    document.metadata = metadata
+    document.save(update_fields=["metadata", "updated_at"])
+
+    record.status = IngestedEmail.Status.IMPORTED
+    record.attachment_count = len(attachments)
+    record.documents_created = 0
+    record.detail = f"Attached {len(attachments)} supplier response file(s) to {document.reference_number}."
+    record.save()
+    return {"message_id": record.message_id, "uid": record.imap_uid,
+            "status": record.status, "detail": record.detail,
+            "requisition_id": str(document.pk), "files_attached": len(attachments)}
 
 
 def _link_related_set(documents: list[Document], *, user) -> None:

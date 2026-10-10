@@ -915,11 +915,20 @@ class WorkflowService:
                 },
             )
 
-        # Fire the notification email asynchronously for both documents and payment runs
-        if doc is not None:
-            WorkflowService._send_notification_step_email(step, document=doc)
-        elif instance.payment_run:
-            WorkflowService._send_notification_step_email(step, payment_run=instance.payment_run)
+        # During RFQ, suppliers are invited through the form's explicit Send RFQ
+        # action so finance can collect responses before approval. Supplier
+        # notifications in other workflow phases retain automatic dispatch.
+        doc_form = ((getattr(doc, "metadata", None) or {}).get("form") or {}) if doc else {}
+        is_rfq_supplier_notification = (
+            doc is not None
+            and (getattr(step, "notify_recipient_type", "") or "") == "supplier"
+            and str(doc_form.get("workflow_phase") or "").strip().lower() == "rfq"
+        )
+        if not is_rfq_supplier_notification:
+            if doc is not None:
+                WorkflowService._send_notification_step_email(step, document=doc)
+            elif instance.payment_run:
+                WorkflowService._send_notification_step_email(step, payment_run=instance.payment_run)
 
         # Immediately advance — notification steps never block
         WorkflowService._advance_step(instance, order)
@@ -948,6 +957,7 @@ class WorkflowService:
             template_id = str(step.template_id) if step.template_id else None
             include_items_table = bool(getattr(step, "notify_include_items_table", False))
             table_field_key = (getattr(step, "notify_table_field", None) or "").strip() or None
+            table_column_keys = getattr(step, "notify_table_columns", None)
 
             # Resolve supplier emails if recipient type is "supplier"
             recipient_type = getattr(step, "notify_recipient_type", "email") or "email"
@@ -971,6 +981,7 @@ class WorkflowService:
                     template_id=template_id,
                     include_items_table=include_items_table,
                     table_field_key=table_field_key,
+                    table_column_keys=table_column_keys,
                 )
             )
         except Exception:
@@ -987,30 +998,44 @@ class WorkflowService:
         Resolve supplier emails from form data + SunSystems Supplier/Query.
         Returns unique email addresses for the selected supplier codes.
         """
+        contacts = WorkflowService._resolve_supplier_contacts(document, supplier_field_key)
+        return list(dict.fromkeys(
+            str(item.get("email") or "").strip()
+            for item in contacts
+            if str(item.get("email") or "").strip()
+        ))
+
+    @staticmethod
+    def _resolve_supplier_contacts(document, supplier_field_key: str) -> list[dict]:
+        """Resolve selected top-level or table suppliers to SSC code/name/email."""
         try:
             metadata = document.metadata if isinstance(document.metadata, dict) else {}
             form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
             form_values = form.get("values") if isinstance(form.get("values"), dict) else {}
-            raw = form_values.get(supplier_field_key)
+            if "." in str(supplier_field_key or ""):
+                table_key, column_key = str(supplier_field_key).split(".", 1)
+                rows = form_values.get(table_key)
+                raw = [row.get(column_key) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+            else:
+                raw = form_values.get(supplier_field_key)
 
             # Normalize stored value → list of supplier codes.
             # AccountMultiSelect stores string[] (or a single string when multi=false).
             codes: list[str] = []
-            if isinstance(raw, str) and raw.strip():
-                codes = [raw.strip()]
-            elif isinstance(raw, list):
-                for item in raw:
-                    if isinstance(item, str) and item.strip():
-                        codes.append(item.strip())
-                    elif isinstance(item, dict):
-                        code = (
-                            item.get("account_code")
-                            or item.get("SupplierCode")
-                            or item.get("code")
-                            or item.get("value")
-                        )
-                        if code:
-                            codes.append(str(code).strip())
+            raw_values = raw if isinstance(raw, list) else [raw]
+            for item in raw_values:
+                if isinstance(item, str) and item.strip():
+                    codes.append(item.strip())
+                elif isinstance(item, dict):
+                    code = (
+                        item.get("account_code")
+                        or item.get("SupplierCode")
+                        or item.get("code")
+                        or item.get("value")
+                        or item.get("id")
+                    )
+                    if code:
+                        codes.append(str(code).strip())
 
             codes = [c for c in codes if c]
             if not codes:
@@ -1064,7 +1089,7 @@ class WorkflowService:
             response_xml = client.execute("Supplier", "Query", ssc_payload)
 
             wanted = {c.upper() for c in codes}
-            emails: list[str] = []
+            contacts: list[dict] = []
             seen: set[str] = set()
             root = ET.fromstring(response_xml or "<SSC/>")
             for supplier in root.findall(".//Supplier"):
@@ -1072,19 +1097,23 @@ class WorkflowService:
                 if wanted and code.upper() not in wanted:
                     continue
                 email = (supplier.findtext("EMailAddress") or "").strip()
-                if email and email.lower() not in seen:
-                    seen.add(email.lower())
-                    emails.append(email)
+                if code and code.upper() not in seen:
+                    seen.add(code.upper())
+                    contacts.append({
+                        "code": code,
+                        "name": (supplier.findtext("SupplierName") or supplier.findtext("Description") or "").strip(),
+                        "email": email,
+                    })
 
-            if not emails:
+            if not contacts:
                 logger.warning(
-                    "SunSystems returned no emails for suppliers %s on document %s",
+                    "SunSystems returned no supplier contacts for %s on document %s",
                     codes,
                     getattr(document, "pk", None),
                 )
-            return emails
+            return contacts
         except Exception:
-            logger.exception("Failed to resolve supplier emails for field %s", supplier_field_key)
+            logger.exception("Failed to resolve supplier contacts for field %s", supplier_field_key)
             return []
 
     @staticmethod

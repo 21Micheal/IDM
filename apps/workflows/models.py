@@ -244,6 +244,12 @@ class WorkflowStep(models.Model):
         null=True,
         help_text="Form table field key to render as the items table in the email.",
     )
+    notify_table_columns = models.JSONField(
+        default=None,
+        blank=True,
+        null=True,
+        help_text="Selected form table column keys to include in the notification email.",
+    )
     # Recipient type: "user" | "email" | "supplier"
     notify_recipient_type = models.CharField(
         max_length=20,

@@ -965,18 +965,18 @@ export default function FormDetailPage() {
           )}
 
           {/* ── Supplier Invoices & Quotations panel (RFQ stage) ── */}
-          {step === "rfq_approved" && (
+          {String((formData as any)?.workflow_phase || "").toLowerCase() === "rfq" && (
             <InvoiceAttachmentsPanel
               documentId={doc.id}
-              supplierCodes={(doc.metadata as any)?.rfq?.supplier_codes ?? []}
-              existingAttachments={
-                Array.isArray((formData as any)?.values?.supplier_attachments)
-                  ? (formData as any).values.supplier_attachments
-                  : []
-              }
-              onAttached={() => {
+              values={formData?.values ?? {}}
+              onBeforeSend={async () => {
+                if (!formDirtyRef.current) return;
+                const { jsonValues, attachments } = collectFormAttachments(formValues);
+                await documentsAPI.updateForm(doc.id, jsonValues, attachments);
+                formDirtyRef.current = false;
                 qc.invalidateQueries({ queryKey: ["form", id] });
               }}
+              onUpdated={() => qc.invalidateQueries({ queryKey: ["form", id] })}
             />
           )}
 
