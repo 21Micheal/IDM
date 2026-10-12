@@ -907,7 +907,7 @@ class UserGroupViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy",
-                           "add_member", "remove_member", "set_permissions", "duplicate"):
+                           "add_member", "remove_member", "set_permissions", "set_requisition_templates", "duplicate"):
             return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
@@ -1086,6 +1086,23 @@ class UserGroupViewSet(viewsets.ModelViewSet):
         return Response(GroupPermissionSerializer(created, many=True).data)
 
     @action(detail=True, methods=["post"])
+    def set_requisition_templates(self, request, pk=None):
+        """Set the requisition forms that members of this group may start."""
+        from apps.templates_engine.models import DocumentTemplate
+
+        group = self.get_object()
+        ids = request.data.get("template_ids", [])
+        if not isinstance(ids, list):
+            return Response({"detail": "template_ids must be a list."}, status=400)
+        templates = DocumentTemplate.objects.filter(
+            id__in=ids, is_active=True, type="built", kind="form", workflow_type="requisition"
+        )
+        if templates.count() != len({str(value) for value in ids}):
+            return Response({"detail": "One or more selected forms are invalid or inactive."}, status=400)
+        group.requisition_templates.set(templates)
+        return Response({"template_ids": [str(value) for value in group.requisition_templates.values_list("id", flat=True)]})
+
+    @action(detail=True, methods=["post"])
     def set_admin_access(self, request, pk=None):
         return Response(
             {"detail": "Administrator access is managed on user accounts, not groups."},
@@ -1131,6 +1148,7 @@ class UserGroupViewSet(viewsets.ModelViewSet):
                 for p in original.permissions.all()
             ]
             GroupPermission.objects.bulk_create(perms)
+            copy.requisition_templates.set(original.requisition_templates.all())
 
         AuditLog.objects.create(
             event=AuditEvent.PERMISSION_CHANGED,

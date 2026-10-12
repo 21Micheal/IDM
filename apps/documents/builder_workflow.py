@@ -370,9 +370,13 @@ def requisition_type_config(document: Document) -> tuple[str, str]:
 
 
 def is_travel_requisition(document: Document) -> bool:
-    """True when the requisition-type field holds the configured Travel value."""
+    """True when the selected requisition form is configured as Travel."""
     if not is_procurement_document(document):
         return False
+    form = ((document.metadata or {}).get("form") or {})
+    category = str(form.get("requisition_category") or "").strip().lower()
+    if category:
+        return category == "travel"
     field, travel_value = requisition_type_config(document)
     if not field:
         return False
@@ -387,7 +391,27 @@ def is_travel_requisition(document: Document) -> bool:
 
 
 def travel_requisition_skips_rfq(document: Document) -> bool:
-    """Travel requisitions always bypass RFQ, even when General/Imprest lines exist."""
+    """Use the template-level procurement path; retain legacy snapshots."""
+    if not is_procurement_document(document):
+        return False
+    form = ((document.metadata or {}).get("form") or {})
+    if "skip_rfq" in form:
+        return bool(form.get("skip_rfq"))
+    template_id = form.get("template_id")
+    if template_id:
+        try:
+            from apps.templates_engine.models import DocumentTemplate
+            template = DocumentTemplate.objects.filter(pk=template_id).only("skip_rfq", "requisition_type_field", "travel_type_value").first()
+            if template:
+                if template.skip_rfq:
+                    return True
+                # Documents created before the template-level path setting keep
+                # their old dropdown-based stage behavior.
+                if template.requisition_type_field:
+                    return is_travel_requisition(document)
+                return False
+        except Exception:
+            pass
     return is_travel_requisition(document)
 
 

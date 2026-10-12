@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { groupsAPI, documentTypesAPI, usersAPI, normalizeListResponse, dmsSettingsAPI } from "@/services/api";
+import { groupsAPI, documentTypesAPI, usersAPI, normalizeListResponse, dmsSettingsAPI, templatesAPI } from "@/services/api";
 import {
-  Plus, Users, Shield, ChevronRight, X, Loader2,
+  Plus, Users, Shield, ChevronRight, X, Loader2, FileText,
   Check, UserPlus, Settings2, Info, Trash2, Copy,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
@@ -19,7 +19,7 @@ interface GroupPerm {
   action: string;
 }
 interface Member    { id: string; user: { id: string; full_name: string; email: string; job_description?: string }; expires_at: string | null; is_active: boolean }
-interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean; sees_all_documents: boolean }
+interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean; sees_all_documents: boolean; requisition_template_ids?: string[] }
 interface User      { id: string; full_name: string; email: string; job_description?: string }
 
 const ADMIN_GROUP_NAME = "Administrators";
@@ -428,7 +428,7 @@ function GroupDetail({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<"permissions" | "members">("permissions");
+  const [tab, setTab] = useState<"permissions" | "members" | "requisitions">("permissions");
   const [userSearch, setUserSearch] = useState("");
   const isHodGroup = group.name === HOD_GROUP_NAME;
   const isBuiltInGroup = isHodGroup;
@@ -448,6 +448,19 @@ function GroupDetail({
     queryKey: ["group", group.id],
     queryFn: () => groupsAPI.get(group.id).then((r) => r.data),
   });
+  const { data: requisitionTemplates = [] } = useQuery<any[]>({
+    queryKey: ["group-requisition-templates"],
+    queryFn: async () => {
+      const response = await templatesAPI.list({ type: "built" });
+      const list = response.data.results ?? response.data;
+      return Array.isArray(list) ? list.filter((item: any) => item.kind === "form" && item.workflow_type === "requisition") : [];
+    },
+    enabled: tab === "requisitions",
+  });
+  const [selectedRequisitionTemplates, setSelectedRequisitionTemplates] = useState<string[]>([]);
+  useEffect(() => {
+    setSelectedRequisitionTemplates(groupDetail?.requisition_template_ids ?? []);
+  }, [groupDetail?.requisition_template_ids]);
 
   const { data: allUsers = [] } = useQuery<User[]>({
     queryKey: ["users-search", userSearch],
@@ -466,6 +479,15 @@ function GroupDetail({
       qc.invalidateQueries({ queryKey: ["groups"] });
     },
     onError: (err) => toast.error(extractApiError(err, "Failed to save permissions")),
+  });
+  const setRequisitionTemplatesMutation = useMutation({
+    mutationFn: () => groupsAPI.setRequisitionTemplates(group.id, selectedRequisitionTemplates),
+    onSuccess: () => {
+      toast.success("Requisition forms assigned to this group.");
+      qc.invalidateQueries({ queryKey: ["group", group.id] });
+      qc.invalidateQueries({ queryKey: ["groups"] });
+    },
+    onError: (err) => toast.error(extractApiError(err, "Failed to assign requisition forms")),
   });
 
   const setSeesAllMutation = useMutation({
@@ -578,6 +600,7 @@ function GroupDetail({
           <nav className="-mb-px flex gap-8">
             {[
               { id: "permissions", label: "Permissions", icon: Shield },
+              { id: "requisitions", label: "Requisition forms", icon: FileText },
               { id: "members", label: `Members (${group.member_count})`, icon: Users },
             ].map(({ id, label, icon: Icon }) => (
               <button
@@ -627,6 +650,44 @@ function GroupDetail({
                 onSave={(perms) => setPermsMutation.mutate(perms)}
                 isSaving={setPermsMutation.isPending}
               />
+            </div>
+          )}
+
+          {tab === "requisitions" && (
+            <div className="space-y-5">
+              <div className="border border-[#C8CDD2] bg-white p-5">
+                <h3 className="text-sm font-semibold text-foreground">Forms members may raise</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Members can start forms assigned to any of their groups. If they have one available form, it opens directly; if they have several, they can choose.
+                </p>
+                <div className="mt-4 space-y-2">
+                  {requisitionTemplates.map((template: any) => (
+                    <label key={template.id} className="flex cursor-pointer items-start gap-3 border border-[#E2E6E9] p-3 hover:bg-[#F8FAFB]">
+                      <input
+                        type="checkbox"
+                        checked={selectedRequisitionTemplates.includes(template.id)}
+                        onChange={(event) => setSelectedRequisitionTemplates((current) => event.target.checked
+                          ? [...current, template.id]
+                          : current.filter((id) => id !== template.id))}
+                        className="mt-0.5 h-4 w-4 accent-[#287EAD]"
+                      />
+                      <span>
+                        <span className="block text-sm font-medium text-foreground">{template.name}</span>
+                        <span className="block text-xs text-muted-foreground">{template.document_type_name || "No document type"}</span>
+                      </span>
+                    </label>
+                  ))}
+                  {requisitionTemplates.length === 0 && <p className="text-sm text-muted-foreground">No active requisition forms found.</p>}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRequisitionTemplatesMutation.mutate()}
+                  disabled={setRequisitionTemplatesMutation.isPending}
+                  className="mt-4 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+                >
+                  {setRequisitionTemplatesMutation.isPending ? "Saving…" : "Save form assignment"}
+                </button>
+              </div>
             </div>
           )}
 

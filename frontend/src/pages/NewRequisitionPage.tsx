@@ -65,14 +65,10 @@ export default function NewRequisitionPage() {
   const { data: templates = [], isLoading: loadingTemplates } = useQuery({
     queryKey: ["templates", "requisition-forms"],
     queryFn: async () => {
-      const res = await templatesAPI.list({ type: "built" });
+      const res = await templatesAPI.list({ type: "built", requisition_forms: true });
       const all = res.data?.results || res.data || [];
       return Array.isArray(all)
-        ? all.filter(
-            (t: any) =>
-              t.name?.toLowerCase().includes("requisition") ||
-              t.document_type_name?.toLowerCase().includes("requisition")
-          )
+        ? all
         : [];
     },
     ...QUERY_SHORT_STALE,
@@ -93,6 +89,11 @@ export default function NewRequisitionPage() {
       setSelectedTemplateId(templates[0].id);
     }
   }, [templates, selectedTemplateId, preselectedTemplateId]);
+
+  useEffect(() => {
+    if (!preselectedTemplateId || loadingTemplates || templates.some((template: any) => template.id === preselectedTemplateId)) return;
+    setSelectedTemplateId(templates[0]?.id ?? null);
+  }, [templates, preselectedTemplateId, loadingTemplates]);
 
   // Apply schema defaults and dynamic formulas (IF, regex, math) when template loads or updates
   // while preserving fields the user has already touched ("surviving updates").
@@ -209,6 +210,7 @@ export default function NewRequisitionPage() {
         title: (jsonValues.title as string) || (selectedTemplate?.name ? `Requisition — ${selectedTemplate.name}` : "Requisition"),
         document_type_id: selectedTemplate?.document_type_id,
         draft_from_template: true,
+        requisition_submission: true,
         attachments,
       };
       return templatesAPI.fillTemplateWithAttachments(payload);
@@ -252,6 +254,7 @@ export default function NewRequisitionPage() {
         title: (jsonValues.title as string) || (selectedTemplate?.name ? `Requisition — ${selectedTemplate.name}` : "Requisition"),
         document_type_id: selectedTemplate?.document_type_id,
         draft_from_template: false,
+        requisition_submission: true,
         attachments,
       };
       const res = await templatesAPI.fillTemplateWithAttachments(payload);
@@ -303,17 +306,17 @@ export default function NewRequisitionPage() {
               <FileText className="h-5 w-5 text-amber-500" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-[#1F2933]">No Requisition Templates Found</h2>
+              <h2 className="text-base font-bold text-[#1F2933]">No Requisition Forms Assigned</h2>
               <p className="mt-1.5 text-sm text-[#5E6870]">
-                Create a requisition form template in your Form Builder to get started.
+                Ask an administrator to assign a requisition form to one of your groups.
               </p>
             </div>
           </div>
           <button
-            onClick={() => navigate("/forms/new/builder")}
+            onClick={() => navigate(-1)}
             className="mt-6 inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99]"
           >
-            <FileText className="h-4 w-4" /> Open Form Builder
+            <ArrowLeft className="h-4 w-4" /> Go back
           </button>
         </div>
       </div>

@@ -3033,7 +3033,7 @@ echo "✓ DocVault LibreOffice integration installed."
         from apps.workflows.models import WorkflowInstance
         instance = WorkflowInstance.objects.filter(
             document=doc, status="in_progress",
-        ).select_related("template").order_by("-created_at").first()
+        ).select_related("template").order_by("-started_at").first()
         if not instance:
             return Response({"detail": "There is no active RFQ workflow."}, status=400)
         step = instance.template.steps.filter(

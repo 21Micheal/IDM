@@ -302,6 +302,7 @@ class UserGroupSerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     has_admin_access = serializers.SerializerMethodField()
+    requisition_template_ids = serializers.SerializerMethodField()
 
     class Meta:
         model  = UserGroup
@@ -309,6 +310,7 @@ class UserGroupSerializer(serializers.ModelSerializer):
             "id", "name", "description", "is_active", "sees_all_documents",
             "permissions", "has_admin_access", "member_count", "created_by", "created_at",
             "head", "head_id",
+            "requisition_template_ids",
         ]
         read_only_fields = ["id", "created_by", "created_at", "head"]
 
@@ -317,6 +319,9 @@ class UserGroupSerializer(serializers.ModelSerializer):
 
     def get_has_admin_access(self, obj):
         return obj.has_admin_access
+
+    def get_requisition_template_ids(self, obj):
+        return [str(value) for value in obj.requisition_templates.values_list("id", flat=True)]
 
     def validate(self, attrs):
         if self.instance and self.instance.name in (

@@ -727,10 +727,11 @@ export interface Template {
   sections: TemplateSection[];
   sunsystems?: SunSystemsConfig;
   workflow_type?: "imprest" | "requisition";
-  /* Requisition-type gating: the form dropdown that names the requisition
-   * type, and the value (default "Travel") that skips the RFQ stage. */
+  /* Requisition forms can be configured to bypass RFQ entirely. */
   requisition_type_field?: string;
   travel_type_value?: string;
+  skip_rfq?: boolean;
+  requisition_category?: "standard" | "travel";
   travel_retirement?: TravelRetirementConfig;
 }
 
@@ -7283,220 +7284,247 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
 
   const fieldCount = template.sections.reduce((a, s) => a + s.fields.length, 0);
 
-  // Dropdown-ish fields that can carry the requisition type ("Travel", etc).
-  const requisitionTypeFields = template.sections
-    .flatMap((s) => s.fields ?? [])
-    .filter((f) => f.key && ["select", "radio"].includes(f.type));
-  const requisitionTypeOptions = requisitionTypeFields.map((f) => ({ value: f.key, label: f.label || f.key }));
-  const selectedTypeField = requisitionTypeFields.find((f) => f.key === template.requisition_type_field);
-  const travelValueOptions = selectedTypeField?.options ?? [];
-
   const iCls =
     "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
     "placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
 
+  const [settingsPane, setSettingsPane] = useState<"procurement" | "finance">("procurement");
+
   return (
-    <div className="mx-auto max-w-4xl space-y-5 p-8">
-      <div className="border border-[#C8CDD2] bg-white shadow-sm">
-        <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-          <h2 className="text-sm font-bold text-[#1F2933]">Template metadata</h2>
-          <p className="text-xs text-[#5E6870] mt-0.5">Used for search, organisation, and document filing.</p>
-        </div>
-        <div className="space-y-4 p-5">
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Name</label>
-            <input value={template.name} onChange={(e) => onCommit({ name: e.target.value })} className={iCls} />
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Description</label>
-            <textarea value={template.description ?? ""} rows={3}
-              onChange={(e) => onCommit({ description: e.target.value })}
-              className={iCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document type <span className="text-red-400 normal-case font-normal">*</span></label>
-            <div className="flex gap-2">
-              <CustomListbox
-                value={template.document_type_id ?? ""}
-                onChange={(val) => onCommit({ document_type_id: val })}
-                options={[{ value: "", label: "Select document type" }, ...documentTypes.map((type) => ({ value: type.id, label: type.name }))]}
-                className={cn(iCls, "flex-1")}
-                buttonClassName="w-full"
-                ariaLabel="Document type"
-              />
-              <button type="button" onClick={() => setShowCreate(true)} title="Create new document type"
-                className="h-9 px-3 border border-[#AEB5BB] bg-white text-[#5E6870] hover:text-[#287EAD] hover:border-[#287EAD]/60 hover:bg-[#EEF6FB] transition-all flex items-center gap-1.5 text-xs font-semibold whitespace-nowrap">
-                <Plus className="h-3.5 w-3.5" /> New type
-              </button>
+    <div className="mx-auto max-w-6xl p-6">
+      <div className="grid grid-cols-[1fr_1.6fr] gap-5 items-start">
+
+        {/* ── LEFT COLUMN: metadata + stats ── */}
+        <div className="space-y-4">
+          <div className="border border-[#C8CDD2] bg-white shadow-sm">
+            <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+              <h2 className="text-sm font-bold text-[#1F2933]">Template metadata</h2>
+              <p className="text-xs text-[#5E6870] mt-0.5">Search, organisation, and document filing.</p>
             </div>
-            {showCreate && (
-              <CreateDocTypeQuickModal
-                onClose={() => setShowCreate(false)}
-                onCreated={(type) => { onCommit({ document_type_id: type.id }); setShowCreate(false); }}
-              />
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Workflow type</label>
-            <CustomListbox
-              value={template.workflow_type ?? "requisition"}
-              onChange={(val) => onCommit({ workflow_type: val as "imprest" | "requisition" })}
-              options={[
-                { value: "imprest", label: "Imprest (Request → Retirement)" },
-                { value: "requisition", label: "Requisition (Requisition → RFQ → LPO)" },
-              ]}
-              className={iCls}
-              buttonClassName="w-full"
-              ariaLabel="Workflow type"
-            />
-            <p className="text-[10px] text-[#8C969E] mt-1">
-              Determines which workflow stages and process steps are available for visibility conditions.
-            </p>
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Tags</label>
-            <div className="flex gap-2">
-              <input value={tagInput} onChange={(e) => setTagInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addTag())}
-                placeholder="Add tag and press Enter"
-                className={cn(iCls, "flex-1")} />
-              <button onClick={addTag} className="h-9 px-3 bg-[#287EAD] text-white text-sm font-semibold hover:bg-[#1E6F99]">
-                <Plus className="h-4 w-4" />
-              </button>
-            </div>
-            {(template.tags ?? []).length > 0 && (
-              <div className="flex flex-wrap gap-2 mt-2">
-                {(template.tags ?? []).map((tag) => (
-                  <span key={tag} className="flex items-center gap-1.5 px-2.5 py-1 bg-[#EEF6FB] text-[#287EAD] text-xs font-semibold border border-[#287EAD]/20">
-                    <Tag className="h-2.5 w-2.5" />{tag}
-                    <button onClick={() => removeTag(tag)} className="text-[#287EAD]/60 hover:text-[#287EAD] ml-0.5"><Minus className="h-2.5 w-2.5" /></button>
-                  </span>
-                ))}
+            <div className="space-y-4 p-5">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Name</label>
+                <input value={template.name} onChange={(e) => onCommit({ name: e.target.value })} className={iCls} />
               </div>
-            )}
-          </div>
-        </div>
-      </div>
-      {template.workflow_type === "requisition" && (
-        <div className="border border-[#C8CDD2] bg-white shadow-sm">
-          <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-            <h2 className="text-sm font-bold text-[#1F2933]">Requisition type &amp; stage gating</h2>
-            <p className="text-xs text-[#5E6870] mt-0.5">
-              Pick the dropdown that identifies the requisition type. Travel requisitions always skip RFQ,
-              whether or not the optional General / Imprest table has rows.
-            </p>
-          </div>
-          <div className="space-y-4 p-5">
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Requisition type field</label>
-              <CustomListbox
-                value={template.requisition_type_field ?? ""}
-                onChange={(val) => onCommit({ requisition_type_field: val })}
-                options={[{ value: "", label: "Select a dropdown field" }, ...requisitionTypeOptions]}
-                className={iCls}
-                buttonClassName="w-full"
-                ariaLabel="Requisition type field"
-              />
-              {requisitionTypeOptions.length === 0 ? (
-                <p className="text-[10px] text-amber-600 mt-1">
-                  Add a single-value choice field (Dropdown / Radio group) to this form, then choose it here.
-                </p>
-              ) : (
-                <p className="text-[10px] text-[#8C969E] mt-1">
-                  The submitted form value of this field decides the requisition type.
-                </p>
-              )}
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Travel value</label>
-              <input
-                value={template.travel_type_value ?? "Travel"}
-                onChange={(e) => onCommit({ travel_type_value: e.target.value })}
-                placeholder="Travel"
-                list="requisition-travel-values"
-                className={iCls}
-              />
-              {travelValueOptions.length > 0 && (
-                <datalist id="requisition-travel-values">
-                  {travelValueOptions.map((opt) => <option key={opt} value={opt} />)}
-                </datalist>
-              )}
-              <p className="text-[10px] text-[#8C969E] mt-1">
-                If the requisition type matches this value, the workflow skips RFQ.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-      {template.workflow_type === "requisition" && (
-        <div className="border border-[#C8CDD2] bg-white shadow-sm">
-          <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-            <h2 className="text-sm font-bold text-[#1F2933]">Travel retirement</h2>
-            <p className="mt-0.5 text-xs text-[#5E6870]">
-              After the LPO is approved, open a retirement stage on this requisition and enforce the travel policy deadline.
-            </p>
-          </div>
-          <div className="space-y-4 p-5">
-            <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-[#1F2933]">
-              <input type="checkbox" checked={Boolean(template.travel_retirement?.enabled)}
-                onChange={(e) => onCommit({ travel_retirement: {
-                  ...(template.travel_retirement ?? {}), enabled: e.target.checked,
-                } })}
-                className="h-4 w-4 accent-[#287EAD]" />
-              Enable travel retirement after LPO approval
-            </label>
-            {template.travel_retirement?.enabled && (
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Travel return date field</label>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Description</label>
+                <textarea value={template.description ?? ""} rows={3}
+                  onChange={(e) => onCommit({ description: e.target.value })}
+                  className={iCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document type <span className="text-red-400 normal-case font-normal">*</span></label>
+                <div className="flex gap-2">
                   <CustomListbox
-                    value={template.travel_retirement.returnDateField ?? ""}
-                    onChange={(val) => onCommit({ travel_retirement: { ...template.travel_retirement, returnDateField: val } })}
-                    options={[
-                      { value: "", label: "Select a date field" },
-                      ...template.sections.flatMap((section) => section.fields ?? [])
-                        .filter((field) => field.key && (field.type === "date" || field.type === "datetime"))
-                        .map((field) => ({ value: field.key, label: `${field.label || field.key} (${field.key})` })),
-                    ]}
-                    className={iCls}
+                    value={template.document_type_id ?? ""}
+                    onChange={(val) => onCommit({ document_type_id: val })}
+                    options={[{ value: "", label: "Select document type" }, ...documentTypes.map((type) => ({ value: type.id, label: type.name }))]}
+                    className={cn(iCls, "flex-1")}
                     buttonClassName="w-full"
-                    ariaLabel="Travel return date field"
+                    ariaLabel="Document type"
                   />
-                  <p className="text-[10px] text-[#8C969E]">The deadline is calculated from this field’s date.</p>
+                  <button type="button" onClick={() => setShowCreate(true)} title="Create new document type"
+                    className="h-9 px-3 border border-[#AEB5BB] bg-white text-[#5E6870] hover:text-[#287EAD] hover:border-[#287EAD]/60 hover:bg-[#EEF6FB] transition-all flex items-center gap-1.5 text-xs font-semibold whitespace-nowrap">
+                    <Plus className="h-3.5 w-3.5" /> New type
+                  </button>
                 </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Days after return</label>
-                  <input type="number" min={0} step={1} className={iCls}
-                    value={template.travel_retirement.deadlineDays ?? 7}
-                    onChange={(e) => onCommit({ travel_retirement: {
-                      ...template.travel_retirement,
-                      deadlineDays: Math.max(0, Math.floor(Number(e.target.value) || 0)),
-                    } })} />
-                  <p className="text-[10px] text-[#8C969E]">An overdue, unsubmitted retirement blocks the traveller from submitting another travel requisition.</p>
-                </div>
+                {showCreate && (
+                  <CreateDocTypeQuickModal
+                    onClose={() => setShowCreate(false)}
+                    onCreated={(type) => { onCommit({ document_type_id: type.id }); setShowCreate(false); }}
+                  />
+                )}
               </div>
-            )}
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Workflow type</label>
+                <CustomListbox
+                  value={template.workflow_type ?? "requisition"}
+                  onChange={(val) => onCommit({ workflow_type: val as "imprest" | "requisition" })}
+                  options={[
+                    { value: "imprest", label: "Imprest (Request → Retirement)" },
+                    { value: "requisition", label: "Requisition → RFQ → LPO" },
+                  ]}
+                  className={iCls}
+                  buttonClassName="w-full"
+                  ariaLabel="Workflow type"
+                />
+                <p className="text-[10px] text-[#8C969E] mt-1">
+                  Determines which workflow stages and process steps are available for visibility conditions.
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Tags</label>
+                <div className="flex gap-2">
+                  <input value={tagInput} onChange={(e) => setTagInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addTag())}
+                    placeholder="Add tag and press Enter"
+                    className={cn(iCls, "flex-1")} />
+                  <button onClick={addTag} className="h-9 px-3 bg-[#287EAD] text-white text-sm font-semibold hover:bg-[#1E6F99]">
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </div>
+                {(template.tags ?? []).length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {(template.tags ?? []).map((tag) => (
+                      <span key={tag} className="flex items-center gap-1.5 px-2.5 py-1 bg-[#EEF6FB] text-[#287EAD] text-xs font-semibold border border-[#287EAD]/20">
+                        <Tag className="h-2.5 w-2.5" />{tag}
+                        <button onClick={() => removeTag(tag)} className="text-[#287EAD]/60 hover:text-[#287EAD] ml-0.5"><Minus className="h-2.5 w-2.5" /></button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Stats strip */}
+          <div className="border border-[#C8CDD2] bg-white shadow-sm">
+            <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+              <h2 className="text-sm font-bold text-[#1F2933]">Template summary</h2>
+            </div>
+            <div className="grid grid-cols-3 divide-x divide-[#C8CDD2]">
+              {[
+                { label: "Sections", value: template.sections.length, isText: false },
+                { label: "Fields",   value: fieldCount,                isText: false },
+                { label: "Doc type", value: documentTypes.find((type) => type.id === template.document_type_id)?.code ?? "—", isText: true },
+              ].map((s) => (
+                <div key={s.label} className="overflow-hidden px-3 py-4 text-center">
+                  <div className={s.isText
+                    ? "truncate text-xs font-bold text-[#287EAD] uppercase tracking-wide"
+                    : "text-2xl font-bold text-[#287EAD]"
+                  } title={String(s.value)}>{s.value}</div>
+                  <div className="text-xs text-[#5E6870] mt-0.5 font-medium">{s.label}</div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
-      )}
-      <div className="border border-[#C8CDD2] bg-white shadow-sm">
-        <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-          <h2 className="text-sm font-bold text-[#1F2933]">Template summary</h2>
-        </div>
-        <div className="grid grid-cols-3 divide-x divide-[#C8CDD2]">
-          {[
-            { label: "Sections", value: template.sections.length },
-            { label: "Fields", value: fieldCount },
-            { label: "Document type", value: documentTypes.find((type) => type.id === template.document_type_id)?.code ?? "—" },
-          ].map((s) => (
-            <div key={s.label} className="px-5 py-4 text-center">
-              <div className="text-2xl font-bold text-[#287EAD]">{s.value}</div>
-              <div className="text-xs text-[#5E6870] mt-0.5 font-medium">{s.label}</div>
+
+        {/* ── RIGHT COLUMN: sub-tabbed config panels ── */}
+        <div className="border border-[#C8CDD2] bg-white shadow-sm">
+          {/* sub-tab bar */}
+          <div className="flex border-b border-[#C8CDD2] bg-[#F3F5F6]">
+            {(["procurement", "finance"] as const).map((pane) => (
+              <button
+                key={pane}
+                type="button"
+                onClick={() => setSettingsPane(pane)}
+                className={cn(
+                  "px-5 py-3 text-xs font-semibold capitalize border-b-2 transition-colors",
+                  settingsPane === pane
+                    ? "border-[#287EAD] text-[#287EAD] bg-white"
+                    : "border-transparent text-[#5E6870] hover:text-[#1F2933] hover:bg-[#EAEDF0]",
+                )}
+              >
+                {pane === "procurement" ? "Procurement" : "Finance / SunSystems"}
+              </button>
+            ))}
+          </div>
+
+          {/* Procurement pane */}
+          {settingsPane === "procurement" && (
+            <div className="space-y-5 p-5">
+              {template.workflow_type === "requisition" ? (
+                <>
+                  <div className="space-y-4">
+                    <div>
+                      <p className="text-sm font-semibold text-[#1F2933]">Requisition type &amp; procurement stages</p>
+                      <p className="text-xs text-[#5E6870] mt-0.5">Choose whether requisitions go through supplier quotations before LPO approval.</p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Requisition type</label>
+                      <CustomListbox
+                        value={template.requisition_category ?? "standard"}
+                        onChange={(value) => onCommit({ requisition_category: value as "standard" | "travel" })}
+                        options={[
+                          { value: "standard", label: "Standard requisition" },
+                          { value: "travel",   label: "Travel requisition" },
+                        ]}
+                        className={iCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Requisition type"
+                      />
+                      <p className="text-[10px] text-[#8C969E]">This type is set on the template; requesters do not choose it in the form.</p>
+                    </div>
+                    <label className="flex cursor-pointer items-start gap-3 text-sm text-[#1F2933]">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(template.skip_rfq)}
+                        onChange={(event) => onCommit({ skip_rfq: event.target.checked })}
+                        className="mt-0.5 h-4 w-4 accent-[#287EAD]"
+                      />
+                      <span>
+                        <span className="block font-semibold">Skip RFQ stage</span>
+                        <span className="mt-0.5 block text-xs text-[#5E6870]">
+                          Enable for direct requisitions such as Travel. Leave off when Finance must request and compare supplier quotations.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className="border-t border-[#EEF0F2] pt-5 space-y-4">
+                    <div>
+                      <p className="text-sm font-semibold text-[#1F2933]">Travel retirement</p>
+                      <p className="mt-0.5 text-xs text-[#5E6870]">After LPO approval, open a retirement stage and enforce the travel policy deadline.</p>
+                    </div>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-[#1F2933]">
+                      <input type="checkbox" checked={Boolean(template.travel_retirement?.enabled)}
+                        onChange={(e) => onCommit({ travel_retirement: {
+                          ...(template.travel_retirement ?? {}), enabled: e.target.checked,
+                        } })}
+                        className="h-4 w-4 accent-[#287EAD]" />
+                      Enable travel retirement after LPO approval
+                    </label>
+                    {template.travel_retirement?.enabled && (
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Travel return date field</label>
+                          <CustomListbox
+                            value={template.travel_retirement.returnDateField ?? ""}
+                            onChange={(val) => onCommit({ travel_retirement: { ...template.travel_retirement, returnDateField: val } })}
+                            options={[
+                              { value: "", label: "Select a date field" },
+                              ...template.sections.flatMap((section) => section.fields ?? [])
+                                .filter((field) => field.key && (field.type === "date" || field.type === "datetime"))
+                                .map((field) => ({ value: field.key, label: `${field.label || field.key} (${field.key})` })),
+                            ]}
+                            className={iCls}
+                            buttonClassName="w-full"
+                            ariaLabel="Travel return date field"
+                          />
+                          <p className="text-[10px] text-[#8C969E]">The deadline is calculated from this field's date.</p>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Days after return</label>
+                          <input type="number" min={0} step={1} className={iCls}
+                            value={template.travel_retirement.deadlineDays ?? 7}
+                            onChange={(e) => onCommit({ travel_retirement: {
+                              ...template.travel_retirement,
+                              deadlineDays: Math.max(0, Math.floor(Number(e.target.value) || 0)),
+                            } })} />
+                          <p className="text-[10px] text-[#8C969E]">An overdue, unsubmitted retirement blocks the traveller from submitting another travel requisition.</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-12 text-center text-sm text-[#8C969E] gap-2">
+                  <Settings className="h-8 w-8 text-[#C8CDD2]" />
+                  <p className="font-medium text-[#5E6870]">No procurement settings</p>
+                  <p className="text-xs max-w-xs">Switch the workflow type to <strong>Requisition</strong> in the metadata panel to configure procurement stages.</p>
+                </div>
+              )}
             </div>
-          ))}
+          )}
+
+          {/* Finance pane — delegates to FinanceSettingsCard */}
+          {settingsPane === "finance" && (
+            <FinanceSettingsCard template={template} onCommit={onCommit} iCls={iCls} processSteps={processSteps} embedded />
+          )}
         </div>
+
       </div>
-      <FinanceSettingsCard template={template} onCommit={onCommit} iCls={iCls} processSteps={processSteps} />
     </div>
   );
 }
@@ -7505,11 +7533,12 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
  * analysis) are set visually in the field inspector; this card holds the
  * connection-level constants (business unit, journal type, …) and the on/off
  * toggles, and previews what the bindings will compile into. */
-function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
+function FinanceSettingsCard({ template, onCommit, iCls, processSteps, embedded = false }: {
   template: Template;
   onCommit: (patch: Partial<Template>) => void;
   iCls: string;
   processSteps: ProcessStepOption[];
+  embedded?: boolean;
 }) {
   const ss = template.sunsystems ?? {};
   const ui: SunSystemsUi = ss.ui ?? {};
@@ -7590,11 +7619,13 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
   );
 
   return (
-    <div className="border border-[#C8CDD2] bg-white shadow-sm">
-      <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-        <h2 className="text-sm font-bold text-[#1F2933]">Infor SunSystems</h2>
-        <p className="text-xs text-[#5E6870] mt-0.5">Budget checks while filling, and journal posting on approval. Bind individual fields in the field inspector.</p>
-      </div>
+    <div className={embedded ? "" : "border border-[#C8CDD2] bg-white shadow-sm"}>
+      {!embedded && (
+        <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+          <h2 className="text-sm font-bold text-[#1F2933]">Infor SunSystems</h2>
+          <p className="text-xs text-[#5E6870] mt-0.5">Budget checks while filling, and journal posting on approval. Bind individual fields in the field inspector.</p>
+        </div>
+      )}
       <div className="space-y-5 p-5">
         {/* Budget check */}
         <div className="flex items-center justify-between">

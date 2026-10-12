@@ -1578,6 +1578,8 @@ export const groupsAPI = {
     id: string,
     permissions: { document_type_id: string | null; stage: string; action: string }[]
   ) => api.post(`/groups/${id}/set_permissions/`, { permissions }),
+  setRequisitionTemplates: (id: string, templateIds: string[]) =>
+    api.post(`/groups/${id}/set_requisition_templates/`, { template_ids: templateIds }),
   members: (id: string) => api.get(`/groups/${id}/members/`),
   addMember: (id: string, userId: string, expiresAt?: string) =>
     api.post(`/groups/${id}/add_member/`, {

@@ -102,6 +102,26 @@ class DocumentTemplate(models.Model):
         default="Travel",
         help_text="Requisition-type value that skips the RFQ stage (Requisition → LPO).",
     )
+    skip_rfq = models.BooleanField(
+        default=False,
+        help_text="Skip the RFQ stage for this requisition form and continue directly to LPO.",
+    )
+    REQUISITION_CATEGORY_CHOICES = [
+        ("standard", "Standard requisition"),
+        ("travel", "Travel requisition"),
+    ]
+    requisition_category = models.CharField(
+        max_length=20,
+        choices=REQUISITION_CATEGORY_CHOICES,
+        default="standard",
+        help_text="Identifies the requisition lifecycle without asking the requester to choose a type on the form.",
+    )
+    available_to_groups = models.ManyToManyField(
+        "accounts.UserGroup",
+        blank=True,
+        related_name="requisition_templates",
+        help_text="Groups whose members may start requisitions with this form.",
+    )
     # Optional travel retirement lifecycle layered onto a requisition. Kept
     # separate from `workflow_type`: requisitions retain their procurement
     # path and may open a retirement phase after LPO approval.
