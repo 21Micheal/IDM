@@ -43,11 +43,24 @@ def _resolve_retirement_source_config(document) -> dict:
 
 
 def _find_retirement_mapping(document) -> dict | None:
-    """Return the first configured `retirement` line spec across all posting
-    stages for this document's (live-template-preferred) journal config.
-    There is normally at most one (stage 2 / "Retirement"), but this doesn't
-    assume a stage number — it just looks for whichever stage's `lines`
-    includes a `retirement` entry."""
+    """Return the retirement rule from the current procurement or journal config.
+
+    Procurement templates keep reconciliation settings on the retirement
+    amount column and derive a journal mapping from the Purchase Order profile;
+    native Imprest templates keep them under journal stages. Prefer the
+    generated procurement mapping, then retain support for native/legacy forms.
+    """
+    try:
+        from .config import get_imprest_retirement_postings
+
+        for posting in get_imprest_retirement_postings(document):
+            mapping = posting.get("mapping") or {}
+            for line_spec in mapping.get("lines") or []:
+                if isinstance(line_spec, dict) and line_spec.get("retirement"):
+                    return line_spec["retirement"]
+    except Exception:
+        pass
+
     cfg = _resolve_retirement_source_config(document)
     if not cfg:
         return None

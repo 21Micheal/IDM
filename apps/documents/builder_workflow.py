@@ -81,7 +81,7 @@ def _retirement_workflow_statuses(document_ids):
         rows = WorkflowInstance.objects.filter(
                 document_id__in=document_ids,
                 rule__phase="retirement",
-            ).order_by("document_id", "-created_at").values_list("document_id", "status")
+            ).order_by("document_id", "-started_at").values_list("document_id", "status")
         result = {}
         for document_id, status in rows:
             result.setdefault(document_id, status)
@@ -108,6 +108,7 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
     if status is None:
         status = _retirement_workflow_statuses([document.id]).get(document.id)
     journal_posted = retirement_journal_posted(document)
+    variance_summary = ((document.metadata or {}).get("form") or {}).get("retirement_variance")
 
     if phase != "retirement":
         label = "LPO pending"
@@ -116,13 +117,12 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
         # V2 CASE workflows can finish the retirement journal successfully
         # without a legacy WorkflowRule.phase row. The posted retirement
         # posting is authoritative even if the workflow outcome mirror is stale.
-        variance = None
         try:
             from apps.sunsystems.variance import compute_retirement_variance
-            variance = compute_retirement_variance(document)
+            variance_summary = compute_retirement_variance(document) or variance_summary
         except Exception:
             pass
-        scenario = (variance or {}).get("scenario")
+        scenario = (variance_summary or {}).get("scenario")
         labels = {
             "exact": ("Exact", "exact"),
             "under": ("Refund due", "refund_due"),
@@ -148,7 +148,7 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
         "status": kind,
         "label": label,
         "due_date": due.isoformat() if due else None,
-        "variance": ((document.metadata or {}).get("form") or {}).get("retirement_variance"),
+        "variance": variance_summary,
     }
 
 
@@ -566,15 +566,15 @@ def retirement_journal_posted(document: Document) -> bool:
         from apps.sunsystems.config import _get_stages, get_imprest_retirement_postings, get_journal_config
         from apps.sunsystems.models import JournalPosting, JournalPostingStatus
 
-        cfg = get_journal_config(document)
-        if not cfg or not cfg.get("enabled"):
-            return False
         stage_nums = {
             int(posting.get("stage"))
             for posting in get_imprest_retirement_postings(document)
             if posting.get("stage") is not None
         }
         if not stage_nums:
+            cfg = get_journal_config(document)
+            if not cfg or not cfg.get("enabled"):
+                return False
             stage_nums = {
                 int(stage.get("stage", 1))
                 for stage in _get_stages(cfg)
