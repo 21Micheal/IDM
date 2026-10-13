@@ -43,6 +43,17 @@ function getLpoDocuments(doc: any): Array<{ id: string; reference?: string }> {
     : [];
 }
 
+function getRetirementOutcome(doc: any): { label: string; status: "exact" | "under" | "over" } | null {
+  const retirementStatus = doc?.form_summary?.retirement?.status;
+  const variance = doc?.form_summary?.retirement_variance
+    ?? doc?.metadata?.form?.retirement_variance;
+  const scenario = String(variance?.scenario || "").toLowerCase();
+  if (scenario === "exact" || retirementStatus === "exact") return { label: "Exact", status: "exact" };
+  if (scenario === "under" || retirementStatus === "refund_due") return { label: "Under expenditure", status: "under" };
+  if (scenario === "over" || retirementStatus === "top_up_due") return { label: "Over expenditure", status: "over" };
+  return null;
+}
+
 function formatMoney(amount: number | null, currency?: string) {
   if (amount === null) return "—";
   try {
@@ -263,6 +274,7 @@ export default function RequisitionsPage() {
                 <th className="px-5 py-3 font-medium">Amount</th>
                 <th className="px-5 py-3 font-medium">Status</th>
                 <th className="px-5 py-3 font-medium">Travel retirement</th>
+                <th className="px-5 py-3 font-medium">Retirement outcome</th>
                 <th className="px-5 py-3 font-medium">LPO</th>
                 <th className="px-5 py-3 font-medium">Created</th>
               </tr>
@@ -300,6 +312,24 @@ export default function RequisitionsPage() {
                         {doc.form_summary.retirement.label}
                       </span>
                     ) : <span className="text-[#9AA5B1]">—</span>}
+                  </td>
+                  <td className="px-5 py-3 text-xs">
+                    {(() => {
+                      const outcome = getRetirementOutcome(doc);
+                      if (!outcome) return <span className="text-[#9AA5B1]">—</span>;
+                      return (
+                        <span className={cn(
+                          "inline-flex rounded-full border px-2 py-1 font-semibold",
+                          outcome.status === "exact"
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                            : outcome.status === "over"
+                              ? "border-red-200 bg-red-50 text-red-700"
+                              : "border-amber-200 bg-amber-50 text-amber-700",
+                        )}>
+                          {outcome.label}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td className="px-5 py-3">
                     <div className="flex flex-wrap gap-1.5">

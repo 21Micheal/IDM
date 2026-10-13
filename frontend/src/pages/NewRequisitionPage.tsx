@@ -72,13 +72,14 @@ export default function NewRequisitionPage() {
         : [];
     },
     ...QUERY_SHORT_STALE,
+    refetchOnMount: "always",
   });
 
   // Fetch selected template with 30s polling so live editor updates arrive automatically
   const { data: selectedTemplate, isLoading: loadingTemplate, isFetching: refreshingTemplate } = useQuery({
     queryKey: ["template", selectedTemplateId],
     queryFn: () => templatesAPI.get(selectedTemplateId!).then((r) => r.data),
-    enabled: !!selectedTemplateId,
+    enabled: !!selectedTemplateId && templates.some((template: any) => template.id === selectedTemplateId),
     ...QUERY_SHORT_STALE,
     refetchInterval: 30_000,
   });
@@ -94,6 +95,28 @@ export default function NewRequisitionPage() {
     if (!preselectedTemplateId || loadingTemplates || templates.some((template: any) => template.id === preselectedTemplateId)) return;
     setSelectedTemplateId(templates[0]?.id ?? null);
   }, [templates, preselectedTemplateId, loadingTemplates]);
+
+  useEffect(() => {
+    if (!loadingTemplates && selectedTemplateId && !templates.some((template: any) => template.id === selectedTemplateId)) {
+      setSelectedTemplateId(templates[0]?.id ?? null);
+      setFormValues({});
+      setFormDirty(false);
+      setMissingFields([]);
+    }
+  }, [templates, selectedTemplateId, loadingTemplates]);
+
+  const selectTemplate = (templateId: string) => {
+    if (templateId === selectedTemplateId) {
+      setTemplatePickerOpen(false);
+      return;
+    }
+    setSelectedTemplateId(templateId);
+    setFormValues({});
+    setFormDirty(false);
+    setMissingFields([]);
+    supplierPrefillRef.current = null;
+    setTemplatePickerOpen(false);
+  };
 
   // Apply schema defaults and dynamic formulas (IF, regex, math) when template loads or updates
   // while preserving fields the user has already touched ("surviving updates").
@@ -397,8 +420,7 @@ export default function NewRequisitionPage() {
                         key={t.id}
                         type="button"
                         onClick={() => {
-                          setSelectedTemplateId(t.id);
-                          setTemplatePickerOpen(false);
+                          selectTemplate(t.id);
                         }}
                         className={cn(
                           "flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-[#F5F7F8]",

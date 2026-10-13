@@ -107,17 +107,15 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
     status = workflow_status
     if status is None:
         status = _retirement_workflow_statuses([document.id]).get(document.id)
+    journal_posted = retirement_journal_posted(document)
 
     if phase != "retirement":
         label = "LPO pending"
         kind = "not_started"
-    elif status == "in_progress":
-        label, kind = "Awaiting Finance", "awaiting_finance"
-    elif status == "returned":
-        label, kind = "Returned for revision", "returned"
-    elif status == "rejected":
-        label, kind = "Retirement rejected", "rejected"
-    elif status == "approved":
+    elif status == "approved" or journal_posted:
+        # V2 CASE workflows can finish the retirement journal successfully
+        # without a legacy WorkflowRule.phase row. The posted retirement
+        # posting is authoritative even if the workflow outcome mirror is stale.
         variance = None
         try:
             from apps.sunsystems.variance import compute_retirement_variance
@@ -131,6 +129,12 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
             "over": ("Top-up due", "top_up_due"),
         }
         label, kind = labels.get(scenario, ("Retired", "retired"))
+    elif status == "in_progress":
+        label, kind = "Awaiting Finance", "awaiting_finance"
+    elif status == "returned":
+        label, kind = "Returned for revision", "returned"
+    elif status == "rejected":
+        label, kind = "Retirement rejected", "rejected"
     elif not travel_return_date(document):
         label, kind = "Return date missing", "return_date_missing"
     elif due and timezone.localdate() > due:
@@ -553,25 +557,37 @@ def sync_retirement_variance(document: Document) -> dict | None:
 
 
 def retirement_journal_posted(document: Document) -> bool:
-    """True when a configured stage-2 SunSystems journal has been posted."""
+    """True when the configured retirement journal posting(s) have posted.
+
+    Older templates stored retirement as journal stage 2. Procurement forms
+    use generated posting stages starting at 30000 (one per retirement table).
+    """
     try:
-        from apps.sunsystems.config import _get_stages, get_journal_config
+        from apps.sunsystems.config import _get_stages, get_imprest_retirement_postings, get_journal_config
         from apps.sunsystems.models import JournalPosting, JournalPostingStatus
 
         cfg = get_journal_config(document)
         if not cfg or not cfg.get("enabled"):
             return False
-        stages = _get_stages(cfg)
-        if len(stages) < 2:
+        stage_nums = {
+            int(posting.get("stage"))
+            for posting in get_imprest_retirement_postings(document)
+            if posting.get("stage") is not None
+        }
+        if not stage_nums:
+            stage_nums = {
+                int(stage.get("stage", 1))
+                for stage in _get_stages(cfg)
+                if int(stage.get("stage", 1)) == 2
+            }
+        if not stage_nums:
             return False
-        stage_nums = {int(s.get("stage", 1)) for s in stages}
-        if 2 not in stage_nums:
-            return False
-        return JournalPosting.objects.filter(
+        posted_stages = set(JournalPosting.objects.filter(
             document=document,
-            stage=2,
+            stage__in=stage_nums,
             status=JournalPostingStatus.POSTED,
-        ).exists()
+        ).values_list("stage", flat=True))
+        return stage_nums.issubset(posted_stages)
     except Exception:
         return False
 

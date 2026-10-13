@@ -486,6 +486,7 @@ function GroupDetail({
       toast.success("Requisition forms assigned to this group.");
       qc.invalidateQueries({ queryKey: ["group", group.id] });
       qc.invalidateQueries({ queryKey: ["groups"] });
+      qc.invalidateQueries({ queryKey: ["templates", "requisition-forms"] });
     },
     onError: (err) => toast.error(extractApiError(err, "Failed to assign requisition forms")),
   });

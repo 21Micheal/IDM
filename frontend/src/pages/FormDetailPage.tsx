@@ -130,11 +130,15 @@ export default function FormDetailPage() {
   const [showJournalXml, setShowJournalXml] = useState(false);
   const [comment, setComment] = useState("");
   const [auditPage, setAuditPage] = useState(1);
+  const navigationState = location.state as {
+    workflowActionCompleted?: boolean;
+    awaitLpo?: boolean;
+  } | null;
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(
-    Boolean((location.state as { workflowActionCompleted?: boolean } | null)?.workflowActionCompleted),
+    Boolean(navigationState?.workflowActionCompleted && !navigationState?.awaitLpo),
   );
   const [awaitingLpo, setAwaitingLpo] = useState(
-    Boolean((location.state as { awaitLpo?: boolean } | null)?.awaitLpo),
+    Boolean(navigationState?.awaitLpo),
   );
   const [isSigningOpen, setIsSigningOpen] = useState(false);
   const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
@@ -193,15 +197,6 @@ export default function FormDetailPage() {
     setLpoMinimized(false);
     setWorkflowActionCompleted(false);
   }, [lpoSetKey]);
-
-  useEffect(() => {
-    if (!awaitingLpo || generatedLpos.length) return;
-    const timeout = window.setTimeout(() => {
-      setAwaitingLpo(false);
-      setWorkflowActionCompleted(true);
-    }, 30_000);
-    return () => window.clearTimeout(timeout);
-  }, [awaitingLpo, generatedLpos.length]);
 
   const lpoPdfQuery = useQuery({
     queryKey: ["lpo-pdf", generatedLpoId],
@@ -1156,15 +1151,6 @@ export default function FormDetailPage() {
         </div>
       )}
 
-      {generatedLpoId && (lpoMinimized || !lpoModalOpen) && (
-        <div className="fixed bottom-4 right-4 z-[250] flex items-center gap-3 border border-[#AEB5BB] bg-white px-4 py-3 shadow-xl">
-          <button type="button" onClick={() => { setLpoMinimized(false); setLpoModalOpen(true); }} className="text-left">
-            <span className="block text-sm font-semibold text-[#1F2933]">LPO {generatedLpoReference || "generated"}</span>
-            <span className="block text-xs text-[#5E6870]">Open purchase order{generatedLpos.length > 1 ? ` (${generatedLpos.length} generated)` : ""}</span>
-          </button>
-        </div>
-      )}
-
       {generatedLpoId && lpoModalOpen && !lpoMinimized && (
         <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/50 p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={`LPO ${generatedLpoReference || "document"}`}>
           <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden border border-[#AEB5BB] bg-white shadow-2xl">
@@ -1219,7 +1205,7 @@ export default function FormDetailPage() {
         </div>
       )}
 
-      {workflowActionCompleted && !activeTask && !generatedLpos.length && (
+      {workflowActionCompleted && !awaitingLpo && !activeTask && !generatedLpos.length && (
         <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
           <div
             role="alertdialog"

@@ -131,12 +131,11 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             if _request_bool(self.request.query_params.get("requisition_forms")):
                 queryset = queryset.filter(type="built", kind="form", workflow_type="requisition")
                 user = self.request.user
-                if not user.has_admin_access:
-                    from django.utils import timezone
-                    group_ids = user.group_memberships.filter(
-                        Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
-                    ).values_list("group_id", flat=True)
-                    queryset = queryset.filter(available_to_groups__in=group_ids).distinct()
+                from django.utils import timezone
+                group_ids = user.group_memberships.filter(
+                    Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+                ).values_list("group_id", flat=True)
+                queryset = queryset.filter(available_to_groups__in=group_ids).distinct()
         return queryset.select_related("created_by", "document_type")
 
     def perform_create(self, serializer):
@@ -217,15 +216,14 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         if _request_bool(request.data.get("requisition_submission")):
             if template.workflow_type != "requisition" or template.type != "built" or template.kind != "form":
                 raise ValidationError({"template_id": "Select a requisition form."})
-            if not request.user.has_admin_access:
-                from django.utils import timezone
-                from django.db.models import Q
-                member_group_ids = request.user.group_memberships.filter(
-                    Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
-                ).values_list("group_id", flat=True)
-                if not template.available_to_groups.filter(id__in=member_group_ids).exists():
-                    from rest_framework.exceptions import PermissionDenied
-                    raise PermissionDenied("You are not assigned to use this requisition form.")
+            from django.utils import timezone
+            from django.db.models import Q
+            member_group_ids = request.user.group_memberships.filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+            ).values_list("group_id", flat=True)
+            if not template.available_to_groups.filter(id__in=member_group_ids).exists():
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied("You are not assigned to use this requisition form.")
         values = request.data.get("values", {})
         if isinstance(values, str):
             try:
