@@ -94,7 +94,9 @@ export default function RequisitionsPage() {
 
   const { data: supplierAccounts } = useQuery({
     queryKey: ["sunsystems", "supplier-accounts"],
-    queryFn: () => sunsystemsAPI.getAccounts({ account_type: "1" }).then((res) => res.data.accounts),
+    queryFn: () => sunsystemsAPI.getAccounts({ account_type: "1" })
+      .then((res) => (Array.isArray(res.data?.accounts) ? res.data.accounts : []))
+      .catch(() => []),
     staleTime: 5 * 60_000,
     retry: false,
   });

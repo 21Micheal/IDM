@@ -70,8 +70,9 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
             )
         
         with transaction.atomic():
-            # Look for existing direct message room.
-            room = ChatRoom.objects.select_for_update().filter(
+            # Find existing room ID without select_for_update (annotate adds
+            # GROUP BY which PostgreSQL forbids with FOR UPDATE).
+            existing_id = ChatRoom.objects.filter(
                 room_type='direct',
                 chatroomparticipant__user=request.user,
                 chatroomparticipant__is_active=True,
@@ -81,7 +82,12 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
                 chatroomparticipant__is_active=True,
             ).annotate(participant_count=Count('participants', distinct=True)).filter(
                 participant_count=2
-            ).first()
+            ).values_list('id', flat=True).first()
+            # Re-fetch with row-level lock on simple pk filter (no GROUP BY).
+            room = (
+                ChatRoom.objects.select_for_update().get(pk=existing_id)
+                if existing_id else None
+            )
 
             if room and not room.messages.exists():
                 room.is_active = False

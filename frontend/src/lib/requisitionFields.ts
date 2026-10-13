@@ -61,7 +61,8 @@ export function getReqAmount(doc: any): number | null {
 /** Resolve SunSystems supplier account values to readable supplier names. */
 export function getReqSupplier(doc: any, accounts: SupplierAccount[] = []): string {
   const { values, fields } = getFormParts(doc);
-  const byCode = new Map(accounts.map((account) => [norm(account.account_code), account.description]));
+  const safeAccounts = Array.isArray(accounts) ? accounts : [];
+  const byCode = new Map(safeAccounts.map((account) => [norm(account.account_code), account.description]));
 
   const lookup = (code: unknown): string => {
     const text = String(code ?? "").trim();

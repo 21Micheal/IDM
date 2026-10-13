@@ -1170,8 +1170,12 @@ def clear_resolved_task_notifications_now(task_id: str) -> int:
     # Clear for delegates who have no other delegated tasks on this target
     for delegation in active_delegations_qs(delegator=task.assigned_to):
         delegate_id = delegation.delegate_id
+        # `delegated_tasks_q()` returns a Q expression over WorkflowTask,
+        # not a queryset of IDs. Passing it to `pk__in` produces SQL that
+        # compares a UUID to a boolean on PostgreSQL and aborts the enclosing
+        # workflow approval transaction.
         delegated_still_active = WorkflowTask.objects.filter(
-            pk__in=delegated_tasks_q(delegation.delegate),
+            delegated_tasks_q(delegation.delegate),
             status__in=["in_progress", "held"],
             **scope_filter,
         ).exists()
