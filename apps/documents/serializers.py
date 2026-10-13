@@ -698,7 +698,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
             statuses = self.context.get(cache_key)
             if statuses is None:
                 root_instance = getattr(self.root, "instance", None)
-                if isinstance(root_instance, (list, tuple)):
+                if root_instance is not None and hasattr(root_instance, "__iter__") and not isinstance(root_instance, Document):
                     document_ids = [item.id for item in root_instance if getattr(item, "id", None)]
                 else:
                     document_ids = [obj.id]
@@ -749,6 +749,77 @@ class DocumentListSerializer(serializers.ModelSerializer):
 
     def get_has_relationships(self, obj):
         return self.get_relationship_count(obj) > 0 or self.get_relationship_suggestion_count(obj) > 0
+
+
+class RequisitionSummaryListSerializer(DocumentListSerializer):
+    """Compact list representation for the two procurement requisition tables.
+
+    Those pages need the form's field keys and values for amount/supplier
+    display, but not the full template schema or per-document permission,
+    preview, relationship, and bulk-action calculations from the general list.
+    """
+    metadata = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Document
+        fields = [
+            "id", "title", "reference_number", "document_type_name", "status",
+            "supplier", "amount", "currency", "uploaded_by", "department_name",
+            "uploaded_by_department_name", "created_at", "updated_at", "metadata",
+            "form_summary",
+        ]
+
+    def get_metadata(self, obj):
+        metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+        form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+        values = form.get("values") if isinstance(form.get("values"), dict) else {}
+        sections = []
+        for section in form.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            fields = []
+            for field in section.get("fields") or []:
+                if not isinstance(field, dict):
+                    continue
+                sunsystems = field.get("sunsystems")
+                compact_field = {
+                    key: field[key] for key in ("key", "type", "label") if key in field
+                }
+                if isinstance(sunsystems, dict) and sunsystems.get("role"):
+                    compact_field["sunsystems"] = {"role": sunsystems["role"]}
+                columns = []
+                for column in field.get("columns") or []:
+                    if not isinstance(column, dict):
+                        continue
+                    compact_column = {
+                        key: column[key] for key in ("key", "type", "label") if key in column
+                    }
+                    column_sunsystems = column.get("sunsystems")
+                    if isinstance(column_sunsystems, dict) and column_sunsystems.get("role"):
+                        compact_column["sunsystems"] = {"role": column_sunsystems["role"]}
+                    columns.append(compact_column)
+                if columns:
+                    compact_field["columns"] = columns
+                fields.append(compact_field)
+            sections.append({"fields": fields})
+
+        compact_form = {
+            "sections": sections,
+            "values": values,
+        }
+        for key in (
+            "lpo_documents", "lpo_document_id", "lpo_reference",
+            "retirement_variance", "workflow_type", "workflow_phase",
+        ):
+            if key in form:
+                compact_form[key] = form[key]
+        return {"form": compact_form}
+
+    def get_form_summary(self, obj):
+        summary = super().get_form_summary(obj)
+        if isinstance(summary, dict):
+            summary.pop("values", None)
+        return summary
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):

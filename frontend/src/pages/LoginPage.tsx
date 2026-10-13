@@ -4,19 +4,12 @@
 import { useState, useRef, useEffect } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useNavigate, useLocation } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Loader2, RefreshCw, ArrowLeft, CheckCircle2 } from "lucide-react";
 
-import {
-  api,
-  authAPI,
-  documentsAPI,
-  notificationsAPI,
-  workflowAPI,
-} from "@/services/api";
+import { authAPI } from "@/services/api";
 
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
@@ -158,7 +151,6 @@ function ForgotPasswordPanel({ onBack }: { onBack: () => void }) {
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const qc = useQueryClient();
   const { setTokens, setUser } = useAuthStore();
 
   const [step, setStep] = useState<"credentials" | "otp" | "forgot">(
@@ -202,34 +194,6 @@ export default function LoginPage() {
         toast.warn("Signed in, but your profile could not be loaded yet.");
       }
     }
-
-    await Promise.allSettled([
-      qc.prefetchQuery({
-        queryKey: ["documents", "recent"],
-        queryFn: () =>
-          documentsAPI.list({ page_size: 5, ordering: "-created_at" }).then((r) => r.data),
-      }),
-      qc.prefetchQuery({
-        queryKey: ["documents", "pending", "count"],
-        queryFn: () =>
-          documentsAPI.list({ status: "pending_approval", page_size: 1 }).then((r) => r.data.count ?? 0),
-      }),
-      qc.prefetchQuery({
-        queryKey: ["workflow", "my-tasks"],
-        queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
-      }),
-      qc.prefetchQuery({
-        queryKey: ["audit", "recent"],
-        queryFn: () =>
-          api
-            .get("/audit/", { params: { ordering: "-timestamp", page_size: 5 } })
-            .then((r) => r.data.results ?? r.data),
-      }),
-      qc.prefetchQuery({
-        queryKey: ["notifications"],
-        queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
-      }),
-    ]);
 
     if (tokenData.must_change_password) {
       navigate("/change-password", { replace: true });

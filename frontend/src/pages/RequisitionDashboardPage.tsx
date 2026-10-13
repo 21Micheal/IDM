@@ -9,7 +9,7 @@
  * - Recent tasks queue at the bottom
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
@@ -18,7 +18,6 @@ import {
   Layers,
   Timer,
   ShieldCheck,
-  ClipboardCheck,
   Plus,
   ArrowRight,
   ChevronLeft,
@@ -30,16 +29,14 @@ import {
   TrendingDown,
   Minus,
   GitBranch,
-  FileSignature,
   Calendar,
-  Wallet,
   CheckCircle2,
 } from "lucide-react";
 import { api, documentsAPI, sunsystemsAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import { getReqAmount, getReqSupplier } from "@/lib/requisitionFields";
-import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
-import type { Document, WorkflowTask } from "@/types";
+import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
+import type { WorkflowTask } from "@/types";
 
 const RECENT_REQS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
@@ -222,6 +219,7 @@ export default function RequisitionDashboardPage() {
     queryFn: () =>
       documentsAPI.list({
         is_form: true,
+        requisition_summary: true,
         ordering: "-updated_at,-created_at",
         page: 1,
         page_size: 200,
@@ -274,7 +272,7 @@ export default function RequisitionDashboardPage() {
   });
 
   const { data: accountsData } = useQuery({
-    queryKey: ["sunsystems", "supplier-count"],
+    queryKey: ["sunsystems", "supplier-accounts"],
     queryFn: () => sunsystemsAPI.getAccounts({ account_type: "1" }).then((res) => res.data),
     staleTime: 5 * 60_000,
     retry: false,

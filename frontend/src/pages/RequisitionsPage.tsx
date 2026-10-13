@@ -81,7 +81,13 @@ export default function RequisitionsPage() {
   const { data: poolData, isLoading } = useQuery({
     queryKey: ["requisitions", "pool"],
     queryFn: () =>
-      documentsAPI.list({ is_form: true, ordering: "-created_at", page: 1, page_size: STATS_POOL_SIZE }).then((r) => r.data),
+      documentsAPI.list({
+        is_form: true,
+        requisition_summary: true,
+        ordering: "-created_at",
+        page: 1,
+        page_size: STATS_POOL_SIZE,
+      }).then((r) => r.data),
     staleTime: 15_000,
     refetchInterval: openLpoFor ? 1_200 : false,
   });

@@ -48,7 +48,7 @@ from .models import (
     SignatureRequestSigner,
 )
 from .serializers import (
-    DocumentListSerializer, DocumentDetailSerializer,
+    DocumentListSerializer, RequisitionSummaryListSerializer, DocumentDetailSerializer,
     DocumentUploadSerializer, DocumentTypeSerializer, DocumentTypeWriteSerializer,
     DocumentVersionSerializer, DocumentCommentSerializer,
     DocumentMetadataEditSerializer, DocumentBulkActionSerializer,
@@ -471,17 +471,24 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs   = (
+        summary_list = (
+            self.action == "list"
+            and str(self.request.query_params.get("requisition_summary") or "").lower()
+            in {"1", "true", "yes"}
+        )
+        qs = (
             Document.objects
             .select_related(
                 "document_type",
                 "uploaded_by",
                 "uploaded_by__department",
                 "department",
-                "edit_locked_by",
             )
-            .prefetch_related("tags", "versions", "workflow_instance__tasks__step")
         )
+        if not summary_list:
+            qs = qs.select_related("edit_locked_by").prefetch_related(
+                "tags", "versions", "workflow_instance__tasks__step"
+            )
         # UNCLASS placeholders are hidden from every listing, but single-object
         # lookups (retrieve/preview_url/file) opt in via get_object() so the
         # bulk-review screen can preview unreviewed email/scan drafts. Access is
@@ -663,6 +670,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 status=DocumentStatus.PENDING_REVIEW,
                 bulk_upload__ingested_emails__isnull=False,
             )
+            if summary_list:
+                # Requisition registers do not show or filter relationship
+                # counts. Avoid their joins and metadata scans on these large
+                # form-only result sets.
+                return qs
             suggestion_ids = None
             wants_suggestions = str(self.request.query_params.get("has_relationship_suggestions", "")).lower()
             if wants_suggestions in ("true", "1", "yes", "false", "0", "no"):
@@ -716,6 +728,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         if self.action == "list":
+            if str(self.request.query_params.get("requisition_summary") or "").lower() in {"1", "true", "yes"}:
+                return RequisitionSummaryListSerializer
             return DocumentListSerializer
         if self.action == "create":
             return DocumentUploadSerializer

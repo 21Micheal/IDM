@@ -107,13 +107,12 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
     status = workflow_status
     if status is None:
         status = _retirement_workflow_statuses([document.id]).get(document.id)
-    journal_posted = retirement_journal_posted(document)
     variance_summary = ((document.metadata or {}).get("form") or {}).get("retirement_variance")
 
     if phase != "retirement":
         label = "LPO pending"
         kind = "not_started"
-    elif status == "approved" or journal_posted:
+    elif status == "approved" or retirement_journal_posted(document):
         # V2 CASE workflows can finish the retirement journal successfully
         # without a legacy WorkflowRule.phase row. The posted retirement
         # posting is authoritative even if the workflow outcome mirror is stale.
