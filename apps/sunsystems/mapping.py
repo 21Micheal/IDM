@@ -407,7 +407,11 @@ def expand_purchase_order_postings(
             entry["rows"].append(row)
 
     expanded = []
-    for (table_key, transaction_type, product_group), entry in grouped.items():
+    multiple_orders = len(grouped) > 1
+    base_second_reference = resolve_value(
+        po.get("second_reference") or po.get("reference"), values
+    )
+    for posting_index, ((table_key, transaction_type, product_group), entry) in enumerate(grouped.items(), 1):
         current = deepcopy(mapping)
         current_po = current.setdefault("purchase_order", {})
         spec = deepcopy(entry["spec"])
@@ -427,6 +431,17 @@ def expand_purchase_order_postings(
         # PurchaseOrderReference is then used for the printable LPO, so never
         # send the application's LPO document-type sequence as the PO number.
         current_po.pop("reference", None)
+        # A requisition can expand into several independent PurchaseOrders
+        # (one per table / transaction type / product group). SunSystems
+        # requires SecondReference to be unique across those orders, so keep
+        # the requisition reference recognizable while giving each order a
+        # deterministic suffix. A single-order requisition keeps the original
+        # reference for backwards compatibility.
+        if multiple_orders and base_second_reference:
+            suffix = f"-{posting_index:02d}"
+            current_po["second_reference"] = {
+                "const": base_second_reference[: max(0, 30 - len(suffix))] + suffix
+            }
         desc_spec = spec.get("description")
         if desc_spec and table_key and isinstance(desc_spec, dict) and desc_spec.get("row_field"):
             current_po["comment"] = {"table": table_key, "row_field": desc_spec["row_field"]}
@@ -773,6 +788,8 @@ def _expand_retirement_lines(retirement: dict, values: dict, warnings: list[str]
             continue
         source = line.get("amount_source", "spent")
         amount_value = amounts.get(source, Decimal("0"))
+        if amount_value == 0:
+            continue
         if line.get("description"):
             description_spec = line["description"]
         elif source == "spent" and spent_description:

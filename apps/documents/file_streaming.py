@@ -101,6 +101,37 @@ def user_generated_lpo_for_document(user: User, doc: Document) -> bool:
     return user_is_involved_with_document(user, link.source_document)
 
 
+def user_is_final_lpo_approver(user: User, doc: Document) -> bool:
+    """Whether the user completed the LPO phase and needs its source form.
+
+    Approval completion is followed by asynchronous PO posting/PDF generation.
+    The final approver must be able to keep polling the requisition detail page
+    during that handoff, after their task has left the active queue.
+    """
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    form = ((doc.metadata or {}).get("form") or {})
+    if form.get("workflow_type") != "requisition":
+        return False
+    if str(form.get("workflow_phase") or "").strip().lower() not in {"lpo", "retirement"}:
+        return False
+    if str(form.get("lpo_final_approver_id") or "") == str(user.id):
+        return True
+    try:
+        if doc.workflow_instance.status != "approved":
+            return False
+    except Exception:
+        return False
+    from apps.workflows.models import WorkflowTaskAction
+
+    last_approval = WorkflowTaskAction.objects.filter(
+        task__workflow_instance__document=doc,
+        action="approved",
+        actor__isnull=False,
+    ).order_by("-created_at").values_list("actor_id", flat=True).first()
+    return str(last_approval or "") == str(user.id)
+
+
 def signed_file_urls_enabled() -> bool:
     return DMSSettings.load().signed_file_urls_enabled
 
@@ -120,6 +151,8 @@ def user_is_involved_with_document(user: User, doc: Document) -> bool:
     if doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id:
         return True
     if user_generated_lpo_for_document(user, doc):
+        return True
+    if user_is_final_lpo_approver(user, doc):
         return True
     # ACTIVE task only — a WorkflowTask row persists (under a new status) after
     # being actioned, so this must be status-filtered. Without it, an approver

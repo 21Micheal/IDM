@@ -449,7 +449,13 @@ def get_imprest_retirement_postings(document) -> list[dict]:
             )
             line_defaults = {key: base_line[key] for key in ("currency", "date", "description", "analysis") if key in base_line}
             if currency_column:
-                line_defaults["currency"] = {"const": str(first_row.get(currency_column.get("key")) or "")}
+                row_currency = str(first_row.get(currency_column.get("key")) or "").strip()
+                # The retirement table may have a currency column that the
+                # user leaves blank. In that case retain the currency already
+                # resolved from the Imprest request / PO mapping instead of
+                # emitting an empty CurrencyCode to SunSystems.
+                if row_currency:
+                    line_defaults["currency"] = {"const": row_currency}
             retirement_line.update(line_defaults)
             postings.append({
                 "stage": 30000 + len(postings),

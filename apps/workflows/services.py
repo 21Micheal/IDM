@@ -1311,6 +1311,18 @@ class WorkflowService:
         from apps.documents.access import outcome_status_for
 
         doc = instance.document
+        last_approver_action = None
+        if doc is not None:
+            last_approver_action = (
+                WorkflowTaskAction.objects.filter(
+                    task__workflow_instance=instance,
+                    action="approved",
+                    actor__isnull=False,
+                )
+                .select_related("actor")
+                .order_by("-created_at")
+                .first()
+            )
         if doc is not None:
             completion_phase = WorkflowService._document_workflow_phase(doc)
             doc.status = outcome_status_for(doc.document_type, outcome)
@@ -1325,6 +1337,13 @@ class WorkflowService:
                 metadata = dict(doc.metadata or {})
                 form = dict(metadata.get("form") or {})
                 form["retirement_workflow_status"] = outcome
+                metadata["form"] = form
+                doc.metadata = metadata
+                update_fields.append("metadata")
+            if completion_phase == "lpo" and outcome == "approved" and last_approver_action:
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["lpo_final_approver_id"] = str(last_approver_action.actor_id)
                 metadata["form"] = form
                 doc.metadata = metadata
                 update_fields.append("metadata")
@@ -1353,16 +1372,6 @@ class WorkflowService:
                 except Exception:
                     pass
 
-            last_approver_action = (
-                WorkflowTaskAction.objects.filter(
-                    task__workflow_instance=instance,
-                    action="approved",
-                    actor__isnull=False,
-                )
-                .select_related("actor")
-                .order_by("-created_at")
-                .first()
-            )
             lpo_actor = last_approver_action.actor if last_approver_action else instance.started_by
             WorkflowService._maybe_post_sunsystems_journal(doc, outcome, actor=lpo_actor)
 

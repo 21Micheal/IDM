@@ -414,6 +414,16 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             "workflow_instance__document__uploaded_by",
             "workflow_instance__document__uploaded_by__department",
         )
+        # The task disappears from a reviewer's active queue immediately after
+        # approval, but the action-history drawer can still be mounted during
+        # the handoff. Let an assigned user or recorded actor read that task's
+        # history without restoring it to the action/list endpoints.
+        if self.action == "history" and not user.has_admin_access:
+            return qs.filter(
+                models.Q(assigned_to=user)
+                | models.Q(actions__actor=user)
+                | delegated_tasks_q(user)
+            ).distinct()
         if document_id := self.request.query_params.get("document") or self.request.query_params.get("document_id"):
             qs = qs.filter(workflow_instance__document_id=document_id)
             if user.has_admin_access:

@@ -508,6 +508,17 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             from apps.documents.file_streaming import lpo_participation_filter
             delegated_task_filter = models.Q()
             lpo_participation = lpo_participation_filter(user)
+            if self.action != "list":
+                from apps.workflows.models import WorkflowTaskAction
+
+                latest_approved_actor = WorkflowTaskAction.objects.filter(
+                    task__workflow_instance__document_id=models.OuterRef("pk"),
+                    action="approved",
+                    actor__isnull=False,
+                ).order_by("-created_at").values("actor_id")[:1]
+                qs = qs.annotate(
+                    _latest_approved_workflow_actor_id=models.Subquery(latest_approved_actor),
+                )
             for delegation in active_delegations_qs(delegate=user):
                 clause = models.Q(
                     workflow_instance__tasks__assigned_to_id=delegation.delegator_id,
@@ -531,6 +542,16 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 ) |
                 models.Q(id__in=active_shared_docs)
             )
+            if self.action != "list":
+                access_filter |= (
+                    models.Q(metadata__form__lpo_final_approver_id=str(user.id))
+                    | models.Q(
+                        _latest_approved_workflow_actor_id=user.id,
+                        workflow_instance__status="approved",
+                        metadata__form__workflow_type="requisition",
+                        metadata__form__workflow_phase__in=["lpo", "retirement"],
+                    )
+                )
 
             # DEPARTMENT SCOPE: a department head (HOD) is involved with every
             # document in the department(s) they head.
