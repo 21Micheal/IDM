@@ -186,53 +186,57 @@ export default function RequisitionsPage() {
   };
 
   return (
-    <div className="mx-auto max-w-[1400px] space-y-5 p-6">
-      {/* Header */}
+    <div className="mx-auto max-w-[1400px] space-y-4 p-6">
+
+      {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-[#1F2933]">Requisitions</h1>
-          <p className="mt-1 text-sm text-[#5E6870]">All purchase requisitions raised in this portal.</p>
+          <h1 className="text-xl font-bold tracking-tight text-[#1F2933]">Requisitions Register</h1>
+          <p className="mt-0.5 text-xs text-[#5E6870]">All purchase requisitions raised in this portal.</p>
         </div>
         <button
           type="button"
           onClick={() => navigate("/new")}
-          className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#1E6F99]"
+          className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#1E6F99]"
         >
           <Plus className="h-4 w-4" /> New Requisition
         </button>
       </div>
 
-      {/* Status chips */}
-      <div className="flex flex-wrap items-center gap-2">
+      {/* ── Status chips ── */}
+      <div className="flex flex-wrap items-center gap-1.5">
         {STATUS_CHIPS.map((chip) => (
           <button
             key={chip.value}
             type="button"
             onClick={() => setStatusFilter(chip.value)}
             className={cn(
-              "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+              "inline-flex items-center gap-1.5 border px-3 py-1.5 text-xs font-semibold transition-colors",
               statusFilter === chip.value
                 ? "border-[#287EAD] bg-[#287EAD] text-white"
-                : "border-[#E4E7EB] bg-white text-[#5E6870] hover:border-[#287EAD] hover:text-[#287EAD]"
+                : "border-[#C8CDD2] bg-white text-[#5E6870] hover:border-[#287EAD] hover:text-[#287EAD]"
             )}
           >
             {chip.label}
-            <span className={cn("rounded-full px-1.5 text-[10px]", statusFilter === chip.value ? "bg-white/20" : "bg-[#F0F2F4]")}>
+            <span className={cn(
+              "px-1.5 text-[10px] font-bold",
+              statusFilter === chip.value ? "opacity-70" : "text-[#8C969E]"
+            )}>
               {statusCounts[chip.value] ?? 0}
             </span>
           </button>
         ))}
       </div>
 
-      {/* Filter bar */}
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[#E4E7EB] bg-white p-3 shadow-sm">
+      {/* ── Filter bar ── */}
+      <div className="flex flex-wrap items-center gap-2 border border-[#C8CDD2] bg-white p-2.5 shadow-sm">
         <div className="relative min-w-[220px] flex-1">
-          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9AA5B1]" />
+          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#9AA5B1]" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search title, reference, supplier…"
-            className="w-full rounded-lg border border-[#E4E7EB] py-2 pl-9 pr-3 text-sm focus:border-[#287EAD] focus:outline-none"
+            className="w-full border border-[#C8CDD2] py-1.5 pl-9 pr-3 text-sm focus:border-[#287EAD] focus:outline-none"
           />
         </div>
         <CustomListbox
@@ -242,23 +246,23 @@ export default function RequisitionsPage() {
             { value: "", label: "All departments" },
             ...departmentOptions.map((department) => ({ value: department, label: department })),
           ]}
-          className="min-w-[190px]"
-          buttonClassName="w-full rounded-lg border border-[#E4E7EB] bg-white px-3 py-2 text-left text-sm text-[#1F2933] focus:border-[#287EAD]"
+          className="min-w-[180px]"
+          buttonClassName="w-full border border-[#C8CDD2] bg-white px-3 py-1.5 text-left text-sm text-[#1F2933]"
           ariaLabel="Filter by department"
         />
-        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="rounded-lg border border-[#E4E7EB] px-3 py-2 text-sm" />
-        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="rounded-lg border border-[#E4E7EB] px-3 py-2 text-sm" />
-        <input value={amountMin} onChange={(e) => setAmountMin(e.target.value)} placeholder="Min amount" inputMode="numeric" className="w-28 rounded-lg border border-[#E4E7EB] px-3 py-2 text-sm" />
-        <input value={amountMax} onChange={(e) => setAmountMax(e.target.value)} placeholder="Max amount" inputMode="numeric" className="w-28 rounded-lg border border-[#E4E7EB] px-3 py-2 text-sm" />
+        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="border border-[#C8CDD2] px-3 py-1.5 text-sm" />
+        <input type="date" value={dateTo}   onChange={(e) => setDateTo(e.target.value)}   className="border border-[#C8CDD2] px-3 py-1.5 text-sm" />
+        <input value={amountMin} onChange={(e) => setAmountMin(e.target.value)} placeholder="Min amount" inputMode="numeric" className="w-28 border border-[#C8CDD2] px-3 py-1.5 text-sm" />
+        <input value={amountMax} onChange={(e) => setAmountMax(e.target.value)} placeholder="Max amount" inputMode="numeric" className="w-28 border border-[#C8CDD2] px-3 py-1.5 text-sm" />
         {activeFilterCount > 0 && (
-          <button type="button" onClick={clearFilters} className="inline-flex items-center gap-1 rounded-lg px-2 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50">
+          <button type="button" onClick={clearFilters} className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50">
             <X className="h-3.5 w-3.5" /> Clear ({activeFilterCount})
           </button>
         )}
       </div>
 
-      {/* Table */}
-      <div className="overflow-x-auto rounded-xl border border-[#E4E7EB] bg-white shadow-sm">
+      {/* ── Table ── */}
+      <div className="overflow-x-auto border border-[#C8CDD2] bg-white shadow-sm">
         {isLoading ? (
           <div className="flex h-48 items-center justify-center">
             <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
@@ -271,61 +275,65 @@ export default function RequisitionsPage() {
         ) : (
           <table className="w-full text-left text-sm">
             <thead>
-              <tr className="border-b border-[#E4E7EB] text-xs uppercase tracking-wide text-[#5E6870]">
-                <th className="px-5 py-3 font-medium">#</th>
-                <th className="px-5 py-3 font-medium">Requisition</th>
-                <th className="px-5 py-3 font-medium">Supplier</th>
-                <th className="px-5 py-3 font-medium">Requester</th>
-                {showDepartmentColumn && <th className="px-5 py-3 font-medium">Department</th>}
-                <th className="px-5 py-3 font-medium">Amount</th>
-                <th className="px-5 py-3 font-medium">Status</th>
-                <th className="px-5 py-3 font-medium">Travel retirement</th>
-                <th className="px-5 py-3 font-medium">Retirement outcome</th>
-                <th className="px-5 py-3 font-medium">LPO</th>
-                <th className="px-5 py-3 font-medium">Created</th>
+              <tr className="border-b border-[#C8CDD2] bg-[#F5F7F8] text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
+                <th className="px-4 py-2.5 font-semibold">#</th>
+                <th className="px-4 py-2.5 font-semibold">Requisition</th>
+                <th className="px-4 py-2.5 font-semibold">Supplier</th>
+                <th className="px-4 py-2.5 font-semibold">Requester</th>
+                {showDepartmentColumn && <th className="px-4 py-2.5 font-semibold">Department</th>}
+                <th className="px-4 py-2.5 font-semibold">Amount</th>
+                <th className="px-4 py-2.5 font-semibold">Status</th>
+                <th className="px-4 py-2.5 font-semibold">Retirement</th>
+                <th className="px-4 py-2.5 font-semibold">Outcome</th>
+                <th className="px-4 py-2.5 font-semibold">LPO</th>
+                <th className="px-4 py-2.5 font-semibold">Created</th>
               </tr>
             </thead>
             <tbody>
               {pageRows.map((doc: any, i: number) => (
                 <tr
                   key={doc.id}
-                  className="cursor-pointer border-b border-[#F0F2F4] last:border-0 hover:bg-[#F8FAFB]"
+                  className="cursor-pointer border-b border-[#F0F2F4] last:border-0 transition-colors hover:bg-[#F3F8FB]"
                   onClick={() => navigate(`/${doc.id}`)}
                 >
-                  <td className="px-5 py-3 text-xs text-[#9AA5B1]">{(page - 1) * PAGE_SIZE + i + 1}</td>
-                  <td className="px-5 py-3 font-medium text-[#1F2933]">
+                  <td className="px-4 py-2.5 text-xs text-[#9AA5B1]">{(page - 1) * PAGE_SIZE + i + 1}</td>
+                  <td className="px-4 py-2.5 font-semibold text-[#1F2933]">
                     {doc.reference_number || "—"}
                   </td>
-                  <td className="px-5 py-3 text-[#5E6870]">{getReqSupplier(doc, supplierAccounts)}</td>
-                  <td className="px-5 py-3 text-[#5E6870]">
+                  <td className="px-4 py-2.5 text-xs text-[#5E6870]">{getReqSupplier(doc, supplierAccounts)}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#5E6870]">
                     {doc.uploaded_by?.full_name || doc.uploaded_by?.email || "—"}
                   </td>
-                  {showDepartmentColumn && <td className="px-5 py-3 text-[#5E6870]">{getReqDepartment(doc)}</td>}
-                  <td className="px-5 py-3 text-[#1F2933]">{formatMoney(getReqAmount(doc), doc.currency)}</td>
-                  <td className="px-5 py-3"><StatusBadge status={doc.status} /></td>
-                  <td className="px-5 py-3 text-xs">
+                  {showDepartmentColumn && <td className="px-4 py-2.5 text-xs text-[#5E6870]">{getReqDepartment(doc)}</td>}
+                  <td className="px-4 py-2.5 font-mono text-xs font-semibold text-[#1F2933]">{formatMoney(getReqAmount(doc), doc.currency)}</td>
+                  <td className="px-4 py-2.5"><StatusBadge status={doc.status} /></td>
+
+                  {/* Travel retirement status */}
+                  <td className="px-4 py-2.5">
                     {doc.form_summary?.retirement ? (
                       <span className={cn(
-                        "inline-flex rounded-full border px-2 py-1 font-semibold",
+                        "inline-flex items-center border px-2 py-0.5 text-[11px] font-semibold",
                         doc.form_summary.retirement.status === "overdue" || doc.form_summary.retirement.status === "top_up_due"
                           ? "border-red-200 bg-red-50 text-red-700"
                           : doc.form_summary.retirement.status === "refund_due"
                             ? "border-amber-200 bg-amber-50 text-amber-700"
                             : doc.form_summary.retirement.status === "exact"
                               ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                              : "border-slate-200 bg-slate-50 text-slate-600",
+                              : "border-[#C8CDD2] bg-[#F5F7F8] text-[#5E6870]",
                       )} title={doc.form_summary.retirement.due_date ? `Due ${doc.form_summary.retirement.due_date}` : undefined}>
                         {doc.form_summary.retirement.label}
                       </span>
-                    ) : <span className="text-[#9AA5B1]">—</span>}
+                    ) : <span className="text-[#C8CDD2]">—</span>}
                   </td>
-                  <td className="px-5 py-3 text-xs">
+
+                  {/* Retirement outcome */}
+                  <td className="px-4 py-2.5">
                     {(() => {
                       const outcome = getRetirementOutcome(doc);
-                      if (!outcome) return <span className="text-[#9AA5B1]">—</span>;
+                      if (!outcome) return <span className="text-[#C8CDD2]">—</span>;
                       return (
                         <span className={cn(
-                          "inline-flex rounded-full border px-2 py-1 font-semibold",
+                          "inline-flex items-center border px-2 py-0.5 text-[11px] font-semibold",
                           outcome.status === "exact"
                             ? "border-emerald-200 bg-emerald-50 text-emerald-700"
                             : outcome.status === "over"
@@ -337,8 +345,10 @@ export default function RequisitionsPage() {
                       );
                     })()}
                   </td>
-                  <td className="px-5 py-3">
-                    <div className="flex flex-wrap gap-1.5">
+
+                  {/* LPO chips */}
+                  <td className="px-4 py-2.5">
+                    <div className="flex flex-wrap gap-1">
                       {getLpoDocuments(doc).map((lpo, index) => (
                         <button
                           key={lpo.id}
@@ -348,14 +358,15 @@ export default function RequisitionsPage() {
                             event.stopPropagation();
                             navigate(`/${doc.id}`, { state: { selectedLpoId: lpo.id } });
                           }}
-                          className="inline-flex items-center gap-1 border border-[#A7CDE3] bg-[#EEF6FB] px-2 py-1 text-[11px] font-semibold text-[#206D99] hover:bg-[#DDEFF9]"
+                          className="inline-flex items-center gap-1 border border-[#A7CDE3] bg-[#EEF6FB] px-2 py-0.5 text-[11px] font-semibold text-[#206D99] hover:bg-[#DDEFF9] transition-colors"
                         >
-                          <FileText className="h-3 w-3" /> {lpo.reference || `LPO ${index + 1}`}
+                          <FileText className="h-2.5 w-2.5" /> {lpo.reference || `LPO ${index + 1}`}
                         </button>
                       ))}
                     </div>
                   </td>
-                  <td className="px-5 py-3 text-[#5E6870]">
+
+                  <td className="px-4 py-2.5 text-xs text-[#5E6870]">
                     {doc.created_at ? formatDistanceToNow(new Date(doc.created_at), { addSuffix: true }) : "—"}
                   </td>
                 </tr>
@@ -366,25 +377,25 @@ export default function RequisitionsPage() {
 
         {/* Pagination */}
         {filteredRows.length > PAGE_SIZE && (
-          <div className="flex items-center justify-between border-t border-[#E4E7EB] px-5 py-3 text-xs text-[#5E6870]">
+          <div className="flex items-center justify-between border-t border-[#E4E7EB] px-5 py-2.5 text-xs text-[#5E6870]">
             <span>
               Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, filteredRows.length)} of {filteredRows.length}
             </span>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <button
                 type="button"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
-                className="rounded border border-[#E4E7EB] px-2.5 py-1 font-medium disabled:opacity-40"
+                className="border border-[#C8CDD2] px-3 py-1 font-medium text-[#1F2933] hover:bg-[#F5F7F8] disabled:opacity-40"
               >
                 Previous
               </button>
-              <span>Page {page} of {totalPages}</span>
+              <span className="px-2">Page {page} of {totalPages}</span>
               <button
                 type="button"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                className="rounded border border-[#E4E7EB] px-2.5 py-1 font-medium disabled:opacity-40"
+                className="border border-[#C8CDD2] px-3 py-1 font-medium text-[#1F2933] hover:bg-[#F5F7F8] disabled:opacity-40"
               >
                 Next
               </button>
