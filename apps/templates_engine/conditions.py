@@ -62,28 +62,31 @@ def build_viewer(group_ids=(), group_names=(), is_admin=False) -> dict:
     """Viewer context for ``user_group`` conditions. A plain dict keeps this
     module dependency-free; callers pass the ids/names they already have."""
     return {
-        "group_ids": {str(g) for g in (group_ids or [])},
-        "group_names": set(group_names or []),
+        "group_ids": {str(g).strip().lower() for g in (group_ids or [])},
+        "group_names": {str(g).strip().lower() for g in (group_names or [])},
         "is_admin": bool(is_admin),
     }
 
 
 def _match_user_group(cond: dict, viewer) -> bool:
-    """Evaluate one ``user_group`` condition. Group rules are a convenience, not
-    an access boundary: with no viewer context (or for admins) they never
-    restrict, matching the frontend's behaviour."""
+    """Evaluate one ``user_group`` condition against the actual viewer.
+
+    Group visibility applies to administrators as well; administrative edit
+    permissions do not implicitly make a viewer a member of every group.
+    Unknown viewer context remains permissive for backward compatibility.
+    """
     operator = cond.get("operator")
     if operator not in ("in_list", "not_in_list"):
         return True  # unknown operator — never hide/lock on it
-    if not viewer or viewer.get("is_admin"):
+    if not viewer:
         return True
     groups = cond.get("groups") or []
     ids = viewer.get("group_ids") or set()
     names = viewer.get("group_names") or set()
     member = any(
         isinstance(g, dict) and (
-            (g.get("id") and str(g["id"]) in ids)
-            or (g.get("name") and g["name"] in names)
+            (g.get("id") and str(g["id"]).strip().lower() in ids)
+            or (g.get("name") and str(g["name"]).strip().lower() in names)
         )
         for g in groups
     )

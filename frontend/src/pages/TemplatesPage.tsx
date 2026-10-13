@@ -13,7 +13,8 @@
  *  - Duplicate / delete
  */
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { useLocation } from "react-router-dom";
 import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -111,13 +112,18 @@ export interface Template {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function designerToBackend(dt: DesignerTemplate): Record<string, unknown> {
+  const categoryValue = (dt.category ?? "").trim().toLowerCase();
+  const allowedCategories = new Set(["finance", "hr", "procurement", "legal", "operations", "admin", "other"]);
+  const category = allowedCategories.has(categoryValue)
+    ? categoryValue
+    : /purchase|\blpo\b/i.test(dt.category ?? "") ? "procurement" : "other";
   return {
     id: dt.id,
     name: dt.name,
     description: dt.description ?? "",
     type: "built",
     kind: "document",
-    category: dt.category ?? "other",
+    category,
     tags: dt.tags ?? [],
     document_type: dt.documentTypeId,
     design: {
@@ -622,6 +628,7 @@ type PageMode = "list" | "builder" | "designer";
 
 export default function TemplatesPage({ initialMode }: { initialMode?: PageMode }) {
   const qc       = useQueryClient();
+  const location = useLocation();
   const [mode, setMode]               = useState<PageMode>(initialMode ?? "list");
   const [editTarget, setEditTarget]   = useState<Template | undefined>(undefined);
   const [previewTarget, setPreviewTarget]       = useState<Template | null>(null);
@@ -630,6 +637,18 @@ export default function TemplatesPage({ initialMode }: { initialMode?: PageMode 
   const [searchQuery, setSearchQuery] = useState("");
   const [typeFilter, setTypeFilter]   = useState<"all" | "built" | "uploaded">("all");
   const [docTypeFilter, setDocTypeFilter] = useState<string>("all");
+
+  // React Router can reuse this page component when moving from the template
+  // list to its new-document route. Re-sync route-driven mode after navigation
+  // instead of relying only on useState's first-render initializer.
+  useEffect(() => {
+    if (initialMode === "designer" || location.pathname.endsWith("/new-document")) {
+      setEditTarget(undefined);
+      setMode("designer");
+    } else if (location.pathname === "/admin/templates") {
+      setMode("list");
+    }
+  }, [initialMode, location.pathname]);
 
   // ── Data ────────────────────────────────────────────────────────────────
 
@@ -753,12 +772,8 @@ export default function TemplatesPage({ initialMode }: { initialMode?: PageMode 
         initial={editTarget ? backendToDesigner(editTarget) : null}
         documentTypes={docTypes.map((t) => ({ id: t.id, name: t.name, code: t.code, metadata_fields: t.metadata_fields }))}
         onSave={async (tpl, stayOpen) => {
-          try {
-            const res = await saveMutation.mutateAsync({ template: tpl, stayOpen });
-            return (res?.data as { id?: string })?.id;
-          } catch {
-            return undefined; // error surfaced by the mutation's onError toast
-          }
+          const res = await saveMutation.mutateAsync({ template: tpl, stayOpen });
+          return (res?.data as { id?: string })?.id;
         }}
         onCancel={() => { setMode("list"); setEditTarget(undefined); }}
         isSaving={saveMutation.isPending}

@@ -223,20 +223,24 @@ type Section = {
 };
 
 /** The person filling/viewing the form, used to evaluate role-restricted
- * sections. The auth payload carries group *names* + admin flags. */
+ * sections. Visibility group rules apply to admins too; edit permission is
+ * evaluated separately. */
 export type FormViewer = { groupNames?: string[]; groupIds?: string[]; isAdmin?: boolean; canEditConditionalSections?: boolean };
 
 /** A section restricted to RBAC groups is visible only to members of those
- * groups (matched by name — the client only has names) and to admins. An empty
+ * groups (matched by id or name). An empty
  * / absent list means everyone. When the viewer is unknown we don't hide — the
  * server stays authoritative. */
 function sectionVisibleToViewer(section: Section, viewer?: FormViewer): boolean {
   const groups = section.visibleToGroups ?? [];
   if (groups.length === 0) return true;
   if (!viewer) return true;
-  if (viewer.isAdmin) return true;
-  const names = new Set(viewer.groupNames ?? []);
-  return groups.some((g) => Boolean(g.name) && names.has(g.name as string));
+  const names = new Set((viewer.groupNames ?? []).map((name) => name.trim().toLowerCase()));
+  const ids = new Set((viewer.groupIds ?? []).map((id) => String(id).trim().toLowerCase()));
+  return groups.some((g) =>
+    (Boolean(g.id) && ids.has(String(g.id).trim().toLowerCase()))
+    || (Boolean(g.name) && names.has(String(g.name).trim().toLowerCase()))
+  );
 }
 
 function isRetirementExpenseSection(section: Section): boolean {
@@ -528,7 +532,7 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
   // No viewer context or an unknown operator never restricts.
   if (c.source === "user_group") {
     if (c.operator !== "in_list" && c.operator !== "not_in_list") return true;
-    if (!viewer || viewer.isAdmin) return true;
+    if (!viewer) return true;
     const wanted = c.groups ?? [];
     if (wanted.length === 0) return true;
     const mine = new Set([
@@ -546,19 +550,18 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
     const a = (actual || "").trim().toLowerCase();
     const e = (expected || "").trim().toLowerCase();
     if (a === e) return true;
-    const aliases: Record<string, string[]> = {
-      approved: ["approved", "request_approved", "requisition_approved", "rfq_approved", "lpo_approved", "retirement_pending", "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved"],
-      // Requisition approval remains a completed milestone while downstream
-      // LPO or retirement workflows are active.
-      requisition_approved: ["requisition_approved", "request_approved", "lpo_pending", "lpo_approved", "retirement_pending", "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved"],
-      // LPO approval remains true throughout the retirement lifecycle.
-      lpo_approved: ["lpo_approved", "retirement_pending", "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved"],
-      retirement_approved: ["retirement_approved", "fully_approved"],
-      pending_approval: ["pending_approval", "request_pending", "retirement_pending", "requisition_pending", "rfq_pending", "lpo_pending"],
-      returned: ["returned", "retirement_returned", "requisition_returned", "rfq_returned", "lpo_returned"],
-      rejected: ["rejected", "retirement_rejected", "requisition_rejected", "rfq_rejected", "lpo_rejected"],
-    };
-    return aliases[e]?.includes(a) ?? false;
+    const downstreamRequisitionApproved = new Set([
+      "request_approved", "lpo_pending", "lpo_approved", "retirement_pending",
+      "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved",
+    ]);
+    const downstreamLpoApproved = new Set([
+      "lpo_approved", "retirement_pending", "retirement_returned",
+      "retirement_rejected", "retirement_approved", "fully_approved",
+    ]);
+    return (e === "requisition_approved" && downstreamRequisitionApproved.has(a))
+      || (e === "lpo_approved" && downstreamLpoApproved.has(a))
+      || (e === "approved" && downstreamRequisitionApproved.has(a))
+      || (e === "retirement_approved" && a === "fully_approved");
   };
   if (c.source === "process_step") {
     const sv = processStep;

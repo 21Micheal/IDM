@@ -284,6 +284,20 @@ const DEFAULT_FIELDS: MergeField[] = [
   { key: "company.phone", label: "Company phone", group: "Organisation" },
   { key: "company.email", label: "Company email", group: "Organisation" },
   { key: "company.logo", label: "Company logo", group: "Organisation", type: "image" },
+  { key: "lpo.number", label: "LPO number", group: "Purchase order" },
+  { key: "lpo.date", label: "LPO date", group: "Purchase order", type: "date" },
+  { key: "lpo.valid_until", label: "Valid until", group: "Purchase order", type: "date" },
+  { key: "lpo.description", label: "Purchase description", group: "Purchase order" },
+  { key: "lpo.currency", label: "Currency", group: "Purchase order" },
+  { key: "lpo.subtotal", label: "Subtotal", group: "Purchase order", type: "number" },
+  { key: "lpo.vat_total", label: "VAT total", group: "Purchase order", type: "number" },
+  { key: "lpo.grand_total", label: "Grand total", group: "Purchase order", type: "number" },
+  { key: "lpo.amount_words", label: "Amount in words", group: "Purchase order" },
+  { key: "supplier.code", label: "Supplier code", group: "Supplier" },
+  { key: "supplier.name", label: "Supplier name", group: "Supplier" },
+  { key: "supplier.email", label: "Supplier email", group: "Supplier" },
+  { key: "supplier.phone", label: "Supplier telephone", group: "Supplier" },
+  { key: "supplier.address", label: "Supplier address", group: "Supplier" },
   { key: "document.title", label: "Document title", group: "Document" },
   { key: "document.number", label: "Document number", group: "Document" },
   { key: "document.date", label: "Document date", group: "Document", type: "date" },
@@ -311,6 +325,20 @@ const DEFAULT_FIELDS: MergeField[] = [
       { key: "amount", label: "Amount", type: "number" },
     ],
   },
+  {
+    key: "line_items", label: "LPO line items", group: "Purchase order", type: "collection", repeating: true,
+    children: [
+      { key: "number", label: "No" }, { key: "item", label: "Item" },
+      { key: "description", label: "Description" }, { key: "uom", label: "U.O.M" },
+      { key: "quantity", label: "Qty", type: "number" },
+      { key: "unit_price", label: "Unit price", type: "number" },
+      { key: "net_price", label: "Net price", type: "number" },
+      { key: "vat_percent", label: "VAT %", type: "number" },
+      { key: "vat", label: "VAT", type: "number" },
+      { key: "gross_value", label: "Gross value", type: "number" },
+      { key: "currency", label: "Currency" },
+    ],
+  },
 ];
 
 /** Neutral preview values used only in the Preview tab. Override with `sampleData`. */
@@ -319,6 +347,20 @@ const SAMPLE_DATA: Record<string, unknown> = {
   "company.address": "1 Example Street\nCity, Country",
   "company.phone": "+000 000 000",
   "company.email": "info@example.com",
+  "lpo.number": "LPO-00031",
+  "lpo.date": "07 Oct 2026",
+  "lpo.valid_until": "10 Oct 2026",
+  "lpo.description": "Software installation",
+  "lpo.currency": "USD",
+  "lpo.subtotal": "500.00",
+  "lpo.vat_total": "0.00",
+  "lpo.grand_total": "500.00",
+  "lpo.amount_words": "Five Hundred USD Only",
+  "supplier.code": "71002",
+  "supplier.name": "Great Crate Co.",
+  "supplier.email": "orders@example.com",
+  "supplier.phone": "+254 700 000 000",
+  "supplier.address": "Hampton Vale Industrial Estate, West Drayton, UB3 4DY",
   "document.title": "Document title",
   "document.number": "DOC-0001",
   "document.date": "01 January 2026",
@@ -338,9 +380,8 @@ const SAMPLE_DATA: Record<string, unknown> = {
   "approved_by.name": "Approver",
   "approved_by.role": "Manager",
   "approved_by.date": "02 January 2026",
-  items: [
-    { number: "1", description: "Item one", quantity: 1, unit_price: 40, amount: 40 },
-    { number: "2", description: "Item two", quantity: 2, unit_price: 30, amount: 60 },
+  line_items: [
+    { number: "1", item: "CN8001 — Freight", description: "Software installation", uom: "EACH", quantity: 1, unit_price: "500.00", net_price: "500.00", vat_percent: "", vat: "0.00", gross_value: "500.00", currency: "USD" },
   ],
 };
 
@@ -381,7 +422,7 @@ export const makeElement = (type: ElementType): DocumentElement => {
   if (type === "signature_group") return { ...base, signatories: [{ id: uid(), step: "1", role: "Signed by", name: "[[Name]]", date: "[[Date]]", signature: "[[Signature]]" }] };
   return {
     ...base, sourceKey: "", showHeader: true, repeatHeader: true, striped: false, cellPadding: 4,
-    headerBackground: "#E2E8F0", headerColor: "#111827", previewRows: 2,
+    headerBackground: "#D4DFEF", headerColor: "#111827", previewRows: 2,
     columns: [
       { id: uid(), key: "col1", label: "Column 1", width: 34 },
       { id: uid(), key: "col2", label: "Column 2", width: 33 },
@@ -1125,7 +1166,7 @@ function SettingsView({ template, documentTypes, commit }: { template: DocumentT
     <section><h3>Template details</h3><Field label="Name"><input className={inputClass} value={template.name} onChange={(event) => commit({ ...template, name: event.target.value })} /></Field><Field label="Description"><textarea className={inputClass} rows={3} value={template.description ?? ""} onChange={(event) => commit({ ...template, description: event.target.value })} /></Field><Field label="Category"><input className={inputClass} value={template.category ?? ""} onChange={(event) => commit({ ...template, category: event.target.value })} /></Field><Field label="Tags (comma separated)"><input className={inputClass} value={(template.tags ?? []).join(", ")} onChange={(event) => commit({ ...template, tags: event.target.value.split(",").map((tag) => tag.trim()).filter(Boolean) })} /></Field>{!!documentTypes?.length && <Field label="Document type"><select className={inputClass} value={template.documentTypeId ?? ""} onChange={(event) => commit({ ...template, documentTypeId: event.target.value })}><option value="">Select type</option>{documentTypes.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}</select></Field>}</section>
     <section><h3>Page setup</h3><div className="dtd-two"><Field label="Size"><select className={inputClass} value={template.page.size} onChange={(event) => setPage({ size: event.target.value as PageSize })}>{(Object.keys(PAGE_DIMS) as PageSize[]).map((size) => <option key={size}>{size}</option>)}</select></Field><Field label="Orientation"><select className={inputClass} value={template.page.orientation} onChange={(event) => setPage({ orientation: event.target.value as Orientation })}><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></Field></div><h4>Margins (mm)</h4><div className="dtd-four">{(["top", "right", "bottom", "left"] as const).map((key) => <Field key={key} label={key}><NumberInput value={template.page.margin[key]} min={0} max={60} onChange={(value) => setMargin(key, value)} /></Field>)}</div></section>
     <section><h3>Typography & colour</h3><div className="dtd-two"><Field label="Body font"><select className={inputClass} value={template.theme.fontFamily} onChange={(event) => setTheme({ fontFamily: event.target.value })}>{FONT_OPTIONS.map((font) => <option key={font.value} value={font.value}>{font.label}</option>)}</select></Field><Field label="Heading font"><select className={inputClass} value={template.theme.headingFamily} onChange={(event) => setTheme({ headingFamily: event.target.value })}>{FONT_OPTIONS.map((font) => <option key={font.value} value={font.value}>{font.label}</option>)}</select></Field></div><div className="dtd-two"><Field label="Base size"><NumberInput value={template.theme.baseFontSize} min={7} max={24} onChange={(baseFontSize) => setTheme({ baseFontSize })} suffix="px" /></Field><Field label="Line height"><NumberInput value={template.theme.lineHeight} min={1} max={3} step={0.05} onChange={(lineHeight) => setTheme({ lineHeight })} /></Field></div><div className="dtd-three"><Field label="Text"><input type="color" value={template.theme.textColor} onChange={(event) => setTheme({ textColor: event.target.value })} /></Field><Field label="Headings"><input type="color" value={template.theme.headingColor} onChange={(event) => setTheme({ headingColor: event.target.value })} /></Field><Field label="Accent / rules"><input type="color" value={template.theme.accentColor} onChange={(event) => setTheme({ accentColor: event.target.value })} /></Field></div></section>
-    <section><h3>Page bands & watermark</h3><div className="dtd-check-row"><label><input type="checkbox" checked={template.header.enabled} onChange={(event) => commit({ ...template, header: { ...template.header, enabled: event.target.checked } })} />Header</label><label><input type="checkbox" checked={template.footer.enabled} onChange={(event) => commit({ ...template, footer: { ...template.footer, enabled: event.target.checked } })} />Footer</label><label><input type="checkbox" checked={template.watermark.enabled} onChange={(event) => setWatermark({ enabled: event.target.checked })} />Watermark</label></div><div className="dtd-two"><Field label="Watermark type"><select className={inputClass} value={template.watermark.kind} onChange={(event) => setWatermark({ kind: event.target.value as WatermarkSettings["kind"] })}><option value="text">Text</option><option value="image">Image URL</option></select></Field><Field label="Width"><NumberInput value={template.watermark.width} max={1000} onChange={(width) => setWatermark({ width })} suffix="px" /></Field></div><Field label="Watermark text, field or image URL"><input className={inputClass} value={template.watermark.value} onChange={(event) => setWatermark({ value: event.target.value })} /></Field><div className="dtd-two"><Field label="Opacity"><input type="range" min="0.01" max="0.4" step="0.01" value={template.watermark.opacity} onChange={(event) => setWatermark({ opacity: Number(event.target.value) })} /></Field><Field label="Rotation"><NumberInput min={-180} max={180} value={template.watermark.rotation} onChange={(rotation) => setWatermark({ rotation })} suffix="°" /></Field></div></section>
+    <section><h3>Page bands & watermark</h3><div className="dtd-check-row"><label><input type="checkbox" checked={template.header.enabled} onChange={(event) => commit({ ...template, header: { ...template.header, enabled: event.target.checked } })} />Header</label><label><input type="checkbox" checked={template.footer.enabled} onChange={(event) => commit({ ...template, footer: { ...template.footer, enabled: event.target.checked } })} />Footer</label><label><input type="checkbox" checked={template.watermark.enabled} onChange={(event) => setWatermark({ enabled: event.target.checked })} />Watermark</label></div><div className="dtd-two"><Field label="Watermark type"><select className={inputClass} value={template.watermark.kind} onChange={(event) => setWatermark({ kind: event.target.value as WatermarkSettings["kind"] })}><option value="text">Text</option><option value="image">Image</option></select></Field><Field label="Width"><NumberInput value={template.watermark.width} max={1000} onChange={(width) => setWatermark({ width })} suffix="px" /></Field></div><Field label={template.watermark.kind === "image" ? "Watermark image URL (data URL required for PDF)" : "Watermark text or field token"}><input className={inputClass} value={template.watermark.value} placeholder={template.watermark.kind === "image" ? "data:image/png;base64,…" : "e.g. CONFIDENTIAL or {{document.number}}"} onChange={(event) => setWatermark({ value: event.target.value })} /></Field><div className="dtd-two"><Field label="Opacity"><input type="range" min="0.01" max="0.4" step="0.01" value={template.watermark.opacity} onChange={(event) => setWatermark({ opacity: Number(event.target.value) })} /></Field><Field label="Rotation"><NumberInput min={-180} max={180} value={template.watermark.rotation} onChange={(rotation) => setWatermark({ rotation })} suffix="°" /></Field></div></section>
     <section className="dtd-wide"><h3>Required DMS fields</h3><div className="dtd-field-chips">{collectRequiredFields(template).map((field) => <code key={field}>{`{{${field}}}`}</code>)}{!collectRequiredFields(template).length && <span className="dtd-hint">No fields used yet.</span>}</div></section>
   </div></main>;
 }
@@ -1163,7 +1204,10 @@ export default function TemplateDesigner({ initial, mergeFields = DEFAULT_FIELDS
   const [dragLabel, setDragLabel] = useState<{ label: string; icon: typeof FileText } | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
-  const data = useMemo(() => ({ ...SAMPLE_DATA, ...(sampleData ?? {}) }), [sampleData]);
+  // Keep preview placeholders visible unless a caller explicitly supplies
+  // preview data. Synthetic values can make a layout look populated when the
+  // real document has no matching field value.
+  const data = useMemo(() => ({ ...(sampleData ?? {}) }), [sampleData]);
 
   const commit = useCallback((next: DocumentTemplateV2) => {
     setHistory((current) => [...current.slice(0, cursor + 1), normalizeTemplate(next)].slice(-80));
@@ -1338,8 +1382,11 @@ export default function TemplateDesigner({ initial, mergeFields = DEFAULT_FIELDS
       toast.error("Select a document type in Settings before saving.");
       return;
     }
-    try { await onSave(outputDocumentTemplate(template), false); toast.success("Template saved"); }
-    catch (error) { toast.error(error instanceof Error ? error.message : "Template could not be saved"); }
+    try { await onSave(outputDocumentTemplate(template), false); }
+    catch {
+      // The host page owns API error reporting. Do not show a success toast or
+      // dismiss the editor when its save callback rejects.
+    }
   };
 
   /* ---------- keyboard ---------- */

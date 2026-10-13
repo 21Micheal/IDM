@@ -1331,6 +1331,38 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             if row.get("marginBottom"):
                 story.append(Spacer(1, float(row["marginBottom"]) * .75))
 
+    def band_cell_layout(cell, cell_width, page_number=1):
+        """Measure and retain each header/footer cell's items in vertical order."""
+        entries = []
+        total_height = 0
+        for element in cell.get("elements") or []:
+            kind = element.get("type")
+            if kind in ("text", "note", "heading"):
+                raw = _subst_tokens(str(element.get("text") or ""), {**values, "page": page_number, "pages": len(pages)})
+                style = element.get("style") or {}
+                font_size = max(6, float(style.get("fontSize", 10)) * .75)
+                font = "Helvetica-Bold" if kind == "heading" or style.get("bold") else "Helvetica"
+                paragraph_style = ParagraphStyle(
+                    "BandMeasure", parent=styles["Normal"], fontName=font,
+                    fontSize=font_size, leading=font_size * 1.15,
+                    textColor=as_color(style.get("color"), text_color),
+                    alignment=align_map.get(style.get("textAlign"), TA_CENTER),
+                )
+                paragraph = Paragraph(xml_escape(raw).replace("\n", "<br/>"), paragraph_style)
+                _, height = paragraph.wrap(max(1, cell_width - 4), 10000)
+                entries.append(("text", paragraph, height, 0))
+                total_height += height + 2
+            elif kind in ("image", "logo"):
+                image_data = _decode_data_url_image(element.get("src"))
+                if image_data:
+                    reader = ImageReader(BytesIO(image_data))
+                    image_width, image_height = reader.getSize()
+                    width = min(float(element.get("width") or 80) * .75, 60, max(1, cell_width - 4))
+                    height = width * image_height / max(image_width, 1)
+                    entries.append(("image", image_data, height, width))
+                    total_height += height + 2
+        return entries, total_height
+
     def band_row_heights(band):
         if not band or not band.get("enabled"):
             return []
@@ -1341,29 +1373,8 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             cell_widths = [content_width * weight / max(1, sum(weights)) for weight in weights]
             row_height = max(float(row.get("minHeight") or 12) * .75, 12)
             for cell, cell_width in zip(cells, cell_widths):
-                for element in cell.get("elements") or []:
-                    kind = element.get("type")
-                    if kind in ("text", "note", "heading"):
-                        raw = _subst_tokens(str(element.get("text") or ""), {**values, "page": 1, "pages": len(pages)})
-                        style = element.get("style") or {}
-                        font_size = max(6, float(style.get("fontSize", 10)) * .75)
-                        font = "Helvetica-Bold" if kind == "heading" or style.get("bold") else "Helvetica"
-                        text_style = ParagraphStyle(
-                            "BandMeasure", parent=styles["Normal"], fontName=font,
-                            fontSize=font_size, leading=font_size * 1.15,
-                            textColor=as_color(style.get("color"), text_color),
-                            alignment=align_map.get(style.get("textAlign"), TA_CENTER),
-                        )
-                        paragraph = Paragraph(xml_escape(raw).replace("\n", "<br/>"), text_style)
-                        _, height = paragraph.wrap(max(1, cell_width - 4), 10000)
-                        row_height = max(row_height, height + 4)
-                    elif kind in ("image", "logo"):
-                        image_data = _decode_data_url_image(element.get("src"))
-                        if image_data:
-                            reader = ImageReader(BytesIO(image_data))
-                            image_width, image_height = reader.getSize()
-                            width = min(float(element.get("width") or 80) * .75, 60, max(1, cell_width - 4))
-                            row_height = max(row_height, width * image_height / max(image_width, 1) + 4)
+                _entries, content_height = band_cell_layout(cell, cell_width)
+                row_height = max(row_height, content_height + 2)
             heights.append(row_height)
         return heights
 
@@ -1373,7 +1384,6 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
         canv.saveState()
         usable = content_width
         y = y_top
-        logo_widths = {}
         row_heights = band_row_heights(band)
         for row, row_height in zip(band.get("rows") or [], row_heights):
             cells = row.get("columns") or []
@@ -1381,32 +1391,15 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             x = left
             for cell, weight in zip(cells, weights):
                 cell_width = usable * weight / max(1, sum(weights))
-                for element in cell.get("elements") or []:
-                    kind = element.get("type")
-                    if kind in ("text", "note", "heading"):
-                        raw = _subst_tokens(str(element.get("text") or ""), {**values, "page": canv.getPageNumber(), "pages": len(pages)})
-                        font_size = max(6, float((element.get("style") or {}).get("fontSize", 10)) * .75)
-                        style = element.get("style") or {}
-                        font = "Helvetica-Bold" if kind == "heading" or style.get("bold") else "Helvetica"
-                        text_style = ParagraphStyle(
-                            "BandText", parent=styles["Normal"], fontName=font,
-                            fontSize=font_size, leading=font_size * 1.15,
-                            textColor=as_color(style.get("color"), text_color),
-                            alignment=align_map.get(style.get("textAlign"), TA_CENTER),
-                        )
-                        paragraph = Paragraph(xml_escape(raw).replace("\n", "<br/>"), text_style)
-                        _, text_height = paragraph.wrap(max(1, cell_width - 4), row_height)
-                        paragraph.drawOn(canv, x + 2, y - text_height + 2)
-                    elif kind in ("image", "logo"):
-                        raw = _decode_data_url_image(element.get("src"))
-                        if raw:
-                            source_key = element.get("src") or ""
-                            width = logo_widths.setdefault(source_key, min(float(element.get("width") or 80) * .75, 60))
-                            width = min(width, max(1, cell_width - 4))
-                            image = ImageReader(BytesIO(raw))
-                            iw, ih = image.getSize()
-                            height = width * ih / max(iw, 1)
-                            canv.drawImage(image, x + (cell_width - width) / 2, y - height, width=width, height=height, preserveAspectRatio=True, mask="auto")
+                entries, content_height = band_cell_layout(cell, cell_width, canv.getPageNumber())
+                cursor_y = y - max(0, (row_height - content_height) / 2)
+                for kind, content, height, width in entries:
+                    if kind == "text":
+                        content.drawOn(canv, x + 2, cursor_y - height + 2)
+                    else:
+                        image = ImageReader(BytesIO(content))
+                        canv.drawImage(image, x + (cell_width - width) / 2, cursor_y - height, width=width, height=height, preserveAspectRatio=True, mask="auto")
+                    cursor_y -= height + 2
                 x += cell_width
             y -= row_height
         if band.get("border"):

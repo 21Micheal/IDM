@@ -81,6 +81,38 @@ def generate_lpo_for_document(
             existing = Document.objects.filter(pk=match.get("id")).first()
             if existing:
                 return existing
+
+        # A prior concurrent posting result may have overwritten the source
+        # requisition's metadata after this LPO was generated. Recover the
+        # already-created child by its SunSystems reference and relationship,
+        # then restore its pointer instead of generating a duplicate PDF.
+        linked_lpos = Document.objects.filter(
+            incoming_relationships__source_document=document,
+            incoming_relationships__relation_type=DocumentRelationship.RelationType.REFERENCES,
+            document_type__code=LPO_DOC_TYPE_CODE,
+        ).distinct().order_by("created_at")
+        for existing in linked_lpos:
+            existing_meta = existing.metadata if isinstance(existing.metadata, dict) else {}
+            if str(existing_meta.get("lpo.number") or "") != str(purchase_order_reference):
+                continue
+            recovered = {
+                "id": str(existing.id),
+                "reference": str(purchase_order_reference),
+                "document_reference": existing.reference_number,
+                "table_key": table_key or "",
+                "table_label": table_label or "Requisition",
+            }
+            if posting_stage is not None:
+                recovered["posting_stage"] = int(posting_stage)
+            records = [item for item in records if str(item.get("id")) != str(existing.id)]
+            records.append(recovered)
+            form["lpo_documents"] = records
+            form["lpo_document_id"] = records[0].get("id")
+            form["lpo_reference"] = records[0].get("reference")
+            meta["form"] = form
+            document.metadata = meta
+            document.save(update_fields=["metadata", "updated_at"])
+            return existing
     else:
         existing_id = form.get("lpo_document_id")
         if existing_id:

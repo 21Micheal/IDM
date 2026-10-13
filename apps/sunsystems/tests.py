@@ -270,8 +270,8 @@ class PurchaseOrderMappingTests(SimpleTestCase):
             "transaction_type": {"const": "ASSETS"},
             "invoice_address_code": {"const": "0000000000"},
             "date": {"field": "approved_date", "format": "DDMMYYYY"},
-            "vlab_base_num": {"const": "7"},
-            "vlab_trans_num": {"const": "9"},
+            "vlab_base_num": {"const": "7"},  # ignored for LPO: quantity is VLAB1
+            "vlab_trans_num": {"const": "9"},  # ignored for LPO: value is VLAB2
             "analysis": {
                 str(n): {
                     "category": {"const": dim},
@@ -327,9 +327,9 @@ class PurchaseOrderMappingTests(SimpleTestCase):
         self.assertEqual(len(lines), 2)
         self.assertEqual([l.findtext("LineNumber") for l in lines], ["1", "2"])
         self.assertEqual(lines[0].findtext("OrderDate"), "26012024")
-        # VLAB 7/9 configuration is honoured.
-        self.assertIsNotNone(lines[0].find("VLAB7/Base/VPolVlabEntry_Val"))
-        self.assertEqual(lines[0].findtext("VLAB9/Trans/VPolVlabEntry_Val"), "230")
+        # Legacy VLAB 7/9 overrides are ignored for LPO payloads.
+        self.assertIsNotNone(lines[0].find("VLAB1/Base/VPolVlabEntry_Val"))
+        self.assertEqual(lines[0].findtext("VLAB2/Trans/VPolVlabEntry_Val"), "230")
         # Analysis 1/2/5 resolved from the ten-slot panel; 3/4 omitted (empty).
         self.assertEqual(lines[0].findtext("AnalysisQuantity/Analysis1/VPolCatAnalysis_AnlCode"), "PROJ-1")
         self.assertEqual(lines[0].findtext("AnalysisQuantity/Analysis1/VPolCatAnalysis_AnlCatId"), "04")

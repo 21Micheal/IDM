@@ -1,0 +1,351 @@
+{
+  "schemaVersion": 2,
+  "name": "Purchase Order (LPO)",
+  "description": "A4 purchase order based on the supplied RRPO sample. Replace the two logo placeholders and select the LPO document type before saving.",
+  "category": "procurement",
+  "tags": ["LPO", "purchase order", "SunSystems"],
+  "page": {
+    "size": "A4",
+    "orientation": "portrait",
+    "margin": { "top": 12, "right": 15, "bottom": 13, "left": 15 }
+  },
+  "theme": {
+    "fontFamily": "Arial, Helvetica, sans-serif",
+    "headingFamily": "Arial, Helvetica, sans-serif",
+    "baseFontSize": 11,
+    "lineHeight": 1.2,
+    "textColor": "#172033",
+    "headingColor": "#172033",
+    "accentColor": "#287EAD"
+  },
+  "header": {
+    "enabled": true,
+    "border": true,
+    "height": 30,
+    "rows": [
+      {
+        "id": "lpo-header-row",
+        "columns": [
+          {
+            "id": "lpo-header-left",
+            "width": 1,
+            "verticalAlign": "center",
+            "elements": [
+              { "id": "lpo-logo-left", "type": "image", "src": "", "alt": "Replace with left company logo", "width": 88, "height": 44, "objectFit": "contain" }
+            ]
+          },
+          {
+            "id": "lpo-header-company",
+            "width": 3,
+            "verticalAlign": "center",
+            "elements": [
+              { "id": "lpo-company-name", "type": "text", "text": "{{company.name}}", "style": { "bold": true, "fontSize": 12, "align": "center", "textAlign": "center", "marginBottom": 1 } },
+              { "id": "lpo-company-address", "type": "text", "text": "{{company.address}}", "style": { "fontSize": 10, "align": "center", "textAlign": "center", "marginBottom": 1 } },
+              { "id": "lpo-company-phone-email", "type": "text", "text": "Tel: +254 0222 222  |  Email: info@flaxem.com", "style": { "fontSize": 9, "align": "center", "textAlign": "center" } }
+            ]
+          },
+          {
+            "id": "lpo-header-right",
+            "width": 1,
+            "verticalAlign": "center",
+            "elements": [
+              { "id": "lpo-logo-right", "type": "image", "src": "", "alt": "Replace with right company logo", "width": 88, "height": 44, "objectFit": "contain" }
+            ]
+          }
+        ],
+        "gap": 4,
+        "minHeight": 54,
+        "marginBottom": 0
+      }
+    ]
+  },
+  "footer": {
+    "enabled": true,
+    "border": true,
+    "height": 16,
+    "rows": [
+      {
+        "id": "lpo-footer-row",
+        "columns": [
+          {
+            "id": "lpo-footer-content",
+            "width": 1,
+            "verticalAlign": "center",
+            "elements": [
+              { "id": "lpo-footer-text", "type": "text", "text": "Purchase Order {{lpo.number}}  ·  Page {{page}} of {{pages}}", "style": { "fontSize": 9, "align": "center", "textAlign": "center", "italic": true } }
+            ]
+          }
+        ],
+        "gap": 0,
+        "minHeight": 16
+      }
+    ]
+  },
+  "watermark": { "enabled": false, "kind": "text", "value": "", "opacity": 0.06, "width": 300, "rotation": -30 },
+  "pages": [
+    {
+      "id": "lpo-page-1",
+      "name": "Purchase Order",
+      "showHeader": true,
+      "showFooter": true,
+      "rows": [
+        {
+          "id": "lpo-title-row",
+          "columns": [
+            {
+              "id": "lpo-title-cell",
+              "width": 1,
+              "verticalAlign": "center",
+              "elements": [
+                { "id": "lpo-title", "type": "heading", "level": 1, "text": "Purchase Order", "style": { "fontSize": 23, "bold": true, "underline": true, "align": "center", "textAlign": "center", "marginTop": 8, "marginBottom": 8 } }
+              ]
+            }
+          ],
+          "gap": 0,
+          "marginBottom": 5,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-number-row",
+          "columns": [
+            { "id": "lpo-number-spacer", "width": 1, "elements": [] },
+            {
+              "id": "lpo-number-details",
+              "width": 1,
+              "elements": [
+                {
+                  "id": "lpo-meta-fields",
+                  "type": "field_group",
+                  "labelWidth": 90,
+                  "fields": [
+                    { "id": "lpo-meta-date", "label": "Date:", "value": "{{lpo.date}}", "boldLabel": true },
+                    { "id": "lpo-meta-number", "label": "LPO No:", "value": "{{lpo.number}}", "boldLabel": true, "boldValue": true },
+                    { "id": "lpo-meta-valid", "label": "Valid Until:", "value": "{{lpo.valid_until}}" }
+                  ]
+                }
+              ]
+            }
+          ],
+          "gap": 12,
+          "marginBottom": 5,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-supplier-heading-row",
+          "columns": [
+            {
+              "id": "lpo-supplier-heading-cell",
+              "width": 1,
+              "elements": [
+                { "id": "lpo-supplier-heading", "type": "heading", "level": 3, "text": "SUPPLIER DETAILS", "style": { "fontSize": 14, "bold": true, "marginTop": 5, "marginBottom": 2 } }
+              ]
+            }
+          ],
+          "gap": 0,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-supplier-details-row",
+          "columns": [
+            {
+              "id": "lpo-supplier-details-cell",
+              "width": 1,
+              "elements": [
+                {
+                  "id": "lpo-supplier-fields",
+                  "type": "field_group",
+                  "labelWidth": 82,
+                  "fields": [
+                    { "id": "lpo-supplier-code", "label": "Code:", "value": "{{supplier.code}}", "boldValue": true },
+                    { "id": "lpo-supplier-name", "label": "Name:", "value": "{{supplier.name}}", "boldValue": true },
+                    { "id": "lpo-supplier-email", "label": "Email:", "value": "{{supplier.email}}" },
+                    { "id": "lpo-supplier-phone", "label": "Telephone:", "value": "{{supplier.phone}}" },
+                    { "id": "lpo-supplier-address", "label": "Address:", "value": "{{supplier.address}}" }
+                  ]
+                }
+              ]
+            }
+          ],
+          "gap": 0,
+          "marginBottom": 4,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-description-row",
+          "columns": [
+            {
+              "id": "lpo-description-cell",
+              "width": 1,
+              "elements": [
+                { "id": "lpo-description", "type": "text", "text": "Description: {{lpo.description}}", "style": { "fontSize": 11, "marginTop": 2, "marginBottom": 5 } }
+              ]
+            }
+          ],
+          "gap": 0,
+          "marginBottom": 2,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-items-title-row",
+          "columns": [
+            {
+              "id": "lpo-items-title-cell",
+              "width": 1,
+              "elements": [
+                { "id": "lpo-items-title", "type": "heading", "level": 2, "text": "Please Supply the Underlisted", "style": { "fontSize": 17, "bold": true, "marginTop": 2, "marginBottom": 4 } }
+              ]
+            }
+          ],
+          "gap": 0,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-items-table-row",
+          "columns": [
+            {
+              "id": "lpo-items-table-cell",
+              "width": 1,
+              "elements": [
+                {
+                  "id": "lpo-items-table",
+                  "type": "data_table",
+                  "sourceKey": "line_items",
+                  "previewRows": 2,
+                  "showHeader": true,
+                  "repeatHeader": true,
+                  "striped": false,
+                  "cellPadding": 4,
+                  "headerBackground": "#D4DFEF",
+                  "headerColor": "#172033",
+                  "columns": [
+                    { "id": "lpo-col-number", "key": "number", "label": "No", "width": 4, "format": "text" },
+                    { "id": "lpo-col-item", "key": "item", "label": "Item", "width": 18, "format": "text" },
+                    { "id": "lpo-col-description", "key": "description", "label": "Description", "width": 17, "format": "text" },
+                    { "id": "lpo-col-uom", "key": "uom", "label": "U.O.M", "width": 7, "format": "text" },
+                    { "id": "lpo-col-quantity", "key": "quantity", "label": "Qty", "width": 5, "align": "right", "format": "number" },
+                    { "id": "lpo-col-unit-price", "key": "unit_price", "label": "Unit Price", "width": 10, "align": "right", "format": "currency" },
+                    { "id": "lpo-col-net", "key": "net_price", "label": "Net Price", "width": 10, "align": "right", "format": "currency" },
+                    { "id": "lpo-col-vat-percent", "key": "vat_percent", "label": "VAT%", "width": 6, "align": "right", "format": "percent" },
+                    { "id": "lpo-col-vat", "key": "vat", "label": "VAT", "width": 7, "align": "right", "format": "currency" },
+                    { "id": "lpo-col-gross", "key": "gross_value", "label": "Gross Value", "width": 10, "align": "right", "format": "currency" }
+                  ],
+                  "summaries": [
+                    {
+                      "id": "lpo-totals-summary",
+                      "label": "Totals in {{lpo.currency}}",
+                      "labelSpan": 6,
+                      "values": ["{{lpo.subtotal}}", "", "{{lpo.vat_total}}", "{{lpo.grand_total}}"],
+                      "bold": true
+                    }
+                  ],
+                  "style": { "borderWidth": 1, "borderColor": "#45566F" }
+                }
+              ]
+            }
+          ],
+          "gap": 0,
+          "marginBottom": 4,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-amount-words-row",
+          "columns": [
+            {
+              "id": "lpo-amount-words-cell",
+              "width": 1,
+              "elements": [
+                { "id": "lpo-amount-words", "type": "text", "text": "Total in Words: {{lpo.amount_words}}", "style": { "bold": true, "fontSize": 11, "marginTop": 2, "marginBottom": 5 } }
+              ]
+            }
+          ],
+          "gap": 0,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-approvals-heading-row",
+          "columns": [
+            {
+              "id": "lpo-approvals-heading-cell",
+              "width": 1,
+              "elements": [
+                { "id": "lpo-approvals-heading", "type": "heading", "level": 3, "text": "APPROVALS", "style": { "fontSize": 14, "bold": true, "marginTop": 3, "marginBottom": 3 } }
+              ]
+            }
+          ],
+          "gap": 0,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-approvals-row",
+          "columns": [
+            {
+              "id": "lpo-prepared-cell",
+              "width": 1,
+              "elements": [
+                { "id": "lpo-prepared-title", "type": "text", "text": "1. Prepared By", "style": { "bold": true, "fontSize": 11, "marginBottom": 1 } },
+                { "id": "lpo-prepared-role", "type": "text", "text": "{{prepared_by.role}}", "style": { "bold": true, "fontSize": 11, "marginBottom": 3 } },
+                { "id": "lpo-prepared-name", "type": "text", "text": "{{prepared_by.name}}", "style": { "fontSize": 11, "marginBottom": 6 } },
+                { "id": "lpo-prepared-date", "type": "text", "text": "Date: {{prepared_by.date}}", "style": { "fontSize": 10 } }
+              ]
+            },
+            {
+              "id": "lpo-approved-cell",
+              "width": 1,
+              "elements": [
+                { "id": "lpo-approved-title", "type": "text", "text": "2. Approved By", "style": { "bold": true, "fontSize": 11, "marginBottom": 1 } },
+                { "id": "lpo-approved-role", "type": "text", "text": "{{approved_by.role}}", "style": { "bold": true, "fontSize": 11, "marginBottom": 3 } },
+                { "id": "lpo-approved-name", "type": "text", "text": "{{approved_by.name}}", "style": { "fontSize": 11, "marginBottom": 6 } },
+                { "id": "lpo-approved-date", "type": "text", "text": "Date: {{approved_by.date}}", "style": { "fontSize": 10 } }
+              ]
+            }
+          ],
+          "gap": 18,
+          "marginBottom": 5,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-terms-heading-row",
+          "columns": [
+            {
+              "id": "lpo-terms-heading-cell",
+              "width": 1,
+              "elements": [
+                { "id": "lpo-terms-heading", "type": "heading", "level": 2, "text": "Standard Terms & Conditions", "style": { "fontSize": 15, "bold": true, "marginTop": 3, "marginBottom": 3 } }
+              ]
+            }
+          ],
+          "gap": 0,
+          "keepTogether": true
+        },
+        {
+          "id": "lpo-terms-row",
+          "columns": [
+            {
+              "id": "lpo-terms-cell",
+              "width": 1,
+              "elements": [
+                {
+                  "id": "lpo-terms-text",
+                  "type": "text",
+                  "text": "Fixed Price: The prices indicated above are fixed and not subject to any adjustment.\nPayment: Payment will be effected within 30 days of receipt of the dated invoice, delivery notes, and a copy of this LPO. Failure to deliver these documents may result in delayed payment.\nTechnical Specifications: The goods shall comply with the technical specifications in the contractor's quotation attached to this Purchase Order.\nDelivery Schedule: Delivery shall be completed according to the contractor's quotation, with the delivery period calculated from signature of this Purchase Order.\nDelivery Instructions: The items will be delivered to the address specified by the purchaser.\nLiquidated Damages: Failure to deliver within the specified period may result in liquidated damages up to the maximum permitted by this Purchase Order.\nFailure to Perform: The purchaser may cancel this Purchase Order if the contractor fails to deliver according to these terms, without compensation.",
+                  "style": { "fontSize": 10, "lineHeight": 1.2, "marginBottom": 0 }
+                }
+              ]
+            }
+          ],
+          "gap": 0,
+          "keepTogether": true
+        }
+      ],
+      "floating": []
+    }
+  ],
+  "requiredFields": [
+    "company.name", "company.address", "company.phone", "company.email",
+    "lpo.number", "lpo.date", "lpo.valid_until", "lpo.description", "lpo.currency",
+    "lpo.subtotal", "lpo.vat_total", "lpo.grand_total", "lpo.amount_words",
+    "supplier.code", "supplier.name", "supplier.email", "supplier.phone", "supplier.address",
+    "prepared_by.name", "prepared_by.role", "prepared_by.date",
+    "approved_by.name", "approved_by.role", "approved_by.date", "line_items"
+  ]
+}

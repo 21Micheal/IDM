@@ -221,21 +221,29 @@ def _mark(posting: JournalPosting, status: str, **fields) -> None:
 def _write_back_to_document(document, posting: JournalPosting) -> None:
     """Mirror the posting result onto metadata.sunsystems.postings[stage] for the UI."""
     try:
-        meta = dict(document.metadata or {})
-        ss = dict(meta.get("sunsystems") or {})
-        postings = dict(ss.get("postings") or {})
-        postings[str(posting.stage)] = {
-            "status": posting.status,
-            "journal_number": posting.journal_number,
-            "message": posting.message,
-            "posted_at": posting.posted_at.isoformat() if posting.posted_at else None,
-        }
-        ss["postings"] = postings
-        # Legacy single-posting compat: also write to ss["posting"] for stage 1.
-        if posting.stage == 1:
-            ss["posting"] = postings["1"]
-        meta["sunsystems"] = ss
-        document.metadata = meta
-        type(document).objects.filter(pk=document.pk).update(metadata=meta)
+        from django.db import transaction
+
+        # Posting stages can complete concurrently. Always merge into the latest
+        # locked metadata so an SSC status write cannot erase an LPO link (or a
+        # different posting stage) written by another worker.
+        with transaction.atomic():
+            latest = type(document).objects.select_for_update().get(pk=document.pk)
+            meta = dict(latest.metadata or {})
+            ss = dict(meta.get("sunsystems") or {})
+            postings = dict(ss.get("postings") or {})
+            postings[str(posting.stage)] = {
+                "status": posting.status,
+                "journal_number": posting.journal_number,
+                "message": posting.message,
+                "posted_at": posting.posted_at.isoformat() if posting.posted_at else None,
+            }
+            ss["postings"] = postings
+            # Legacy single-posting compat: also write to ss["posting"] for stage 1.
+            if posting.stage == 1:
+                ss["posting"] = postings["1"]
+            meta["sunsystems"] = ss
+            latest.metadata = meta
+            latest.save(update_fields=["metadata", "updated_at"])
+            document.metadata = meta
     except Exception:  # pragma: no cover - best-effort UI mirror
         logger.exception("Failed to mirror journal posting onto document %s", document.pk)

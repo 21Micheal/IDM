@@ -1878,8 +1878,8 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           quantity: quantityFieldSpec
             ? { ...quantityFieldSpec, default: ui.quantity || "1" }
             : { const: ui.quantity || "1" },
-          vlab_base_num: { const: ui.vlabBase || "7" },
-          vlab_trans_num: { const: ui.vlabTrans || "9" },
+          vlab_base_num: { const: "1" },
+          vlab_trans_num: { const: "2" },
           ...(Object.keys(poAnalysis).length ? { analysis: poAnalysis } : {}),
           lines: poLines,
         },
@@ -5592,23 +5592,40 @@ function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, 
    * viewer context (undefined) or no group picked, the condition doesn't restrict. */
   if (c.source === "user_group") {
     const wanted = c.groups ?? [];
-    if (wanted.length === 0 || !userGroups) return true;
+    if (wanted.length === 0 || userGroups === undefined) return true;
     const mine = new Set(userGroups.map((g) => g.trim().toLowerCase()));
     const member = wanted.some((g) => mine.has(g.id.toLowerCase()) || mine.has(g.name.trim().toLowerCase()));
     return c.operator === "not_in_list" ? !member : member;
   }
+  const target = (c.value ?? "").trim();
+  const targetLower = target.toLowerCase();
   let sv: string;
   if (c.source === "process_step") {
     sv = processStep;
+    const actual = sv.trim().toLowerCase();
+    const expected = targetLower;
+    const downstreamRequisitionApproved = new Set([
+      "request_approved", "lpo_pending", "lpo_approved", "retirement_pending",
+      "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved",
+    ]);
+    const downstreamLpoApproved = new Set([
+      "lpo_approved", "retirement_pending", "retirement_returned",
+      "retirement_rejected", "retirement_approved", "fully_approved",
+    ]);
+    const stepMatches = actual === expected
+      || (expected === "requisition_approved" && downstreamRequisitionApproved.has(actual))
+      || (expected === "lpo_approved" && downstreamLpoApproved.has(actual))
+      || (expected === "approved" && downstreamRequisitionApproved.has(actual))
+      || (expected === "retirement_approved" && actual === "fully_approved");
+    if (c.operator === "equals") return stepMatches;
+    if (c.operator === "not_equals") return !stepMatches;
   } else {
     const sib = allFields.find((f) => f.key === c.fieldKey);
     if (!sib) return true;
     const v = values[sib.id];
     sv = v == null ? "" : String(v);
   }
-  const target = (c.value ?? "").trim();
   const lower = sv.trim().toLowerCase();
-  const targetLower = target.toLowerCase();
   const num = parseFloat(sv);
   /* Dates compare correctly as ISO strings, so fall back to a string compare
    * whenever either side isn't numeric. */
@@ -7729,10 +7746,6 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps, embedded 
                     <input className={cn(iCls, "font-mono")} value={ui.quantity ?? ""} onChange={(e) => setUi({ quantity: e.target.value })} placeholder="1 (default)" /></div>
                   <div className="space-y-1.5"><span className={label}>Unit price</span>
                     <input className={cn(iCls, "font-mono")} value={ui.unitPrice ?? ""} onChange={(e) => setUi({ unitPrice: e.target.value })} placeholder="= total amount (default)" /></div>
-                  <div className="space-y-1.5"><span className={label}>VLAB base # (qty label)</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.vlabBase ?? ""} onChange={(e) => setUi({ vlabBase: e.target.value })} placeholder="1 (default)" /></div>
-                  <div className="space-y-1.5"><span className={label}>VLAB trans # (amount label)</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.vlabTrans ?? ""} onChange={(e) => setUi({ vlabTrans: e.target.value })} placeholder="2 (default)" /></div>
                 </>
               )}
             </div>

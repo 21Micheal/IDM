@@ -605,21 +605,14 @@ def build_purchase_order_ssc(
         analysis.update(spec.get("analysis") or {})
         _po_analysis_children(analysis_qty, analysis, values, row)
 
-        # VLAB numbers vary by SunSystems transaction-type configuration (e.g.
-        # PK1 uses 7 = base-quantity, 9 = transaction-value). Override per PO or
-        # per line; defaults keep the original 1/2 behaviour.
-        vlab_base_num = resolve_value(
-            spec.get("vlab_base_num") or po.get("vlab_base_num"), values, default="1",
-        ) or "1"
-        vlab_trans_num = resolve_value(
-            spec.get("vlab_trans_num") or po.get("vlab_trans_num"), values, default="2",
-        ) or "2"
-
-        base_el = ET.SubElement(line_el, f"VLAB{vlab_base_num}")
+        # Procurement LPO mappings use VLAB1 for base quantity and VLAB2 for
+        # transaction value. Ignore legacy template overrides (often 7/9) so
+        # retries emit the corrected SunSystems payload as well.
+        base_el = ET.SubElement(line_el, "VLAB1")
         base = ET.SubElement(base_el, "Base")
         ET.SubElement(base, "VPolVlabEntry_Val").text = quantity_str
 
-        trans_el = ET.SubElement(line_el, f"VLAB{vlab_trans_num}")
+        trans_el = ET.SubElement(line_el, "VLAB2")
         trans = ET.SubElement(trans_el, "Trans")
         ET.SubElement(trans, "VPolVlabEntry_Val").text = _amount_str(amount)
 

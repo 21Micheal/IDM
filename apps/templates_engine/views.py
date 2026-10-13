@@ -26,20 +26,19 @@ from apps.templates_engine.conditions import (  # noqa: E402
 
 
 def _section_visible_to_user(section: dict, group_ids: set, group_names: set, is_admin: bool) -> bool:
-    """Role-restricted sections (``visibleToGroups``) are visible only to members
-    of the listed groups and to admins. Matched by id first (canonical), then by
-    name (the stored label / what the client matches on). Empty = everyone."""
+    """Legacy ``visibleToGroups`` sections follow the same membership rule as
+    the builder preview. Admin permissions do not bypass section visibility."""
     groups = section.get("visibleToGroups") or []
     if not groups:
         return True
-    if is_admin:
-        return True
+    normalized_ids = {str(value).strip().lower() for value in group_ids}
+    normalized_names = {str(value).strip().lower() for value in group_names}
     for g in groups:
         if not isinstance(g, dict):
             continue
-        if g.get("id") and str(g["id"]) in group_ids:
+        if g.get("id") and str(g["id"]).strip().lower() in normalized_ids:
             return True
-        if g.get("name") and g["name"] in group_names:
+        if g.get("name") and str(g["name"]).strip().lower() in normalized_names:
             return True
     return False
 

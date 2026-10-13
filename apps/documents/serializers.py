@@ -815,6 +815,59 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         metadata = data.get("metadata")
+        # Recover LPO links for older requisitions where concurrent posting
+        # updates replaced one another's JSON metadata. The generated documents
+        # and their source relationships remain authoritative; expose any missing
+        # links in this response so approvers can open every posted LPO.
+        if (
+            isinstance(metadata, dict)
+            and isinstance(metadata.get("form"), dict)
+            and str(getattr(getattr(instance, "document_type", None), "code", "")).upper() != "LPO"
+        ):
+            metadata = dict(metadata)
+            form = dict(metadata["form"])
+            lpo_records = [dict(item) for item in (form.get("lpo_documents") or []) if isinstance(item, dict)]
+            known_ids = {str(item.get("id")) for item in lpo_records if item.get("id")}
+            postings = {
+                str(posting.journal_number): posting
+                for posting in instance.journal_postings.filter(component__iexact="PurchaseOrder").only(
+                    "stage", "stage_label", "journal_number"
+                )
+                if posting.journal_number
+            }
+            links = instance.outgoing_relationships.filter(
+                relation_type=DocumentRelationship.RelationType.REFERENCES,
+                target_document__document_type__code="LPO",
+            ).select_related("target_document")
+            for link in links:
+                lpo = link.target_document
+                if str(lpo.id) in known_ids:
+                    continue
+                lpo_meta = lpo.metadata if isinstance(lpo.metadata, dict) else {}
+                reference = str(lpo_meta.get("lpo.number") or "").strip()
+                if not reference:
+                    continue
+                posting = postings.get(reference)
+                stage_label = str(getattr(posting, "stage_label", "") or "")
+                label_parts = [part.strip() for part in stage_label.split("/")]
+                record = {
+                    "id": str(lpo.id),
+                    "reference": reference,
+                    "document_reference": lpo.reference_number,
+                    "table_label": label_parts[1] if len(label_parts) > 1 else "Purchase Order",
+                }
+                if posting:
+                    record["posting_stage"] = int(posting.stage)
+                lpo_records.append(record)
+                known_ids.add(str(lpo.id))
+            if lpo_records:
+                lpo_records.sort(key=lambda item: int(item.get("posting_stage") or 0))
+                form["lpo_documents"] = lpo_records
+                form["lpo_document_ids"] = [item["id"] for item in lpo_records]
+                form["lpo_document_id"] = lpo_records[0].get("id")
+                form["lpo_reference"] = lpo_records[0].get("reference")
+                metadata["form"] = form
+                data["metadata"] = metadata
         suggestions = metadata.get("relationship_suggestions") if isinstance(metadata, dict) else None
         if (
             user

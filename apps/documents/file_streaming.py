@@ -48,11 +48,18 @@ def lpo_participation_filter(user):
     ).order_by("-created_at").values("actor_id")[:1]
     links = DocumentRelationship.objects.filter(
         relation_type=DocumentRelationship.RelationType.REFERENCES,
-        note="Generated on LPO approval",
+        target_document__document_type__code="LPO",
     ).annotate(
         last_approval_actor_id=Subquery(latest_approval_actor),
     ).filter(
-        Q(created_by=user) | Q(last_approval_actor_id=user.id)
+        Q(created_by=user)
+        | Q(last_approval_actor_id=user.id)
+        | Q(source_document__uploaded_by=user)
+        | Q(source_document__owned_by=user)
+        | Q(
+            source_document__workflow_instance__tasks__assigned_to=user,
+            source_document__workflow_instance__tasks__status__in=["in_progress", "held"],
+        )
     )
     return Q(id__in=links.values("target_document_id"))
 
@@ -72,9 +79,8 @@ def user_generated_lpo_for_document(user: User, doc: Document) -> bool:
 
     link = DocumentRelationship.objects.filter(
         relation_type=DocumentRelationship.RelationType.REFERENCES,
-        note="Generated on LPO approval",
-    ).filter(
-        models.Q(source_document=doc) | models.Q(target_document=doc)
+        target_document=doc,
+        target_document__document_type__code="LPO",
     ).select_related("source_document").first()
     if not link:
         return False
@@ -82,14 +88,17 @@ def user_generated_lpo_for_document(user: User, doc: Document) -> bool:
         return True
 
     # Older LPO records were attributed to the workflow starter. Also recognize
-    # the final approver recorded on the source requisition's latest approval.
+    # the final approver and anyone who can currently access the source requisition
+    # (including a retirement approver).
     from apps.workflows.models import WorkflowTaskAction
     last_approval = WorkflowTaskAction.objects.filter(
         task__workflow_instance__document=link.source_document,
         action="approved",
         actor__isnull=False,
     ).select_related("actor").order_by("-created_at").first()
-    return bool(last_approval and last_approval.actor_id == user.id)
+    if last_approval and last_approval.actor_id == user.id:
+        return True
+    return user_is_involved_with_document(user, link.source_document)
 
 
 def signed_file_urls_enabled() -> bool:
