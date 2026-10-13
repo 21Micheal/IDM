@@ -19,7 +19,7 @@
 
 import { Suspense, useEffect, useRef, useState, useMemo } from "react";
 import { extractApiError } from "@/lib/apiError";
-import { useParams, useNavigate, useLocation, Link } from "react-router-dom";
+import { useParams, useNavigate, useLocation, useSearchParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
 import TemplateForm, { hasVisibleEditableSection, hasVisibleRetirementEditSection, requiredFieldLabels } from "@/components/templates/TemplateForm";
@@ -142,6 +142,9 @@ export default function FormDetailPage() {
   );
   const [isSigningOpen, setIsSigningOpen] = useState(false);
   const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  const taskPanelRef = useRef<HTMLDivElement>(null);
+
   // Required fields that failed the last save/submit attempt. Kept in state
   // (not just a toast) so a long list stays on screen while it's being fixed.
   const [missingFields, setMissingFields] = useState<string[]>([]);
@@ -252,6 +255,15 @@ export default function FormDetailPage() {
     ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
+
+  // When the page is opened via an email notification link (?task=<id>),
+  // scroll the action panel into view once the approver's task has loaded.
+  useEffect(() => {
+    if (!searchParams.get("task") || !activeTask) return;
+    const el = taskPanelRef.current;
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "end" });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTask]);
 
   // Approval tasks can arrive after the document query. Enter edit mode when
   // the reviewer's active task resolves; TemplateForm still enforces each
@@ -1108,7 +1120,7 @@ export default function FormDetailPage() {
       </div>
 
       {activeTask && (
-        <div className="z-10 shrink-0 border-t border-[#C8CDD2] bg-white">
+        <div ref={taskPanelRef} className="z-10 shrink-0 border-t border-[#C8CDD2] bg-white">
           <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
             <WorkflowActionPanel
               task={activeTask}

@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useState } from "react";
-import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { useSessionUiStore } from "@/store/sessionUiStore";
@@ -8,6 +8,13 @@ import { VaultToaster } from "@/components/ui/vault-toast";
 import { Loader2 } from "lucide-react";
 import SessionDialogs from "@/components/shared/SessionDialogs";
 import type { DeploymentConfig } from "@/store/authStore";
+
+/** Redirect legacy /documents/:id links (from old notification emails) to /:id, preserving query params. */
+function DocumentRedirect() {
+  const { id } = useParams<{ id: string }>();
+  const { search } = useLocation();
+  return <Navigate to={`/${id}${search}`} replace />;
+}
 
 const Layout = lazy(() => import("@/components/shared/Layout"));
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
@@ -394,6 +401,7 @@ export default function App() {
               <Route path="workflow/builder" element={<RequireAdmin><WorkflowBuilderPage /></RequireAdmin>} />
             </Route>
 
+            <Route path="documents/:id" element={<DocumentRedirect />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>

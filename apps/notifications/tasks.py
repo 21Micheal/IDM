@@ -195,14 +195,17 @@ def _resolve_email(
 
 
 def _document_url(document_id) -> str:
-    return f"{settings.FRONTEND_URL.rstrip('/')}/documents/{document_id}"
+    # The SPA serves documents at /{id}, not /documents/{id}.
+    return f"{settings.FRONTEND_URL.rstrip('/')}/{document_id}"
 
 
 def _payment_run_task_context(task):
     """Return common notification fields for document and payment-run tasks."""
     doc = task.workflow_instance.document
     if doc is not None:
-        link = f"/documents/{doc.id}"
+        # Link directly to the document, with the task pre-selected so the
+        # recipient lands on their approval action rather than the dashboard.
+        link = f"/{doc.id}?task={task.id}"
         return {
             "link": link,
             "title": doc.title,
@@ -221,7 +224,7 @@ def _payment_run_task_context(task):
 
     run = task.workflow_instance.payment_run
     if run is not None:
-        link = f"/workflow?task={task.id}"
+        link = f"/approvals?task={task.id}"
         currencies = ", ".join(run.currency_codes or []) or "N/A"
         total = f"{run.total_amount} {currencies}".strip()
         if run.submitted_by_id and run.submitted_by:
@@ -247,12 +250,12 @@ def _payment_run_task_context(task):
         }
 
     return {
-        "link": "/workflow",
+        "link": "/approvals",
         "title": "Workflow task",
         "reference": str(task.id),
         "target_label": "workflow item",
         "target_label_title": "Workflow item",
-        "direct_url": f"{settings.FRONTEND_URL.rstrip('/')}/workflow",
+        "direct_url": f"{settings.FRONTEND_URL.rstrip('/')}/approvals",
         "detail_lines": ["  Workflow task"],
         "scope": "unknown",
         "document_id": None,
@@ -688,7 +691,7 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
     if doc is None:
         return
 
-    link = f"/documents/{doc.id}"
+    link = f"/{doc.id}"
     msg = f"Your document '{doc.title}' ({doc.reference_number}) has been {verb}."
     for recipient in recipients:
         ctx = dict(
@@ -736,7 +739,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
     doc      = task.workflow_instance.document
     uploader = doc.uploaded_by
     approver = task.assigned_to
-    link     = f"/documents/{doc.id}"
+    link     = f"/{doc.id}"
 
     message = (
         f"Your document '{doc.title}' ({doc.reference_number}) "
@@ -783,7 +786,7 @@ def notify_document_held(task_id: str, comment: str, hold_hours: int) -> None:
     doc      = task.workflow_instance.document
     uploader = doc.uploaded_by
     approver = task.assigned_to
-    link     = f"/documents/{doc.id}"
+    link     = f"/{doc.id}"
 
     # Human-readable duration
     if hold_hours < 24:
@@ -837,7 +840,7 @@ def notify_hold_released(task_id: str) -> None:
     doc      = task.workflow_instance.document
     uploader = doc.uploaded_by
     approver = task.assigned_to
-    link     = f"/documents/{doc.id}"
+    link     = f"/{doc.id}"
 
     # Notify uploader
     msg_uploader = (
@@ -1143,7 +1146,7 @@ def clear_resolved_task_notifications_now(task_id: str) -> int:
     if document_id:
         scope_filter = {"workflow_instance__document_id": document_id}
         # Documents share one inbox link per document.
-        links = [f"/documents/{document_id}"]
+        links = [f"/{document_id}"]
     elif payment_run_id:
         scope_filter = {"workflow_instance__payment_run_id": payment_run_id}
         # Payment-run assignment notices are per-task; also clear the run-level link.
@@ -1247,7 +1250,7 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
     reason_line = f"  Reason: {action.comment}\n" if action.comment else ""
 
     if doc is not None:
-        link = f"/documents/{doc.id}"
+        link = f"/{doc.id}"
         title = doc.title
         reference = doc.reference_number
         target_type = "document"
@@ -1403,7 +1406,7 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
 # ── Ad-hoc signature requests ──────────────────────────────────────────────────
 
 def _signature_link(doc_id) -> str:
-    return f"/documents/{doc_id}"
+    return f"/{doc_id}"
 
 
 @shared_task(queue="notifications")
