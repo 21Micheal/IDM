@@ -10,6 +10,7 @@ import {
   LogOut,
   ChevronLeft,
   ChevronRight,
+  BellRing,
   Bell,
   CircleUserRound,
   ExternalLink,
@@ -21,10 +22,14 @@ import {
   PenTool,
   UserCheck,
   Package,
+  Inbox,
+  ClipboardCheck,
+  ArrowRight,
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
-import { useQuery } from "@tanstack/react-query";
-import { notificationsAPI, workflowAPI, sunsystemsAPI } from "@/services/api";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { notificationsAPI, workflowAPI, sunsystemsAPI, normalizeListResponse } from "@/services/api";
+import type { Notification } from "@/types";
 import { QUERY_ONE_MINUTE_STALE } from "@/lib/reactQueryDefaults";
 import { cn } from "@/lib/utils";
 import { ChatLauncher } from "@/components/chat/ChatLauncher";
@@ -33,6 +38,212 @@ import dmsLogo from "@/assets/images/dmslogo4.png";
 interface RequisitionLayoutProps {
   /** Optional white-label organization or brand name */
   brandName?: string;
+}
+
+const TASK_NOTIF_TYPES = new Set(["task_assigned", "task_sla_warning", "task_overdue"]);
+
+/** Drop-down notifications + tasks tray (matches full-layout behaviour). */
+function NotificationsTray({ attentionCount }: { attentionCount: number }) {
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+
+  // Load lists fresh whenever the tray opens.
+  useEffect(() => {
+    if (!open) return;
+    qc.invalidateQueries({ queryKey: ["notifications"] });
+    qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
+  }, [open, qc]);
+
+  // Close on Escape.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const { data: allNotifications = [] } = useQuery<Notification[]>({
+    queryKey: ["notifications"],
+    queryFn: () => notificationsAPI.list({ page_size: 50 }).then((r) => normalizeListResponse<Notification>(r.data)),
+    enabled: open,
+    staleTime: 0,
+  });
+
+  const { data: tasks = [] } = useQuery<any[]>({
+    queryKey: ["workflow", "my-tasks"],
+    queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
+    enabled: open,
+    staleTime: 0,
+  });
+
+  const markRead = useMutation({
+    mutationFn: (id: string) => notificationsAPI.markRead(id),
+    onMutate: async (id) => {
+      await qc.cancelQueries({ queryKey: ["notifications"] });
+      const prev = qc.getQueryData<Notification[]>(["notifications"]);
+      if (prev) qc.setQueryData(["notifications"], prev.map((n) => n.id === id ? { ...n, is_read: true } : n));
+      return { prev };
+    },
+    onError: (_e, _id, ctx) => { if (ctx?.prev) qc.setQueryData(["notifications"], ctx.prev); },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+    },
+  });
+
+  const openNotif = (n: Notification) => {
+    setOpen(false);
+    if (!n.is_read) markRead.mutate(n.id);
+    // Normalise legacy /documents/{uuid} links.
+    const link = (n.link || "/notifications").replace(/^\/documents\/([^/]+)$/, "/$1");
+    navigate(link);
+  };
+
+  const notices = allNotifications.filter((n) => !TASK_NOTIF_TYPES.has(n.type));
+  const taskAlerts = allNotifications.filter((n) => TASK_NOTIF_TYPES.has(n.type));
+  const unreadNotices = notices.filter((n) => !n.is_read).slice(0, 5);
+  const unreadTaskAlerts = taskAlerts.filter((n) => !n.is_read).slice(0, 3);
+  const visibleTasks = tasks.slice(0, 5) as any[];
+  const noticeUnread = notices.filter((n) => !n.is_read).length;
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="relative flex h-8 w-8 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+        title="Notifications and tasks"
+        aria-label="Open notifications and tasks tray"
+      >
+        <BellRing className="h-4 w-4" />
+        {attentionCount > 0 && (
+          <span className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center bg-rose-600 px-1 text-[9px] font-bold text-white">
+            {attentionCount > 9 ? "9+" : attentionCount}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 top-10 z-30 w-[370px] overflow-hidden border border-[#C8CDD2] bg-white shadow-2xl">
+            {/* Header */}
+            <div className="border-b border-[#C8CDD2] bg-[#287EAD] px-4 py-3 text-white">
+              <p className="text-sm font-bold">Notifications &amp; tasks</p>
+              <p className="mt-0.5 text-xs text-white/75">Updates and assigned approval work.</p>
+            </div>
+
+            {/* Section tabs */}
+            <div className="grid grid-cols-2 border-b border-[#C8CDD2] bg-[#F5F7F8] text-sm">
+              <button
+                type="button"
+                onClick={() => { setOpen(false); navigate("/notifications"); }}
+                className="flex items-center justify-between border-r border-[#C8CDD2] px-4 py-3 text-left font-semibold text-[#1F2933] hover:bg-[#EEF6FB]"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <Inbox className="h-4 w-4 text-[#287EAD]" />
+                  Notices
+                </span>
+                <span className="font-bold text-[#287EAD]">{noticeUnread}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => { setOpen(false); navigate("/approvals"); }}
+                className="flex items-center justify-between px-4 py-3 text-left font-semibold text-[#1F2933] hover:bg-[#EEF6FB]"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <ClipboardCheck className="h-4 w-4 text-[#287EAD]" />
+                  Tasks
+                </span>
+                <span className="font-bold text-[#287EAD]">{tasks.length + unreadTaskAlerts.length}</span>
+              </button>
+            </div>
+
+            <div className="max-h-[420px] divide-y divide-[#C8CDD2] overflow-y-auto">
+              {/* Notices section */}
+              <section className="p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#5E6870]">Notifications</p>
+                  <button onClick={() => { setOpen(false); navigate("/notifications"); }} className="text-xs font-bold text-[#287EAD] hover:text-[#206D99]">
+                    View all
+                  </button>
+                </div>
+                {unreadNotices.length === 0 ? (
+                  <div className="border border-dashed border-[#C8CDD2] bg-[#F5F7F8] px-3 py-5 text-center text-sm text-[#5E6870]">
+                    No unread updates.
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {unreadNotices.map((n) => (
+                      <button
+                        key={n.id}
+                        type="button"
+                        onClick={() => openNotif(n)}
+                        className="block w-full border border-transparent px-3 py-2 text-left hover:border-[#C8CDD2] hover:bg-[#F5F7F8]"
+                      >
+                        <p className="line-clamp-2 text-sm font-semibold text-[#1F2933]">{n.message}</p>
+                        <p className="mt-1 text-xs text-[#5E6870]">
+                          {new Date(n.created_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              {/* Tasks section */}
+              <section className="p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#5E6870]">Pending Tasks</p>
+                  <button onClick={() => { setOpen(false); navigate("/approvals"); }} className="inline-flex items-center gap-1 text-xs font-bold text-[#287EAD] hover:text-[#206D99]">
+                    Open queue <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                {unreadTaskAlerts.length > 0 && (
+                  <div className="mb-2 space-y-1">
+                    {unreadTaskAlerts.map((n) => (
+                      <button
+                        key={n.id}
+                        type="button"
+                        onClick={() => openNotif(n)}
+                        className="block w-full border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2 text-left hover:bg-[#DDEFF9]"
+                      >
+                        <p className="line-clamp-2 text-sm font-bold text-[#1F2933]">{n.message}</p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {visibleTasks.length === 0 ? (
+                  <div className="border border-dashed border-[#C8CDD2] bg-[#F5F7F8] px-3 py-5 text-center text-sm text-[#5E6870]">
+                    No active tasks.
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {visibleTasks.map((task: any, i: number) => {
+                      const title = task.document_title || task.workflow_instance?.document?.title || "Workflow task";
+                      const ref = task.document_ref || task.workflow_instance?.document?.reference_number || task.step?.name || "";
+                      return (
+                        <button
+                          key={task.id || i}
+                          type="button"
+                          onClick={() => { setOpen(false); navigate("/approvals"); }}
+                          className="block w-full border border-[#C8CDD2] bg-white px-3 py-2 text-left hover:bg-[#EEF6FB]"
+                        >
+                          <p className="truncate text-sm font-bold text-[#1F2933]">{title}</p>
+                          <p className="mt-1 truncate text-xs text-[#5E6870]">{ref}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 export default function Layout({
@@ -305,7 +516,7 @@ export default function Layout({
                   <span className="truncate flex-1">{item.label}</span>
                 )}
                 {!collapsed && item.count !== undefined && item.count > 0 && (
-                  <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-semibold text-amber-300">
+                  <span className="bg-[#287EAD]/25 px-2 py-0.5 text-xs font-semibold text-[#54B3E5]">
                     {item.count}
                   </span>
                 )}
@@ -462,18 +673,8 @@ export default function Layout({
             {/* Chat Launcher */}
             <ChatLauncher variant="light" />
 
-            {/* Notification Bell */}
-            <button
-              type="button"
-              onClick={() => navigate("/notifications")}
-              className="relative rounded-full p-1.5 text-[#5E6870] hover:bg-slate-100 transition-colors"
-              title="Notifications"
-            >
-              <Bell className="h-4 w-4" />
-              {unreadCount > 0 && (
-                <span className="absolute right-1 top-1 flex h-2 w-2 rounded-full bg-rose-500" />
-              )}
-            </button>
+            {/* Notification Tray */}
+            <NotificationsTray attentionCount={unreadCount + pendingApprovalsCount} />
 
             {/* User menu */}
             <div ref={userMenuRef} className="relative">

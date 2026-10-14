@@ -43,14 +43,16 @@ function getLpoDocuments(doc: any): Array<{ id: string; reference?: string }> {
     : [];
 }
 
-function getRetirementOutcome(doc: any): { label: string; status: "exact" | "under" | "over" } | null {
+function getRetirementOutcome(doc: any): { label: string; status: "exact" | "under" | "over"; amount: number | null } | null {
   const retirementStatus = doc?.form_summary?.retirement?.status;
   const variance = doc?.form_summary?.retirement_variance
     ?? doc?.metadata?.form?.retirement_variance;
   const scenario = String(variance?.scenario || "").toLowerCase();
-  if (scenario === "exact" || retirementStatus === "exact") return { label: "Exact", status: "exact" };
-  if (scenario === "under" || retirementStatus === "refund_due") return { label: "Under expenditure", status: "under" };
-  if (scenario === "over" || retirementStatus === "top_up_due") return { label: "Over expenditure", status: "over" };
+  const parsedAmount = Number(variance?.amount);
+  const amount = Number.isFinite(parsedAmount) ? Math.abs(parsedAmount) : null;
+  if (scenario === "exact" || retirementStatus === "exact") return { label: "Exact", status: "exact", amount: amount ?? 0 };
+  if (scenario === "under" || retirementStatus === "refund_due") return { label: "Under expenditure", status: "under", amount };
+  if (scenario === "over" || retirementStatus === "top_up_due") return { label: "Over expenditure", status: "over", amount };
   return null;
 }
 
@@ -60,6 +62,14 @@ function formatMoney(amount: number | null, currency?: string) {
     return new Intl.NumberFormat("en-US", { style: "currency", currency: currency || "KES", maximumFractionDigits: 0 }).format(amount);
   } catch {
     return `${currency ?? ""} ${amount.toLocaleString()}`.trim();
+  }
+}
+
+function formatVariance(amount: number, currency?: string) {
+  try {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: currency || "KES", maximumFractionDigits: 2 }).format(amount);
+  } catch {
+    return `${currency ?? ""} ${amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`.trim();
   }
 }
 
@@ -342,7 +352,9 @@ export default function RequisitionsPage() {
                               ? "border-red-200 bg-red-50 text-red-700"
                               : "border-amber-200 bg-amber-50 text-amber-700",
                         )}>
-                          {outcome.label}
+                          {outcome.amount === null
+                            ? outcome.label
+                            : `${outcome.label} · ${formatVariance(outcome.amount, doc.currency)}`}
                         </span>
                       );
                     })()}
