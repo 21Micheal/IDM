@@ -416,14 +416,11 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
         )
         # The task disappears from a reviewer's active queue immediately after
         # approval, but the action-history drawer can still be mounted during
-        # the handoff. Let an assigned user or recorded actor read that task's
-        # history without restoring it to the action/list endpoints.
+        # the handoff. The history action applies its own document-view check;
+        # it must be able to resolve a task from another step in the same
+        # document's workflow, even when this user was not that step's actor.
         if self.action == "history" and not user.has_admin_access:
-            return qs.filter(
-                models.Q(assigned_to=user)
-                | models.Q(actions__actor=user)
-                | delegated_tasks_q(user)
-            ).distinct()
+            return qs
         if document_id := self.request.query_params.get("document") or self.request.query_params.get("document_id"):
             qs = qs.filter(workflow_instance__document_id=document_id)
             if user.has_admin_access:
@@ -663,6 +660,25 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=["get"])
     def history(self, request, pk=None):
         task    = self.get_object()
+        user = request.user
+        allowed = bool(
+            user.has_admin_access
+            or task.assigned_to_id == user.id
+            or task.actions.filter(actor=user).exists()
+            or user_can_action_task_via_delegation(user, task)
+        )
+        if not allowed and task.workflow_instance.document_id:
+            from apps.documents.file_streaming import user_can_view_document
+
+            allowed = user_can_view_document(user, task.workflow_instance.document)
+        if not allowed and task.workflow_instance.payment_run_id:
+            allowed = task.workflow_instance.payment_run.submitted_by_id == user.id
+        if not allowed:
+            # Match the normal object-permission behavior without revealing
+            # whether an unrelated task ID exists.
+            from rest_framework.exceptions import NotFound
+
+            raise NotFound()
         actions = task.actions.select_related("actor").all()
         return Response(WorkflowTaskActionSerializer(actions, many=True).data)
 

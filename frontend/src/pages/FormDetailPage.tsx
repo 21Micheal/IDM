@@ -320,21 +320,22 @@ export default function FormDetailPage() {
   const submitMutation = useMutation({
     mutationFn: async (workflowStage?: "requisition" | "rfq" | "lpo" | "retirement") => {
       if (formEditing && formDirtyRef.current) {
-        const shouldSave = window.confirm("You have unsaved changes in the form. Save them before submitting?");
-        if (shouldSave) {
-          const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
-            groupNames: user?.group_names ?? [],
-            isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
-            canEditConditionalSections: canEditConditionalSections(),
-          }, formProcessStep());
-          if (missing.length) {
-            setMissingFields(missing);
-            toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
-            throw new Error("Form validation failed");
-          }
-          setMissingFields([]);
-          await updateFormMutation.mutateAsync();
+        // Never advance a workflow with values that exist only in this tab.
+        // Previously declining the optional save prompt still submitted the
+        // workflow, so the next approver saw the last persisted (often blank)
+        // retirement table.
+        const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
+          groupNames: user?.group_names ?? [],
+          isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+          canEditConditionalSections: canEditConditionalSections(),
+        }, formProcessStep());
+        if (missing.length) {
+          setMissingFields(missing);
+          toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
+          throw new Error("Form validation failed");
         }
+        setMissingFields([]);
+        await updateFormMutation.mutateAsync();
       }
       return documentsAPI.submit(id!, workflowStage ? { workflow_stage: workflowStage } : undefined);
     },
