@@ -21,6 +21,7 @@ const LoginPage = lazy(() => import("@/pages/LoginPage"));
 const PasswordResetConfirmPage = lazy(() => import("@/pages/PasswordResetConfirmPage"));
 const ForceChangePasswordPage = lazy(() => import("@/pages/ForceChangePasswordPage"));
 const AnalyticsDashboardPage = lazy(() => import("@/pages/AnalyticsDashboard"));
+const AuditPage = lazy(() => import("@/pages/AuditPage"));
 const WorkflowPage = lazy(() => import("@/pages/WorkflowPage"));
 const AdminMailboxPage = lazy(() => import("@/pages/AdminMailboxPage"));
 const AdminSunSystemsPage = lazy(() => import("@/pages/AdminSunSystemsPage"));
@@ -281,6 +282,11 @@ const ROUTE_FALLBACK_CONTENT = [
     description: "Loading alerts, reminders, and recent workflow updates.",
   },
   {
+    match: (pathname: string) => pathname.startsWith("/audit"),
+    title: "Preparing audit trail",
+    description: "Loading activity history and audit records.",
+  },
+  {
     match: (pathname: string) => pathname.startsWith("/profile"),
     title: "Preparing profile settings",
     description: "Loading account preferences, security options, and personal details.",
@@ -382,6 +388,7 @@ export default function App() {
               <Route path="external" element={<ExternalPage />} />
               <Route path="approvals" element={<WorkflowPage />} />
               <Route path="analytics" element={<AnalyticsDashboardPage />} />
+              <Route path="audit" element={<AuditPage />} />
               <Route path="notifications" element={<NotificationsPage />} />
               <Route path="notifications/workflow/:documentId" element={<NotificationWorkflowPage />} />
               <Route path=":id" element={<FormDetailPage />} />

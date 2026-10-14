@@ -7,6 +7,7 @@ import {
   Building2,
   CheckCircle2,
   BarChart3,
+  Activity,
   LogOut,
   ChevronLeft,
   ChevronRight,
@@ -344,8 +345,13 @@ export default function Layout({
         label: "Spend Analytics",
         icon: BarChart3,
       },
+      {
+        to: "/audit",
+        label: hasAdminAccess ? "Audit Trail" : "Document Activity",
+        icon: Activity,
+      },
     ],
-    [pendingApprovalsCount, unreadCount]
+    [pendingApprovalsCount, unreadCount, hasAdminAccess]
   );
 
   const adminNavItems = useMemo(
@@ -641,6 +647,8 @@ export default function Layout({
                 ? "Requisition Approvals Queue"
                 : location.pathname.includes("/analytics")
                 ? "Procurement Spend Analytics"
+                : location.pathname.startsWith("/audit")
+                ? user?.has_admin_access ? "Audit Trail" : "Document Activity"
                 : location.pathname.includes("/dashboard")
                 ? "Requisition Dashboard"
                 : "Requisitions Register"}
