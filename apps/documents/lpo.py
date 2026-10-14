@@ -165,6 +165,16 @@ def generate_lpo_for_document(
         type_id=doc_type.id,
         reference_number=document_reference,
     )
+    # Keep the resolved supplier contact on the generated order so later
+    # delivery does not have to query SunSystems a second time.
+    lpo_metadata = dict(lpo_doc.metadata or {})
+    lpo_metadata["lpo_supplier"] = {
+        "code": _as_text(merge_values.get("supplier.code")),
+        "name": _as_text(merge_values.get("supplier.name")),
+        "email": _as_text(merge_values.get("supplier.email")),
+    }
+    lpo_doc.metadata = lpo_metadata
+    Document.objects.filter(pk=lpo_doc.pk).update(metadata=lpo_metadata)
     try:
         DocumentRelationship.objects.get_or_create(
             source_document=document,
@@ -220,7 +230,7 @@ def generate_lpo_for_posting(document, posting, actor=None):
     spec = specs[0] if specs and isinstance(specs[0], dict) else {}
     table_key = str(spec.get("repeat_over") or "") or None
     values = mapping.get("_posting_values")
-    return generate_lpo_for_document(
+    lpo = generate_lpo_for_document(
         document,
         actor=actor,
         purchase_order_reference=reference,
@@ -229,6 +239,56 @@ def generate_lpo_for_posting(document, posting, actor=None):
         table_label=(spec.get("table_label") or mapping.get("_posting_label") or posting.stage_label),
         values_override=values if isinstance(values, dict) else None,
     )
+    # The first rollout emails only the General / Imprest lines order. Travel
+    # table orders continue to be generated normally, without supplier email.
+    if lpo and _is_general_imprest_table(document, table_key):
+        supplier_email = _as_text(
+            ((lpo.metadata or {}).get("lpo_supplier") or {}).get("email")
+        )
+        # LPOs generated before supplier delivery was introduced do not have
+        # the contact snapshot yet. Resolve it from the same table-scoped data.
+        if not supplier_email:
+            merge_values = build_lpo_merge_values(
+                document,
+                reference,
+                actor=actor or getattr(posting, "posted_by", None),
+                table_key=table_key,
+                values_override=values if isinstance(values, dict) else None,
+            )
+            supplier_email = _as_text(merge_values.get("supplier.email"))
+        if supplier_email:
+            try:
+                from apps.documents.tasks import email_generated_lpo_to_supplier
+
+                email_generated_lpo_to_supplier.delay(
+                    str(lpo.pk),
+                    supplier_email,
+                    str(document.pk),
+                    reference,
+                )
+            except Exception:
+                logger.exception("Could not queue supplier email for LPO %s", lpo.pk)
+        else:
+            logger.warning(
+                "Supplier email is unavailable for General / Imprest LPO %s (%s)",
+                lpo.pk,
+                reference,
+            )
+    return lpo
+
+
+def _is_general_imprest_table(document, table_key: str | None) -> bool:
+    if not table_key:
+        return False
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    for section in form.get("sections") or []:
+        for field in section.get("fields") or []:
+            if field.get("type") != "table" or str(field.get("key") or "") != table_key:
+                continue
+            # The builder stores this as workflowRole. Accept the snake-case
+            # spelling too for older/imported form snapshots.
+            return str(field.get("workflowRole") or field.get("workflow_role") or "").strip().lower() == "rfq_required_lines"
+    return False
 
 
 def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None, table_key=None, values_override=None) -> dict:
