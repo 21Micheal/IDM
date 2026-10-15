@@ -8,6 +8,42 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+@shared_task(queue="default")
+def resume_ready_lpo_gates() -> int:
+    """Recover LPO approval gates whose posting callback was missed.
+
+    The service rechecks approval, posting, and generated-document state before
+    advancing, so this is safe to run periodically and is idempotent.
+    """
+    from .models import WorkflowInstance
+    from .services import WorkflowService
+
+    candidates = (
+        WorkflowInstance.objects
+        .filter(
+            status="in_progress",
+            tasks__status="approved",
+            tasks__step__post_lpo_after_approval=True,
+            tasks__actions__action="approved",
+        )
+        .select_related("document")
+        .distinct()
+    )
+    resumed = 0
+    for instance in candidates.iterator():
+        if not instance.document_id:
+            continue
+        try:
+            if WorkflowService._resume_lpo_workflow_if_ready(instance.document):
+                resumed += 1
+        except Exception:
+            logger.exception(
+                "Failed to recover ready LPO approval gate for workflow %s",
+                instance.pk,
+            )
+    return resumed
+
+
 @shared_task(bind=True, max_retries=3, queue="default")
 def auto_release_hold(self, task_id: str) -> None:
     """

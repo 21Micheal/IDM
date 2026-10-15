@@ -289,6 +289,10 @@ CELERY_TASK_ROUTES = {
 WORKFLOW_SLA_WARNING_HOURS = env.int("WORKFLOW_SLA_WARNING_HOURS", default=4)
 WORKFLOW_HOLD_WARNING_HOURS = env.int("WORKFLOW_HOLD_WARNING_HOURS", default=2)
 CELERY_BEAT_SCHEDULE = {
+    "workflow-ready-lpo-gate-recovery": {
+        "task": "apps.workflows.tasks.resume_ready_lpo_gates",
+        "schedule": 60,
+    },
     "workflow-sla-warning-backstop": {
         "task": "apps.workflows.tasks.notify_sla_warning_tasks",
         "schedule": 15 * 60,

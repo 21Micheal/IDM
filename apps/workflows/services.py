@@ -1384,6 +1384,15 @@ class WorkflowService:
                     continue
                 if not step.post_lpo_after_approval:
                     continue
+                # A periodic recovery may revisit a gate after a transient
+                # posting/resume failure. Never let ready posting records
+                # advance a step before its approval action has been recorded.
+                if not instance.tasks.filter(
+                    step=step,
+                    status="approved",
+                    actions__action="approved",
+                ).exists():
+                    continue
                 with transaction.atomic():
                     locked = WorkflowInstance.objects.select_for_update().get(pk=instance.pk)
                     if locked.status != "in_progress" or locked.current_step_order != step.order:
