@@ -121,6 +121,8 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                     assignee_type=step.assignee_type,
                     assignee_group=step.assignee_group, assignee_user=step.assignee_user,
                     assignee_user_auto=step.assignee_user_auto,
+                    assignee_user_field=step.assignee_user_field,
+                    post_lpo_after_approval=step.post_lpo_after_approval,
                     sla_hours=step.sla_hours, allow_resubmit=step.allow_resubmit,
                     allow_approve=step.allow_approve, allow_reject=step.allow_reject,
                     allow_return=step.allow_return,

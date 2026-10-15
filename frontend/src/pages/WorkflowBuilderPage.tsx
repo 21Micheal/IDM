@@ -25,7 +25,7 @@ import {
 } from "@/lib/workflowGraph";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-type AssigneeType = "group_any" | "group_all" | "group_specific";
+type AssigneeType = "group_any" | "group_all" | "group_specific" | "form_user";
 type StepType = "approval" | "notification";
 type WorkflowTargetType = "document" | "payment_run";
 type WorkflowRouteKind = "document" | "form" | "payment_run";
@@ -44,6 +44,7 @@ interface WorkflowStep {
   assignee_user: string | null;
   assignee_user_name?: string;
   assignee_user_auto?: boolean;
+  assignee_user_field?: string;
   sla_hours: number;
   allow_resubmit: boolean;
   allow_approve: boolean;
@@ -296,6 +297,7 @@ const ASSIGNEE_MODES: { value: AssigneeType; label: string; description: string;
   { value: "group_any", label: "Any member", description: "Single approver from group", Icon: Users },
   { value: "group_all", label: "All members", description: "Consensus required", Icon: UsersRound },
   { value: "group_specific", label: "Specific member", description: "Designated approver or a chosen member", Icon: User },
+  { value: "form_user", label: "Selected form user", description: "The person selected by the requisitioner", Icon: User },
 ];
 
 const GROUP_COLORS = [
@@ -337,7 +339,7 @@ function normalizeAssigneeType(value: unknown): AssigneeType {
   if (typeof value === "string" && value in LEGACY_ASSIGNEE_TYPE_MAP) {
     return LEGACY_ASSIGNEE_TYPE_MAP[value];
   }
-  if (value === "group_any" || value === "group_all" || value === "group_specific") {
+  if (value === "group_any" || value === "group_all" || value === "group_specific" || value === "form_user") {
     return value;
   }
   return "group_any";
@@ -478,7 +480,7 @@ function blankStep(): WorkflowStep {
     order: 0, name: "", status_label: "Pending Approval",
     step_type: "approval",
     post_lpo_after_approval: false,
-    assignee_type: "group_any", assignee_group: null, assignee_user: null,
+    assignee_type: "group_any", assignee_group: null, assignee_user: null, assignee_user_field: "",
     sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, allow_return_submitter: true,
     requires_signature: false, instructions: "",
     approver_email_subject: "", approver_email_body: "",
@@ -567,12 +569,26 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * { id|name|key, label|title, type, options }. Adjust here if your schema differs —
  * nothing else depends on it.
  */
-function extractFormFields(docType: Partial<DocumentType> | null | undefined): WorkflowField[] {
+function extractFormFields(
+  docType: Partial<DocumentType> | null | undefined,
+  templates: Array<Record<string, any>> = [],
+): WorkflowField[] {
   const m = (docType?.metadata ?? {}) as Record<string, any>;
-  const raw: any[] = m.form?.fields ?? m.form_template?.fields ?? m.form?.schema?.fields ?? m.fields ?? [];
-  if (!Array.isArray(raw)) return [];
-  const toType = (t: string): WorkflowField["type"] => {
+  const raw: any[] = m.form?.fields
+    ?? m.form_template?.fields
+    ?? m.form?.schema?.fields
+    ?? m.form?.sections?.flatMap((section: any) => section?.fields ?? [])
+    ?? m.sections?.flatMap((section: any) => section?.fields ?? [])
+    ?? m.fields
+    ?? [];
+  const templateFields = templates.flatMap((template) =>
+    (Array.isArray(template?.sections) ? template.sections : [])
+      .flatMap((section: any) => Array.isArray(section?.fields) ? section.fields : [])
+  );
+  const allFields = [...(Array.isArray(raw) ? raw : []), ...templateFields];
+  const toType = (t: string, source?: string): WorkflowField["type"] => {
     const x = (t || "").toLowerCase();
+    if (x === "user" || (x === "reference" && ["users", "user"].includes(String(source ?? "").toLowerCase()))) return "user";
     if (["currency", "money", "amount"].includes(x)) return "money";
     if (["number", "integer", "decimal", "float"].includes(x)) return "number";
     if (["select", "dropdown", "radio", "choice"].includes(x)) return "select";
@@ -582,13 +598,17 @@ function extractFormFields(docType: Partial<DocumentType> | null | undefined): W
     return "text";
   };
   const out: WorkflowField[] = [];
-  for (const f of raw) {
-    const id = String(f?.id ?? f?.name ?? f?.key ?? "");
-    if (!id) continue;
+  const seen = new Set<string>();
+  for (const f of allFields) {
+    const key = String(f?.key ?? f?.name ?? f?.id ?? "");
+    const id = String(f?.id ?? key);
+    if (!id || seen.has(key || id)) continue;
+    seen.add(key || id);
+    const referenceSource = f?.referenceSource ?? f?.reference_source ?? (String(f?.type).toLowerCase() === "user" ? "users" : undefined);
     const opts = Array.isArray(f?.options)
       ? f.options.map((o: any) => (typeof o === "string" ? { value: o, label: o } : { value: String(o.value ?? o.id ?? o.label), label: String(o.label ?? o.value) }))
       : undefined;
-    out.push({ id, label: String(f?.label ?? f?.title ?? id), type: toType(String(f?.type ?? "")), options: opts, source: "form" });
+    out.push({ id, key, label: String(f?.label ?? f?.title ?? id), type: toType(String(f?.type ?? ""), referenceSource), options: opts, source: "form" });
   }
   return out;
 }
@@ -619,6 +639,7 @@ function validateStepData(raw: StepData): string | null {
   }
   if (!s.assignee_group) return `"${s.name}" needs a group.`;
   if (s.assignee_type === "group_specific" && !s.assignee_user) return `"${s.name}" needs a specific group member.`;
+  if (s.assignee_type === "form_user" && !s.assignee_user_field) return `"${s.name}" needs a user field selected.`;
   if (!s.allow_approve && !s.allow_reject && !s.allow_return && !s.allow_return_submitter) return `"${s.name}" must have at least one approver action enabled.`;
   if (s.requires_signature && !s.allow_approve) return `"${s.name}" requires approval before it can require a signature.`;
   return null;
@@ -796,6 +817,19 @@ function StepEditPanel({
   const selectedGroup = groups.find((group) => group.id === step.assignee_group);
   const isHodGroupSelected = isHodGroupName(selectedGroup?.name ?? step.assignee_group_name);
   const needsGroupMember = step.assignee_type === "group_specific" && !isHodGroupSelected;
+  const needsFormUser = step.assignee_type === "form_user";
+  const { data: formTemplates = [], isLoading: formTemplatesLoading } = useQuery<Array<Record<string, any>>>({
+    queryKey: ["workflow-form-templates", docType?.id],
+    queryFn: async () => {
+      if (!docType?.id) return [];
+      const response = await templatesAPI.list({ document_type: docType.id, type: "built" });
+      const raw = response.data?.results ?? response.data ?? [];
+      return Array.isArray(raw) ? raw.filter((template) => !template?.kind || template.kind === "form") : [];
+    },
+    enabled: Boolean(docType?.id),
+    staleTime: 5 * 60_000,
+  });
+  const formUserFields = extractFormFields(docType, formTemplates).filter((field) => field.type === "user");
 
   const { data: groupMembers = [], isLoading: membersLoading } = useQuery<AppUser[]>({
     queryKey: ["group-members", step.assignee_group],
@@ -981,6 +1015,7 @@ function StepEditPanel({
                     assignee_user: next === "group_specific" ? step.assignee_user : null,
                     assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
                     assignee_user_auto: next === "group_specific" ? step.assignee_user_auto : undefined,
+                    assignee_user_field: next === "form_user" ? (step.assignee_user_field ?? "") : "",
                   });
                 }}
                 options={ASSIGNEE_MODES.map((m) => ({ value: m.value, label: `${m.label} — ${m.description}` }))}
@@ -993,6 +1028,29 @@ function StepEditPanel({
                 </p>
               )}
             </div>
+
+            {needsFormUser && (
+              <div>
+                <Label required>Form field containing the approver</Label>
+                <CustomListbox
+                  value={step.assignee_user_field ?? ""}
+                  onChange={(value) => onChange({ assignee_user_field: value })}
+                  options={[
+                    { value: "", label: formTemplatesLoading ? "Loading form fields…" : formUserFields.length ? "Select a user field" : "No user fields found" },
+                    ...formUserFields.map((field) => ({ value: field.key ?? field.id, label: field.label })),
+                  ]}
+                  buttonClassName={inp}
+                  ariaLabel="Selected approver form field"
+                />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  {formTemplatesLoading
+                    ? "Loading user fields from this document type’s form templates."
+                    : formUserFields.length
+                      ? "The selected person must be an active member of the approver group above."
+                      : "No user picker fields were found in this document type’s built form templates. Add a User picker field to the form and save it first."}
+                </p>
+              </div>
+            )}
 
             {needsGroupMember && (
               <div>

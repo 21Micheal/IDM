@@ -200,6 +200,7 @@ def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any
         "toggle": FieldType.BOOLEAN,
         "date": FieldType.DATE,
         "datetime": FieldType.DATE,
+        "user": FieldType.USER,
     }
 
     def add_field(field: Dict[str, Any], source: str = "form") -> None:

@@ -1113,6 +1113,10 @@ class UserGroupViewSet(viewsets.ModelViewSet):
     def members(self, request, pk=None):
         group       = self.get_object()
         memberships = group.memberships.select_related("user", "added_by").all()
+        if request.query_params.get("active_only", "").lower() in {"1", "true", "yes"}:
+            memberships = memberships.filter(user__is_active=True).filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+            )
         return Response(UserGroupMembershipSerializer(memberships, many=True).data)
 
     @action(detail=True, methods=["post"])

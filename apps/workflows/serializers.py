@@ -95,7 +95,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             "post_lpo_after_approval",
             # approval-step fields
             "assignee_type", "assignee_group", "assignee_group_name",
-            "assignee_user", "assignee_user_name", "assignee_user_auto",
+            "assignee_user", "assignee_user_name", "assignee_user_auto", "assignee_user_field",
             "sla_hours", "allow_resubmit",
             "allow_approve", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
@@ -172,7 +172,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "step_type",
             "post_lpo_after_approval",
             # approval-step
-            "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto",
+            "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto", "assignee_user_field",
             "sla_hours", "allow_resubmit",
             "allow_approve", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
@@ -188,6 +188,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "instructions":            {"required": False, "allow_blank": True},
             "step_type":               {"required": False},
             "post_lpo_after_approval": {"required": False},
+            "assignee_user_field":    {"required": False, "allow_blank": True},
             "approver_email_subject":  {"required": False, "allow_blank": True},
             "approver_email_body":     {"required": False, "allow_blank": True},
             "notify_email":            {"required": False, "allow_blank": True},
@@ -243,6 +244,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             # Notification steps don't need approval semantics — clear them
             attrs.setdefault("assignee_group", None)
             attrs.setdefault("assignee_user", None)
+            attrs.setdefault("assignee_user_field", "")
             attrs["allow_approve"]       = False
             attrs["allow_reject"]        = False
             attrs["allow_return"]        = False
@@ -257,7 +259,8 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         assignee_group = attrs.get("assignee_group", getattr(self.instance, "assignee_group", None))
         assignee_user  = attrs.get("assignee_user",  getattr(self.instance, "assignee_user",  None))
 
-        if assignee_type in ("group_any", "group_all", "group_specific"):
+        assignee_user_field = attrs.get("assignee_user_field", getattr(self.instance, "assignee_user_field", ""))
+        if assignee_type in ("group_any", "group_all", "group_specific", "form_user"):
             if assignee_group is None:
                 raise serializers.ValidationError(
                     {"assignee_group": "A group is required for group-based assignment."}
@@ -266,10 +269,19 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"assignee_user": "A specific member is required for this assignment mode."}
                 )
-            if assignee_type != "group_specific" and assignee_user is not None:
+            if assignee_type == "form_user" and not str(assignee_user_field or "").strip():
+                raise serializers.ValidationError(
+                    {"assignee_user_field": "Select the form field that contains the approver."}
+                )
+            if assignee_type == "form_user":
+                attrs["assignee_user"] = None
+                attrs["assignee_user_auto"] = False
+            if assignee_type not in ("group_specific", "form_user") and assignee_user is not None:
                 raise serializers.ValidationError(
                     {"assignee_user": "Only specific member assignments can set a user."}
                 )
+            if assignee_type != "form_user":
+                attrs["assignee_user_field"] = ""
         else:
             raise serializers.ValidationError({"assignee_type": "Invalid assignment mode."})
 

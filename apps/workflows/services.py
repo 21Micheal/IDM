@@ -1122,6 +1122,24 @@ class WorkflowService:
 
     @staticmethod
     def _resolve_assignees(step: WorkflowStep, document=None):
+        if step.assignee_type == "form_user":
+            if not step.assignee_group_id:
+                raise WorkflowError(f"Step '{step.name}' is missing its approver group.")
+            field_key = str(step.assignee_user_field or "").strip()
+            form_values = ((getattr(document, "metadata", None) or {}).get("form") or {}).get("values") or {}
+            selected = form_values.get(field_key) if field_key else None
+            user_id = selected.get("id") if isinstance(selected, dict) else selected
+            user = User.objects.filter(pk=user_id, is_active=True).first() if user_id else None
+            if not user:
+                raise WorkflowError(
+                    f"Step '{step.name}' needs a user selected in the '{field_key or 'approver'}' form field."
+                )
+            if not WorkflowService._is_active_group_member(step.assignee_group, user):
+                raise WorkflowError(
+                    f"The user selected for '{step.name}' is not an active member of '{step.assignee_group.name}'."
+                )
+            return [user]
+
         if step.assignee_type == "specific_user":
             if not step.assignee_user_id:
                 raise WorkflowError(f"Step '{step.name}' is missing its assigned user.")

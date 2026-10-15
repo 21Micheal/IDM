@@ -1580,7 +1580,7 @@ export const groupsAPI = {
   ) => api.post(`/groups/${id}/set_permissions/`, { permissions }),
   setRequisitionTemplates: (id: string, templateIds: string[]) =>
     api.post(`/groups/${id}/set_requisition_templates/`, { template_ids: templateIds }),
-  members: (id: string) => api.get(`/groups/${id}/members/`),
+  members: (id: string, params?: Record<string, unknown>) => api.get(`/groups/${id}/members/`, { params }),
   addMember: (id: string, userId: string, expiresAt?: string) =>
     api.post(`/groups/${id}/add_member/`, {
       user_id: userId,

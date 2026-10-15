@@ -124,6 +124,7 @@ class WorkflowStep(models.Model):
         ("group_any",      "Any member of group"),
         ("group_all",      "All members of group"),
         ("group_specific", "Specific member of group"),
+        ("form_user",      "User selected in form"),
     ]
 
     STEP_TYPES = [
@@ -166,6 +167,12 @@ class WorkflowStep(models.Model):
     assignee_user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name="assigned_steps",
+    )
+    assignee_user_field = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        help_text="Form field key whose selected user receives this approval task.",
     )
     # True when assignee_user was auto-filled from the group's designated approver
     # (head) rather than hand-picked. Such steps resolve the group's CURRENT head

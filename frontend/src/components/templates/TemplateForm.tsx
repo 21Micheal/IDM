@@ -60,7 +60,7 @@ type Column = {
   decimals?: number; thousandsSeparator?: boolean;
   min?: number; max?: number;
   tooltip?: string; additionalText?: string; readonly?: boolean; hidden?: boolean;
-  defaultValue?: string; referenceSource?: string;
+  defaultValue?: string; referenceSource?: string; referenceGroupId?: string;
   visibleWhen?: VisibleWhen | null;
   editableWhen?: VisibleWhen | null;
   calc?: { expression?: string };
@@ -106,7 +106,7 @@ type Field = {
   required?: boolean; colSpan?: number; width?: number;
   workflowRole?: string;
   options?: string[]; columns?: Column[]; minRows?: number;
-  currencySymbol?: string; currencyFromField?: string; referenceSource?: string; tooltip?: string; regex?: string;
+  currencySymbol?: string; currencyFromField?: string; referenceSource?: string; referenceGroupId?: string; tooltip?: string; regex?: string;
   min?: number; max?: number; minLength?: number; maxLength?: number;
   /* Number/currency display config — a "number" field with `currency` type (or
    * a linked currency dropdown) is money; both share decimals/grouping. */
@@ -323,8 +323,9 @@ function formatFileSize(size?: number) {
  * documents, document types). Stores `{ id, label, source }`. In read-only mode
  * it renders the stored label (documents link to the target).
  */
-function ReferencePicker({ source, value, onChange, disabled, compact }: {
+function ReferencePicker({ source, referenceGroupId, value, onChange, disabled, compact }: {
   source?: string;
+  referenceGroupId?: string;
   value: unknown;
   onChange: (v: ReferenceValue | undefined) => void;
   disabled?: boolean;
@@ -375,8 +376,8 @@ function ReferencePicker({ source, value, onChange, disabled, compact }: {
   }, [open]);
 
   const { data: options = [], isFetching } = useQuery({
-    queryKey: ["reference-source", resolved?.key, resolved?.serverSearch ? debounced : ""],
-    queryFn: () => resolved!.fetch(debounced),
+    queryKey: ["reference-source", resolved?.key, referenceGroupId ?? "", resolved?.serverSearch ? debounced : ""],
+    queryFn: () => resolved!.fetch(debounced, referenceGroupId),
     enabled: open && Boolean(resolved),
     staleTime: 30_000,
   });
@@ -925,6 +926,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
       return (
         <ReferencePicker
           source={col.referenceSource ?? (type === "user" ? "users" : "documents")}
+          referenceGroupId={col.referenceGroupId}
           value={value}
           onChange={onChange}
           disabled={dis}
@@ -2178,6 +2180,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
           <ReferencePicker
             source={field.referenceSource ?? (type === "user" ? "users" : "documents")}
+            referenceGroupId={field.referenceGroupId}
             value={f.value}
             disabled={dis}
             onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
