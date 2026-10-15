@@ -147,14 +147,17 @@ def get_purchase_order_postings(document) -> list[dict]:
 
 
 def get_imprest_request_postings(document) -> list[dict]:
-    """Build balanced Ledger Import postings for CAS_IMPREST table rows.
+    """Build balanced Ledger Import postings for General / Imprest table rows.
 
     The PurchaseOrder profile remains the source of common field bindings
     (description, currency, date, analysis, business unit, and requisition
-    reference). Each qualifying row produces a debit/credit pair for its line
-    amount, so the journal total is the sum of CAS_IMPREST rows only.
+    reference). Each populated row produces a debit/credit pair for its line
+    amount; the table itself is exclusively the Imprest request source.
     """
-    config = get_sunsystems_config(document).get("purchase_order")
+    sunsystems = get_sunsystems_config(document)
+    config = sunsystems.get("imprest_request")
+    if not isinstance(config, dict) or not config.get("enabled"):
+        config = sunsystems.get("purchase_order")
     if not isinstance(config, dict) or not config.get("enabled"):
         legacy = get_journal_config(document) or {}
         if not legacy.get("enabled") or str(legacy.get("component") or "").lower() != "purchaseorder":
@@ -170,21 +173,26 @@ def get_imprest_request_postings(document) -> list[dict]:
     sunsystems = get_sunsystems_config(document)
     ui = sunsystems.get("ui") if isinstance(sunsystems.get("ui"), dict) else {}
     imprest_groups: dict[str, dict] = {}
-    for spec in _po_line_specs(po):
+    request_specs = po.get("imprest_request_lines")
+    if not isinstance(request_specs, list):
+        # Backwards compatibility for mappings saved before Imprest lines were
+        # separated from the PurchaseOrder profile.
+        request_specs = [
+            spec for spec in _po_line_specs(po)
+            if isinstance(spec, dict) and spec.get("imprest_request_transaction_type")
+        ]
+    for spec in request_specs:
         table_key = str(spec.get("repeat_over") or "")
-        if not table_key or not spec.get("imprest_request_transaction_type"):
+        if not table_key:
             continue
         rows = values.get(table_key)
         if not isinstance(rows, list):
             continue
-        expected_type = str(spec["imprest_request_transaction_type"]).strip().casefold()
         group = imprest_groups.setdefault(table_key, {"spec": spec, "rows": []})
         for row in rows:
             if not isinstance(row, dict) or not any(value not in (None, "", [], {}) for value in row.values()):
                 continue
-            actual_type = resolve_value(spec.get("purchase_transaction_type"), values, row).strip().casefold()
-            if actual_type == expected_type:
-                group["rows"].append(row)
+            group["rows"].append(row)
 
     postings = []
     for table_key, group in imprest_groups.items():
@@ -358,7 +366,12 @@ def get_imprest_retirement_postings(document) -> list[dict]:
     sections = form.get("sections") if isinstance(form.get("sections"), list) else []
     values = get_form_values(document)
     po_postings = get_imprest_request_postings(document)
-    po_config = get_sunsystems_config(document).get("purchase_order") or {}
+    sunsystems = get_sunsystems_config(document)
+    po_config = sunsystems.get("imprest_request")
+    if not isinstance(po_config, dict) or not po_config.get("enabled"):
+        po_config = sunsystems.get("purchase_order")
+    if not isinstance(po_config, dict):
+        po_config = {}
     po = po_config.get("purchase_order") if isinstance(po_config, dict) else {}
     if not isinstance(po, dict):
         po = {}
@@ -414,22 +427,18 @@ def get_imprest_retirement_postings(document) -> list[dict]:
 
             issued_amount: dict = {"const": "0"}
             if str(retirement.get("issuedAmountMode") or "field") == "imprest_request_total" or not retirement.get("issuedAmountField"):
-                for spec in (po.get("lines") or []):
+                request_specs = po.get("imprest_request_lines") or po.get("lines") or []
+                for spec in request_specs:
                     request_table = str(spec.get("repeat_over") or "")
-                    transaction_type = str(spec.get("imprest_request_transaction_type") or "").strip()
-                    if not request_table or not transaction_type:
+                    if not request_table:
                         continue
                     amount_spec = spec.get("amount") or spec.get("unit_price") or spec.get("quantity")
                     amount_column_key = amount_spec.get("row_field") if isinstance(amount_spec, dict) else None
-                    type_spec = spec.get("purchase_transaction_type")
-                    match_column_key = type_spec.get("row_field") if isinstance(type_spec, dict) else None
-                    if amount_column_key and match_column_key:
+                    if amount_column_key:
                         issued_amount = {
-                            "sum_matching_rows": {
+                            "sum_rows": {
                                 "table": request_table,
                                 "amount_column": amount_column_key,
-                                "match_column": match_column_key,
-                                "values": [transaction_type],
                             }
                         }
                         break

@@ -1144,8 +1144,9 @@ export default function FormDetailPage() {
                   && activeOrder > 0
                   && lpoApprovalSteps.some((step) => step.id === `approver-${activeOrder}`)
                   && !laterLpoStepExists;
+                const isLpoGenerationApprover = Boolean((activeTask?.step as any)?.post_lpo_after_approval);
 
-                if (!isLastLpoApprover) {
+                if (!isLpoGenerationApprover && !isLastLpoApprover) {
                   setAwaitingLpo(false);
                   setWorkflowActionCompleted(true);
                   return;

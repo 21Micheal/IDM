@@ -33,7 +33,6 @@ from django.utils import timezone
 from django.conf import settings
 from django.core.files.base import ContentFile
 from datetime import timedelta
-from random import choice
 import hashlib
 import mimetypes
 import os
@@ -852,7 +851,11 @@ class WorkflowService:
                 # Schedule SLA notifications for both documents and payment runs
                 WorkflowService._schedule_task_sla_notifications(task)
         except Exception:
-            pass
+            logger.exception(
+                "Could not queue notifications for workflow step %s (order=%s)",
+                step.name,
+                order,
+            )
 
     @staticmethod
     def _execute_notification_step(instance: WorkflowInstance, step: WorkflowStep, order: int) -> None:
@@ -1203,7 +1206,12 @@ class WorkflowService:
                 raise WorkflowError(
                     f"Group '{step.assignee_group.name if step.assignee_group else step.name}' has no active members."
                 )
-            return [choice(members)]
+            # Make the task visible and actionable to every eligible member.
+            # The first approval advances the step and _advance_step marks the
+            # remaining sibling tasks as skipped, preserving any-member
+            # approval semantics while ensuring at least one group member is
+            # available to act.
+            return members
 
         if step.assignee_type == "group_all":
             members = WorkflowService._active_group_members(step.assignee_group)
@@ -1681,9 +1689,14 @@ class WorkflowService:
             procurement_document = is_procurement_document(document)
             sunsystems = get_sunsystems_config(document) if procurement_document else {}
             po_profile = sunsystems.get("purchase_order") or {}
+            imprest_profile = sunsystems.get("imprest_request") or {}
             legacy_journal = sunsystems.get("journal") or {}
             is_legacy_po = str(legacy_journal.get("component") or "").lower() == "purchaseorder"
-            has_po_mapping = (isinstance(po_profile, dict) and po_profile.get("enabled")) or is_legacy_po
+            has_po_mapping = (
+                (isinstance(po_profile, dict) and po_profile.get("enabled"))
+                or (isinstance(imprest_profile, dict) and imprest_profile.get("enabled"))
+                or is_legacy_po
+            )
 
             # The Imprest advance journal reuses common bindings from the PO
             # profile and posts as soon as requisition approval completes.

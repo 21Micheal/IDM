@@ -180,6 +180,16 @@ def resolve_value(spec: Any, values: dict, row: dict | None = None, *, default: 
 
 def resolve_amount(spec: Any, values: dict, row: dict | None = None) -> Decimal:
     """Resolve a ValueSpec to a Decimal amount (0 when blank/unparseable)."""
+    aggregate = spec.get("sum_rows") if isinstance(spec, dict) else None
+    if isinstance(aggregate, dict):
+        rows = (values or {}).get(aggregate.get("table"))
+        if not isinstance(rows, list):
+            return Decimal("0")
+        total = Decimal("0")
+        for table_row in rows:
+            if isinstance(table_row, dict):
+                total += resolve_amount({"row_field": aggregate.get("amount_column")}, values, table_row)
+        return total
     aggregate = spec.get("sum_matching_rows") if isinstance(spec, dict) else None
     if isinstance(aggregate, dict):
         rows = (values or {}).get(aggregate.get("table"))
@@ -336,7 +346,7 @@ def _po_line_specs(po: dict) -> list[dict]:
     one-element list, folding the legacy ``analysis10_*`` constants into slot 10.
     """
     specs = po.get("lines")
-    if isinstance(specs, list) and specs:
+    if isinstance(specs, list):
         return [spec for spec in specs if isinstance(spec, dict)]
 
     legacy = dict(po)
@@ -676,6 +686,7 @@ def classify_retirement(retirement: dict, values: dict, warnings: list[str] | No
     issued = resolve_amount(issued_spec, values)
     issued_field_key = issued_spec.get("field") if isinstance(issued_spec, dict) else None
     issued_sum_spec = issued_spec.get("sum_matching_rows") if isinstance(issued_spec, dict) else None
+    issued_rows_spec = issued_spec.get("sum_rows") if isinstance(issued_spec, dict) else None
     if issued_field_key and issued_field_key not in (values or {}):
         # The configured field key doesn't exist in the submitted values at
         # all — as opposed to existing with a blank/zero value. This is the
@@ -697,7 +708,16 @@ def classify_retirement(retirement: dict, values: dict, warnings: list[str] | No
         rows = (values or {}).get(table_key)
         if not table_key or not amount_column or not match_column or not isinstance(rows, list):
             _warnings.append(
-                "Retirement's CAS_IMPREST issued amount source is incomplete or its source table is missing; "
+                "Retirement's Imprest request amount source is incomplete or its source table is missing; "
+                "issued amount treated as 0. Check the General / Imprest table mappings."
+            )
+    elif isinstance(issued_rows_spec, dict):
+        table_key = issued_rows_spec.get("table")
+        amount_column = issued_rows_spec.get("amount_column")
+        rows = (values or {}).get(table_key)
+        if not table_key or not amount_column or not isinstance(rows, list):
+            _warnings.append(
+                "Retirement's Imprest request amount source is incomplete or its source table is missing; "
                 "issued amount treated as 0. Check the General / Imprest table mappings."
             )
     elif not issued_field_key:

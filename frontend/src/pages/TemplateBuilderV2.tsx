@@ -265,7 +265,7 @@ export interface RetirementScenario {
  * _expand_retirement_lines) interprets at posting time. */
 export interface RetirementConfig {
   enabled: boolean;
-  /** Use either a numeric form field or the CAS_IMPREST-filtered requisition total. */
+  /** Use either a numeric form field or the total from General / Imprest rows. */
   issuedAmountMode?: "field" | "imprest_request_total";
   issuedAmountField?: string; // top-level field KEY holding the issued amount
   exact: RetirementScenario;
@@ -669,6 +669,7 @@ export interface SunSystemsConfig {
   ui?: SunSystemsUi;
   journal?: Record<string, unknown>;
   purchase_order?: Record<string, unknown>;
+  imprest_request?: Record<string, unknown>;
   budget?: Record<string, unknown>;
   connection?: Record<string, unknown>;
 }
@@ -1464,9 +1465,15 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const purchaseOrderEnabled = separateProfiles
     ? Boolean(ui.purchaseOrderEnabled)
     : Boolean(ui.journalEnabled && ui.postingKind === "purchase_order");
-  if (!ledgerJournalEnabled && !purchaseOrderEnabled && !ui.budgetEnabled) return ss;
-
   const fields = template.sections.flatMap((s) => s.fields ?? []);
+  const hasImprestRequestConfig = fields.some((field) =>
+    field.type === "table"
+      && field.workflowRole === "rfq_required_lines"
+      && (field.sunsystems?.imprestRequest?.enabled
+        || field.columns?.some((column) => column.sunsystems?.role === "line_amount" && column.sunsystems?.imprestRequest?.enabled)),
+  );
+  if (!ledgerJournalEnabled && !purchaseOrderEnabled && !hasImprestRequestConfig && !ui.budgetEnabled) return ss;
+
   const byRole = (role: string) => fields.find((f) => f.sunsystems?.role === role);
   const accountSpec = (source: AccountCodeSource | undefined, manual: string | undefined, columns?: TableColumn[]) => {
     if (source === "account_code" || source === "supplier_code") {
@@ -1542,15 +1549,12 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         if (retirement.issuedAmountMode === "imprest_request_total") {
           const requestTable = fields.find((candidate) => candidate.type === "table" && candidate.workflowRole === "rfq_required_lines");
           const requestAmountColumn = requestTable?.columns?.find((candidate) => candidate.sunsystems?.role === "line_amount");
-          const requestTypeColumn = requestTable?.columns?.find((candidate) => candidate.sunsystems?.role === "purchase_transaction_type");
           const requestConfig = requestTable?.sunsystems?.imprestRequest ?? requestAmountColumn?.sunsystems?.imprestRequest;
-          if (requestTable && requestAmountColumn && requestTypeColumn && requestConfig?.enabled) {
+          if (requestTable && requestAmountColumn && requestConfig?.enabled) {
             issuedAmountSpec = {
-              sum_matching_rows: {
+              sum_rows: {
                 table: requestTable.key,
                 amount_column: requestAmountColumn.key,
-                match_column: requestTypeColumn.key,
-                values: [(requestConfig.transactionType || "CAS_IMPREST").trim()],
               },
             };
           }
@@ -1672,7 +1676,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const purchaseTransactionTypeFieldSpec = valueSpec(byRole("purchase_transaction_type"));
   const productGroupSpec = valueSpec(byRole("product_group"));
 
-  const poTables = fields.filter((f) => f.type === "table" && f.workflowRole !== "retirement_expenses").map((f) => ({
+  const poTables = fields.filter((f) => f.type === "table" && f.workflowRole !== "retirement_expenses" && f.workflowRole !== "rfq_required_lines").map((f) => ({
     field: f,
     columns: f.columns ?? [],
     amount: (f.columns ?? []).find((c) => c.sunsystems?.role === "line_amount"),
@@ -1741,6 +1745,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   // PurchaseOrder lines: one per requisition table that carries a value source
   // (an explicit amount column, or quantity + unit price). Repeats per row.
   const poLines: Record<string, unknown>[] = [];
+  const imprestRequestLines: Record<string, unknown>[] = [];
   for (const f of fields) {
     if (f.type !== "table") continue;
     // Retirement expense rows reconcile the advance; they are not PO lines.
@@ -1751,7 +1756,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       ?? cols.find((c) => c.type === "external" && c.external?.source === "items")
       ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "item");
     const productGroupCol = cols.find((c) => c.sunsystems?.role === "product_group");
-    const transactionTypeCol = cols.find((c) => c.sunsystems?.role === "purchase_transaction_type");
+    const transactionTypeCol = f.workflowRole === "rfq_required_lines"
+      ? undefined
+      : cols.find((c) => c.sunsystems?.role === "purchase_transaction_type");
     const descriptionCol = cols.find((c) => c.sunsystems?.role === "description");
     const qtyCol = cols.find((c) => c.sunsystems?.role === "quantity");
     const upCol = cols.find((c) => c.sunsystems?.role === "unit_price");
@@ -1770,7 +1777,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     if (!amtCol && !(qtyCol && upCol)) continue;
     const lineAnalysis: Record<string, unknown> = {};
     for (const c of analysisCols) lineAnalysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
-    poLines.push({
+    const lineSpec: Record<string, unknown> = {
       repeat_over: f.key,
       table_label: f.label || f.key,
       account_code: acctCol ? { row_field: acctCol.key } : { const: f.sunsystems?.account ?? ui.accountCode ?? "" },
@@ -1779,13 +1786,12 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         : itemFieldSpec
           ? { item_code: itemFieldSpec }
           : (ui.itemCode ? { item_code: { const: ui.itemCode } } : {})),
-      ...(productGroupCol
+      ...(f.workflowRole !== "rfq_required_lines" && productGroupCol
         ? { product_group: { row_field: productGroupCol.key } }
-        : (productGroupSpec ? { product_group: productGroupSpec } : {})),
+        : (f.workflowRole !== "rfq_required_lines" && productGroupSpec ? { product_group: productGroupSpec } : {})),
       ...(transactionTypeCol ? { purchase_transaction_type: { row_field: transactionTypeCol.key } } : {}),
       ...(imprestRequest?.enabled && f.workflowRole === "rfq_required_lines"
         ? {
-            imprest_request_transaction_type: (imprestRequest.transactionType || "CAS_IMPREST").trim(),
             ...(imprestAccountSource === "account_code" && imprestAccountCol
               ? { imprest_request_account: { row_field: imprestAccountCol.key } }
               : imprestAccountSource === "supplier_code" && supplierCol
@@ -1826,7 +1832,15 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       ...(upCol ? { unit_price: { row_field: upCol.key } } : {}),
       ...(amtCol ? { amount: { row_field: amtCol.key } } : {}),
       ...(Object.keys(lineAnalysis).length ? { analysis: lineAnalysis } : {}),
-    });
+    };
+    if (f.workflowRole === "rfq_required_lines") {
+      // General / Imprest rows are exclusively the source for the advance
+      // journal. They are never PurchaseOrder lines, even when they contain
+      // item, supplier, or pricing columns.
+      if (imprestRequest?.enabled) imprestRequestLines.push(lineSpec);
+    } else {
+      poLines.push(lineSpec);
+    }
   }
 
   const purchaseOrderMapping = {
@@ -1875,6 +1889,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           invoice_address_code: { const: ui.invoiceAddressCode || "0000000000" },
           ...(dateSpec ? { date: dateSpec } : {}),
           ...(currencySpec ? { currency: currencySpec } : {}),
+          ...(imprestRequestLines.length ? { imprest_request_lines: imprestRequestLines } : {}),
           // A populated table quantity column wins; empty/missing row values
           // fall back to the form-level quantity mapping or configured default.
           quantity: quantityFieldSpec
@@ -1896,6 +1911,19 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const purchase_order = separateProfiles
     ? (purchaseOrderEnabled ? purchaseOrderMapping : { enabled: false })
     : { enabled: false };
+  const imprest_request = hasImprestRequestConfig
+    ? {
+        enabled: true,
+        component: "Journal",
+        method: "Import",
+        context: purchaseOrderMapping.context,
+        purchase_order: {
+          ...purchaseOrderMapping.purchase_order,
+          lines: [],
+          imprest_request_lines: imprestRequestLines,
+        },
+      }
+    : { enabled: false };
 
   const byBudgetRole = (r: string) => fields.find((f) => budgetRoleOf(f) === r);
   const budget = ui.budgetEnabled
@@ -1908,7 +1936,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     }
     : { enabled: false };
 
-  return { ...ss, ui, journal, purchase_order, budget };
+  return { ...ss, ui, journal, purchase_order, imprest_request, budget };
 }
 
 function outputTemplate(template: Template, keepId: boolean, resolved: Record<string, ResolvedTableRef> = {}): Template {
@@ -2995,9 +3023,8 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
   const amountFieldOptions = formFields.filter((f) => f.key && (f.type === "number" || f.type === "currency" || CALCULATED_TYPES.has(f.type)));
   const imprestTable = formFields.find((f) => f.type === "table" && f.workflowRole === "rfq_required_lines");
   const imprestAmountColumn = imprestTable?.columns?.find((c) => c.sunsystems?.role === "line_amount");
-  const imprestTransactionColumn = imprestTable?.columns?.find((c) => c.sunsystems?.role === "purchase_transaction_type");
   const imprestConfig = imprestTable?.sunsystems?.imprestRequest ?? imprestAmountColumn?.sunsystems?.imprestRequest;
-  const hasImprestTotalSource = !!(imprestTable && imprestAmountColumn && imprestTransactionColumn && imprestConfig?.enabled);
+  const hasImprestTotalSource = !!(imprestTable && imprestAmountColumn && imprestConfig?.enabled);
   const IMPREST_TOTAL_SOURCE = "__imprest_request_total__";
 
   const iCls =
@@ -3028,17 +3055,17 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
                 options={[
                   { value: "", label: "— choose a field —" },
                   ...amountFieldOptions.map((f) => ({ value: f.key, label: `${f.label} (${f.key})` })),
-                  ...(hasImprestTotalSource ? [{ value: IMPREST_TOTAL_SOURCE, label: `CAS_IMPREST row total (${imprestTable?.label || imprestTable?.key})` }] : []),
+                  ...(hasImprestTotalSource ? [{ value: IMPREST_TOTAL_SOURCE, label: `Imprest request total (${imprestTable?.label || imprestTable?.key})` }] : []),
                 ]}
                 className={cn(iCls, "mt-1", !retirement.issuedAmountField && retirement.issuedAmountMode !== "imprest_request_total" && amountFieldOptions.length > 0 && "border-amber-400")}
                 buttonClassName="w-full"
                 ariaLabel="Issued amount field"
               />
               {retirement.issuedAmountMode === "imprest_request_total" && (
-                <p className="mt-1 text-[10px] text-[#5E6870]">Issued amount is calculated by summing the Line amount column only for rows whose Purchase transaction type is {imprestConfig?.transactionType || "CAS_IMPREST"}.</p>
+                <p className="mt-1 text-[10px] text-[#5E6870]">Issued amount is calculated by summing the Line amount column for all populated rows in the General / Imprest table.</p>
               )}
               {!hasImprestTotalSource && imprestTable && (
-                <p className="mt-1 text-[10px] text-amber-600">To use the request total, enable Imprest request posting on the General / Imprest table and map its Line amount and Purchase transaction type columns.</p>
+                <p className="mt-1 text-[10px] text-amber-600">To use the request total, enable Imprest request posting on the General / Imprest table and map its Line amount column.</p>
               )}
               {amountFieldOptions.length === 0 && !hasImprestTotalSource ? (
                 <p className="mt-1 text-[10px] text-amber-600">Add a Number or Currency field elsewhere on the form to hold the issued/requested amount.</p>
@@ -3072,7 +3099,6 @@ function ImprestRequestConfigEditor({ field, siblingColumns, onChange }: {
 }) {
   const amountColumn = siblingColumns.find((candidate) => candidate.sunsystems?.role === "line_amount");
   const config = field.sunsystems?.imprestRequest ?? amountColumn?.sunsystems?.imprestRequest;
-  const hasTransactionTypeColumn = siblingColumns.some((candidate) => candidate.sunsystems?.role === "purchase_transaction_type");
   const iCls = "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
   const parameterDefaults: Record<string, string> = {
     AllowBalTran: "1",
@@ -3097,18 +3123,13 @@ function ImprestRequestConfigEditor({ field, siblingColumns, onChange }: {
     <div className="space-y-2">
       <div>
         <p className="text-sm font-medium text-[#1F2933]">Imprest request posting</p>
-        <p className="mt-0.5 text-[10px] text-[#8C969E]">At requisition approval, post the advance journal for matching rows. Common line mappings come from the Purchase Order profile.</p>
+        <p className="mt-0.5 text-[10px] text-[#8C969E]">At requisition approval, post the advance journal for all populated rows in this table. Common line mappings come from the Purchase Order profile.</p>
       </div>
       <div className="space-y-3 border border-[#C8CDD2] bg-white p-3">
         <ToggleYesNo value={!!config?.enabled} onChange={enableConfig} />
         {config?.enabled && (
           <>
             <div className="grid grid-cols-2 gap-3">
-              <label className="space-y-1 text-xs font-semibold text-[#475569]">Purchase transaction type filter
-                <input className={cn(iCls, "font-mono")} value={config.transactionType ?? "CAS_IMPREST"}
-                  onChange={(e) => onChange({ ...config, enabled: true, transactionType: e.target.value })} />
-                <span className="block text-[10px] font-normal text-[#8C969E]">Selects qualifying rows; default CAS_IMPREST. This is not the Ledger Journal Type.</span>
-              </label>
               <label className="space-y-1 text-xs font-semibold text-[#475569]">Ledger Journal Type (JournalType)
                 <input className={cn(iCls, "font-mono")} value={config.journalType ?? "FGJ"}
                   onChange={(e) => onChange({ ...config, enabled: true, journalType: e.target.value })} />
@@ -3139,7 +3160,6 @@ function ImprestRequestConfigEditor({ field, siblingColumns, onChange }: {
               </div>
             </div>
             {!amountColumn && <p className="text-[10px] text-amber-600">Map a table column to Line amount so the advance total can be calculated.</p>}
-            {!hasTransactionTypeColumn && <p className="text-[10px] text-amber-600">Map a table column to Purchase transaction type to identify qualifying rows.</p>}
           </>
         )}
       </div>
@@ -3270,6 +3290,7 @@ function ColumnConfigModal({
   const isNumeric = draft.type === "number" || draft.type === "currency";
   const isText = draft.type === "text" || draft.type === "textarea" || draft.type === "email" || draft.type === "phone";
   const isCalcCol = !!draft.calc;
+  const isImprestRequestTable = tableField?.workflowRole === "rfq_required_lines";
   const keyDuplicate = siblingColumns.some((c) => c.id !== draft.id && c.key === draft.key);
   const needsWideModal = !!draft.sunsystems?.retirement?.enabled;
 
@@ -3443,13 +3464,16 @@ function ColumnConfigModal({
               )}
               <Row label="SunSystems role">
                 <CustomListbox
-                  value={draft.sunsystems?.role ?? ""}
+                  value={draft.sunsystems?.role === "purchase_transaction_type" && isImprestRequestTable ? "" : draft.sunsystems?.role ?? ""}
                   onChange={(val) => set({ sunsystems: { ...(draft.sunsystems ?? {}), role: val || undefined } })}
-                  options={FINANCE_COLUMN_ROLES.map((o) => ({ value: o.value, label: o.label }))}
+                  options={FINANCE_COLUMN_ROLES
+                    .filter((option) => !(isImprestRequestTable && option.value === "purchase_transaction_type"))
+                    .map((o) => ({ value: o.value, label: o.label }))}
                   className={iCls}
                   buttonClassName="w-full"
                   ariaLabel="SunSystems role"
                 />
+                {isImprestRequestTable && <p className="mt-1 text-[10px] text-[#8C969E]">This table posts only the Imprest journal, so Purchase transaction type is not used.</p>}
               </Row>
               {draft.sunsystems?.role === "analysis" && (
                 <Row label="Analysis code number (1–10)">
@@ -3619,7 +3643,9 @@ function ColumnConfigModal({
           </button>
           <div className="flex gap-2">
             <button onClick={onClose} className="border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">Cancel</button>
-            <button onClick={() => onSave(draft)} className="inline-flex items-center gap-2 bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99]">
+            <button onClick={() => onSave(isImprestRequestTable && draft.sunsystems?.role === "purchase_transaction_type"
+              ? { ...draft, sunsystems: { ...draft.sunsystems, role: undefined } }
+              : draft)} className="inline-flex items-center gap-2 bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99]">
               <CheckCircle2 className="h-4 w-4" /> Save
             </button>
           </div>
@@ -7617,7 +7643,7 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps, embedded 
   const poNumberLabel = roleLabel("po_number");
   const poSupplierLabel = roleLabel("supplier_code");
   const poLineTables = fields.filter(
-    (f) => f.type === "table" && f.workflowRole !== "retirement_expenses" && (f.columns ?? []).some((c) =>
+    (f) => f.type === "table" && f.workflowRole !== "retirement_expenses" && f.workflowRole !== "rfq_required_lines" && (f.columns ?? []).some((c) =>
       ["line_amount", "item_code", "quantity", "unit_price"].includes(c.sunsystems?.role ?? "")),
   );
   const analysisPanelField = fields.find(

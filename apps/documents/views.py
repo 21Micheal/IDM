@@ -523,8 +523,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     action="approved",
                     actor__isnull=False,
                 ).order_by("-created_at").values("actor_id")[:1]
+                lpo_generation_actor = WorkflowTaskAction.objects.filter(
+                    task__workflow_instance__document_id=models.OuterRef("pk"),
+                    task__step__post_lpo_after_approval=True,
+                    action="approved",
+                    actor__isnull=False,
+                ).order_by("-created_at").values("actor_id")[:1]
                 qs = qs.annotate(
                     _latest_approved_workflow_actor_id=models.Subquery(latest_approved_actor),
+                    _lpo_generation_actor_id=models.Subquery(lpo_generation_actor),
                 )
             for delegation in active_delegations_qs(delegate=user):
                 clause = models.Q(
@@ -552,6 +559,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             if self.action != "list":
                 access_filter |= (
                     models.Q(metadata__form__lpo_final_approver_id=str(user.id))
+                    | models.Q(_lpo_generation_actor_id=user.id)
                     | models.Q(
                         _latest_approved_workflow_actor_id=user.id,
                         workflow_instance__status="approved",

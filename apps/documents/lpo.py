@@ -239,9 +239,10 @@ def generate_lpo_for_posting(document, posting, actor=None):
         table_label=(spec.get("table_label") or mapping.get("_posting_label") or posting.stage_label),
         values_override=values if isinstance(values, dict) else None,
     )
-    # The first rollout emails only the General / Imprest lines order. Travel
-    # table orders continue to be generated normally, without supplier email.
-    if lpo and _is_general_imprest_table(document, table_key):
+    # Send every generated LPO to the supplier selected for its own table.
+    # Delivery waits for the LPO approval chain when the PO was generated at
+    # an intermediate approval gate; otherwise it can be queued immediately.
+    if lpo:
         supplier_email = _as_text(
             ((lpo.metadata or {}).get("lpo_supplier") or {}).get("email")
         )
@@ -274,7 +275,7 @@ def generate_lpo_for_posting(document, posting, actor=None):
                 logger.exception("Could not queue supplier email for LPO %s", lpo.pk)
         else:
             logger.warning(
-                "Supplier email is unavailable for General / Imprest LPO %s (%s)",
+                "Supplier email is unavailable for LPO %s (%s)",
                 lpo.pk,
                 reference,
             )
@@ -327,20 +328,6 @@ def queue_pending_lpo_supplier_emails(document) -> None:
             lambda lid=lpo_id, email=recipient, rid=requisition_id, ref=reference:
             email_generated_lpo_to_supplier.delay(lid, email, rid, ref)
         )
-
-
-def _is_general_imprest_table(document, table_key: str | None) -> bool:
-    if not table_key:
-        return False
-    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
-    for section in form.get("sections") or []:
-        for field in section.get("fields") or []:
-            if field.get("type") != "table" or str(field.get("key") or "") != table_key:
-                continue
-            # The builder stores this as workflowRole. Accept the snake-case
-            # spelling too for older/imported form snapshots.
-            return str(field.get("workflowRole") or field.get("workflow_role") or "").strip().lower() == "rfq_required_lines"
-    return False
 
 
 def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None, table_key=None, values_override=None) -> dict:
