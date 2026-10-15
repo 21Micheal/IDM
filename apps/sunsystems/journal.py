@@ -58,6 +58,7 @@ def post_journal_for_document(
 
     if posting.status == JournalPostingStatus.POSTED:
         _maybe_generate_lpo_after_posting(document, posting, actor)
+        _resume_lpo_workflow_after_posting(document)
         return posting
 
     mapping = get_journal_mapping(document, stage=stage)
@@ -163,6 +164,7 @@ def post_journal_for_document(
         )
         _write_back_to_document(document, posting)
         _maybe_generate_lpo_after_posting(document, posting, actor)
+        _resume_lpo_workflow_after_posting(document)
         try:
             from apps.documents.builder_workflow import sync_retirement_variance
 
@@ -181,7 +183,17 @@ def post_journal_for_document(
             response_xml=result.raw,
             message=message_text,
         )
+    _resume_lpo_workflow_after_posting(document)
     return posting
+
+
+def _resume_lpo_workflow_after_posting(document) -> None:
+    """Release the marked LPO approval only after all POs and PDFs are ready."""
+    try:
+        from apps.workflows.services import WorkflowService
+        WorkflowService._resume_lpo_workflow_if_ready(document)
+    except Exception:
+        logger.exception("Could not resume the LPO workflow for %s after posting", document.pk)
 
 
 def _maybe_generate_lpo_after_posting(document, posting, actor=None) -> None:

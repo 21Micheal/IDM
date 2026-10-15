@@ -695,6 +695,9 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
                   : <><Users className="w-3 h-3" />{s.assignee_group_name || groupName(s.assignee_group)}
                     {s.sla_hours ? <><Clock className="w-3 h-3 ml-1" />{s.sla_hours < 24 ? `${s.sla_hours}h` : `${Math.floor(s.sla_hours / 24)}d`}</> : null}</>}
               </p>
+              {!isN && s.post_lpo_after_approval && (
+                <p className="mt-1 text-[10px] font-semibold text-primary">LPOs generate after this approval</p>
+              )}
             </div>
             {bad && <AlertCircle className="w-4 h-4 text-destructive flex-shrink-0" />}
           </div>

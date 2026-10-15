@@ -258,14 +258,18 @@ def generate_lpo_for_posting(document, posting, actor=None):
             supplier_email = _as_text(merge_values.get("supplier.email"))
         if supplier_email:
             try:
-                from apps.documents.tasks import email_generated_lpo_to_supplier
-
-                email_generated_lpo_to_supplier.delay(
-                    str(lpo.pk),
-                    supplier_email,
-                    str(document.pk),
-                    reference,
-                )
+                delivery = {
+                    "status": "pending_approval" if _lpo_delivery_waiting_for_approval(document) else "queued",
+                    "recipient": supplier_email,
+                    "reference": reference,
+                }
+                metadata = dict(lpo.metadata or {})
+                metadata["supplier_email"] = delivery
+                lpo.metadata = metadata
+                lpo.save(update_fields=["metadata", "updated_at"])
+                if delivery["status"] == "queued":
+                    from apps.documents.tasks import email_generated_lpo_to_supplier
+                    email_generated_lpo_to_supplier.delay(str(lpo.pk), supplier_email, str(document.pk), reference)
             except Exception:
                 logger.exception("Could not queue supplier email for LPO %s", lpo.pk)
         else:
@@ -275,6 +279,54 @@ def generate_lpo_for_posting(document, posting, actor=None):
                 reference,
             )
     return lpo
+
+
+def _lpo_delivery_waiting_for_approval(document) -> bool:
+    """True while a workflow is paused at its configured LPO generation gate."""
+    try:
+        from apps.workflows.models import WorkflowInstance
+        for instance in WorkflowInstance.objects.filter(document=document, status="in_progress").select_related("template"):
+            if instance.template.steps.filter(
+                order=instance.current_step_order,
+                post_lpo_after_approval=True,
+            ).exists():
+                return True
+        return False
+    except Exception:
+        logger.exception("Could not determine whether LPO supplier email should wait for approval")
+        return False
+
+
+def queue_pending_lpo_supplier_emails(document) -> None:
+    """Queue deferred supplier emails when the LPO approval chain completes."""
+    from apps.documents.models import Document
+    from apps.documents.tasks import email_generated_lpo_to_supplier
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    for record in form.get("lpo_documents") or []:
+        if not isinstance(record, dict) or not record.get("id"):
+            continue
+        try:
+            lpo = Document.objects.get(pk=record["id"])
+        except (Document.DoesNotExist, ValueError, TypeError):
+            continue
+        metadata = dict(lpo.metadata or {})
+        state = dict(metadata.get("supplier_email") or {})
+        if state.get("status") != "pending_approval":
+            continue
+        recipient = _as_text(state.get("recipient") or (metadata.get("lpo_supplier") or {}).get("email"))
+        reference = _as_text(state.get("reference") or record.get("reference"))
+        if not recipient:
+            continue
+        state["status"] = "queued"
+        metadata["supplier_email"] = state
+        lpo.metadata = metadata
+        lpo.save(update_fields=["metadata", "updated_at"])
+        lpo_id = str(lpo.pk)
+        requisition_id = str(document.pk)
+        transaction.on_commit(
+            lambda lid=lpo_id, email=recipient, rid=requisition_id, ref=reference:
+            email_generated_lpo_to_supplier.delay(lid, email, rid, ref)
+        )
 
 
 def _is_general_imprest_table(document, table_key: str | None) -> bool:

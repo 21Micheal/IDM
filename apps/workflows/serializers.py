@@ -92,6 +92,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
         fields = [
             "id", "template", "order", "name", "status_label",
             "step_type",
+            "post_lpo_after_approval",
             # approval-step fields
             "assignee_type", "assignee_group", "assignee_group_name",
             "assignee_user", "assignee_user_name", "assignee_user_auto",
@@ -169,6 +170,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "status_label",
             "step_type",
+            "post_lpo_after_approval",
             # approval-step
             "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto",
             "sla_hours", "allow_resubmit",
@@ -185,6 +187,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             "instructions":            {"required": False, "allow_blank": True},
             "step_type":               {"required": False},
+            "post_lpo_after_approval": {"required": False},
             "approver_email_subject":  {"required": False, "allow_blank": True},
             "approver_email_body":     {"required": False, "allow_blank": True},
             "notify_email":            {"required": False, "allow_blank": True},

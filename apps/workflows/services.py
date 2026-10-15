@@ -514,6 +514,10 @@ class WorkflowService:
         if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, step.order):
             return
 
+        if step.post_lpo_after_approval and doc is not None:
+            if WorkflowService._start_lpo_posting_gate(instance, step, doc):
+                return
+
         WorkflowService._advance_step(instance, step.order)
 
     # ── Reject ─────────────────────────────────────────────────────────────
@@ -1264,6 +1268,107 @@ class WorkflowService:
             WorkflowService._complete(instance, "approved")
 
     @staticmethod
+    def _start_lpo_posting_gate(instance: WorkflowInstance, step: WorkflowStep, document) -> bool:
+        """Post configured POs after a marked approval and hold the workflow here.
+
+        Returns True when the configured PO postings are gated. If there are no
+        PO mappings, normal approval flow continues.
+        """
+        try:
+            from apps.documents.builder_workflow import is_procurement_document
+            from apps.sunsystems.config import get_purchase_order_postings
+            if (
+                not is_procurement_document(document)
+                or WorkflowService._document_workflow_phase(document) != "lpo"
+            ):
+                return False
+            requested = get_purchase_order_postings(document)
+            if not requested:
+                return False
+            from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+            from apps.sunsystems.tasks import post_journal_for_document
+
+            for item in requested:
+                stage = int(item["stage"])
+                posting, created = JournalPosting.objects.get_or_create(
+                    document=document,
+                    stage=stage,
+                    defaults={"status": JournalPostingStatus.PENDING},
+                )
+                if posting.status == JournalPostingStatus.POSTED:
+                    continue
+                posting.status = JournalPostingStatus.PENDING
+                posting.stage_label = str(item.get("label") or f"LPO {stage - 999}")[:64]
+                posting.message = "Queued after the configured LPO approval; later approvals are waiting for generation."
+                posting.error = ""
+                posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
+                document_id = str(document.pk)
+                actor_id = str(instance.started_by_id) if instance.started_by_id else None
+                _queue_after_commit(
+                    lambda did=document_id, current_stage=stage, aid=actor_id: post_journal_for_document.delay(did, current_stage, aid)
+                )
+
+            # If every posting was already successful (e.g. an approval is
+            # replayed after a prior successful post), resume without waiting
+            # for a task that will not be queued.
+            WorkflowService._resume_lpo_workflow_if_ready(document)
+            return True
+        except Exception:
+            logger.exception("Could not start the LPO posting gate for document %s", document.pk)
+            # Keep later approvers blocked if dispatch fails; the failed
+            # posting remains visible and can be retried by an administrator.
+            return True
+
+    @staticmethod
+    def _resume_lpo_workflow_if_ready(document) -> bool:
+        """Resume a marked approval once every configured PO and PDF is ready."""
+        try:
+            from apps.documents.builder_workflow import is_procurement_document
+            from apps.sunsystems.config import get_purchase_order_postings
+            from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+            if (
+                not is_procurement_document(document)
+                or WorkflowService._document_workflow_phase(document) != "lpo"
+            ):
+                return False
+            requested = get_purchase_order_postings(document)
+            if not requested:
+                return False
+            stages = [int(item["stage"]) for item in requested]
+            posted = dict(
+                JournalPosting.objects.filter(document=document, stage__in=stages)
+                .values_list("stage", "status")
+            )
+            if any(posted.get(stage) != JournalPostingStatus.POSTED for stage in stages):
+                return False
+            form = ((document.metadata or {}).get("form") or {})
+            generated = {
+                int(row.get("posting_stage"))
+                for row in (form.get("lpo_documents") or [])
+                if isinstance(row, dict) and str(row.get("posting_stage", "")).isdigit()
+            }
+            if not set(stages).issubset(generated):
+                return False
+
+            instances = WorkflowInstance.objects.filter(document=document, status="in_progress").select_related("template")
+            for instance in instances:
+                try:
+                    step = instance.template.steps.get(order=instance.current_step_order)
+                except WorkflowStep.DoesNotExist:
+                    continue
+                if not step.post_lpo_after_approval:
+                    continue
+                with transaction.atomic():
+                    locked = WorkflowInstance.objects.select_for_update().get(pk=instance.pk)
+                    if locked.status != "in_progress" or locked.current_step_order != step.order:
+                        continue
+                    WorkflowService._advance_step(locked, step.order)
+                return True
+        except Exception:
+            logger.exception("Could not resume LPO workflow after generation for %s", document.pk)
+        return False
+
+    @staticmethod
     def _active_group_members(group):
         if not group:
             return []
@@ -1348,6 +1453,13 @@ class WorkflowService:
                 doc.metadata = metadata
                 update_fields.append("metadata")
             WorkflowService._save_document(doc, update_fields=update_fields)
+
+            if completion_phase == "lpo" and outcome == "approved":
+                try:
+                    from apps.documents.lpo import queue_pending_lpo_supplier_emails
+                    queue_pending_lpo_supplier_emails(doc)
+                except Exception:
+                    logger.exception("Could not queue pending supplier LPO emails for %s", doc.pk)
 
             # Does an intermediate procurement stage follow this approval?
             advances = False

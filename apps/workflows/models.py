@@ -149,6 +149,10 @@ class WorkflowStep(models.Model):
             "'notification' fires an email and auto-advances immediately."
         ),
     )
+    post_lpo_after_approval = models.BooleanField(
+        default=False,
+        help_text="After this approval, post configured purchase orders and generate their LPO documents before continuing.",
+    )
 
     # ── Approval-step fields ──────────────────────────────────────────────────
     assignee_type = models.CharField(max_length=20, choices=ASSIGNEE_TYPES, default="group_any")

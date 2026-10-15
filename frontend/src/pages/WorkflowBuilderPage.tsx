@@ -36,6 +36,7 @@ interface WorkflowStep {
   name: string;
   status_label: string;
   step_type: StepType;
+  post_lpo_after_approval?: boolean;
   // Approval-step fields
   assignee_type: AssigneeType;
   assignee_group: string | null;
@@ -350,6 +351,7 @@ function normalizeStep(step: WorkflowStep): WorkflowStep {
   return {
     ...step,
     step_type: normalizeStepType((step as any).step_type),
+    post_lpo_after_approval: Boolean((step as any).post_lpo_after_approval),
     assignee_type: normalizeAssigneeType(step.assignee_type),
     assignee_group: isUuidLike(step.assignee_group) ? step.assignee_group : null,
     assignee_user: isUuidLike(step.assignee_user) ? step.assignee_user : null,
@@ -475,6 +477,7 @@ function blankStep(): WorkflowStep {
   return {
     order: 0, name: "", status_label: "Pending Approval",
     step_type: "approval",
+    post_lpo_after_approval: false,
     assignee_type: "group_any", assignee_group: null, assignee_user: null,
     sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, allow_return_submitter: true,
     requires_signature: false, instructions: "",
@@ -486,6 +489,7 @@ function blankNotificationStep(): WorkflowStep {
   return {
     order: 0, name: "Send Notification", status_label: "Notification Sent",
     step_type: "notification",
+    post_lpo_after_approval: false,
     assignee_type: "group_any", assignee_group: null, assignee_user: null,
     sla_hours: 1,
     allow_resubmit: false, allow_approve: false, allow_reject: false, allow_return: false, allow_return_submitter: false,
@@ -926,6 +930,22 @@ function StepEditPanel({
 
         {/* ── Approval step fields ────────────────────────────────────────── */}
         {step.step_type === "approval" && (<>
+          <button
+            type="button"
+            onClick={() => onChange({ post_lpo_after_approval: !step.post_lpo_after_approval })}
+            className={clsx(
+              "w-full flex items-start gap-3 p-4 rounded-xl border text-left transition-colors",
+              step.post_lpo_after_approval ? "border-primary/40 bg-primary/5 text-primary" : "border-border bg-muted/30 text-foreground hover:bg-muted/60"
+            )}
+          >
+            <span className={clsx("mt-0.5 w-4 h-4 rounded border flex items-center justify-center", step.post_lpo_after_approval ? "bg-primary border-primary text-white" : "border-muted-foreground/50")}>
+              {step.post_lpo_after_approval ? <Check className="w-3 h-3" /> : null}
+            </span>
+            <span>
+              <span className="block text-xs font-semibold">Generate LPOs after this approval</span>
+              <span className="block text-[11px] mt-1 opacity-80">Post the purchase orders and create their documents before the next approval step.</span>
+            </span>
+          </button>
           <div className="grid grid-cols-1 gap-4 p-4 rounded-lg bg-muted/40 border border-border">
             <div>
               <Label required>Approver group</Label>
