@@ -42,6 +42,12 @@ export interface ExternalSourceDef {
   fetch: (params: { dimension?: string }) => Promise<ExternalRecord[]>;
 }
 
+function taxRateFromName(name: string): string | undefined {
+  if (/\b(ex(?:c)?empt|zero[ -]?rated|not (?:analysed|analyzed))\b/i.test(name)) return "0";
+  const match = name.match(/(?:^|\D)(\d+(?:\.\d+)?)\s*%/);
+  return match?.[1];
+}
+
 /* Single source of truth for the External sources the designer can pick. Add a
  * new entry here (and the matching backend view) to offer another entity. */
 export const EXTERNAL_SOURCES: ExternalSourceDef[] = [
@@ -84,7 +90,10 @@ export const EXTERNAL_SOURCES: ExternalSourceDef[] = [
             (r.data.analysis_codes ?? []).map((c) => ({
               code: c.analysis_code,
               description: c.name,
-              data: { dimension_id: c.analysis_dimension_id },
+              data: {
+                dimension_id: c.analysis_dimension_id,
+                ...(dimension === "12" ? { tax_rate: taxRateFromName(c.name) ?? "" } : {}),
+              },
             })),
           )
         : Promise.resolve([]),

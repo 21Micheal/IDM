@@ -922,6 +922,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
         fields = [
             "id", "step", "assigned_to",
             "status", "status_display",
+            "execution_lane",
             "requires_signature",
             "comment", "held_until",
             "due_at", "acted_at",
@@ -933,6 +934,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
             "file_name", "file_mime_type",
             "is_delegated", "delegated_from",
         ]
+        read_only_fields = ["execution_lane"]
 
 
 class WorkflowInstanceSerializer(serializers.ModelSerializer):
@@ -946,7 +948,8 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
         fields = [
             "id", "target_type", "document", "payment_run", "template", "rule", "rule_label",
             "phase",
-            "status", "current_step_order",
+            "status", "current_step_order", "imprest_request_status",
+            "imprest_request_current_step_order", "imprest_request_completed_at",
             "definition_version", "current_node_id",
             "started_by", "started_at", "completed_at", "tasks",
         ]

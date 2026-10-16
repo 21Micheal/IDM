@@ -154,6 +154,7 @@ export interface StepData {
   name: string;
   step_type: "approval" | "notification";
   post_lpo_after_approval?: boolean;
+  parallel_lane?: "imprest_request" | null;
   order?: number;
   [key: string]: any;
 }

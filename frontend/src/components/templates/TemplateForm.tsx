@@ -57,7 +57,7 @@ type Column = {
   type?: ColType | string; options?: string[]; currencySymbol?: string;
   currencyFromColumn?: string;
   showTotal?: boolean;
-  budgetLine?: { dimensions?: string[]; accountCodes?: string[] };
+  budgetLine?: { dimensions?: string[]; accountCodes?: string[]; taxRateColumn?: string };
   /* Number/currency display config (builder: "Number / Currency" column). */
   decimals?: number; thousandsSeparator?: boolean;
   min?: number; max?: number;
@@ -67,7 +67,7 @@ type Column = {
   editableWhen?: VisibleWhen | null;
   calc?: { expression?: string };
   sunsystems?: { budgetAmountField?: string; monitoredAmountField?: string; account?: string; accountField?: string; [k: string]: unknown } | null;
-  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string; fillDescriptionColumn?: string; fillDescriptionField?: string } | null;
+  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string; fillDescriptionColumn?: string; fillDescriptionField?: string; fillTaxRateColumn?: string; fillTaxRateField?: string } | null;
 };
 
 type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
@@ -129,7 +129,7 @@ type Field = {
   /* Table reference (type === "reference" && referenceSource === "table"). */
   tableRef?: AnyTableRef | null;
   /* External (SunSystems-backed) lookup — mirrors the builder's ExternalConfig. */
-  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string; fillDescriptionColumn?: string; fillDescriptionField?: string } | null;
+  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string; fillDescriptionColumn?: string; fillDescriptionField?: string; fillTaxRateColumn?: string; fillTaxRateField?: string } | null;
   sunsystems?: {
     budgetAmountField?: string;
     monitoredAmountField?: string;
@@ -855,6 +855,11 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           disabled={dis}
           dimensions={col.budgetLine?.dimensions}
           accountCodes={col.budgetLine?.accountCodes}
+          taxRateColumn={col.budgetLine?.taxRateColumn}
+          taxRateValue={col.budgetLine?.taxRateColumn ? row?.[col.budgetLine.taxRateColumn] : undefined}
+          onTaxRateChange={(rate) => {
+            if (col.budgetLine?.taxRateColumn) onChangeCell?.(col.budgetLine.taxRateColumn, rate);
+          }}
         />
       );
     case "sunsystems_account": {
@@ -989,7 +994,12 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           source={col.external?.source ?? "items"}
           dimension={col.external?.dimension}
           value={sval}
-          onChange={onChange}
+          onChange={(next) => {
+            onChange(next);
+            if ((!next || (Array.isArray(next) && next.length === 0)) && col.external?.fillTaxRateColumn) {
+              onChangeCell?.(col.external.fillTaxRateColumn, "");
+            }
+          }}
           autoFillDefault={Boolean(col.defaultValue && sval === col.defaultValue)}
           showCodeOnly={!!col.external?.fillDescriptionColumn}
           onSelectRecord={(rec) => {
@@ -1000,6 +1010,9 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
             }
             if (col.external?.fillDescriptionColumn) {
               onChangeCell?.(col.external.fillDescriptionColumn, rec.description ?? "");
+            }
+            if (col.external?.fillTaxRateColumn) {
+              onChangeCell?.(col.external.fillTaxRateColumn, rec.data?.tax_rate ?? "");
             }
           }}
           multi={false}
@@ -1027,15 +1040,19 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
 
 // ── Table field ───────────────────────────────────────────────────────────────
 
-function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes }: {
+function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, taxRateColumn, taxRateValue, onTaxRateChange }: {
   value: unknown;
   onChange: (value: Record<string, string>) => void;
   disabled?: boolean;
   dimensions?: string[];
   accountCodes?: string[];
+  taxRateColumn?: string;
+  taxRateValue?: unknown;
+  onTaxRateChange?: (rate: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [taxRateDraft, setTaxRateDraft] = useState("");
   const selectedDimensions = Array.isArray(dimensions) ? dimensions : ANALYSIS_PANEL_SLOTS;
   const availableAccountCodes = Array.isArray(accountCodes) ? accountCodes : [];
   const current = value && typeof value === "object" && !Array.isArray(value)
@@ -1056,6 +1073,7 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes }
       if (item != null && typeof item !== "object") next[key] = String(item);
     });
     setDraft(next);
+    setTaxRateDraft(taxRateValue == null ? "" : String(taxRateValue));
     setOpen(true);
   };
 
@@ -1119,8 +1137,13 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes }
                           const updated = { ...previous };
                           if (code) updated[dimension] = code;
                           else delete updated[dimension];
+                          if (dimension === "12" && !code) setTaxRateDraft("");
                           return updated;
                         })}
+                        autoFillDefault={dimension === "12" && Boolean(draft[dimension])}
+                        onSelectRecord={dimension === "12" && taxRateColumn
+                          ? (record) => setTaxRateDraft(record.data?.tax_rate == null ? "" : String(record.data.tax_rate))
+                          : undefined}
                         multi={false}
                         compact
                         showSelectedName
@@ -1138,7 +1161,7 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes }
             </div>
             <div className="flex justify-end gap-2 border-t border-border bg-muted/20 px-5 py-3">
               <button type="button" onClick={() => setOpen(false)} className="border border-border bg-white px-4 py-2 text-sm font-medium text-foreground hover:bg-muted">Cancel</button>
-              <button type="button" onClick={() => { onChange(draft); setOpen(false); }} className="bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90">Save Budget Line</button>
+              <button type="button" onClick={() => { onChange(draft); if (taxRateColumn) onTaxRateChange?.(taxRateDraft); setOpen(false); }} className="bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90">Save Budget Line</button>
             </div>
           </div>
         </div>,
@@ -2563,7 +2586,14 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
             source={field.external?.source ?? "items"}
             dimension={field.external?.dimension}
             value={(f.value as string | string[]) ?? (field.external?.multi ? [] : "")}
-            onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+            autoFillDefault={Boolean(field.defaultValue && String(f.value ?? "") === field.defaultValue)}
+            onChange={(v) => {
+              f.onChange(v);
+              onChangeCb(key, v);
+              if ((!v || (Array.isArray(v) && v.length === 0)) && field.external?.fillTaxRateField) {
+                onChangeCb(field.external.fillTaxRateField, "");
+              }
+            }}
             showCodeOnly={!!field.external?.fillDescriptionField}
             onSelectRecord={(rec) => {
               // Items: mirror the picked item's BaseItemUnit into a sibling field.
@@ -2573,6 +2603,9 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
               }
               if (field.external?.fillDescriptionField) {
                 onChangeCb(field.external.fillDescriptionField, rec.description ?? "");
+              }
+              if (field.external?.fillTaxRateField) {
+                onChangeCb(field.external.fillTaxRateField, rec.data?.tax_rate ?? "");
               }
             }}
             multi={field.external?.multi ?? false}

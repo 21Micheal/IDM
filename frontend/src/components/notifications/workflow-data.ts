@@ -24,6 +24,7 @@ export interface WorkflowNotificationContext {
 type WorkflowTaskRecord = {
   id?: string;
   status?: string;
+  execution_lane?: string;
   status_display?: string;
   step?: {
     template?: string;
@@ -100,6 +101,7 @@ export const PHASE_LABELS: Record<string, string> = {
 
 type DefinitionBlock = {
   kind?: string;
+  step?: { parallel_lane?: string };
   field_id?: string;
   values?: string[];
   label?: string;
@@ -158,10 +160,36 @@ export function phaseOrdersFromDefinition(definition: unknown): Record<string, n
   return Object.keys(result).length ? result : null;
 }
 
+function parallelImprestOrdersFromDefinition(definition: unknown): Set<number> {
+  if (!definition || typeof definition !== "object") return new Set();
+  const def = definition as { version?: number; blocks?: DefinitionBlock[] };
+  if (def.version !== 2 || !Array.isArray(def.blocks)) return new Set();
+  const orders = new Set<number>();
+  let counter = 0;
+  const walk = (blocks: DefinitionBlock[] | undefined) => {
+    for (const block of blocks ?? []) {
+      if (block.kind === "approval" || block.kind === "notification") {
+        counter += 1;
+        if (block.kind === "approval" && block.step?.parallel_lane === "imprest_request") orders.add(counter);
+      } else if (block.kind === "if_else") {
+        for (const branch of block.branches ?? []) walk(branch.blocks);
+        walk(block.else_blocks);
+      } else if (block.kind === "switch") {
+        for (const item of block.cases ?? []) walk(item.blocks);
+        walk(block.default_blocks);
+      }
+    }
+  };
+  walk(def.blocks);
+  return orders;
+}
+
 type WorkflowInstanceRecord = {
   id: string;
   status?: string;
   current_step_order?: number | null;
+  imprest_request_status?: string;
+  imprest_request_current_step_order?: number | null;
   document?: string;
   template?: string;
   phase?: WorkflowPhase | string;
@@ -252,7 +280,7 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
     history: histories[index] ?? [],
   }));
 
-  const meta = getWorkflowMeta(orderedTasks, instance);
+  const meta = getWorkflowMeta(orderedTasks.filter((task) => task.execution_lane !== "imprest_request"), instance);
   const steps = buildApproverWorkflow(
     tasksWithHistory,
     template?.steps ?? [],
@@ -274,7 +302,10 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
 
   return {
     steps,
-    currentStep: steps.findIndex((step) => step.status === "in-progress" || step.status === "on-hold"),
+    currentStep: (() => {
+      const activeMain = steps.findIndex((step) => step.lane !== "imprest_request" && (step.status === "in-progress" || step.status === "on-hold"));
+      return activeMain >= 0 ? activeMain : steps.findIndex((step) => step.status === "in-progress" || step.status === "on-hold");
+    })(),
     isActive,
     ...meta,
   };
@@ -298,6 +329,7 @@ function buildApproverWorkflow(
   // reconciled with the current mirror below before phase filtering is applied.
   const phaseMap = phaseOrdersFromDefinition(templateDefinition);
   const orderPhase = new Map<number, string>();
+  const parallelImprestOrders = parallelImprestOrdersFromDefinition(templateDefinition);
   if (phaseMap) {
     for (const [phaseName, orders] of Object.entries(phaseMap)) {
       for (const order of orders) orderPhase.set(order, phaseName);
@@ -387,6 +419,9 @@ function buildApproverWorkflow(
       stepOrder,
       index,
       phase: orderPhase.get(stepOrder),
+      lane: parallelImprestOrders.has(stepOrder) || items.some(({ task }) => task.execution_lane === "imprest_request")
+        ? "imprest_request" as const
+        : undefined,
       isNotification,
       name,
       approver,

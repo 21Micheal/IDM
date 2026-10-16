@@ -63,6 +63,14 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
     () => steps.filter((step) => !step.kind || step.kind === "task"),
     [steps],
   );
+  const parallelImprestSteps = useMemo(
+    () => taskSteps.filter((step) => step.lane === "imprest_request").sort((a, b) => a.order - b.order),
+    [taskSteps],
+  );
+  const mainTaskSteps = useMemo(
+    () => taskSteps.filter((step) => step.lane !== "imprest_request"),
+    [taskSteps],
+  );
 
   const phaseRank = (value?: string) => {
     if (!value) return -1;
@@ -72,7 +80,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
 
   // The active task's phase is the best signal when a document's metadata or
   // caller prop has not caught up with a workflow transition yet.
-  const activeStepPhase = taskSteps.find(
+  const activeStepPhase = mainTaskSteps.find(
     (step) => step.status === "in-progress" || step.status === "on-hold",
   )?.phase;
   const effectivePhase = activeStepPhase && phaseRank(activeStepPhase) >= 0
@@ -86,15 +94,15 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
 
   const currentPhase =
     effectivePhase && phaseRank(effectivePhase) >= 0 ? (effectivePhase as string) : null;
-  const phased = Boolean(currentPhase && taskSteps.some((step) => step.phase));
+  const phased = Boolean(currentPhase && mainTaskSteps.some((step) => step.phase));
 
   const phaseCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const step of taskSteps) {
+    for (const step of mainTaskSteps) {
       if (step.phase) counts.set(step.phase, (counts.get(step.phase) ?? 0) + 1);
     }
     return counts;
-  }, [taskSteps]);
+  }, [mainTaskSteps]);
 
   // Earlier procurement phases available behind a toggle (requisition before
   // rfq, requisition + rfq before lpo).  Later phases are never shown here.
@@ -108,28 +116,32 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
     : [];
 
   const visibleSteps = useMemo(() => {
-    if (!phased) return [...taskSteps].sort((a, b) => a.order - b.order);
+    if (!phased) return [...mainTaskSteps].sort((a, b) => a.order - b.order);
     const currentRank = phaseRank(currentPhase ?? undefined);
-    return taskSteps
+    return mainTaskSteps
       .filter((step) => {
         const rank = phaseRank(step.phase);
         if (rank < 0 || rank > currentRank) return false;
         return step.phase === currentPhase || shownEarlierPhases.has(step.phase ?? "");
       })
       .sort((a, b) => phaseRank(a.phase) - phaseRank(b.phase) || a.order - b.order);
-  }, [taskSteps, phased, currentPhase, shownEarlierPhases]);
+  }, [mainTaskSteps, phased, currentPhase, shownEarlierPhases]);
 
   const rows = useMemo(() => {
     const counters: Record<string, number> = {};
     let previousPhase: string | undefined;
-    return visibleSteps.map((step) => {
+    const mainRows = visibleSteps.map((step) => {
       const key = step.phase ?? "_";
       counters[key] = (counters[key] ?? 0) + 1;
       const startGroup = phased && shownEarlierPhases.size > 0 && step.phase !== previousPhase;
       previousPhase = step.phase;
       return { step, number: counters[key], startGroup };
     });
-  }, [visibleSteps, phased, shownEarlierPhases]);
+    return [
+      ...mainRows,
+      ...parallelImprestSteps.map((step, index) => ({ step, number: index + 1, startGroup: index === 0 })),
+    ];
+  }, [visibleSteps, parallelImprestSteps, phased, shownEarlierPhases]);
 
   if (isLoading) {
     return (
@@ -171,7 +183,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
             })()}
           </p>
           <span className="rounded-full bg-[#F1F5F9] px-2 py-0.5 text-[10px] font-semibold text-[#475569] shrink-0">
-            {visibleSteps.length} stage{visibleSteps.length !== 1 ? "s" : ""}
+            {rows.length} stage{rows.length !== 1 ? "s" : ""}
           </span>
         </div>
 
@@ -239,7 +251,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
                   {startGroup && (
                     <tr className="bg-[#EEF2F6]">
                       <td colSpan={5} className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-[#475569]">
-                        {PHASE_LABELS[step.phase ?? ""] ?? step.phase} stage
+                        {step.lane === "imprest_request" ? "Imprest request approval · independent lane" : `${PHASE_LABELS[step.phase ?? ""] ?? step.phase} stage`}
                       </td>
                     </tr>
                   )}

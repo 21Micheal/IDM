@@ -470,13 +470,15 @@ class WorkflowService:
         instance   = task.workflow_instance
         step       = task.step
         doc        = instance.document
+        execution_lane = task.execution_lane or "main"
         advance_order = step.order
         task_step_order = step.order
-        if WorkflowService.is_v2_workflow(instance.template) and instance.current_step_order:
+        cursor_order = instance.imprest_request_current_step_order if execution_lane == "imprest_request" else instance.current_step_order
+        if WorkflowService.is_v2_workflow(instance.template) and cursor_order:
             # WorkflowStep rows are a mutable flat mirror of the v2 definition.
             # Older tasks can still point at a parked mirror row after a prior
             # template save, so use the instance cursor to advance the graph.
-            advance_order = instance.current_step_order
+            advance_order = cursor_order
             current_step = instance.template.steps.filter(order=advance_order).first()
             if current_step and (
                 current_step.name.strip() != step.name.strip()
@@ -526,10 +528,10 @@ class WorkflowService:
             # Payment runs also need action notifications
             WorkflowService._notify_action(action, None)
 
-        if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, task_step_order):
+        if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, task_step_order, execution_lane):
             return
 
-        if step.post_lpo_after_approval and doc is not None:
+        if execution_lane == "main" and step.post_lpo_after_approval and doc is not None:
             if WorkflowService._start_lpo_posting_gate(instance, step, doc):
                 return
 
@@ -537,6 +539,7 @@ class WorkflowService:
             instance,
             advance_order,
             task_step_order=task_step_order if advance_order != task_step_order else None,
+            execution_lane=execution_lane,
         )
 
     # ── Reject ─────────────────────────────────────────────────────────────
@@ -578,7 +581,7 @@ class WorkflowService:
             )
             WorkflowService._notify_action(action, None)
 
-        WorkflowService._complete(instance, "rejected")
+        WorkflowService._complete(instance, "rejected", execution_lane=task.execution_lane or "main")
 
     # ── Return for review ──────────────────────────────────────────────────
 
@@ -609,6 +612,7 @@ class WorkflowService:
 
         instance       = task.workflow_instance
         current_order  = task.step.order
+        execution_lane = task.execution_lane or "main"
         doc            = instance.document
 
         # Payment runs cannot be returned - treat as rejection
@@ -623,7 +627,7 @@ class WorkflowService:
                     changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "return_to": return_to},
                 )
                 WorkflowService._notify_action(action, None)
-            WorkflowService._complete(instance, "rejected")
+            WorkflowService._complete(instance, "rejected", execution_lane=execution_lane)
             return
 
         AuditLog.objects.create(
@@ -635,13 +639,24 @@ class WorkflowService:
             changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "return_to": return_to},
         )
 
-        WorkflowService._skip_active_tasks(instance, step_order=current_order)
+        WorkflowService._skip_active_tasks(instance, step_order=current_order, execution_lane=execution_lane)
 
         # Both destinations pause the instance and keep current_step_order so
         # resubmission resumes THIS step instead of restarting from step 1.
         # return_to only controls who is notified / recorded on the action.
-        doc.status = DocumentStatus.RETURNED
-        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+        if execution_lane == "main":
+            doc.status = DocumentStatus.RETURNED
+            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+        else:
+            instance.imprest_request_status = "returned"
+            instance.imprest_request_completed_at = timezone.now()
+            instance.save(update_fields=["imprest_request_status", "imprest_request_completed_at", "updated_at"])
+            metadata = dict(doc.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "returned"
+            metadata["form"] = form
+            doc.metadata = metadata
+            WorkflowService._save_document(doc, update_fields=["metadata", "updated_at"])
 
         WorkflowService._notify_action(action, doc)
 
@@ -666,9 +681,11 @@ class WorkflowService:
         )
 
         doc        = task.workflow_instance.document
+        execution_lane = task.execution_lane or "main"
         if doc is not None:
-            doc.status = "On Hold"
-            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+            if execution_lane == "main":
+                doc.status = "On Hold"
+                WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
             AuditLog.objects.create(
                 event=AuditEvent.WORKFLOW_HELD,
@@ -740,9 +757,15 @@ class WorkflowService:
             raise WorkflowError("Only in-progress workflows can be cancelled.")
 
         WorkflowService._skip_active_tasks(instance)
+        WorkflowService._skip_active_tasks(instance, execution_lane="imprest_request")
         instance.status       = "cancelled"
         instance.completed_at = timezone.now()
-        instance.save(update_fields=["status", "completed_at"])
+        if instance.imprest_request_status == "in_progress":
+            instance.imprest_request_status = "cancelled"
+            instance.imprest_request_completed_at = timezone.now()
+        instance.save(update_fields=[
+            "status", "completed_at", "imprest_request_status", "imprest_request_completed_at",
+        ])
 
         doc        = instance.document
         if doc is None:
@@ -767,7 +790,7 @@ class WorkflowService:
     # ── Internals ──────────────────────────────────────────────────────────
 
     @staticmethod
-    def _v2_active_step_orders(instance: WorkflowInstance):
+    def _v2_active_step_orders(instance: WorkflowInstance, execution_lane: str = "main"):
         """Return ``(orders, end_outcome)`` for the v2 branch this instance is on.
 
         ``orders`` are ``WorkflowStep.order`` values (1-based positions in the
@@ -793,10 +816,36 @@ class WorkflowService:
             build_field_map_from_document_type(document_type)
             if document_type is not None else {}
         )
-        return resolve_active_path(definition, field_map, context)
+        lane_orders = []
+        counter = [0]
+
+        def collect_parallel(blocks):
+            for block in blocks or []:
+                kind = block.get("kind")
+                if kind in ("approval", "notification"):
+                    counter[0] += 1
+                    if kind == "approval" and (block.get("step") or {}).get("parallel_lane") == "imprest_request":
+                        lane_orders.append(counter[0])
+                elif kind == "if_else":
+                    for branch in block.get("branches") or []:
+                        collect_parallel(branch.get("blocks"))
+                    collect_parallel(block.get("else_blocks"))
+                elif kind == "switch":
+                    for case in block.get("cases") or []:
+                        collect_parallel(case.get("blocks"))
+                    collect_parallel(block.get("default_blocks"))
+
+        collect_parallel(definition.get("blocks"))
+        if execution_lane == "imprest_request":
+            return lane_orders, None
+
+        active_orders, end_outcome = resolve_active_path(definition, field_map, context)
+        if lane_orders:
+            active_orders = [order for order in active_orders if order not in set(lane_orders)]
+        return active_orders, end_outcome
 
     @staticmethod
-    def _activate_v2_step(instance: WorkflowInstance) -> None:
+    def _activate_v2_step(instance: WorkflowInstance, execution_lane: str = "main") -> None:
         """Activate the first/next step on the branch of a v2 definition.
 
         The definition decides which branch is live (switch on ``context.phase``
@@ -805,29 +854,36 @@ class WorkflowService:
         branch once and picks the matching order instead of trusting
         ``current_step_order`` blindly.
         """
-        orders, end_outcome = WorkflowService._v2_active_step_orders(instance)
+        orders, end_outcome = WorkflowService._v2_active_step_orders(instance, execution_lane)
         if not orders:
-            WorkflowService._complete(instance, end_outcome or "approved")
+            WorkflowService._complete(instance, end_outcome or "approved", execution_lane=execution_lane)
             return
 
-        order = instance.current_step_order
+        order = (
+            instance.imprest_request_current_step_order
+            if execution_lane == "imprest_request" else instance.current_step_order
+        )
         if order not in orders:
             order = orders[0]
-            instance.current_step_order = order
-            instance.save(update_fields=["current_step_order"])
-        WorkflowService._activate_step(instance, order)
+            if execution_lane == "imprest_request":
+                instance.imprest_request_current_step_order = order
+                instance.save(update_fields=["imprest_request_current_step_order"])
+            else:
+                instance.current_step_order = order
+                instance.save(update_fields=["current_step_order"])
+        WorkflowService._activate_step(instance, order, execution_lane=execution_lane)
 
     @staticmethod
-    def _activate_step(instance: WorkflowInstance, order: int) -> None:
+    def _activate_step(instance: WorkflowInstance, order: int, execution_lane: str = "main") -> None:
         try:
             step = instance.template.steps.get(order=order)
         except WorkflowStep.DoesNotExist:
-            WorkflowService._complete(instance, "approved")
+            WorkflowService._complete(instance, "approved", execution_lane=execution_lane)
             return
 
         # ── Notification step: fire-and-forget, then immediately advance ──────
         if step.step_type == "notification":
-            WorkflowService._execute_notification_step(instance, step, order)
+            WorkflowService._execute_notification_step(instance, step, order, execution_lane=execution_lane)
             return
 
         # ── Approval step: create tasks and wait for human action ─────────────
@@ -846,16 +902,21 @@ class WorkflowService:
                     assigned_to=assigned,
                     status="in_progress",
                     due_at=due,
+                    execution_lane=execution_lane,
                 )
             )
 
         doc = instance.document
-        if doc is not None:
+        if doc is not None and execution_lane == "main":
             doc.status = step.status_label
             WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
-        instance.current_step_order = order
-        instance.save(update_fields=["current_step_order"])
+        if execution_lane == "imprest_request":
+            instance.imprest_request_current_step_order = order
+            instance.save(update_fields=["imprest_request_current_step_order"])
+        else:
+            instance.current_step_order = order
+            instance.save(update_fields=["current_step_order"])
 
         try:
             from apps.notifications.tasks import notify_task_assigned
@@ -878,7 +939,7 @@ class WorkflowService:
             )
 
     @staticmethod
-    def _execute_notification_step(instance: WorkflowInstance, step: WorkflowStep, order: int) -> None:
+    def _execute_notification_step(instance: WorkflowInstance, step: WorkflowStep, order: int, execution_lane: str = "main") -> None:
         """
         Handle a notification step (informational blast to people outside the
         approval chain). Does not replace per-stage action/completion notifies:
@@ -889,12 +950,16 @@ class WorkflowService:
           5. Auto-advance to the next step.
         """
         doc = instance.document
-        if doc is not None:
+        if doc is not None and execution_lane == "main":
             doc.status = step.status_label
             WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
-        instance.current_step_order = order
-        instance.save(update_fields=["current_step_order"])
+        if execution_lane == "imprest_request":
+            instance.imprest_request_current_step_order = order
+            instance.save(update_fields=["imprest_request_current_step_order"])
+        else:
+            instance.current_step_order = order
+            instance.save(update_fields=["current_step_order"])
 
         # Create a task record for auditability
         task = WorkflowTask.objects.create(
@@ -903,6 +968,7 @@ class WorkflowService:
             assigned_to=None,
             status="notified",
             acted_at=timezone.now(),
+            execution_lane=execution_lane,
         )
 
         WorkflowTaskAction.objects.create(
@@ -958,7 +1024,7 @@ class WorkflowService:
                 WorkflowService._send_notification_step_email(step, payment_run=instance.payment_run)
 
         # Immediately advance — notification steps never block
-        WorkflowService._advance_step(instance, order)
+        WorkflowService._advance_step(instance, order, execution_lane=execution_lane)
 
     @staticmethod
     def _send_notification_step_email(step: WorkflowStep, document=None, payment_run=None) -> None:
@@ -1249,6 +1315,11 @@ class WorkflowService:
             raise WorkflowError(
                 f"This task is '{task.get_status_display()}' and cannot be actioned."
             )
+        if (
+            task.execution_lane == "imprest_request"
+            and task.workflow_instance.imprest_request_status != "in_progress"
+        ):
+            raise WorkflowError("The Imprest request approval lane is no longer active.")
 
     @staticmethod
     def _save_document(document: Document, update_fields=None) -> None:
@@ -1273,15 +1344,16 @@ class WorkflowService:
                 )
 
     @staticmethod
-    def _has_active_step_tasks(instance: WorkflowInstance, order: int) -> bool:
+    def _has_active_step_tasks(instance: WorkflowInstance, order: int, execution_lane: str = "main") -> bool:
         return instance.tasks.filter(
             step__order=order,
+            execution_lane=execution_lane,
             status__in=["in_progress", "held"],
         ).exists()
 
     @staticmethod
-    def _skip_active_tasks(instance: WorkflowInstance, step_order: int | None = None) -> None:
-        qs = instance.tasks.filter(status__in=["in_progress", "held"])
+    def _skip_active_tasks(instance: WorkflowInstance, step_order: int | None = None, execution_lane: str = "main") -> None:
+        qs = instance.tasks.filter(execution_lane=execution_lane, status__in=["in_progress", "held"])
         if step_order is not None:
             qs = qs.filter(step__order=step_order)
         skipped_ids = list(qs.values_list("id", flat=True))
@@ -1295,25 +1367,25 @@ class WorkflowService:
                 pass
 
     @staticmethod
-    def _advance_step(instance: WorkflowInstance, order: int, task_step_order: int | None = None) -> None:
+    def _advance_step(instance: WorkflowInstance, order: int, task_step_order: int | None = None, execution_lane: str = "main") -> None:
         # Skip sibling tasks by their persisted FK order, then navigate by the
         # logical order in the active v2 definition.
-        WorkflowService._skip_active_tasks(instance, step_order=task_step_order if task_step_order is not None else order)
+        WorkflowService._skip_active_tasks(instance, step_order=task_step_order if task_step_order is not None else order, execution_lane=execution_lane)
         if WorkflowService.is_v2_workflow(instance.template):
             # Stay within the active branch: the next order is the smallest
             # active order greater than this step, not necessarily order + 1.
-            orders, end_outcome = WorkflowService._v2_active_step_orders(instance)
+            orders, end_outcome = WorkflowService._v2_active_step_orders(instance, execution_lane)
             later = [candidate for candidate in orders if candidate > order]
             if later:
-                WorkflowService._activate_step(instance, order=later[0])
+                WorkflowService._activate_step(instance, order=later[0], execution_lane=execution_lane)
             else:
-                WorkflowService._complete(instance, end_outcome or "approved")
+                WorkflowService._complete(instance, end_outcome or "approved", execution_lane=execution_lane)
             return
         next_order = order + 1
         if instance.template.steps.filter(order=next_order).exists():
-            WorkflowService._activate_step(instance, order=next_order)
+            WorkflowService._activate_step(instance, order=next_order, execution_lane=execution_lane)
         else:
-            WorkflowService._complete(instance, "approved")
+            WorkflowService._complete(instance, "approved", execution_lane=execution_lane)
 
     @staticmethod
     def _start_lpo_posting_gate(instance: WorkflowInstance, step: WorkflowStep, document) -> bool:
@@ -1411,6 +1483,7 @@ class WorkflowService:
                 # advance a step before its approval action has been recorded.
                 if not instance.tasks.filter(
                     step=step,
+                    execution_lane="main",
                     status="approved",
                     actions__action="approved",
                 ).exists():
@@ -1464,8 +1537,36 @@ class WorkflowService:
         ).exists()
 
     @staticmethod
-    def _complete(instance: WorkflowInstance, outcome: str) -> None:
-        WorkflowService._skip_active_tasks(instance)
+    def _complete(instance: WorkflowInstance, outcome: str, *, execution_lane: str = "main") -> None:
+        WorkflowService._skip_active_tasks(instance, execution_lane=execution_lane)
+        if execution_lane == "imprest_request":
+            instance.imprest_request_status = outcome
+            instance.imprest_request_completed_at = timezone.now()
+            instance.save(update_fields=[
+                "imprest_request_status", "imprest_request_completed_at", "updated_at",
+            ])
+            doc = instance.document
+            if doc is not None:
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["imprest_request_workflow_status"] = outcome
+                metadata["form"] = form
+                doc.metadata = metadata
+                WorkflowService._save_document(doc, update_fields=["metadata", "updated_at"])
+                if outcome == "approved":
+                    last_action = WorkflowTaskAction.objects.filter(
+                        task__workflow_instance=instance,
+                        task__execution_lane="imprest_request",
+                        action="approved",
+                        actor__isnull=False,
+                    ).select_related("actor").order_by("-created_at").first()
+                    WorkflowService._queue_imprest_request_postings(
+                        doc,
+                        actor=last_action.actor if last_action else instance.started_by,
+                        message="Queued after Imprest request approval.",
+                    )
+            return
+
         instance.status       = outcome
         instance.completed_at = timezone.now()
         instance.save(update_fields=["status", "completed_at"])
@@ -1473,11 +1574,15 @@ class WorkflowService:
         from apps.documents.access import outcome_status_for
 
         doc = instance.document
+        # The Imprest request approval is a detached lane. Its completion only
+        # controls the advance journal; it must never change document status,
+        # procurement phase, LPO progress, or the document-wide completion UI.
         last_approver_action = None
         if doc is not None:
             last_approver_action = (
                 WorkflowTaskAction.objects.filter(
                     task__workflow_instance=instance,
+                    task__execution_lane="main",
                     action="approved",
                     actor__isnull=False,
                 )
@@ -1487,6 +1592,7 @@ class WorkflowService:
             )
         if doc is not None:
             completion_phase = WorkflowService._document_workflow_phase(doc)
+            parallel_imprest_started = False
             doc.status = outcome_status_for(doc.document_type, outcome)
             update_fields = ["status", "updated_at"]
             try:
@@ -1510,6 +1616,12 @@ class WorkflowService:
                 doc.metadata = metadata
                 update_fields.append("metadata")
             WorkflowService._save_document(doc, update_fields=update_fields)
+
+            if completion_phase == "requisition" and outcome == "approved":
+                parallel_imprest_started = WorkflowService._start_parallel_imprest_request(
+                    instance,
+                    doc,
+                )
 
             if completion_phase == "lpo" and outcome == "approved":
                 try:
@@ -1542,7 +1654,12 @@ class WorkflowService:
                     pass
 
             lpo_actor = last_approver_action.actor if last_approver_action else instance.started_by
-            WorkflowService._maybe_post_sunsystems_journal(doc, outcome, actor=lpo_actor)
+            WorkflowService._maybe_post_sunsystems_journal(
+                doc,
+                outcome,
+                actor=lpo_actor,
+                defer_imprest_request=parallel_imprest_started,
+            )
 
             # A fully-approved procurement stage opens the next stage on its
             # own (Requisition -> RFQ -> LPO; Travel skips RFQ). The requestor
@@ -1577,6 +1694,63 @@ class WorkflowService:
             except Exception:
                 pass
             WorkflowService._complete_payment_run(instance, outcome)
+
+    @staticmethod
+    def _start_parallel_imprest_request(instance: WorkflowInstance, document) -> bool:
+        """Start marked Imprest approval steps as an independent workflow lane."""
+        try:
+            from apps.documents.builder_workflow import is_procurement_document
+            from apps.sunsystems.config import get_imprest_request_postings
+
+            if not is_procurement_document(document) or not WorkflowService.is_v2_workflow(instance.template):
+                return False
+            lane_orders, _ = WorkflowService._v2_active_step_orders(instance, "imprest_request")
+            if not lane_orders or not get_imprest_request_postings(document):
+                return False
+
+            if instance.imprest_request_status:
+                return True
+
+            instance.imprest_request_status = "in_progress"
+            instance.imprest_request_current_step_order = lane_orders[0]
+            instance.imprest_request_completed_at = None
+            instance.save(update_fields=[
+                "imprest_request_status", "imprest_request_current_step_order",
+                "imprest_request_completed_at", "updated_at",
+            ])
+            WorkflowService._activate_v2_step(instance, execution_lane="imprest_request")
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "in_progress"
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+            return True
+        except Exception:
+            logger.exception("Could not start parallel Imprest request approvals for %s", document.pk)
+            return False
+
+    @staticmethod
+    def _queue_imprest_request_postings(document, *, actor=None, message="Queued for Imprest request approval.") -> None:
+        from apps.sunsystems.config import get_imprest_request_postings
+        from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+        from apps.sunsystems.tasks import post_journal_for_document
+
+        actor_id = str(actor.pk) if actor and getattr(actor, "pk", None) else None
+        for item in get_imprest_request_postings(document):
+            stage = int(item["stage"])
+            posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
+            if not created:
+                continue
+            posting.status = JournalPostingStatus.PENDING
+            posting.stage_label = str(item.get("label") or "Imprest request")[:64]
+            posting.message = message
+            posting.error = ""
+            posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
+            document_id = str(document.pk)
+            _queue_after_commit(
+                lambda did=document_id, current_stage=stage, aid=actor_id: post_journal_for_document.delay(did, current_stage, aid)
+            )
 
     @staticmethod
     def _maybe_advance_procurement_stage(document, actor=None) -> bool:
@@ -1657,7 +1831,7 @@ class WorkflowService:
             return None
 
     @staticmethod
-    def _maybe_post_sunsystems_journal(document, outcome: str, actor=None) -> None:
+    def _maybe_post_sunsystems_journal(document, outcome: str, actor=None, *, defer_imprest_request=False) -> None:
         """Post any journal stages whose ``post_on`` trigger matches this outcome.
 
         Supports multi-stage imprest flows: stage 1 fires on "approved", stage 2
@@ -1732,29 +1906,18 @@ class WorkflowService:
             # The Imprest advance journal reuses common bindings from the PO
             # profile and posts as soon as requisition approval completes.
             if (
+                not defer_imprest_request
+                and
                 has_po_mapping
                 and outcome == "approved"
                 and phase == "requisition"
                 and "requisition" in completed_procurement_stages(document)
             ):
-                from apps.sunsystems.models import JournalPosting, JournalPostingStatus
-
-                from apps.sunsystems.config import get_imprest_request_postings
-
-                for item in get_imprest_request_postings(document):
-                    stage = int(item["stage"])
-                    posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
-                    if not created:
-                        continue
-                    posting.status = JournalPostingStatus.PENDING
-                    posting.stage_label = str(item.get("label") or "Imprest request")[:64]
-                    posting.message = "Queued for requisition-stage Imprest posting."
-                    posting.error = ""
-                    posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
-                    doc_id = str(document.id)
-                    _queue_after_commit(
-                        lambda did=doc_id, current_stage=stage, aid=posting_actor_id: post_journal_for_document.delay(did, current_stage, aid)
-                    )
+                WorkflowService._queue_imprest_request_postings(
+                    document,
+                    actor=actor,
+                    message="Queued for requisition-stage Imprest posting.",
+                )
 
             # Retirement reconciliations are compiled from the retirement
             # table's exact/under/over rules, independently of the ordinary

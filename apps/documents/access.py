@@ -4,6 +4,7 @@ Document lifecycle access: stage resolution and editability policies.
 from __future__ import annotations
 
 from typing import Any
+from django.db import models
 
 from apps.documents.models import DMSSettings, Document, DocumentStatus
 
@@ -81,7 +82,10 @@ def _document_has_active_workflow(document: Document) -> bool:
         instance = document.workflow_instance
     except Exception:
         return False
-    return getattr(instance, "status", None) == "in_progress"
+    return (
+        getattr(instance, "status", None) == "in_progress"
+        or getattr(instance, "imprest_request_status", None) == "in_progress"
+    )
 
 
 def resolve_access_stage(document: Document) -> str:
@@ -302,8 +306,13 @@ def user_has_active_approval_task(user, document: Document) -> bool:
         from apps.accounts.delegation import tasks_visible_to_user
         return tasks_visible_to_user(user).filter(
             workflow_instance__document_id=document.id,
-            workflow_instance__status="in_progress",
             status="in_progress",
+        ).filter(
+            models.Q(workflow_instance__status="in_progress")
+            | models.Q(
+                execution_lane="imprest_request",
+                workflow_instance__imprest_request_status="in_progress",
+            )
         ).exists()
     except Exception:
         return False

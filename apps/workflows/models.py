@@ -424,6 +424,9 @@ class WorkflowInstance(models.Model):
         WorkflowRule, null=True, on_delete=models.SET_NULL, related_name="instances"
     )
     status             = models.CharField(max_length=20, choices=STATUS_CHOICES, default="in_progress")
+    imprest_request_status = models.CharField(max_length=20, blank=True, default="")
+    imprest_request_current_step_order = models.PositiveSmallIntegerField(null=True, blank=True)
+    imprest_request_completed_at = models.DateTimeField(null=True, blank=True)
     current_step_order = models.PositiveSmallIntegerField(default=1)
     # For v2 workflows: store the definition version/hash used for this instance
     definition_version = models.PositiveSmallIntegerField(null=True, blank=True, help_text="Workflow definition version used for this instance")
@@ -461,6 +464,7 @@ class WorkflowTask(models.Model):
     ]
 
     id                = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    execution_lane    = models.CharField(max_length=32, default="main", db_index=True)
     workflow_instance = models.ForeignKey(
         WorkflowInstance, on_delete=models.CASCADE, related_name="tasks"
     )

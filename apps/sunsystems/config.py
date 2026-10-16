@@ -202,11 +202,31 @@ def get_imprest_request_postings(document) -> list[dict]:
             continue
         supplier_spec = po.get("supplier_code")
         supplier_fallback = po.get("supplier_code_fallback")
+        # The Imprest amount is the table column explicitly mapped as
+        # SunSystems "Line amount". Do not reconstruct it from quantity ×
+        # unit price: the form may calculate VAT/gross totals in that column.
+        line_amount_key = None
+        form = (getattr(document, "metadata", None) or {}).get("form") or {}
+        for section in form.get("sections") or []:
+            for field in section.get("fields") or []:
+                if field.get("type") != "table" or field.get("key") != table_key:
+                    continue
+                for column in field.get("columns") or []:
+                    role = str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower()
+                    if role == "line_amount":
+                        line_amount_key = column.get("key")
+                        break
+                break
+            if line_amount_key:
+                break
         lines = []
         for row in rows:
             quantity = resolve_amount(spec.get("quantity") or {"const": "1"}, values, row)
             unit_price = resolve_amount(spec.get("unit_price"), values, row)
-            amount = _po_line_amount(spec, values, row, quantity, unit_price)
+            amount = (
+                resolve_amount({"row_field": line_amount_key}, values, row)
+                if line_amount_key else _po_line_amount(spec, values, row, quantity, unit_price)
+            )
             if amount <= 0:
                 continue
             # The Imprest table has its own debit/counter-account source

@@ -215,6 +215,7 @@ export interface UserSummary {
 export interface WorkflowTask {
   id: string;
   target_type?: "document" | "payment_run";
+  execution_lane?: "main" | "imprest_request" | string;
   step: {
     name: string;
     order: number;

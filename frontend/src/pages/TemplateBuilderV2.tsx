@@ -119,6 +119,8 @@ export interface BudgetLineConfig {
   dimensions?: string[];
   /** Account codes available in the modal's local dropdown. */
   accountCodes?: string[];
+  /** Numeric sibling column that receives the selected Tax dimension's rate. */
+  taxRateColumn?: string;
 }
 
 export interface TableColumn {
@@ -513,6 +515,10 @@ export interface ExternalConfig {
   fillDescriptionColumn?: string;
   /** Analysis-code autofill: copy the picked code's description into a sibling form field. */
   fillDescriptionField?: string;
+  /** Tax dimension autofill: copy the percentage parsed from the code name into a sibling numeric column. */
+  fillTaxRateColumn?: string;
+  /** Tax dimension autofill: copy the percentage parsed from the code name into a sibling numeric field. */
+  fillTaxRateField?: string;
 }
 
 export interface TemplateField {
@@ -3444,6 +3450,23 @@ function ColumnConfigModal({
                       })}
                     </div>
                   </Row>
+                  {(draft.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS).includes("12") && (
+                    <Row label="Tax rate column" hint="When a Tax code is selected, fill this numeric column from the rate in the Tax code name (for example, Standard Rate 16%). Exempt and zero-rated codes fill 0.">
+                      <CustomListbox
+                        value={draft.budgetLine?.taxRateColumn ?? ""}
+                        onChange={(taxRateColumn) => set({ budgetLine: { ...(draft.budgetLine ?? {}), taxRateColumn: taxRateColumn || undefined } })}
+                        options={[
+                          { value: "", label: "Do not autofill a rate" },
+                          ...siblingColumns
+                            .filter((column) => column.id !== draft.id && ["number", "currency", "percentage"].includes(column.type))
+                            .map((column) => ({ value: column.id, label: column.label || column.id })),
+                        ]}
+                        className={iCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Tax rate target column"
+                      />
+                    </Row>
+                  )}
                 </>
               )}
               {draft.type === "external" && (
@@ -3470,6 +3493,22 @@ function ColumnConfigModal({
                       />
                     </Row>
                   )}
+                  {draft.external?.source === "analysis_codes" && draft.external.dimension === "12" && (() => {
+                    const targets = siblingColumns.filter((c) => c.id !== draft.id && c.key && ["number", "currency", "percentage"].includes(c.type));
+                    if (!targets.length) return <Row label="Tax rate target"><span className="text-xs text-amber-700">Add a numeric sibling column for the tax rate.</span></Row>;
+                    return (
+                      <Row label="Auto-fill tax rate into" hint="Reads the percentage in the selected Tax code name; Exempt, Zero Rated, and Not Analysed fill 0. Use this column in your VAT formula.">
+                        <CustomListbox
+                          value={draft.external?.fillTaxRateColumn ?? ""}
+                          onChange={(val) => set({ external: { ...(draft.external ?? { source: "analysis_codes" }), fillTaxRateColumn: val || undefined } })}
+                          options={[{ value: "", label: "— none —" }, ...targets.map((c) => ({ value: c.key as string, label: c.label || c.key || "" }))]}
+                          className={iCls}
+                          buttonClassName="w-full"
+                          ariaLabel="Auto-fill tax rate target column"
+                        />
+                      </Row>
+                    );
+                  })()}
                   {(draft.external?.source ?? "items") === "items" && (() => {
                     const targets = siblingColumns.filter((c) => c.id !== draft.id && c.key);
                     if (targets.length === 0) return null;
@@ -5197,16 +5236,34 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                     </div>
                   </InspectorRow>
                   {field.external?.mode === "single" ? (
-                    <InspectorRow label="Analysis dimension" hint="Render codes for just this dimension.">
-                      <CustomListbox
-                        value={field.external?.dimension ?? "04"}
-                        onChange={(val) => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), dimension: val } })}
-                        options={ANALYSIS_DIMENSIONS.map((d) => ({ value: d.id, label: `${d.name} (${d.id})` }))}
-                        className={inputCls}
-                        buttonClassName="w-full"
-                        ariaLabel="Analysis dimension"
-                      />
-                    </InspectorRow>
+                    <>
+                      <InspectorRow label="Analysis dimension" hint="Render codes for just this dimension.">
+                        <CustomListbox
+                          value={field.external?.dimension ?? "04"}
+                          onChange={(val) => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), dimension: val } })}
+                          options={ANALYSIS_DIMENSIONS.map((d) => ({ value: d.id, label: `${d.name} (${d.id})` }))}
+                          className={inputCls}
+                          buttonClassName="w-full"
+                          ariaLabel="Analysis dimension"
+                        />
+                      </InspectorRow>
+                      {field.external?.dimension === "12" && (() => {
+                        const targets = allFields.filter((f) => f.id !== field.id && f.key && ["number", "currency", "percentage"].includes(f.type));
+                        if (!targets.length) return <InspectorRow label="Tax rate target"><span className="text-xs text-amber-700">Add a numeric sibling field for the tax rate.</span></InspectorRow>;
+                        return (
+                          <InspectorRow label="Auto-fill tax rate into" hint="Reads the percentage in the selected Tax code name; Exempt, Zero Rated, and Not Analysed fill 0. Use this field in your VAT formula.">
+                            <CustomListbox
+                              value={field.external?.fillTaxRateField ?? ""}
+                              onChange={(val) => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), fillTaxRateField: val || undefined } })}
+                              options={[{ value: "", label: "— none —" }, ...targets.map((f) => ({ value: f.key, label: f.label || f.key }))]}
+                              className={inputCls}
+                              buttonClassName="w-full"
+                              ariaLabel="Auto-fill tax rate target field"
+                            />
+                          </InspectorRow>
+                        );
+                      })()}
+                    </>
                   ) : (
                     <InspectorRow label="Panel dimensions" hint="Which ledger dimension each of the ten slots uses.">
                       <PanelSlotsEditor

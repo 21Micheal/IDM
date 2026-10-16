@@ -37,6 +37,7 @@ interface WorkflowStep {
   status_label: string;
   step_type: StepType;
   post_lpo_after_approval?: boolean;
+  parallel_lane?: "imprest_request" | null;
   // Approval-step fields
   assignee_type: AssigneeType;
   assignee_group: string | null;
@@ -354,6 +355,7 @@ function normalizeStep(step: WorkflowStep): WorkflowStep {
     ...step,
     step_type: normalizeStepType((step as any).step_type),
     post_lpo_after_approval: Boolean((step as any).post_lpo_after_approval),
+    parallel_lane: (step as any).parallel_lane === "imprest_request" ? "imprest_request" : null,
     assignee_type: normalizeAssigneeType(step.assignee_type),
     assignee_group: isUuidLike(step.assignee_group) ? step.assignee_group : null,
     assignee_user: isUuidLike(step.assignee_user) ? step.assignee_user : null,
@@ -480,6 +482,7 @@ function blankStep(): WorkflowStep {
     order: 0, name: "", status_label: "Pending Approval",
     step_type: "approval",
     post_lpo_after_approval: false,
+    parallel_lane: null,
     assignee_type: "group_any", assignee_group: null, assignee_user: null, assignee_user_field: "",
     sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, allow_return_submitter: true,
     requires_signature: false, instructions: "",
@@ -816,6 +819,7 @@ function StepEditPanel({
 }) {
   const selectedGroup = groups.find((group) => group.id === step.assignee_group);
   const isHodGroupSelected = isHodGroupName(selectedGroup?.name ?? step.assignee_group_name);
+  const isRequisitionWorkflow = /requisition/i.test(`${docType?.name ?? ""} ${docType?.code ?? ""}`);
   const needsGroupMember = step.assignee_type === "group_specific" && !isHodGroupSelected;
   const needsFormUser = step.assignee_type === "form_user";
   const { data: formTemplates = [], isLoading: formTemplatesLoading } = useQuery<Array<Record<string, any>>>({
@@ -964,6 +968,24 @@ function StepEditPanel({
 
         {/* ── Approval step fields ────────────────────────────────────────── */}
         {step.step_type === "approval" && (<>
+          {isRequisitionWorkflow && (
+            <button
+              type="button"
+              onClick={() => onChange({ parallel_lane: step.parallel_lane === "imprest_request" ? null : "imprest_request" })}
+              className={clsx(
+                "w-full flex items-start gap-3 p-4 rounded-xl border text-left transition-colors",
+                step.parallel_lane === "imprest_request" ? "border-amber-500/40 bg-amber-50 text-amber-950" : "border-border bg-muted/30 text-foreground hover:bg-muted/60"
+              )}
+            >
+              <span className={clsx("mt-0.5 w-4 h-4 rounded border flex items-center justify-center", step.parallel_lane === "imprest_request" ? "bg-amber-600 border-amber-600 text-white" : "border-muted-foreground/50")}>
+                {step.parallel_lane === "imprest_request" ? <Check className="w-3 h-3" /> : null}
+              </span>
+              <span>
+                <span className="block text-xs font-semibold">Run as an independent Imprest request approval</span>
+                <span className="block text-[11px] mt-1 opacity-80">This step is removed from the requisition and LPO approval path. It starts after requisition approval and does not hold up LPO approvals.</span>
+              </span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onChange({ post_lpo_after_approval: !step.post_lpo_after_approval })}
