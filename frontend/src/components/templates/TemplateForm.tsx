@@ -50,12 +50,14 @@ import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOp
 type ColType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
   | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "url" | "percentage" | "rating" | "multi_select" | "image" | "external" | "sunsystems_account" | "budget";
+  | "url" | "percentage" | "rating" | "multi_select" | "image" | "external" | "sunsystems_account" | "budget" | "budget_line";
 
 type Column = {
   id?: string; key?: string; label?: string; required?: boolean;
   type?: ColType | string; options?: string[]; currencySymbol?: string;
   currencyFromColumn?: string;
+  showTotal?: boolean;
+  budgetLine?: { dimensions?: string[]; accountCodes?: string[] };
   /* Number/currency display config (builder: "Number / Currency" column). */
   decimals?: number; thousandsSeparator?: boolean;
   min?: number; max?: number;
@@ -106,9 +108,9 @@ type Field = {
   placeholder?: string; help_text?: string; helpText?: string;
   required?: boolean; colSpan?: number; width?: number;
   workflowRole?: string;
-  options?: string[]; columns?: Column[]; minRows?: number;
+  options?: string[]; columns?: Column[]; minRows?: number; totalLabel?: string;
   currencySymbol?: string; currencyFromField?: string; referenceSource?: string; referenceGroupId?: string; tooltip?: string; regex?: string;
-  min?: number; max?: number; minLength?: number; maxLength?: number;
+  min?: string | number; max?: string | number; minLength?: number; maxLength?: number;
   /* Number/currency display config — a "number" field with `currency` type (or
    * a linked currency dropdown) is money; both share decimals/grouping. */
   decimals?: number; thousandsSeparator?: boolean;
@@ -136,6 +138,14 @@ type Field = {
     [k: string]: unknown;
   } | null;
 };
+
+/** Native date controls use local calendar dates; UTC slicing can be yesterday in some timezones. */
+function minimumDate(configured?: string | number): string {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const configuredDate = typeof configured === "string" ? configured : "";
+  return configuredDate && configuredDate > today ? configuredDate : today;
+}
 
 // Field types whose value is derived from `field.calc.expression` rather than
 // typed by the person filling the form. Mirrors the builder's CALCULATED_TYPES.
@@ -718,7 +728,7 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }:
 
   if (file) {
     return (
-      <div className="flex items-center gap-1 text-xs text-foreground">
+      <div className="flex min-h-9 w-full min-w-0 items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-foreground">
         <Paperclip className="h-3 w-3 flex-shrink-0 text-primary" />
         <span className="min-w-0 truncate" title={file.name}>{file.name}</span>
         {!disabled && (
@@ -733,7 +743,7 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }:
 
   if (descriptor) {
     return (
-      <div className="flex items-center gap-1.5 text-xs text-foreground">
+      <div className="flex min-h-9 w-full min-w-0 items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-foreground">
         <Paperclip className="h-3 w-3 flex-shrink-0 text-primary" />
         <span className="min-w-0 truncate" title={descriptor.name}>{descriptor.name}</span>
         {documentId && attachmentKey && (
@@ -754,13 +764,23 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }:
   }
 
   return (
-    <input type="file" disabled={disabled} className="text-xs w-full"
-      onChange={(e) => onChange(e.target.files?.[0] ?? undefined)} />
+    disabled ? (
+      <span className="block w-full truncate text-xs text-muted-foreground">No attachment</span>
+    ) : (
+      <label className="relative flex min-h-9 w-full min-w-0 cursor-pointer items-center gap-2 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-600 transition hover:border-sky-500 hover:bg-sky-50/40 focus-within:border-sky-600 focus-within:ring-2 focus-within:ring-sky-600/15">
+        <Paperclip className="h-3.5 w-3.5 flex-shrink-0 text-sky-700" />
+        <span className="min-w-0 flex-1 truncate">Choose attachment</span>
+        <span className="flex-shrink-0 rounded border border-slate-200 bg-slate-50 px-2 py-1 font-medium text-slate-700">Browse</span>
+        <input type="file" className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          onChange={(e) => onChange(e.target.files?.[0] ?? undefined)} />
+      </label>
+    )
   );
 }
 
-function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentId, attachmentKey, row, allValues, allFields }: {
+function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentId, attachmentKey, row, allValues, allFields, wrapText = false }: {
   col: Column; value: unknown; onChange: (v: unknown) => void; readOnly?: boolean;
+  wrapText?: boolean;
   onChangeCell?: (key: string, value: unknown) => void;
   documentId?: string; attachmentKey?: string; row?: Record<string, unknown>;
   allValues: TemplateFormValues; allFields: Field[];
@@ -827,6 +847,16 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
   const sval = typeof value === "string" ? value : value == null ? "" : String(value);
 
   switch (type) {
+    case "budget_line":
+      return (
+        <BudgetLineInput
+          value={value}
+          onChange={onChange}
+          disabled={dis}
+          dimensions={col.budgetLine?.dimensions}
+          accountCodes={col.budgetLine?.accountCodes}
+        />
+      );
     case "sunsystems_account": {
       const selected = Array.isArray(value) ? value.join(", ") : sval;
       if (dis) return <span className="py-0.5 text-sm text-foreground">{selected || <span className="italic text-muted-foreground">—</span>}</span>;
@@ -876,7 +906,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
     case "boolean":
       return <input type="checkbox" checked={sval === "true"} disabled={dis} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-primary" />;
     case "textarea":
-      return <textarea rows={1} value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={`${base} resize-none`} />;
+      return <textarea rows={wrapText ? 2 : 1} value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={`${base} ${wrapText ? "h-9 min-h-9 max-h-9 resize-none overflow-y-auto whitespace-pre-wrap rounded-md border border-slate-300 bg-white px-2 py-1 leading-4 focus:border-sky-600 focus:ring-2 focus:ring-sky-600/15" : "resize-none"}`} />;
     case "currency":
     case "number":
     case "percentage": {
@@ -932,7 +962,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
       );
     }
     case "date":
-      return <input type="date" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="date" value={sval} min={minimumDate(col.min)} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "datetime":
       return <input type="datetime-local" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "time":
@@ -960,6 +990,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           dimension={col.external?.dimension}
           value={sval}
           onChange={onChange}
+          autoFillDefault={Boolean(col.defaultValue && sval === col.defaultValue)}
           showCodeOnly={!!col.external?.fillDescriptionColumn}
           onSelectRecord={(rec) => {
             // Items: mirror the picked item's BaseItemUnit into a sibling cell.
@@ -978,13 +1009,171 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
         />
       );
     default:
+      if (wrapText) {
+        return (
+          <textarea
+            rows={2}
+            value={sval}
+            disabled={dis}
+            title={sval}
+            onChange={(e) => onChange(e.target.value)}
+            className={`${base} block h-9 min-h-9 max-h-9 resize-none overflow-y-auto whitespace-pre-wrap rounded-md border border-slate-300 bg-white px-2 py-1 leading-4 focus:border-sky-600 focus:ring-2 focus:ring-sky-600/15 disabled:bg-slate-50`}
+          />
+        );
+      }
       return <input type="text" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
   }
 }
 
 // ── Table field ───────────────────────────────────────────────────────────────
 
-function TableField({ field, value, onChange, readOnly, tableKey, documentId, allValues, processStep, allFields, viewer }: {
+function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes }: {
+  value: unknown;
+  onChange: (value: Record<string, string>) => void;
+  disabled?: boolean;
+  dimensions?: string[];
+  accountCodes?: string[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const selectedDimensions = Array.isArray(dimensions) ? dimensions : ANALYSIS_PANEL_SLOTS;
+  const availableAccountCodes = Array.isArray(accountCodes) ? accountCodes : [];
+  const current = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const accountCode = String(current.account_code ?? "");
+  const summary = [
+    accountCode,
+    ...selectedDimensions
+      .filter((dimension) => current[dimension])
+      .map((dimension) => `A${ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1} ${analysisDimensionName(dimension)}: ${String(current[dimension])}`),
+  ].filter(Boolean).join(" · ");
+
+  const openEditor = () => {
+    if (disabled) return;
+    const next: Record<string, string> = {};
+    Object.entries(current).forEach(([key, item]) => {
+      if (item != null && typeof item !== "object") next[key] = String(item);
+    });
+    setDraft(next);
+    setOpen(true);
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={openEditor}
+        title={summary || "Open Budget Line editor"}
+        className={`w-full min-h-8 border border-border bg-white px-2 py-1 text-left text-sm transition-colors ${disabled ? "cursor-default" : "hover:border-primary hover:bg-primary/5"}`}
+      >
+        {summary
+          ? <span className="block truncate text-foreground">{summary}</span>
+          : <span className="text-muted-foreground">{disabled ? "—" : "Select Budget Line…"}</span>}
+      </button>
+      {open && createPortal(
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-3" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setOpen(false);
+        }}>
+          <div role="dialog" aria-modal="true" aria-label="Budget Line" className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden border border-border bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-border px-5 py-4">
+              <div>
+                <h2 className="text-base font-semibold text-foreground">Budget Line</h2>
+                <p className="mt-0.5 text-xs text-muted-foreground">Select the account and configured analysis codes.</p>
+              </div>
+              <button type="button" onClick={() => setOpen(false)} className="rounded p-1 text-muted-foreground hover:bg-muted" aria-label="Close Budget Line editor">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">Account code</label>
+                <CustomListbox
+                  value={draft.account_code ?? ""}
+                  onChange={(next) => setDraft((previous) => ({ ...previous, account_code: next }))}
+                  options={[
+                    { value: "", label: "Select account code…" },
+                    ...availableAccountCodes.map((code) => ({ value: code, label: code })),
+                  ]}
+                  className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
+                  buttonClassName="w-full"
+                  ariaLabel="Budget Line account code"
+                  disabled={disabled || availableAccountCodes.length === 0}
+                />
+                {availableAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add account codes in the table column’s Budget Line settings.</p>}
+              </div>
+              {selectedDimensions.length > 0 ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {selectedDimensions.map((dimension) => (
+                    <div key={dimension} className="min-w-0">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Analysis {ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1} · {analysisDimensionName(dimension)} <span className="font-mono font-normal">(ID {dimension})</span>
+                      </label>
+                      <ExternalSelect
+                        source="analysis_codes"
+                        dimension={dimension}
+                        value={draft[dimension] ?? ""}
+                        onChange={(next) => setDraft((previous) => {
+                          const code = Array.isArray(next) ? (next[0] ?? "") : next;
+                          const updated = { ...previous };
+                          if (code) updated[dimension] = code;
+                          else delete updated[dimension];
+                          return updated;
+                        })}
+                        multi={false}
+                        compact
+                        showSelectedName
+                        placeholder="Select analysis code…"
+                        className="w-full"
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="border border-dashed border-border bg-muted/30 p-4 text-sm text-muted-foreground">
+                  No analysis dimensions are configured for this Budget Line.
+                </p>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border bg-muted/20 px-5 py-3">
+              <button type="button" onClick={() => setOpen(false)} className="border border-border bg-white px-4 py-2 text-sm font-medium text-foreground hover:bg-muted">Cancel</button>
+              <button type="button" onClick={() => { onChange(draft); setOpen(false); }} className="bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90">Save Budget Line</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+function hasFieldValue(value: unknown, type?: string): boolean {
+  if (value === undefined || value === null || value === "") return false;
+  if (typeof value === "string") return Boolean(value.trim());
+  if (typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (type === "budget_line") return Boolean(String(record.account_code ?? "").trim());
+    return Object.values(record).some((entry) => entry !== undefined && entry !== null && String(entry).trim() !== "");
+  }
+  return true;
+}
+
+function validationMessageFor(issues: string[], label: string, value?: unknown, type?: string): string | undefined {
+  const issue = issues.find((item) => item === label || item.startsWith(`${label} (`) || item === `Past date: ${label}` || item.startsWith(`Past date: ${label} (`));
+  if (!issue) return undefined;
+  if (issue.startsWith("Past date:")) {
+    const dateValue = String(value ?? "").slice(0, 10);
+    return dateValue && dateValue < minimumDate() ? "Choose today or a later date." : undefined;
+  }
+  if (issue.includes("invalid format")) return "Enter a valid value.";
+  if (hasFieldValue(value, type)) return undefined;
+  return "Required";
+}
+
+function TableField({ field, value, onChange, readOnly, tableKey, documentId, allValues, processStep, allFields, viewer, validationIssues = [] }: {
   field: Field;
   value: Record<string, unknown>[];
   onChange: (rows: Record<string, unknown>[]) => void;
@@ -995,6 +1184,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   processStep?: string;
   allFields: Field[];
   viewer?: FormViewer;
+  validationIssues?: string[];
 }) {
   // ALL columns — used by the calc engine. Hidden helper columns must still
   // participate in formula evaluation even though they are not rendered.
@@ -1011,6 +1201,25 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
     evalVisible({ hidden: c.hidden, visibleWhen: c.visibleWhen }, allValues, allFields, step, row ?? null, viewer);
   const colEditableInRow = (c: Column, row?: Record<string, unknown> | null) =>
     evalEditable({ readonly: c.readonly, editableWhen: c.editableWhen }, allValues, allFields, step, row ?? null, viewer);
+  const columnIssue = (col: Column, rowIndex?: number, value?: unknown): string | undefined => {
+    const prefix = `${field.label ?? tableKey} — ${col.label ?? col.key ?? ""}`;
+    const issue = validationIssues.find((item) => {
+      const normalized = item.startsWith("Past date: ") ? item.slice("Past date: ".length) : item;
+      if (rowIndex === undefined) return normalized === prefix;
+      return normalized === `${prefix} (row ${rowIndex + 1})` || normalized === prefix;
+    });
+    if (!issue) return undefined;
+    if (issue.startsWith("Past date:")) {
+      const dateValue = String(value ?? "").slice(0, 10);
+      if (!dateValue || dateValue >= minimumDate()) return undefined;
+    }
+    if (!issue.startsWith("Past date:") && hasFieldValue(value, col.type)) return undefined;
+    return issue.startsWith("Past date:") ? "Choose today or a later date." : "Required";
+  };
+  const columnHasIssue = (col: Column) => rows.length
+    ? rows.some((row, rowIndex) => columnIssue(col, rowIndex, row[col.key ?? ""]))
+    : Boolean(columnIssue(col));
+  const tableIssues = allCols.flatMap((col) => columnIssue(col) ? [`${col.label ?? col.key}: Required`] : []);
 
   const emptyRow = (): Record<string, unknown> => {
     const r: Record<string, unknown> = {};
@@ -1153,60 +1362,54 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
           <table className="w-full text-sm border-separate border-spacing-0">
             <thead>
               <tr className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                {cols.map((col, i) => {
-                  // Alternating column tint: even → faint blue-grey, odd → white.
-                  const colBg = i % 2 === 0 ? "bg-[#F4F7FA]" : "bg-white";
-                  return (
-                    <th key={col.id ?? i} title={col.tooltip}
-                        className={`w-[230px] flex-shrink-0 px-5 py-4 text-left font-semibold border-b border-r border-border/60 last:border-r-0 whitespace-nowrap ${colBg}`}>
-                      <div className="flex items-center gap-1">
-                        {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
-                        {col.calc?.expression && (
-                          <span className="text-[9px] font-semibold text-emerald-600 bg-emerald-50 px-1 rounded" title="Formula column">ƒx</span>
-                        )}
-                        {(col.readonly || col.editableWhen) && !col.calc?.expression && (
-                          <Lock className="h-3 w-3 text-muted-foreground/70" aria-label="Locked in some rows" />
-                        )}
-                      </div>
-                      {col.additionalText && <div className="mt-1 text-[10px] font-normal text-muted-foreground/80">{col.additionalText}</div>}
-                    </th>
-                  );
-                })}
+                {cols.map((col, i) => (
+                  <th key={col.id ?? i} title={col.tooltip}
+                    className={`w-[230px] flex-shrink-0 bg-slate-50 px-3 py-3 text-left font-semibold border-b border-r border-border/60 last:border-r-0 whitespace-nowrap ${columnHasIssue(col) ? "border-b-red-500 text-red-700" : ""}`}>
+                    <div className="flex items-center gap-1">
+                      {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
+                      {col.calc?.expression && (
+                        <span className="text-[9px] font-semibold text-emerald-600 bg-emerald-50 px-1 rounded" title="Formula column">ƒx</span>
+                      )}
+                      {(col.readonly || col.editableWhen) && !col.calc?.expression && (
+                        <Lock className="h-3 w-3 text-muted-foreground/70" aria-label="Locked in some rows" />
+                      )}
+                    </div>
+                    {col.additionalText && <div className="mt-1 text-[10px] font-normal text-muted-foreground/80">{col.additionalText}</div>}
+                  </th>
+                ))}
                 {!readOnly && <th className="w-8 flex-shrink-0 px-4 py-4 border-b border-border/60 bg-white" />}
               </tr>
             </thead>
             <tbody>
               {computedRows.map((row, ri) => {
-                const isEvenRow = ri % 2 === 0;
                 return (
-                  <tr key={ri} className="border-b border-border/40 last:border-0 group/row">
+                  <tr key={ri} className="border-b border-border/50 last:border-0 hover:bg-slate-50/50">
                     {cols.map((col, ci) => {
                       const key = col.key ?? `col_${ci}`;
                       const shown = colVisibleInRow(col, row);
                       const cellLocked = readOnly || !colEditableInRow(col, row);
-                      // 4-shade checkerboard: row parity × col parity
-                      const isEvenCol = ci % 2 === 0;
-                      const cellBg =
-                        isEvenRow && isEvenCol  ? "bg-[#EBF1F7]" :   // darker blue-grey
-                        isEvenRow && !isEvenCol ? "bg-[#F3F5F7]" :   // faint warm-grey
-                        !isEvenRow && isEvenCol ? "bg-[#F4F7FA]" :   // base blue-grey
-                                                  "bg-white";         // plain white
+                      const protectedCell = cellLocked || Boolean(col.calc?.expression);
+                      const cellIssue = columnIssue(col, ri, row[key]);
                       return (
                         <td key={col.id ?? ci}
-                            className={`w-[230px] flex-shrink-0 px-5 py-4 align-top border-r border-border/25 last:border-r-0 ${cellBg} group-hover/row:brightness-[0.985] transition-[filter]`}>
+                            className={`w-[230px] flex-shrink-0 px-2 py-2 align-top border-r border-border/30 last:border-r-0 focus-within:bg-sky-50/40 ${protectedCell ? "bg-slate-50" : "bg-white"}`}>
                           {shown ? (
-                            <TableColInput
-                              col={col}
-                              value={row[key] ?? ""}
-                              row={row}
-                              allValues={allValues}
-                              allFields={allFields}
-                              onChange={(v) => update(ri, key, v)}
-                              onChangeCell={(cellKey, cellVal) => update(ri, cellKey, cellVal)}
-                              readOnly={cellLocked}
-                              documentId={documentId}
-                              attachmentKey={`${tableKey}~${ri}~${key}`}
-                            />
+                            <div className={cellIssue ? "w-full min-w-0 rounded-sm ring-1 ring-red-500 [&_input]:!border-red-500 [&_textarea]:!border-red-500 [&_select]:!border-red-500 [&_button]:!border-red-500" : "w-full min-w-0"}>
+                              <TableColInput
+                                col={col}
+                                value={row[key] ?? ""}
+                                row={row}
+                                allValues={allValues}
+                                allFields={allFields}
+                                onChange={(v) => update(ri, key, v)}
+                                onChangeCell={(cellKey, cellVal) => update(ri, cellKey, cellVal)}
+                                readOnly={cellLocked}
+                              wrapText={allCols.some((candidate) => candidate.external?.fillDescriptionColumn === key)}
+                                documentId={documentId}
+                                attachmentKey={`${tableKey}~${ri}~${key}`}
+                              />
+                              {cellIssue && <p role="alert" className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-red-700"><AlertCircle className="h-3 w-3" />{cellIssue}</p>}
+                            </div>
                           ) : (
                             <span className="block text-sm italic text-muted-foreground/70" title="Not applicable for this row">—</span>
                           )}
@@ -1214,7 +1417,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                       );
                     })}
                     {!readOnly && (
-                      <td className={`w-8 flex-shrink-0 px-3 py-4 text-center align-top ${isEvenRow ? "bg-[#F3F5F7]" : "bg-white"} group-hover/row:brightness-[0.985] transition-[filter]`}>
+                      <td className="w-8 flex-shrink-0 bg-white px-2 py-2 text-center align-top">
                         {rows.length > 1 && (
                           <button type="button" onClick={() => removeRow(ri)} className="inline-flex items-center justify-center rounded text-muted-foreground hover:text-red-500 transition-colors">
                             <Trash2 className="h-4 w-4" />
@@ -1226,10 +1429,63 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                 );
               })}
             </tbody>
-
+            {cols.some((col) => col.showTotal && (col.type === "number" || col.type === "currency")) && (() => {
+              const totalColumns = cols.filter((col) => col.showTotal && (col.type === "number" || col.type === "currency"));
+              const firstTotalIndex = cols.findIndex((col) => totalColumns.includes(col));
+              const label = field.totalLabel ?? "Total";
+              const totalFor = (col: Column) => {
+                const key = col.key;
+                if (!key) return 0;
+                return computedRows.reduce((sum, row) => {
+                  if (!colVisibleInRow(col, row)) return sum;
+                  const raw = row[key];
+                  const parsed = typeof raw === "number" ? raw : Number(String(raw ?? "").replace(/,/g, ""));
+                  return Number.isFinite(parsed) ? sum + parsed : sum;
+                }, 0);
+              };
+              return (
+                <tfoot>
+                  <tr className="border-t-2 border-border bg-[#F4F7FA] font-semibold text-foreground">
+                    {firstTotalIndex > 0 && (
+                      <td colSpan={firstTotalIndex} className="w-[230px] px-5 py-3 text-right text-xs uppercase tracking-wide text-muted-foreground">
+                        {label}
+                      </td>
+                    )}
+                    {cols.slice(firstTotalIndex).map((col, offset) => {
+                      const configured = totalColumns.includes(col);
+                      const isFirstTotal = firstTotalIndex === 0 && offset === 0;
+                      const numeric = configured ? formatNumeric(totalFor(col), numberConfig(col).decimals, numberConfig(col).grouping) : "";
+                      const currencyCode = col.currencyFromColumn
+                        ? computedRows.find((row) => row[col.currencyFromColumn!])?.[col.currencyFromColumn]
+                        : undefined;
+                      const symbol = col.type === "currency"
+                        ? (currencySymbolFor(typeof currencyCode === "string" ? currencyCode : undefined) ?? col.currencySymbol ?? "KSh")
+                        : undefined;
+                      return (
+                        <td key={col.id ?? col.key} className="w-[230px] px-5 py-3 align-top border-r border-border/25 last:border-r-0">
+                          {configured && (
+                            <div className="flex flex-col items-start gap-0.5">
+                              {isFirstTotal && <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</span>}
+                              <span className="flex items-center gap-1">
+                                {symbol && <span className="text-[10px] text-muted-foreground">{symbol}</span>}
+                                {numeric}
+                              </span>
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
+                    {!readOnly && <td className="w-8 px-3 py-3" />}
+                  </tr>
+                </tfoot>
+              );
+            })()}
           </table>
         </div>
       </div>
+      {rows.length === 0 && tableIssues.length > 0 && (
+        <p role="alert" className="flex items-center gap-1 text-xs font-semibold text-red-700"><AlertCircle className="h-3.5 w-3.5" />{tableIssues.join(" · ")}</p>
+      )}
       {!readOnly && (
         <button type="button" onClick={addRow} className="flex items-center gap-1.5 text-xs font-semibold text-primary hover:text-primary/80 transition-colors">
           <Plus className="h-3.5 w-3.5" /> Add row
@@ -1745,7 +2001,7 @@ function AnalysisPanelInput({ value, onChange, disabled, slots }: {
   );
 }
 
-function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields, onLaunchSignatureModal, onButtonClick, buttonDone = false, viewer }: {
+function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields, onLaunchSignatureModal, onButtonClick, buttonDone = false, viewer, validationIssues = [] }: {
   field: Field;
   control: any;
   errors: Record<string, any>;
@@ -1761,6 +2017,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   onButtonClick?: (field: Field) => void;
   buttonDone?: boolean;
   viewer?: FormViewer;
+  validationIssues?: string[];
 }) {
   const key  = field.key ?? field.id ?? "";
   const type = field.type ?? "text";
@@ -1770,6 +2027,8 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   const style = { gridColumn: `span ${span} / span ${span}` };
   const dis   = readOnly || field.readonly || !editable;
   const err   = errors[key]?.message as string | undefined;
+  const validationMessage = validationMessageFor(validationIssues, label, allValues[key], type);
+  const displayError = validationMessage ?? err;
 
   if (field.hidden) return null;
 
@@ -1826,6 +2085,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       processStep={processStep}
       allFields={allFields}
       viewer={viewer}
+      validationIssues={validationIssues}
     />
   );
 
@@ -1935,14 +2195,15 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     return (
       <div className="min-w-0" style={style}>
         <Controller control={control} name={key} render={({ field: f }) => (
-          <label className="flex cursor-pointer items-center gap-2.5 text-sm text-foreground">
+          <label className={`flex cursor-pointer items-center gap-2.5 text-sm ${validationMessage ? "text-red-700" : "text-foreground"}`}>
             <input type="checkbox" checked={Boolean(f.value)} disabled={dis}
-              className="h-4 w-4 rounded border-border accent-primary"
+              className={`h-4 w-4 rounded accent-primary ${validationMessage ? "outline outline-1 outline-red-500" : "border-border"}`}
               onChange={(e) => { f.onChange(e.target.checked); onChangeCb(key, e.target.checked); }} />
             {label}
             {field.required && <span className="text-red-500">*</span>}
           </label>
         )} />
+        {displayError && <p role="alert" className="mt-1 flex items-center gap-1 text-xs font-semibold text-red-700"><AlertCircle className="h-3 w-3" />{displayError}</p>}
       </div>
     );
   }
@@ -1952,7 +2213,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // the person WHY they can't type in it.
   const lockedAtStep = !readOnly && !editable && !field.readonly;
   const labelEl = (
-    <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
+    <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: validationMessage ? "#B42318" : "#1F2933" }}>
       {label}
       {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
       {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
@@ -2003,14 +2264,17 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     return (
       <div className="min-w-0" style={style}>
         {labelEl}
-        <SignatureField
-          fieldKey={key}
-          disabled={dis}
-          value={allValues[key]}
-          onChangeCb={onChangeCb}
-          onLaunchSignatureModal={onLaunchSignatureModal}
-          allValues={allValues}
-        />
+        <div className={validationMessage ? "rounded-sm ring-1 ring-red-500" : ""}>
+          <SignatureField
+            fieldKey={key}
+            disabled={dis}
+            value={allValues[key]}
+            onChangeCb={onChangeCb}
+            onLaunchSignatureModal={onLaunchSignatureModal}
+            allValues={allValues}
+          />
+        </div>
+        {displayError && <p role="alert" className="mt-1 flex items-center gap-1 text-xs font-semibold text-red-700"><AlertCircle className="h-3 w-3" />{displayError}</p>}
       </div>
     );
   }
@@ -2018,14 +2282,17 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     return (
       <div className="min-w-0" style={style}>
         {labelEl}
-        <MultiFileField
-          fieldKey={key}
-          label={label}
-          disabled={dis}
-          allValues={allValues}
-          documentId={(allValues.__document_id as string | undefined)}
-          onChangeCb={onChangeCb}
-        />
+        <div className={validationMessage ? "rounded-sm ring-1 ring-red-500" : ""}>
+          <MultiFileField
+            fieldKey={key}
+            label={label}
+            disabled={dis}
+            allValues={allValues}
+            documentId={(allValues.__document_id as string | undefined)}
+            onChangeCb={onChangeCb}
+          />
+        </div>
+        {displayError && <p role="alert" className="mt-1 flex items-center gap-1 text-xs font-semibold text-red-700"><AlertCircle className="h-3 w-3" />{displayError}</p>}
       </div>
     );
   }
@@ -2033,15 +2300,18 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     return (
       <div className="min-w-0" style={style}>
         {labelEl}
-        <FileAttachField
-          label={label}
-          fieldKey={key}
-          imageOnly={type === "image"}
-          disabled={dis}
-          value={allValues[key]}
-          documentId={(allValues.__document_id as string | undefined)}
-          onChangeCb={onChangeCb}
-        />
+        <div className={validationMessage ? "rounded-sm ring-1 ring-red-500" : ""}>
+          <FileAttachField
+            label={label}
+            fieldKey={key}
+            imageOnly={type === "image"}
+            disabled={dis}
+            value={allValues[key]}
+            documentId={(allValues.__document_id as string | undefined)}
+            onChangeCb={onChangeCb}
+          />
+        </div>
+        {displayError && <p role="alert" className="mt-1 flex items-center gap-1 text-xs font-semibold text-red-700"><AlertCircle className="h-3 w-3" />{displayError}</p>}
       </div>
     );
   }
@@ -2308,6 +2578,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
             multi={field.external?.multi ?? false}
             disabled={dis}
             showSelectedName={!(field.external?.multi ?? false) && !field.external?.fillDescriptionField}
+            className="w-full"
           />
         )} />
       );
@@ -2316,6 +2587,24 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     default: {
       // text, email, phone, date, datetime, time (and any unknown type, which
       // degrades to a plain text box rather than disappearing from the form).
+      const isExternalDescriptionTarget = type === "text"
+        && allFields.some((candidate) => candidate.external?.fillDescriptionField === key);
+      if (isExternalDescriptionTarget) {
+        control_el = (
+          <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
+            <textarea
+              value={String(f.value ?? "")}
+              disabled={dis}
+              placeholder={field.placeholder}
+              rows={2}
+              title={String(f.value ?? "")}
+              className={`${inp} min-h-[3.5rem] resize-y whitespace-pre-wrap leading-5`}
+              onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }}
+            />
+          )} />
+        );
+        break;
+      }
       const htmlType =
         type === "email" ? "email"
         : type === "phone" ? "tel"
@@ -2326,7 +2615,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       control_el = (
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
           <input type={htmlType} value={String(f.value ?? "")} disabled={dis}
-            placeholder={field.placeholder} min={field.min} max={field.max}
+            placeholder={field.placeholder} min={type === "date" ? minimumDate(field.min) : field.min} max={field.max}
             maxLength={field.maxLength} className={inp}
             onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }} />
         )} />
@@ -2337,9 +2626,11 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   return (
     <div className="min-w-0" style={style}>
       {labelEl}
-      {control_el}
-      {err && (
-        <p className={errCls}><AlertCircle className="h-3 w-3 flex-shrink-0" />{err}</p>
+      <div className={validationMessage ? "rounded-sm ring-1 ring-red-500 [&_input]:!border-red-500 [&_textarea]:!border-red-500 [&_select]:!border-red-500 [&_button]:!border-red-500" : ""}>
+        {control_el}
+      </div>
+      {displayError && (
+        <p role="alert" className={validationMessage ? "mt-1 flex items-center gap-1 text-xs font-semibold text-red-700" : errCls}><AlertCircle className="h-3 w-3 flex-shrink-0" />{displayError}</p>
       )}
     </div>
   );
@@ -2347,7 +2638,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections, retirementOnlyEdit = false, retirementSectionReadOnly = false, onLaunchSignatureModal }: {
+function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections, retirementOnlyEdit = false, retirementSectionReadOnly = false, onLaunchSignatureModal, validationIssues = [] }: {
   sections: unknown[];
   values: TemplateFormValues;
   onChange: (key: string, value: unknown) => void;
@@ -2360,6 +2651,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   retirementOnlyEdit?: boolean;
   retirementSectionReadOnly?: boolean;
   onLaunchSignatureModal?: (fieldKey?: string) => void;
+  validationIssues?: string[];
 }) {
   const rawSections = (Array.isArray(sections) ? sections : []) as Section[];
   // Materialise linked tables (embed -> table) and keep only the ACTIVE
@@ -2574,6 +2866,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
                   onButtonClick={runButton}
                   buttonDone={f.button?.action === "add_block" && addedIds.includes(f.button?.targetSectionId ?? "")}
                   viewer={viewer}
+                  validationIssues={validationIssues}
                 />
               ))}
               {visibleFields.length === 0 && (
@@ -2644,17 +2937,19 @@ export function requiredFieldLabels(
           // Column rules are row-scoped (they may reference sibling columns),
           // so a value is only enforced in the rows where the column is
           // actually shown and editable.
-          const missingInAnyRow =
-            rows.length === 0
-              ? evalVisible(col, values, allFields, processStep, null, viewer) && evalEditable(col, values, allFields, processStep, null, viewer)
-              : rows.some((row) => {
-                  if (!evalVisible(col, values, allFields, processStep, row, viewer)) return false;
-                  if (!evalEditable(col, values, allFields, processStep, row, viewer)) return false;
-                  const v = row?.[colKey];
-                  return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
-                });
-          if (missingInAnyRow) {
-            missing.push(`${f.label ?? key} — ${col.label ?? colKey}`);
+          const tableColumnLabel = `${f.label ?? key} — ${col.label ?? colKey}`;
+          if (rows.length === 0) {
+            if (evalVisible(col, values, allFields, processStep, null, viewer) && evalEditable(col, values, allFields, processStep, null, viewer)) missing.push(tableColumnLabel);
+          } else {
+            rows.forEach((row, rowIndex) => {
+              if (!evalVisible(col, values, allFields, processStep, row, viewer)) return;
+              if (!evalEditable(col, values, allFields, processStep, row, viewer)) return;
+              const v = row?.[colKey];
+              const empty = col.type === "budget_line"
+                ? !v || typeof v !== "object" || Array.isArray(v) || !String((v as Record<string, unknown>).account_code ?? "").trim()
+                : v === undefined || v === null || (typeof v === "string" && v.trim() === "");
+              if (empty) missing.push(`${tableColumnLabel} (row ${rowIndex + 1})`);
+            });
           }
         }
         continue; // tables have no scalar `required`/regex of their own
@@ -2681,4 +2976,46 @@ export function requiredFieldLabels(
     }
   }
   return missing;
+}
+
+/** Visible, editable date inputs that contain a date before today's local date. */
+export function pastDateFieldLabels(
+  sections: unknown[],
+  values: TemplateFormValues,
+  viewer?: FormViewer,
+  processStep = "draft",
+): string[] {
+  const rawList = (Array.isArray(sections) ? sections : []) as Section[];
+  const list = activeSections(materializeSections(rawList), values);
+  const allFields = list.flatMap((section) => section.fields ?? []);
+  const today = minimumDate();
+  const invalid: string[] = [];
+
+  for (const section of list) {
+    if (!evalVisible(section, values, allFields, processStep, null, viewer)) continue;
+    if (!sectionVisibleToViewer(section, viewer) || conditionalEditBlockedForViewer(section, viewer)) continue;
+    const sectionEditable = evalEditableForViewer(section, values, allFields, processStep, viewer);
+    for (const field of section.fields ?? []) {
+      const key = field.key ?? "";
+      if (!key || field.hidden || !evalVisible(field, values, allFields, processStep, null, viewer)) continue;
+      if (conditionalEditBlockedForViewer(field, viewer)) continue;
+      if (!sectionEditable || !evalEditableForViewer(field, values, allFields, processStep, viewer)) continue;
+      if (field.type === "date") {
+        const value = String(values[key] ?? "").slice(0, 10);
+        if (value && value < today) invalid.push(field.label ?? key);
+      }
+      if (field.type !== "table") continue;
+      const rows = Array.isArray(values[key]) ? values[key] as Record<string, unknown>[] : [];
+      for (const column of field.columns ?? []) {
+        if (column.type !== "date" || column.hidden || !column.key) continue;
+        rows.forEach((row, index) => {
+          if (!evalVisible(column, values, allFields, processStep, row, viewer)) return;
+          if (!evalEditable(column, values, allFields, processStep, row, viewer)) return;
+          const value = String(row?.[column.key!] ?? "").slice(0, 10);
+          if (value && value < today) invalid.push(`${field.label ?? key} — ${column.label ?? column.key} (row ${index + 1})`);
+        });
+      }
+    }
+  }
+  return invalid;
 }

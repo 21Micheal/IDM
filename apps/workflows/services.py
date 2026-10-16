@@ -470,6 +470,22 @@ class WorkflowService:
         instance   = task.workflow_instance
         step       = task.step
         doc        = instance.document
+        advance_order = step.order
+        task_step_order = step.order
+        if WorkflowService.is_v2_workflow(instance.template) and instance.current_step_order:
+            # WorkflowStep rows are a mutable flat mirror of the v2 definition.
+            # Older tasks can still point at a parked mirror row after a prior
+            # template save, so use the instance cursor to advance the graph.
+            advance_order = instance.current_step_order
+            current_step = instance.template.steps.filter(order=advance_order).first()
+            if current_step and (
+                current_step.name.strip() != step.name.strip()
+                or current_step.step_type != step.step_type
+            ):
+                raise WorkflowError(
+                    "This approval task no longer matches the workflow's active step. "
+                    "Refresh the task and contact an administrator if it remains available."
+                )
 
         if step.requires_signature and doc is None:
             raise WorkflowError("Payment run workflow steps cannot require document signatures.")
@@ -510,14 +526,18 @@ class WorkflowService:
             # Payment runs also need action notifications
             WorkflowService._notify_action(action, None)
 
-        if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, step.order):
+        if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, task_step_order):
             return
 
         if step.post_lpo_after_approval and doc is not None:
             if WorkflowService._start_lpo_posting_gate(instance, step, doc):
                 return
 
-        WorkflowService._advance_step(instance, step.order)
+        WorkflowService._advance_step(
+            instance,
+            advance_order,
+            task_step_order=task_step_order if advance_order != task_step_order else None,
+        )
 
     # ── Reject ─────────────────────────────────────────────────────────────
 
@@ -1275,8 +1295,10 @@ class WorkflowService:
                 pass
 
     @staticmethod
-    def _advance_step(instance: WorkflowInstance, order: int) -> None:
-        WorkflowService._skip_active_tasks(instance, step_order=order)
+    def _advance_step(instance: WorkflowInstance, order: int, task_step_order: int | None = None) -> None:
+        # Skip sibling tasks by their persisted FK order, then navigate by the
+        # logical order in the active v2 definition.
+        WorkflowService._skip_active_tasks(instance, step_order=task_step_order if task_step_order is not None else order)
         if WorkflowService.is_v2_workflow(instance.template):
             # Stay within the active branch: the next order is the smallest
             # active order greater than this step, not necessarily order + 1.

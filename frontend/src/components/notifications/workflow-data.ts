@@ -161,6 +161,7 @@ export function phaseOrdersFromDefinition(definition: unknown): Record<string, n
 type WorkflowInstanceRecord = {
   id: string;
   status?: string;
+  current_step_order?: number | null;
   document?: string;
   template?: string;
   phase?: WorkflowPhase | string;
@@ -257,6 +258,7 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
     template?.steps ?? [],
     effectivePhase,
     template?.definition,
+    instance?.current_step_order,
   );
 
   // The workflow is still "live" (worth polling) while at least one stage is
@@ -283,6 +285,7 @@ function buildApproverWorkflow(
   templateSteps: WorkflowTemplateStepRecord[] = [],
   workflowPhase?: WorkflowPhase | null,
   templateDefinition?: unknown,
+  currentStepOrder?: number | null,
 ): WorkflowStep[] {
   const grouped = tasksWithHistory.reduce((map, item) => {
     const order = item.task.step?.order ?? map.size + 1;
@@ -291,9 +294,8 @@ function buildApproverWorkflow(
     return map;
   }, new Map<number, Array<{ task: WorkflowTaskRecord; history: TaskHistoryRecord[] }>>());
 
-  // Phase split for branched templates: order -> phase.  Orphaned mirror rows
-  // (steps kept for FK history but no longer in the definition) have no phase
-  // and are dropped so they never appear in the table.
+  // Phase split for branched templates: order -> phase. Orphaned task rows are
+  // reconciled with the current mirror below before phase filtering is applied.
   const phaseMap = phaseOrdersFromDefinition(templateDefinition);
   const orderPhase = new Map<number, string>();
   if (phaseMap) {
@@ -315,6 +317,31 @@ function buildApproverWorkflow(
           assignee_user_name: undefined,
           instructions: undefined,
         }));
+
+  // Repair display for older task rows that still point at mirror steps parked
+  // by previous workflow saves. The active instance cursor gives the current
+  // step; completed rows can be matched to an unfilled step by their name.
+  if (templateSteps.length > 0) {
+    const validOrders = new Set(sourceStepsRaw.map((step) => step.order));
+    const orphanGroups = [...grouped.entries()]
+      .filter(([order]) => !validOrders.has(order))
+      .sort(([a], [b]) => a - b);
+    for (const [orphanOrder, items] of orphanGroups) {
+      const active = items.some(({ task }) => task.status === "in_progress" || task.status === "held");
+      const activeTarget = active && currentStepOrder && validOrders.has(currentStepOrder)
+        ? currentStepOrder
+        : undefined;
+      const orphanName = items[0]?.task.step?.name?.trim().toLowerCase();
+      const nameTarget = sourceStepsRaw.find((step) =>
+        step.name?.trim().toLowerCase() === orphanName && !grouped.has(step.order),
+      )?.order;
+      const targetOrder = activeTarget ?? nameTarget;
+      if (!targetOrder || targetOrder === orphanOrder) continue;
+      grouped.set(targetOrder, [...(grouped.get(targetOrder) ?? []), ...items]);
+      grouped.delete(orphanOrder);
+    }
+  }
+
   const sourceSteps = phaseMap
     ? sourceStepsRaw.filter((step) => orderPhase.has(step.order))
     : sourceStepsRaw;

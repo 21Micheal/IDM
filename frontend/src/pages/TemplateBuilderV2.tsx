@@ -53,7 +53,7 @@ import {
 import { useForm, type UseFormRegister, type FieldErrors } from "react-hook-form";
 import { toast } from "sonner";
 import CustomListbox from "@/components/ui/CustomListbox";
-import { EXTERNAL_SOURCES } from "@/components/ui/ExternalSelect";
+import ExternalSelect, { EXTERNAL_SOURCES } from "@/components/ui/ExternalSelect";
 import { ANALYSIS_DIMENSIONS, ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
 import {
   ArrowLeft, Save, Undo2, Redo2, Eye, LayoutGrid, Settings,
@@ -112,7 +112,14 @@ export interface CalcConfig {
 export type TableColumnType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
   | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "percentage" | "rating" | "url" | "multi_select" | "image" | "external" | "sunsystems_account" | "budget";
+  | "percentage" | "rating" | "url" | "multi_select" | "image" | "external" | "sunsystems_account" | "budget" | "budget_line";
+
+export interface BudgetLineConfig {
+  /** SunSystems AnalysisDimensionIds shown in the Budget Line editor modal. */
+  dimensions?: string[];
+  /** Account codes available in the modal's local dropdown. */
+  accountCodes?: string[];
+}
 
 export interface TableColumn {
   id: string;
@@ -139,6 +146,10 @@ export interface TableColumn {
   // the same table whose selected code drives this cell's symbol per row. When
   // set, `currencySymbol` is only the fallback for unknown codes.
   currencyFromColumn?: string;
+  /** Include this numeric column in the table's bottom summary row. */
+  showTotal?: boolean;
+  /** Modal configuration for the composite account + analysis budget line. */
+  budgetLine?: BudgetLineConfig;
   dateFormat?: string;
   referenceSource?: string;    // e.g. "users", "departments", "vendors"
   referenceGroupId?: string;
@@ -520,6 +531,7 @@ export interface TemplateField {
   workflowRole?: "requisition_lines" | "rfq_required_lines" | "retirement_expenses" | "rfq_supplier_attachments";
   defaultValue?: string;
   minRows?: number;
+  totalLabel?: string;
   multi?: boolean;
   /* Extended */
   tooltip?: string;
@@ -648,32 +660,24 @@ export interface SunSystemsUi {
   budgetMode?: "warn" | "block";
   businessUnit?: string;
   budgetCode?: string;
+  /** Accounting period for ledger journal postings, formatted YYYY/YYYY. */
+  accountingPeriod?: string;
   journalType?: string;
   postingType?: string;
   parameters?: { name: string; value: string }[];
   currencyConst?: string;
   dateFormat?: string;
   validateBalance?: boolean;
-  supplierCode?: string;
   purchaseTransactionType?: string;
   invoiceAddressCode?: string;
-  itemCode?: string;
-  accountCode?: string;
   analysis10Category?: string;
   analysis10Code?: string;
   /** Fixed order quantity (default "1"). Blank = use the backend default. */
   quantity?: string;
-  /** Fixed unit price. Blank = derived from total amount (qty-1 pattern). */
-  unitPrice?: string;
   /** VLAB label number for the base/quantity value line (default "1"). */
   vlabBase?: string;
   /** VLAB label number for the transaction/amount value line (default "2"). */
   vlabTrans?: string;
-  /** Constant PurchaseOrderReference emitted when the template has no
-   *  "Purchase order number" field. Blank uses the runtime-generated LPO no. */
-  poNumberConst?: string;
-  /** Constant Comment / description on the purchase-order header. */
-  poComment?: string;
 }
 export interface SunSystemsConfig {
   ui?: SunSystemsUi;
@@ -1221,6 +1225,7 @@ function cellPlaceholder(c: TableColumn): string {
     case "multi_select": return c.options?.[0] ? `${c.options[0]} +` : "Select many…";
     case "image": return "🖼 image";
     case "sunsystems_account": return "Select supplier…";
+    case "budget_line": return "Select budget line…";
     default: return "—";
   }
 }
@@ -1236,6 +1241,7 @@ function newColumn(type: TableColumnType = "text", label = "New Column"): TableC
     currencySymbol: type === "currency" ? "KSh" : undefined,
     referenceSource: type === "reference" ? "documents" : type === "user" ? "users" : undefined,
     external: type === "external" ? { source: "items" } : undefined,
+    budgetLine: type === "budget_line" ? { dimensions: [...ANALYSIS_PANEL_SLOTS] } : undefined,
   };
 }
 
@@ -1469,6 +1475,10 @@ function buildSampleValues(template: Template): Record<string, unknown> {
 function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const ss = template.sunsystems ?? {};
   const ui: SunSystemsUi = ss.ui ?? {};
+  const cleanedUi = { ...ui } as SunSystemsUi & Record<string, unknown>;
+  for (const obsolete of ["supplierCode", "poNumberConst", "poComment", "itemCode", "accountCode", "unitPrice"]) {
+    delete cleanedUi[obsolete];
+  }
   const separateProfiles = ui.ledgerJournalEnabled !== undefined || ui.purchaseOrderEnabled !== undefined;
   const ledgerJournalEnabled = separateProfiles
     ? Boolean(ui.ledgerJournalEnabled)
@@ -1483,7 +1493,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       && (field.sunsystems?.imprestRequest?.enabled
         || field.columns?.some((column) => column.sunsystems?.role === "line_amount" && column.sunsystems?.imprestRequest?.enabled)),
   );
-  if (!ledgerJournalEnabled && !purchaseOrderEnabled && !hasImprestRequestConfig && !ui.budgetEnabled) return ss;
+  if (!ledgerJournalEnabled && !purchaseOrderEnabled && !hasImprestRequestConfig && !ui.budgetEnabled) {
+    return { ...ss, ui: cleanedUi };
+  }
 
   const byRole = (role: string) => fields.find((f) => f.sunsystems?.role === role);
   const accountSpec = (source: AccountCodeSource | undefined, manual: string | undefined, columns?: TableColumn[]) => {
@@ -1498,7 +1510,10 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
 
   const currencyField = byRole("currency");
   const currencySpec = valueSpec(currencyField) ?? (ui.currencyConst ? { const: ui.currencyConst } : undefined);
-  const referenceSpec = valueSpec(byRole("reference"));
+  // The document reference is assigned by the server, so forms no longer need
+  // a dedicated input just to carry it into SSC. An explicit Reference role
+  // still wins when the builder maps one.
+  const referenceSpec = valueSpec(byRole("reference")) ?? { source: "reference_number" };
   const dateSpec = valueSpec(byRole("transaction_date"), { format: ui.dateFormat || "DDMMYYYY" });
   const descSpec = valueSpec(byRole("description"));
   const postingKind = ui.postingKind ?? "journal";
@@ -1595,8 +1610,15 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         continue;
       }
       const acctCol = cols.find((c) => c.sunsystems?.role === "account_code");
+      const budgetLineCol = cols.find((c) => c.type === "budget_line");
       const descCol = cols.find((c) => c.sunsystems?.role === "description");
       const analysis: Record<string, unknown> = {};
+      if (budgetLineCol) {
+        for (const dimension of budgetLineCol.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS) {
+          const slot = ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1;
+          if (slot > 0) analysis[String(slot)] = { row_field: budgetLineCol.key, key: dimension };
+        }
+      }
       for (const c of cols.filter((c) => c.sunsystems?.role === "analysis")) {
         analysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
       }
@@ -1608,7 +1630,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         // role is "Line amount") take priority; the table-level default
         // (set via the table field's Journal role card) is the fallback for
         // templates that haven't been re-configured since this was added.
-        account: accountSpec(amountCol.sunsystems?.accountSource ?? b.accountSource ?? (acctCol ? "account_code" : "manual"), amountCol.sunsystems?.account ?? b.account, cols),
+        account: budgetLineCol
+          ? { row_field: budgetLineCol.key, key: "account_code" }
+          : accountSpec(amountCol.sunsystems?.accountSource ?? b.accountSource ?? (acctCol ? "account_code" : "manual"), amountCol.sunsystems?.account ?? b.account, cols),
         dc: amountCol.sunsystems?.dc ?? b.dc ?? "D",
         amount: { row_field: amountCol.key },
         description: descCol ? { row_field: descCol.key } : descSpec,
@@ -1780,6 +1804,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     const curCol = cols.find((c) => c.sunsystems?.role === "currency");
     const uomCol = cols.find((c) => c.sunsystems?.role === "uom");
     const analysisCols = cols.filter((c) => c.sunsystems?.role === "analysis");
+    const budgetLineCol = cols.find((c) => c.type === "budget_line");
     const imprestRequest = f.sunsystems?.imprestRequest ?? amtCol?.sunsystems?.imprestRequest;
     const imprestAccountSource = amtCol?.sunsystems?.accountSource ?? imprestRequest?.accountSource;
     const imprestManualAccount = amtCol?.sunsystems?.account ?? imprestRequest?.account;
@@ -1787,16 +1812,37 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     const imprestManualCounterAccount = amtCol?.sunsystems?.counterAccount ?? imprestRequest?.counterAccount;
     if (!amtCol && !(qtyCol && upCol)) continue;
     const lineAnalysis: Record<string, unknown> = {};
+    const poLineAnalysis: Record<string, unknown> = {};
+    if (budgetLineCol) {
+      for (const dimension of budgetLineCol.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS) {
+        const slot = ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1;
+        if (slot > 0) {
+          lineAnalysis[String(slot)] = { row_field: budgetLineCol.key, key: dimension };
+          poLineAnalysis[String(slot)] = {
+            category: { const: dimension },
+            code: { row_field: budgetLineCol.key, key: dimension },
+          };
+        }
+      }
+    }
     for (const c of analysisCols) lineAnalysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
+    for (const c of analysisCols) {
+      const slot = String(c.sunsystems?.analysisNumber ?? 1);
+      poLineAnalysis[slot] = { code: { row_field: c.key } };
+    }
     const lineSpec: Record<string, unknown> = {
       repeat_over: f.key,
       table_label: f.label || f.key,
-      account_code: acctCol ? { row_field: acctCol.key } : { const: f.sunsystems?.account ?? ui.accountCode ?? "" },
+      account_code: budgetLineCol
+        ? { row_field: budgetLineCol.key, key: "account_code" }
+        : acctCol
+          ? { row_field: acctCol.key }
+          : (f.sunsystems?.account ? { const: f.sunsystems.account } : undefined),
       ...(itemCol
         ? { item_code: { row_field: itemCol.key } }
         : itemFieldSpec
           ? { item_code: itemFieldSpec }
-          : (ui.itemCode ? { item_code: { const: ui.itemCode } } : {})),
+          : {}),
       ...(f.workflowRole !== "rfq_required_lines" && productGroupCol
         ? { product_group: { row_field: productGroupCol.key } }
         : (f.workflowRole !== "rfq_required_lines" && productGroupSpec ? { product_group: productGroupSpec } : {})),
@@ -1842,7 +1888,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         : { const: ui.quantity || "1" },
       ...(upCol ? { unit_price: { row_field: upCol.key } } : {}),
       ...(amtCol ? { amount: { row_field: amtCol.key } } : {}),
-      ...(Object.keys(lineAnalysis).length ? { analysis: lineAnalysis } : {}),
+      ...(Object.keys(lineAnalysis).length ? { analysis: f.workflowRole === "rfq_required_lines" ? lineAnalysis : poLineAnalysis } : {}),
     };
     if (f.workflowRole === "rfq_required_lines") {
       // General / Imprest rows are exclusively the source for the advance
@@ -1867,31 +1913,21 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         },
         ...(currencySpec ? { currency: currencySpec } : {}),
         purchase_order: {
-          // PO reference: a "Purchase order number" field, a fixed constant, or
-          // (default) the LPO number reserved when the LPO document is created.
-          reference: poNumberSpec
-            ? { ...poNumberSpec, default: ui.poNumberConst || "" }
-            : (ui.poNumberConst ? { const: ui.poNumberConst } : { source: "lpo_number" }),
+          // An explicitly mapped PO number field wins; otherwise use the LPO
+          // number reserved for this requisition.
+          reference: poNumberSpec ?? { source: "lpo_number" },
           // The source requisition's reference becomes SecondReference.
           ...(referenceSpec ? { second_reference: referenceSpec } : {}),
-          // A bound supplier field wins, but an empty one falls back to the
-          // configured constant so an unfilled RFQ cannot block posting.
-          supplier_code: supplierSpec
-            ? supplierSpec
-            : supplierTableSpec
-              ? supplierTableSpec
-              : { const: ui.supplierCode || "81105" },
+          // Supplier identity comes from a mapped form field or table column.
+          ...(supplierSpec ? { supplier_code: supplierSpec } : supplierTableSpec ? { supplier_code: supplierTableSpec } : {}),
           ...(supplierSpec && supplierTableSpec ? {
             supplier_code_fallback: supplierTableSpec,
           } : {}),
-          ...((supplierSpec || supplierTableSpec) && ui.supplierCode
-            ? { supplier_code_default: { const: ui.supplierCode } }
-            : {}),
           ...(descSpec
             ? { comment: descSpec }
             : descriptionTableSource
               ? { comment: { table: descriptionTableSource.tableKey, row_field: descriptionTableSource.column.key } }
-              : (ui.poComment ? { comment: { const: ui.poComment } } : {})),
+              : {}),
           ...(purchaseTransactionTypeFieldSpec
             ? { transaction_type: { ...purchaseTransactionTypeFieldSpec, default: ui.purchaseTransactionType || "" } }
             : ui.purchaseTransactionType
@@ -1947,7 +1983,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     }
     : { enabled: false };
 
-  return { ...ss, ui, journal, purchase_order, imprest_request, budget };
+  return { ...ss, ui: cleanedUi, journal, purchase_order, imprest_request, budget };
 }
 
 function outputTemplate(template: Template, keepId: boolean, resolved: Record<string, ResolvedTableRef> = {}): Template {
@@ -2752,6 +2788,7 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
   { value: "multi_select", label: "Multi-select" },
   { value: "external", label: "External" },
   { value: "sunsystems_account", label: "SunSystems supplier" },
+  { value: "budget_line", label: "Budget Line (Account + Analysis)" },
   { value: "budget", label: "Budget Banner" },
 ];
 
@@ -3364,13 +3401,51 @@ function ColumnConfigModal({
                     becomes a currency purely through its number format. */}
                 <CustomListbox
                   value={draft.type === "currency" ? "number" : (draft.type ?? "text")}
-                  onChange={(val) => set({ type: val as TableColumnType })}
+                  onChange={(val) => set({
+                    type: val as TableColumnType,
+                    ...(val === "budget_line" && !draft.budgetLine ? { budgetLine: { dimensions: [...ANALYSIS_PANEL_SLOTS] } } : {}),
+                  })}
                   options={COL_TYPES.map((t) => ({ value: t.value, label: t.label }))}
                   className={iCls}
                   buttonClassName="w-full"
                   ariaLabel="Column type"
                 />
               </Row>
+              {draft.type === "budget_line" && (
+                <>
+                  <Row label="Available account codes" hint="These codes appear in the Budget Line account dropdown.">
+                    <DropdownValuesEditor
+                      options={draft.budgetLine?.accountCodes ?? []}
+                      onChange={(accountCodes) => set({ budgetLine: { ...(draft.budgetLine ?? {}), accountCodes } })}
+                      quickAddCurrencies={false}
+                    />
+                  </Row>
+                  <Row label="Analysis dimensions" hint="Choose which dimension lookups appear in the modal. Selected codes map to their SunSystems analysis slots and dimension IDs.">
+                    <div className="grid grid-cols-1 gap-1.5 border border-[#C8CDD2] bg-[#F8FAFB] p-2 sm:grid-cols-2">
+                      {ANALYSIS_PANEL_SLOTS.map((dimensionId) => {
+                        const selected = draft.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS;
+                        return (
+                          <label key={dimensionId} className="flex min-w-0 items-center gap-2 px-1 py-1 text-xs text-[#34414A]">
+                            <input
+                              type="checkbox"
+                              checked={selected.includes(dimensionId)}
+                              onChange={(event) => {
+                                const dimensions = event.target.checked
+                                  ? [...selected, dimensionId]
+                                  : selected.filter((id) => id !== dimensionId);
+                                set({ budgetLine: { ...(draft.budgetLine ?? {}), dimensions: ANALYSIS_PANEL_SLOTS.filter((id) => dimensions.includes(id)) } });
+                              }}
+                              className="h-4 w-4 accent-[#287EAD]"
+                            />
+                            <span className="truncate">Analysis {ANALYSIS_PANEL_SLOTS.indexOf(dimensionId) + 1} · {analysisDimensionName(dimensionId)}</span>
+                            <span className="ml-auto font-mono text-[10px] text-[#77838B]">ID {dimensionId}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </Row>
+                </>
+              )}
               {draft.type === "external" && (
                 <>
                   <Row label="Source">
@@ -3411,18 +3486,18 @@ function ColumnConfigModal({
                       </Row>
                     );
                   })()}
-                  {(draft.external?.source ?? "items") === "analysis_codes" && (() => {
+                  {(() => {
                     const targets = siblingColumns.filter((c) => c.id !== draft.id && c.key);
                     if (targets.length === 0) return null;
                     return (
-                      <Row label="Auto-fill description into" hint="Store only the selected analysis code here, and copy its description into this column in the same row.">
+                      <Row label="Auto-fill description into" hint="When a record is selected, keep only its code here and copy its description into the chosen sibling column.">
                         <CustomListbox
                           value={draft.external?.fillDescriptionColumn ?? ""}
-                          onChange={(val) => set({ external: { ...(draft.external ?? { source: "analysis_codes" }), fillDescriptionColumn: val || undefined } })}
+                          onChange={(val) => set({ external: { ...(draft.external ?? { source: "items" }), fillDescriptionColumn: val || undefined } })}
                           options={[{ value: "", label: "— none —" }, ...targets.map((c) => ({ value: c.key as string, label: c.label || c.key || "" }))]}
                           className={iCls}
                           buttonClassName="w-full"
-                          ariaLabel="Auto-fill analysis code description target column"
+                          ariaLabel="Auto-fill external record description target column"
                         />
                       </Row>
                     );
@@ -3452,6 +3527,11 @@ function ColumnConfigModal({
                       })
                     }
                   />
+                </Row>
+              )}
+              {isNumeric && (
+                <Row label="Include in table total" hint="Adds this column's sum to the table's bottom summary row.">
+                  <ToggleYesNo value={!!draft.showTotal} onChange={(showTotal) => set({ showTotal })} />
                 </Row>
               )}
               {draft.type === "budget" && (() => {
@@ -3502,7 +3582,19 @@ function ColumnConfigModal({
                 <input className={iCls} value={draft.tooltip ?? ""} onChange={(e) => set({ tooltip: e.target.value })} placeholder="Shown on hover (?)" />
               </Row>
               <Row label="Default value">
-                {isDropdown ? (
+                {draft.type === "external" ? (
+                  <ExternalSelect
+                    source={draft.external?.source ?? "items"}
+                    dimension={draft.external?.dimension}
+                    value={draft.defaultValue ?? ""}
+                    onChange={(next) => set({ defaultValue: Array.isArray(next) ? (next[0] ?? "") : next })}
+                    multi={false}
+                    compact
+                    showSelectedName
+                    className="w-full"
+                    placeholder="Select default record…"
+                  />
+                ) : isDropdown ? (
                   <CustomListbox
                     value={draft.defaultValue ?? ""}
                     onChange={(val) => set({ defaultValue: val })}
@@ -3760,7 +3852,7 @@ function ConfirmDeleteDialog({ open, title, message, confirmLabel = "Delete", on
   }, [open, onCancel]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
+    <div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
       <div role="alertdialog" aria-modal="true" onClick={(e) => e.stopPropagation()}
         className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-2xl">
         <div className="flex items-start gap-3 px-5 py-4">
@@ -3988,7 +4080,7 @@ function NumberFormatEditor({
 
 
 
-function DropdownValuesEditor({ options, onChange }: { options: string[]; onChange: (opts: string[]) => void }) {
+function DropdownValuesEditor({ options, onChange, quickAddCurrencies = true }: { options: string[]; onChange: (opts: string[]) => void; quickAddCurrencies?: boolean }) {
   const [draft, setDraft] = useState("");
   const move = (idx: number, dir: "up" | "down") => {
     const next = [...options];
@@ -4001,14 +4093,14 @@ function DropdownValuesEditor({ options, onChange }: { options: string[]; onChan
     <div className="border border-[#C8CDD2] bg-white">
       <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#EEF6FB] px-3 py-2">
         <span className="text-xs font-semibold uppercase tracking-wider text-[#287EAD]">Values</span>
-        <button
+        {quickAddCurrencies && <button
           type="button"
           title="Append standard currency codes (USD, EUR, KES…) — link an amount field to this dropdown to auto-set its symbol"
           onClick={() => onChange([...options, ...CURRENCY_CODES.filter((c) => !options.includes(c))])}
           className="text-[10px] font-semibold text-[#287EAD] hover:text-[#1E6F99]"
         >
           + Currency codes
-        </button>
+        </button>}
       </div>
       <div className="divide-y divide-[#E5E8EB]">
         {options.map((opt, idx) => (
@@ -5147,18 +5239,18 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                       </InspectorRow>
                     );
                   })()}
-                  {field.external?.source === "analysis_codes" && field.external?.mode === "single" && (() => {
+                  {((field.external?.source !== "analysis_codes" || field.external?.mode === "single") && !(field.external?.multi ?? false)) && (() => {
                     const targets = allFields.filter((f) => f.id !== field.id && f.key && f.type !== "button");
                     if (targets.length === 0) return null;
                     return (
-                      <InspectorRow label="Auto-fill description into" hint="Store only the selected analysis code here, and copy its description into this field.">
+                      <InspectorRow label="Auto-fill description into" hint="When a record is selected, keep only its code here and copy its description into the chosen field.">
                         <CustomListbox
                           value={field.external?.fillDescriptionField ?? ""}
-                          onChange={(val) => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), fillDescriptionField: val || undefined } })}
+                          onChange={(val) => onUpdate({ external: { ...(field.external ?? { source: "items" }), fillDescriptionField: val || undefined } })}
                           options={[{ value: "", label: "— none —" }, ...targets.map((f) => ({ value: f.key, label: f.label || f.key }))]}
                           className={inputCls}
                           buttonClassName="w-full"
-                          ariaLabel="Auto-fill analysis code description target"
+                          ariaLabel="Auto-fill external record description target"
                         />
                       </InspectorRow>
                     );
@@ -5200,6 +5292,13 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                 <input type="number" min={1} max={20} value={field.minRows ?? 2}
                   onChange={(e) => onUpdate({ minRows: Number(e.target.value) })} className={inputCls} />
               </InspectorRow>
+              {(field.columns ?? []).some((column) => column.showTotal) && (
+                <InspectorRow label="Total row label" hint="Shown before the first total in the table footer.">
+                  <input value={field.totalLabel ?? "Total"}
+                    onChange={(e) => onUpdate({ totalLabel: e.target.value })}
+                    className={inputCls} placeholder="Total" />
+                </InspectorRow>
+              )}
             </>
           )}
           {field.type === "multi_file" && (
@@ -5645,6 +5744,13 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
           <Building2 className="h-3 w-3 flex-shrink-0" />
         </div>
       );
+    case "budget_line":
+      return (
+        <div className={cn(base, "flex items-center justify-between gap-1 text-muted-foreground")}>
+          <span className="truncate">Select account and analysis codes…</span>
+          <Building2 className="h-3 w-3 flex-shrink-0" />
+        </div>
+      );
     case "file":
       return <input type="file" disabled={ro} className="text-xs" />;
     case "image":
@@ -5742,6 +5848,32 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
               </tr>
             ))}
           </tbody>
+          {cols.some((col) => col.showTotal && (col.type === "number" || col.type === "currency")) && (() => {
+            const totalCols = cols.filter((col) => col.showTotal && (col.type === "number" || col.type === "currency"));
+            const firstTotalIndex = cols.findIndex((col) => totalCols.includes(col));
+            return (
+              <tfoot>
+                <tr className="border-t-2 border-slate-300 bg-slate-50 font-semibold text-slate-700">
+                  {firstTotalIndex > 0 && <td colSpan={firstTotalIndex} className="px-3 py-2 text-right">{field.totalLabel || "Total"}</td>}
+                  {cols.slice(firstTotalIndex).map((col, offset) => {
+                    if (!totalCols.includes(col)) return <td key={col.id} className="px-3 py-2" />;
+                    const total = rows.reduce((sum, row) => {
+                      const amount = Number(String(row[col.key] ?? "").replace(/,/g, ""));
+                      return Number.isFinite(amount) ? sum + amount : sum;
+                    }, 0);
+                    const decimals = col.decimals ?? (col.type === "currency" ? 2 : 0);
+                    return (
+                      <td key={col.id} className="px-3 py-2">
+                        {firstTotalIndex === 0 && offset === 0 && <span className="mr-2 text-[10px] uppercase text-slate-500">{field.totalLabel || "Total"}</span>}
+                        {total.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals, useGrouping: col.thousandsSeparator !== false })}
+                      </td>
+                    );
+                  })}
+                  <td />
+                </tr>
+              </tfoot>
+            );
+          })()}
         </table>
       </div>
       {!readOnly && (
@@ -7905,31 +8037,22 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps, embedded 
                 </>
               ) : (
                 <>
-                  <div className="space-y-1.5"><span className={label}>Supplier code</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.supplierCode ?? "81105"} onChange={(e) => setUi({ supplierCode: e.target.value })} placeholder="81105" /></div>
                   <div className="space-y-1.5"><span className={label}>Purchase transaction type</span>
                     <input className={cn(iCls, "font-mono")} value={ui.purchaseTransactionType ?? ""} onChange={(e) => setUi({ purchaseTransactionType: e.target.value })} placeholder="SunSystems purchase type / definition code" />
                     <p className="text-[10px] text-[#8C969E]">Your SunSystems response says a reference definition is required. Product Group is a line value; this is the header purchase type.</p></div>
                   <div className="space-y-1.5"><span className={label}>Invoice address</span>
                     <input className={cn(iCls, "font-mono")} value={ui.invoiceAddressCode ?? "0000000000"} onChange={(e) => setUi({ invoiceAddressCode: e.target.value })} placeholder="0000000000" /></div>
-                  <div className="space-y-1.5"><span className={label}>PO number (fixed)</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.poNumberConst ?? ""} onChange={(e) => setUi({ poNumberConst: e.target.value })} placeholder="auto: generated LPO no." /></div>
-                  <div className="space-y-1.5"><span className={label}>Comment</span>
-                    <input className={iCls} value={ui.poComment ?? ""} onChange={(e) => setUi({ poComment: e.target.value })} placeholder="e.g. Purchase of Cabinets" /></div>
-                  <div className="space-y-1.5"><span className={label}>Item code</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.itemCode ?? "ITM29"} onChange={(e) => setUi({ itemCode: e.target.value })} placeholder="ITM29" /></div>
-                  <div className="space-y-1.5"><span className={label}>Account code</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.accountCode ?? ""} onChange={(e) => setUi({ accountCode: e.target.value })} placeholder="optional" /></div>
                   <div className="space-y-1.5"><span className={label}>Analysis 10 category</span>
                     <input className={cn(iCls, "font-mono")} value={ui.analysis10Category ?? "11"} onChange={(e) => setUi({ analysis10Category: e.target.value })} placeholder="11" /></div>
                   <div className="space-y-1.5"><span className={label}>Analysis 10 code</span>
                     <input className={cn(iCls, "font-mono")} value={ui.analysis10Code ?? "E"} onChange={(e) => setUi({ analysis10Code: e.target.value })} placeholder="E" /></div>
                   <div className="space-y-1.5"><span className={label}>Order quantity</span>
                     <input className={cn(iCls, "font-mono")} value={ui.quantity ?? ""} onChange={(e) => setUi({ quantity: e.target.value })} placeholder="1 (default)" /></div>
-                  <div className="space-y-1.5"><span className={label}>Unit price</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.unitPrice ?? ""} onChange={(e) => setUi({ unitPrice: e.target.value })} placeholder="= total amount (default)" /></div>
                 </>
               )}
+              <div className="space-y-1.5"><span className={label}>Accounting period</span>
+                <input className={cn(iCls, "font-mono")} value={ui.accountingPeriod ?? ""} onChange={(e) => setUi({ accountingPeriod: e.target.value })} placeholder="2026/2027" pattern="^\\d{4}/\\d{4}$" />
+                <p className="text-[10px] text-[#8C969E]">Format: YYYY/YYYY (for example, 2026/2027). Saved for the printed requisition.</p></div>
             </div>
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div><span className={label}>Reference</span><div className="mt-1 text-[#1F2933]">{roleLabel("reference")}</div></div>
@@ -7950,11 +8073,11 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps, embedded 
                 </div>
                 <div>
                   <span className={label}>Supplier source</span>
-                  <div className="mt-1 text-[#1F2933]">{poSupplierLabel !== "—" ? poSupplierLabel : (ui.supplierCode || "81105 (constant)")}</div>
+                  <div className="mt-1 text-[#1F2933]">{poSupplierLabel !== "—" ? poSupplierLabel : "No supplier field mapped"}</div>
                 </div>
                 <div>
                   <span className={label}>PO number source</span>
-                  <div className="mt-1 text-[#1F2933]">{poNumberLabel !== "—" ? poNumberLabel : (ui.poNumberConst || "generated LPO number")}</div>
+                  <div className="mt-1 text-[#1F2933]">{poNumberLabel !== "—" ? poNumberLabel : "Generated LPO number"}</div>
                 </div>
                 <div>
                   <span className={label}>Analysis 1–10</span>

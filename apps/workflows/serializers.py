@@ -483,6 +483,12 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
     def _upsert_steps(self, template, steps_data):
         existing_steps = list(template.steps.all())
         existing_by_id = {str(step.id): step for step in existing_steps}
+        # The v2 editor's block IDs are stable, but the flat compatibility
+        # mirror does not carry WorkflowStep UUIDs. Reuse the existing row at
+        # the same flattened position when no valid UUID was submitted. Without
+        # this, every save parks task-linked rows as orphans; their order then
+        # no longer agrees with WorkflowInstance.current_step_order.
+        existing_by_order = {step.order: step for step in existing_steps if step.order < 20000}
         incoming_ids = []
         incoming_existing_ids = set()
 
@@ -500,6 +506,32 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                     raw.pop("id", None)
                 else:
                     incoming_existing_ids.add(step_id)
+
+        if template.definition and template.definition.get("version") == 2:
+            used_ids = set(incoming_existing_ids)
+            for position, raw in enumerate(steps_data, start=1):
+                step_id = raw.get("id")
+                if step_id and str(step_id) in existing_by_id:
+                    continue
+                name = str(raw.get("name") or "").strip().casefold()
+                step_type = raw.get("step_type") or "approval"
+                candidates = [
+                    step for step in existing_steps
+                    if step.order < 20000
+                    and str(step.id) not in used_ids
+                    and step.name.strip().casefold() == name
+                    and step.step_type == step_type
+                ]
+                # Prefer the same logical step even if its position changed;
+                # ties (for repeated labels) resolve to the closest old order.
+                matched = min(candidates, key=lambda step: abs(step.order - (position or step.order)), default=None)
+                positional = existing_by_order.get(position)
+                if matched is None and positional and str(positional.id) not in used_ids:
+                    matched = positional
+                if matched:
+                    raw["id"] = str(matched.id)
+                    used_ids.add(str(matched.id))
+                    incoming_existing_ids.add(str(matched.id))
 
         removed_steps = [
             step for step in existing_steps

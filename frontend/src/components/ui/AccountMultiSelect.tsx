@@ -234,7 +234,7 @@ export default function AccountMultiSelect({
         createPortal(
           <div
             ref={panelRef}
-            className="fixed z-50 flex flex-col overflow-hidden bg-white"
+            className="fixed z-[140] flex flex-col overflow-hidden bg-white"
             style={{
               ...style,
               border: "1.5px solid #287EAD",

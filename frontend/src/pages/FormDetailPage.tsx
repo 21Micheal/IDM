@@ -22,7 +22,7 @@ import { extractApiError } from "@/lib/apiError";
 import { useParams, useNavigate, useLocation, useSearchParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
-import TemplateForm, { hasVisibleEditableSection, hasVisibleRetirementEditSection, requiredFieldLabels } from "@/components/templates/TemplateForm";
+import TemplateForm, { hasVisibleEditableSection, hasVisibleRetirementEditSection, pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
 import BudgetBanner from "@/components/templates/BudgetBanner";
 import JournalPostingCard from "@/components/templates/JournalPostingCard";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
@@ -329,10 +329,14 @@ export default function FormDetailPage() {
           isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
           canEditConditionalSections: canEditConditionalSections(),
         }, formProcessStep());
-        if (missing.length) {
-          setMissingFields(missing);
-          toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
-          throw new Error("Form validation failed");
+        const pastDates = pastDateFieldLabels(formData?.sections ?? [], formValues, {
+          groupNames: user?.group_names ?? [],
+          isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+          canEditConditionalSections: canEditConditionalSections(),
+        }, formProcessStep());
+        if (missing.length || pastDates.length) {
+          setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
+          throw new Error("FORM_REQUIRED_FIELDS");
         }
         setMissingFields([]);
         await updateFormMutation.mutateAsync();
@@ -347,7 +351,16 @@ export default function FormDetailPage() {
       qc.invalidateQueries({ queryKey: ["form-workflow", id] });
       qc.invalidateQueries({ queryKey: ["forms"] });
     },
-    onError: (err) => toast.error(extractApiError(err, "Submission failed")),
+    onError: (err: any) => {
+      if (err?.message === "FORM_REQUIRED_FIELDS") return;
+      const message = extractApiError(err, "Submission failed");
+      if (/required fields missing/i.test(message)) {
+        const fieldList = message.split(/required fields missing:\s*/i)[1];
+        setMissingFields(fieldList ? fieldList.split(/,\s*/) : [message]);
+        return;
+      }
+      toast.error(message);
+    },
   });
 
   const commentMutation = useMutation({
@@ -642,8 +655,13 @@ export default function FormDetailPage() {
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
       canEditConditionalSections: canEditConditionalSections(),
     }, step);
-    if (missing.length) {
-      setMissingFields(missing);
+    const pastDates = pastDateFieldLabels(formData.sections ?? [], formValues, {
+      groupNames: user?.group_names ?? [],
+      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      canEditConditionalSections: canEditConditionalSections(),
+    }, step);
+    if (missing.length || pastDates.length) {
+      setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
       toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
       return;
     }
@@ -767,6 +785,11 @@ export default function FormDetailPage() {
             <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
               <div className="flex items-center gap-2 min-w-0">
                 <p className="text-sm font-bold text-[#1F2933]">Form</p>
+                {doc.reference_number && (
+                  <span className="inline-flex items-center border border-[#B7D7E8] bg-[#EEF6FB] px-2 py-0.5 text-[11px] font-semibold text-[#1E648A]">
+                    {doc.reference_number}
+                  </span>
+                )}
                 <span className="text-xs text-[#5E6870]">
                   {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
                 </span>
@@ -863,17 +886,6 @@ export default function FormDetailPage() {
               </div>
             </div>
             <div className="space-y-4 p-5">
-              {missingFields.length > 0 && formEditing && (
-                <div className="border border-red-200 bg-red-50 px-4 py-3">
-                  <p className="flex items-center gap-2 text-xs font-bold text-red-800">
-                    <AlertTriangle className="h-3.5 w-3.5" />
-                    {missingFields.length} required field{missingFields.length === 1 ? "" : "s"} to complete
-                  </p>
-                  <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-red-800">
-                    {missingFields.map((m) => <li key={m} className="list-inside list-disc">{m}</li>)}
-                  </ul>
-                </div>
-              )}
               {budgetEnabled && formEditing && (() => {
                 const budgetMeta = doc.metadata?.sunsystems?.budget ?? {};
                 const amountField = budgetMeta.amount_field as string | undefined;
@@ -891,6 +903,7 @@ export default function FormDetailPage() {
               <TemplateForm
                 sections={formData.sections ?? []}
                 values={formEditing ? formValues : (formData.values ?? {})}
+                validationIssues={formEditing ? missingFields : []}
                 onChange={(k, v) => { formDirtyRef.current = true; setFormValues((prev) => ({ ...prev, [k]: v })); }}
                 readOnly={!formEditing}
                 documentId={doc.id}

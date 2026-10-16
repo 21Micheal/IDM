@@ -197,7 +197,7 @@ export default function CustomListbox({
             role="listbox"
             tabIndex={-1}
             aria-label={ariaLabel}
-            className={`fixed z-50 overflow-y-auto overflow-x-hidden rounded-md border border-[#C8CDD2] bg-white py-1 shadow-sm ${listClassName}`}
+            className={`fixed z-[140] overflow-y-auto overflow-x-hidden rounded-md border border-[#C8CDD2] bg-white py-1 shadow-sm ${listClassName}`}
             onKeyDown={onKeyDown}
             style={popoverStyle}
           >

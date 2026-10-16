@@ -16,14 +16,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { extractApiError } from "@/lib/apiError";
 import { templatesAPI, documentsAPI } from "@/services/api";
-import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import TemplateForm, { pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { toast } from "@/components/ui/vault-toast";
 import { cn } from "@/lib/utils";
 import {
   Loader2, ArrowLeft, FileText, CheckCircle2,
-  AlertCircle, RefreshCw, Sparkles, ChevronDown, ClipboardList,
+  RefreshCw, Sparkles, ChevronDown, ClipboardList,
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
@@ -263,10 +264,14 @@ export default function NewRequisitionPage() {
         },
         "submit"
       );
-      if (missing.length) {
-        setMissingFields(missing);
-        toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
-        throw new Error("Form validation failed");
+      const pastDates = pastDateFieldLabels(selectedTemplate?.sections ?? [], formValues, {
+        groupNames: user?.group_names ?? [],
+        isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+        canEditConditionalSections: true,
+      }, "submit");
+      if (missing.length || pastDates.length) {
+        setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
+        throw new Error("FORM_REQUIRED_FIELDS");
       }
       setMissingFields([]);
       const { jsonValues, attachments } = collectFormAttachments(formValues);
@@ -293,7 +298,14 @@ export default function NewRequisitionPage() {
       navigate("/list");
     },
     onError: (err: any) => {
-      toast.error(err?.response?.data?.detail || "Failed to submit requisition");
+      if (err?.message === "FORM_REQUIRED_FIELDS") return;
+      const message = extractApiError(err, "Failed to submit requisition");
+      if (/required fields missing/i.test(message)) {
+        const fieldList = message.split(/required fields missing:\s*/i)[1];
+        setMissingFields(fieldList ? fieldList.split(/,\s*/) : [message]);
+        return;
+      }
+      toast.error(message);
     },
   });
 
@@ -445,21 +457,6 @@ export default function NewRequisitionPage() {
       {/* ── Main Document Area ── */}
       <div className="px-6 pt-6 pb-4">
 
-        {/* Missing fields banner */}
-        {missingFields.length > 0 && (
-          <div className="mb-4 border border-amber-300 bg-amber-50 p-4">
-            <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
-              <AlertCircle className="h-4 w-4 text-amber-600" />
-              Please complete the following required fields before submitting:
-            </div>
-            <ul className="mt-2 list-inside list-disc space-y-0.5 text-xs text-amber-800">
-              {missingFields.map((f) => (
-                <li key={f}>{f}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-
         {/* ── Document Card ── */}
         {loadingTemplate ? (
           <div className="flex h-64 items-center justify-center border border-[#C8CDD2] bg-white shadow-sm">
@@ -474,6 +471,7 @@ export default function NewRequisitionPage() {
             <TemplateForm
               sections={selectedTemplate.sections ?? []}
               values={formValues}
+              validationIssues={missingFields}
               onChange={handleFieldChange}
               readOnly={false}
               documentId={undefined}

@@ -59,11 +59,6 @@ interface ApprovalStagesTableProps {
 export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalStagesTableProps) {
   const [shownEarlierPhases, setShownEarlierPhases] = useState<Set<string>>(new Set());
 
-  // Always start collapsed when the document moves to a new phase.
-  useEffect(() => {
-    setShownEarlierPhases(new Set());
-  }, [phase]);
-
   const taskSteps = useMemo(
     () => steps.filter((step) => !step.kind || step.kind === "task"),
     [steps],
@@ -75,8 +70,22 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
     return index;
   };
 
+  // The active task's phase is the best signal when a document's metadata or
+  // caller prop has not caught up with a workflow transition yet.
+  const activeStepPhase = taskSteps.find(
+    (step) => step.status === "in-progress" || step.status === "on-hold",
+  )?.phase;
+  const effectivePhase = activeStepPhase && phaseRank(activeStepPhase) >= 0
+    ? activeStepPhase
+    : phase;
+
+  // Always start collapsed when the document moves to a new phase.
+  useEffect(() => {
+    setShownEarlierPhases(new Set());
+  }, [effectivePhase]);
+
   const currentPhase =
-    phase && phaseRank(phase) >= 0 ? (phase as string) : null;
+    effectivePhase && phaseRank(effectivePhase) >= 0 ? (effectivePhase as string) : null;
   const phased = Boolean(currentPhase && taskSteps.some((step) => step.phase));
 
   const phaseCounts = useMemo(() => {
@@ -151,7 +160,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
         <div className="flex items-center gap-2 min-w-0">
           <p className="text-xs font-bold text-[#1F2933] uppercase tracking-wide truncate">
             {(() => {
-              switch (phase) {
+              switch (effectivePhase) {
                 case "requisition": return "Requisition Approval Stages";
                 case "rfq":         return "RFQ Approval Stages";
                 case "lpo":         return "LPO Approval Stages";

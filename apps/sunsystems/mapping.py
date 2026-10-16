@@ -535,8 +535,6 @@ def build_purchase_order_ssc(
     supplier_code = resolve_value(po.get("supplier_code"), values)
     if not supplier_code:
         supplier_code = resolve_value(po.get("supplier_code_fallback"), values)
-    if not supplier_code:
-        supplier_code = resolve_value(po.get("supplier_code_default"), values)
     second_reference = resolve_value(po.get("second_reference"), values)
     comment = resolve_value(po.get("comment") or po.get("description") or mapping.get("description"), values)
     transaction_type = resolve_value(po.get("transaction_type"), values)

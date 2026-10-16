@@ -16,7 +16,7 @@ import { FileText } from "lucide-react";
 import clsx from "clsx";
 import type { ReactNode } from "react";
 
-type PreviewColumn = { id?: string; key?: string; label?: string; type?: string };
+type PreviewColumn = { id?: string; key?: string; label?: string; type?: string; showTotal?: boolean };
 type PreviewField = {
   id?: string;
   key?: string;
@@ -29,6 +29,7 @@ type PreviewField = {
   options?: string[];
   columns?: PreviewColumn[];
   minRows?: number;
+  totalLabel?: string;
   hidden?: boolean;
   visibleWhen?: VisibleWhen | null;
 };
@@ -134,6 +135,19 @@ function PreviewField({ field, isBuiltTemplate }: { field: PreviewField; isBuilt
               {cols.map((c, i) => <div key={c.id ?? i} className="flex-1 border-r border-slate-100 px-2 py-1.5 text-[10px] text-slate-300 last:border-0">—</div>)}
             </div>
           ))}
+          {cols.some((c) => c.showTotal && (c.type === "number" || c.type === "currency")) && (
+            <div className="flex border-t border-slate-300 bg-slate-50 text-[10px] font-semibold text-slate-600">
+              {cols.map((c, i) => (
+                <div key={c.id ?? i} className="flex-1 border-r border-slate-200 px-2 py-1.5 last:border-0">
+                  {c.showTotal && (c.type === "number" || c.type === "currency")
+                    ? <span>{i === cols.findIndex((column) => column.showTotal && (column.type === "number" || column.type === "currency")) && <span className="mr-1 uppercase text-slate-400">{field.totalLabel || "Total"}</span>}—</span>
+                    : i === cols.findIndex((column) => column.showTotal && (column.type === "number" || column.type === "currency")) - 1
+                      ? (field.totalLabel || "Total")
+                      : ""}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     );

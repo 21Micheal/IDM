@@ -26,7 +26,7 @@ import { useEffect, useState } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, templatesAPI } from "@/services/api";
-import { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import { pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
 import { useAuthStore } from "@/store/authStore";
 import TemplateForm from "@/components/templates/TemplateForm";
 import BudgetBanner from "@/components/templates/BudgetBanner";
@@ -123,7 +123,8 @@ export default function FormFillModal({
     onError: (err: any) => {
       setUploadingFiles(false);
       setSubmitting(false);
-      toast.error(extractApiError(err, "Could not create the form."));
+      const message = extractApiError(err, "Could not create the form.");
+      if (!/required fields missing/i.test(message)) toast.error(message);
     },
   });
 
@@ -164,9 +165,12 @@ export default function FormFillModal({
         isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
       },
     );
-    if (missing.length) {
-      setMissingFields(missing);
-      toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
+    const pastDates = pastDateFieldLabels(template.sections ?? [], jsonValues, {
+      groupNames: currentUser?.group_names ?? [],
+      isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
+    });
+    if (missing.length || pastDates.length) {
+      setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
       return;
     }
     setMissingFields([]);
@@ -190,8 +194,15 @@ export default function FormFillModal({
         );
         onClose();
       }
-    } catch {
-      // create itself failed — already toasted
+    } catch (err) {
+      // The server performs the authoritative required-field check too. If it
+      // finds a field the client could not classify (for example a dynamic
+      // section), surface its field list in the form as well as in the toast.
+      const message = extractApiError(err, "");
+      if (/required fields missing/i.test(message)) {
+        const fieldList = message.split(/required fields missing:\s*/i)[1];
+        setMissingFields(fieldList ? fieldList.split(/,\s*/) : [message]);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -270,16 +281,6 @@ export default function FormFillModal({
           </div>
         ) : (
           <div className="space-y-4">
-            {missingFields.length > 0 && (
-              <div className="border border-red-200 bg-red-50 px-4 py-3">
-                <p className="text-xs font-bold text-red-800">
-                  {missingFields.length} required field{missingFields.length === 1 ? "" : "s"} to complete
-                </p>
-                <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-red-800">
-                  {missingFields.map((m) => <li key={m} className="list-inside list-disc">{m}</li>)}
-                </ul>
-              </div>
-            )}
             {Boolean((template.sunsystems?.budget as any)?.enabled) && (() => {
               const budgetMeta = (template.sunsystems?.budget ?? {}) as Record<string, any>;
               const amountField = budgetMeta.amount_field as string | undefined;
@@ -296,6 +297,7 @@ export default function FormFillModal({
             <TemplateForm
               sections={template.sections ?? []}
               values={values}
+              validationIssues={missingFields}
               onChange={(key, val) => setValues((prev) => ({ ...prev, [key]: val }))}
               documentStatus="draft"
             />
