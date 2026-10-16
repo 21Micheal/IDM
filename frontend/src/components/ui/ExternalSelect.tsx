@@ -108,6 +108,9 @@ interface Props {
   /** Show only the code in the box and put the record's (long) name under it.
    * Ignored for multi-select, where the count is more useful. */
   showSelectedName?: boolean;
+  /** Show only the code in the trigger (useful when the description is stored
+   * in a separate field or table column). */
+  showCodeOnly?: boolean;
   /** Called with the full record whenever a value is picked (not cleared).
    * Used to auto-fill sibling fields, e.g. an item's BaseItemUnit. */
   onSelectRecord?: (record: ExternalRecord) => void;
@@ -124,6 +127,7 @@ export default function ExternalSelect({
   placeholder,
   className = "",
   showSelectedName = false,
+  showCodeOnly = false,
   onSelectRecord,
 }: Props) {
   const def = externalSourceDef(source);
@@ -217,7 +221,7 @@ export default function ExternalSelect({
   const isSelected = (code: string) => valueArray.includes(code);
   const labelFor = (code: string) => {
     const rec = byCode.get(code);
-    return rec?.description ? `${code} — ${rec.description}` : code;
+    return !showCodeOnly && rec?.description ? `${code} — ${rec.description}` : code;
   };
 
   const toggle = (code: string) => {

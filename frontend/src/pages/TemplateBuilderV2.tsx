@@ -79,7 +79,7 @@ import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
 
 export type FieldType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
-  | "select" | "radio" | "boolean" | "checkbox" | "email" | "phone"
+  | "select" | "radio" | "boolean" | "checkbox" | "yes_no" | "email" | "phone"
   | "file" | "image" | "table" | "divider" | "heading" | "signature"
   | "reference" | "user" | "multi_select"
   | "url" | "percentage" | "rating" | "auto_number"
@@ -112,7 +112,7 @@ export interface CalcConfig {
 export type TableColumnType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
   | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "percentage" | "rating" | "url" | "multi_select" | "image" | "external" | "sunsystems_account";
+  | "percentage" | "rating" | "url" | "multi_select" | "image" | "external" | "sunsystems_account" | "budget";
 
 export interface TableColumn {
   id: string;
@@ -191,12 +191,17 @@ export interface FieldFinanceBinding {
   // Budget banner field references (for the new budget field type)
   budgetAmountField?: string;
   monitoredAmountField?: string;
+  /** Resolve a budget banner's account code from a sibling field/column. */
+  accountField?: string;
   /** Marks qualifying table rows for the requisition-stage Imprest advance. */
   imprestRequest?: ImprestRequestConfig;
 }
 export interface ColumnFinanceBinding {
   role?: string;            // see FINANCE_COLUMN_ROLES
   account?: string;         // for role "account_code": a constant fallback account.
+  accountField?: string;    // for a budget banner: resolve account code from a sibling field/column.
+  budgetAmountField?: string;
+  monitoredAmountField?: string;
   accountSource?: AccountCodeSource;
   counterAccount?: string;
   counterAccountSource?: AccountCodeSource;
@@ -492,6 +497,11 @@ export interface ExternalConfig {
   fillColumn?: string;
   /** Items autofill: copy the picked item's BaseItemUnit into this sibling form field. */
   fillField?: string;
+  /** Analysis-code autofill: copy the picked code's description into a sibling
+   * table column (within the same row). */
+  fillDescriptionColumn?: string;
+  /** Analysis-code autofill: copy the picked code's description into a sibling form field. */
+  fillDescriptionField?: string;
 }
 
 export interface TemplateField {
@@ -761,6 +771,7 @@ const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults
   multi_select: { label: "Multi-select", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
   radio: { label: "Radio group", group: "choice", defaults: { colSpan: 6, options: ["Yes", "No"] } },
   boolean: { label: "Checkbox", group: "choice", defaults: { colSpan: 6 } },
+  yes_no: { label: "Yes/No Toggle", group: "choice", defaults: { colSpan: 4 }, hint: "A user-editable yes/no switch" },
   // Legacy alias of `boolean`; kept for stored templates, hidden from the palette.
   checkbox: { label: "Checkbox", group: "choice", defaults: { colSpan: 6 } },
   reference: { label: "Reference", group: "reference", defaults: { colSpan: 6, referenceSource: "documents" }, hint: "Links to a record — or to a table in this form or another form" },
@@ -789,7 +800,7 @@ const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults
 const ICONS: Record<FieldType, React.ElementType> = {
   text: Type, textarea: AlignLeft, number: Hash, currency: Hash,
   date: Calendar, datetime: Calendar, time: Clock, select: List,
-  multi_select: List, radio: CircleDot, boolean: CheckSquare, checkbox: CheckSquare,
+  multi_select: List, radio: CircleDot, boolean: CheckSquare, checkbox: CheckSquare, yes_no: ToggleLeft,
   signature: Pencil, email: Mail, phone: Phone, file: Paperclip,
   image: ImageIcon, table: Table2, heading: Heading, divider: Minus,
   reference: Link2, user: UserIcon,
@@ -1429,7 +1440,7 @@ function sampleScalar(f: { type: FieldType; label: string; options?: string[]; d
     case "datetime": return new Date().toISOString().slice(0, 16);
     case "time": return "09:00";
     case "select": case "radio": case "multi_select": return f.options?.[0] ?? "Sample";
-    case "boolean": case "checkbox": return "true";
+    case "boolean": case "checkbox": case "yes_no": return "true";
     case "email": return "sample@example.com";
     default: return f.label || "Sample";
   }
@@ -2116,6 +2127,8 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
           {field.label}
         </label>
       );
+    case "yes_no":
+      return <div className="flex h-8 items-center"><span className="relative inline-flex h-5 w-9 rounded-full bg-[#287EAD] p-0.5"><span className="ml-auto h-4 w-4 rounded-full bg-white" /></span><span className="ml-2 text-xs text-zinc-600">Yes</span></div>;
     case "radio":
       return (
         <div className="flex flex-col gap-1">
@@ -2221,9 +2234,9 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                   const ColIcon = ({
                     text: Type, textarea: AlignLeft, number: Hash, currency: Hash,
                     date: Calendar, datetime: Calendar, time: Clock, select: List,
-                    boolean: CheckSquare, email: Mail, phone: Phone, reference: Link2,
+                    boolean: CheckSquare, radio: CircleDot, rating: Star, email: Mail, phone: Phone, reference: Link2,
                     user: UserIcon, file: Paperclip, image: ImageIcon, multi_select: List,
-                    url: UrlIcon, percentage: Percent, external: Package, sunsystems_account: Building2,
+                    url: UrlIcon, percentage: Percent, external: Package, sunsystems_account: Building2, budget: Wallet,
                   } as Record<TableColumnType, React.ElementType>)[(c.type ?? "text") as TableColumnType] ?? Type;
                   return (
                     <div
@@ -2739,6 +2752,7 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
   { value: "multi_select", label: "Multi-select" },
   { value: "external", label: "External" },
   { value: "sunsystems_account", label: "SunSystems supplier" },
+  { value: "budget", label: "Budget Banner" },
 ];
 
 /* ── Formula reference ────────────────────────────────────────────────────
@@ -3397,6 +3411,22 @@ function ColumnConfigModal({
                       </Row>
                     );
                   })()}
+                  {(draft.external?.source ?? "items") === "analysis_codes" && (() => {
+                    const targets = siblingColumns.filter((c) => c.id !== draft.id && c.key);
+                    if (targets.length === 0) return null;
+                    return (
+                      <Row label="Auto-fill description into" hint="Store only the selected analysis code here, and copy its description into this column in the same row.">
+                        <CustomListbox
+                          value={draft.external?.fillDescriptionColumn ?? ""}
+                          onChange={(val) => set({ external: { ...(draft.external ?? { source: "analysis_codes" }), fillDescriptionColumn: val || undefined } })}
+                          options={[{ value: "", label: "— none —" }, ...targets.map((c) => ({ value: c.key as string, label: c.label || c.key || "" }))]}
+                          className={iCls}
+                          buttonClassName="w-full"
+                          ariaLabel="Auto-fill analysis code description target column"
+                        />
+                      </Row>
+                    );
+                  })()}
                 </>
               )}
               {isNumeric && (
@@ -3424,6 +3454,44 @@ function ColumnConfigModal({
                   />
                 </Row>
               )}
+              {draft.type === "budget" && (() => {
+                const numericSources = [
+                  ...formFields.filter((f) => f.type === "number" || f.type === "currency" || CALCULATED_TYPES.has(f.type))
+                    .map((f) => ({ value: f.key, label: `${f.label || f.key} (form)` })),
+                  ...siblingColumns.filter((c) => c.id !== draft.id && c.key && (c.type === "number" || c.type === "currency"))
+                    .map((c) => ({ value: c.key as string, label: `${c.label || c.key} (this row)` })),
+                ];
+                const accountSources = [
+                  ...formFields.filter((f) => f.key)
+                    .map((f) => ({ value: f.key, label: `${f.label || f.key} (form)` })),
+                  ...siblingColumns.filter((c) => c.id !== draft.id && c.key)
+                    .map((c) => ({ value: c.key as string, label: `${c.label || c.key} (this row)` })),
+                ];
+                return <>
+                  <Row label="Budget amount source">
+                    <CustomListbox value={draft.sunsystems?.budgetAmountField ?? ""}
+                      onChange={(val) => set({ sunsystems: { ...(draft.sunsystems ?? {}), budgetAmountField: val || undefined } })}
+                      options={[{ value: "", label: "— use default value —" }, ...numericSources]}
+                      className={iCls} buttonClassName="w-full" ariaLabel="Budget amount source" />
+                  </Row>
+                  <Row label="Amount to monitor">
+                    <CustomListbox value={draft.sunsystems?.monitoredAmountField ?? ""}
+                      onChange={(val) => set({ sunsystems: { ...(draft.sunsystems ?? {}), monitoredAmountField: val || undefined } })}
+                      options={[{ value: "", label: "— choose a field or column —" }, ...numericSources]}
+                      className={iCls} buttonClassName="w-full" ariaLabel="Budget amount to monitor" />
+                  </Row>
+                  <Row label="Account code source">
+                    <CustomListbox value={draft.sunsystems?.accountField ?? ""}
+                      onChange={(val) => set({ sunsystems: { ...(draft.sunsystems ?? {}), accountField: val || undefined } })}
+                      options={[{ value: "", label: "— use account code below —" }, ...accountSources]}
+                      className={iCls} buttonClassName="w-full" ariaLabel="Budget account code source" />
+                  </Row>
+                  <Row label="Account code" hint="Fallback/static account code if no source is selected.">
+                    <input className={cn(iCls, "font-mono")} value={draft.sunsystems?.account ?? ""}
+                      onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), account: e.target.value } })} placeholder="e.g. 37400" />
+                  </Row>
+                </>;
+              })()}
               <Row label="Mandatory">
                 <ToggleYesNo value={!!draft.required} onChange={(v) => set({ required: v })} />
               </Row>
@@ -4953,6 +5021,13 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                 }} />
             </InspectorRow>
           )}
+          {field.type === "heading" && (
+            <InspectorRow label="Heading text">
+              <input className={inputCls} value={field.label}
+                onChange={(e) => onUpdate({ label: e.target.value })}
+                placeholder="Enter heading text" />
+            </InspectorRow>
+          )}
           <InspectorRow label="Field Key" hint={autoKey ? "Following the label automatically — edit directly to take over." : "Used as the variable name in generated documents"}>
             <input
               className={cn(inputCls, keyDuplicate && "border-red-500 focus:border-red-500 focus:ring-red-500/20", "font-mono")}
@@ -5072,6 +5147,22 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                       </InspectorRow>
                     );
                   })()}
+                  {field.external?.source === "analysis_codes" && field.external?.mode === "single" && (() => {
+                    const targets = allFields.filter((f) => f.id !== field.id && f.key && f.type !== "button");
+                    if (targets.length === 0) return null;
+                    return (
+                      <InspectorRow label="Auto-fill description into" hint="Store only the selected analysis code here, and copy its description into this field.">
+                        <CustomListbox
+                          value={field.external?.fillDescriptionField ?? ""}
+                          onChange={(val) => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), fillDescriptionField: val || undefined } })}
+                          options={[{ value: "", label: "— none —" }, ...targets.map((f) => ({ value: f.key, label: f.label || f.key }))]}
+                          className={inputCls}
+                          buttonClassName="w-full"
+                          ariaLabel="Auto-fill analysis code description target"
+                        />
+                      </InspectorRow>
+                    );
+                  })()}
                 </>
               )}
             </>
@@ -5158,6 +5249,15 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                   ...tableColumns.filter(c => c.key && (c.type === "number" || c.type === "currency"))
                     .map(c => ({ key: c.key, label: c.label || c.key })),
                 ];
+                const allAccountSources = [
+                  ...allFields.filter(f => f.key && f.type !== "table" && f.type !== "button")
+                    .map(f => ({ key: f.key, label: `${f.label || f.key} (form)` })),
+                  ...allFields.filter(f => f.type === "table" && f.key && f.columns)
+                    .flatMap(f => f.columns!.filter(c => c.key).map(c => ({
+                      key: `${f.key}.${c.key}`,
+                      label: `${f.label || f.key}: ${c.label || c.key}`,
+                    }))),
+                ];
 
                 return (
                   <>
@@ -5190,7 +5290,17 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                         ariaLabel="Amount field to monitor"
                       />
                     </InspectorRow>
-                    <InspectorRow label="Account code" hint="The SunSystems account code for this budget">
+                    <InspectorRow label="Account code source" hint="Use a form field or table column; otherwise use the static account below.">
+                      <CustomListbox
+                        value={field.sunsystems?.accountField ?? ""}
+                        onChange={(val) => onUpdate({ sunsystems: { ...(field.sunsystems ?? {}), accountField: val || undefined } })}
+                        options={[{ value: "", label: "— use static account below —" }, ...allAccountSources.map(f => ({ value: f.key, label: f.label }))]}
+                        className={inputCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Account code source"
+                      />
+                    </InspectorRow>
+                    <InspectorRow label="Static account code" hint="Fallback account code if no source is selected or its value is blank.">
                       <input className={cn(inputCls, "font-mono")} value={field.sunsystems?.account ?? ""} onChange={(e) => onUpdate({ sunsystems: { ...(field.sunsystems ?? {}), account: e.target.value } })} placeholder="e.g. 37400" />
                     </InspectorRow>
                   </>
@@ -5487,6 +5597,8 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
       );
     case "boolean":
       return <input type="checkbox" checked={value === "true"} disabled={ro} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-[#287EAD]" />;
+    case "budget":
+      return <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-800">Budget check</div>;
     case "textarea":
       return <textarea rows={1} value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={cn(base, "resize-none")} />;
     case "currency": {
@@ -5683,6 +5795,13 @@ function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, 
     sv = v == null ? "" : String(v);
   }
   const lower = sv.trim().toLowerCase();
+  const booleanAlias = (value: string): string | null => {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "yes") return "yes";
+    if (normalized === "false" || normalized === "no") return "no";
+    return null;
+  };
+  const actualBool = booleanAlias(sv), expectedBool = booleanAlias(c.value ?? "");
   const num = parseFloat(sv);
   /* Dates compare correctly as ISO strings, so fall back to a string compare
    * whenever either side isn't numeric. */
@@ -5701,8 +5820,8 @@ function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, 
   const truthyText = new Set(["true", "yes", "1", "on", "checked"]);
 
   switch (c.operator) {
-    case "equals": return lower === targetLower;
-    case "not_equals": return lower !== targetLower;
+    case "equals": return actualBool !== null && expectedBool !== null ? actualBool === expectedBool : lower === targetLower;
+    case "not_equals": return actualBool !== null && expectedBool !== null ? actualBool !== expectedBool : lower !== targetLower;
     case "is_empty": return sv.trim() === "";
     case "is_not_empty": return sv.trim() !== "";
     case "greater_than": return sv.trim() !== "" && compare(target) > 0;
@@ -6286,7 +6405,10 @@ function coerceNumeric(fieldType: string | undefined, raw: unknown): number {
     const h = parseInt(hStr, 10), m = parseInt(mStr, 10);
     return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
   }
-  if (fieldType === "boolean" || fieldType === "checkbox") return raw ? 1 : 0;
+  if (fieldType === "boolean" || fieldType === "checkbox" || fieldType === "yes_no") {
+    if (typeof raw === "string") return ["yes", "true", "1", "on", "checked"].includes(raw.trim().toLowerCase()) ? 1 : 0;
+    return raw ? 1 : 0;
+  }
   const n = typeof raw === "number" ? raw : parseFloat(String(raw));
   return Number.isFinite(n) ? n : 0;
 }
@@ -6776,6 +6898,9 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
           {field.required && <span className="text-red-500">*</span>}
         </label>
       );
+    case "yes_no":
+      control = <label className="inline-flex cursor-pointer items-center gap-2"><input type="checkbox" {...reg} disabled={dis} className="peer sr-only" /><span className="relative h-6 w-11 rounded-full bg-slate-300 transition peer-checked:bg-[#287EAD] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[#287EAD] after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-transform peer-checked:after:translate-x-5" /><span className="text-sm text-slate-600">Yes / No</span></label>;
+      break;
     case "currency": {
       const linked = field.currencyFromField
         ? allFields.find((f) => f.key === field.currencyFromField)
@@ -8026,6 +8151,11 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
   };
   const renameCalc = (calc?: CalcConfig | null): CalcConfig | null | undefined =>
     calc?.expression ? { ...calc, expression: calc.expression.replace(wordRe, newKey) } : calc;
+  const renameReference = (key?: string): string | undefined => {
+    if (key === oldKey) return newKey;
+    if (key?.endsWith(`.${oldKey}`)) return `${key.slice(0, -(oldKey.length))}${newKey}`;
+    return key;
+  };
 
   const renameColumn = (c: TableColumn): TableColumn => ({
     ...c,
@@ -8036,6 +8166,9 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
     sunsystems: c.sunsystems
       ? {
         ...c.sunsystems,
+        accountField: renameReference(c.sunsystems.accountField),
+        budgetAmountField: renameReference(c.sunsystems.budgetAmountField),
+        monitoredAmountField: renameReference(c.sunsystems.monitoredAmountField),
         ...(c.sunsystems.retirement?.issuedAmountField === oldKey
           ? { retirement: { ...c.sunsystems.retirement, issuedAmountField: newKey } }
           : {}),
@@ -8048,11 +8181,13 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
     editableWhen: renameGroup(f.editableWhen),
     calc: renameCalc(f.calc),
     currencyFromField: f.currencyFromField === oldKey ? newKey : f.currencyFromField,
-    sunsystems: f.sunsystems && (f.sunsystems.budgetAmountField === oldKey || f.sunsystems.monitoredAmountField === oldKey)
+    sunsystems: f.sunsystems && [f.sunsystems.budgetAmountField, f.sunsystems.monitoredAmountField, f.sunsystems.accountField]
+      .some((key) => key === oldKey || key?.endsWith(`.${oldKey}`))
       ? {
         ...f.sunsystems,
-        budgetAmountField: f.sunsystems.budgetAmountField === oldKey ? newKey : f.sunsystems.budgetAmountField,
-        monitoredAmountField: f.sunsystems.monitoredAmountField === oldKey ? newKey : f.sunsystems.monitoredAmountField,
+        budgetAmountField: renameReference(f.sunsystems.budgetAmountField),
+        monitoredAmountField: renameReference(f.sunsystems.monitoredAmountField),
+        accountField: renameReference(f.sunsystems.accountField),
       }
       : f.sunsystems,
     columns: f.columns ? f.columns.map(renameColumn) : f.columns,

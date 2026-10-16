@@ -4,6 +4,15 @@ import path from "path";
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    host: "0.0.0.0",
+    proxy: {
+      "/api": { target: "http://backend:8000", changeOrigin: true },
+      "/ws": { target: "ws://backend:8000", changeOrigin: true, ws: true },
+      "/media": { target: "http://backend:8000", changeOrigin: true },
+      "/static": { target: "http://backend:8000", changeOrigin: true },
+    },
+  },
   resolve: {
     alias: {
       "@/": path.resolve(__dirname, "./src") + "/",

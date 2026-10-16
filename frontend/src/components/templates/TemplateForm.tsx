@@ -50,7 +50,7 @@ import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOp
 type ColType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
   | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "url" | "percentage" | "rating" | "multi_select" | "image" | "external" | "sunsystems_account";
+  | "url" | "percentage" | "rating" | "multi_select" | "image" | "external" | "sunsystems_account" | "budget";
 
 type Column = {
   id?: string; key?: string; label?: string; required?: boolean;
@@ -64,7 +64,8 @@ type Column = {
   visibleWhen?: VisibleWhen | null;
   editableWhen?: VisibleWhen | null;
   calc?: { expression?: string };
-  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string } | null;
+  sunsystems?: { budgetAmountField?: string; monitoredAmountField?: string; account?: string; accountField?: string; [k: string]: unknown } | null;
+  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string; fillDescriptionColumn?: string; fillDescriptionField?: string } | null;
 };
 
 type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
@@ -126,11 +127,12 @@ type Field = {
   /* Table reference (type === "reference" && referenceSource === "table"). */
   tableRef?: AnyTableRef | null;
   /* External (SunSystems-backed) lookup — mirrors the builder's ExternalConfig. */
-  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string } | null;
+  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string; fillDescriptionColumn?: string; fillDescriptionField?: string } | null;
   sunsystems?: {
     budgetAmountField?: string;
     monitoredAmountField?: string;
     account?: string;
+    accountField?: string;
     [k: string]: unknown;
   } | null;
 };
@@ -757,15 +759,33 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }:
   );
 }
 
-function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentId, attachmentKey, row }: {
+function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentId, attachmentKey, row, allValues, allFields }: {
   col: Column; value: unknown; onChange: (v: unknown) => void; readOnly?: boolean;
   onChangeCell?: (key: string, value: unknown) => void;
   documentId?: string; attachmentKey?: string; row?: Record<string, unknown>;
+  allValues: TemplateFormValues; allFields: Field[];
 }) {
   const base = "w-full bg-transparent py-0.5 text-sm outline-none text-foreground placeholder:text-muted-foreground/50";
   if (col.hidden) return null;
   const type = (col.type ?? "text") as ColType;
   const dis = readOnly || col.readonly;
+
+  if (type === "budget") {
+    const ss = col.sunsystems ?? {};
+    const budget = resolveNumericSource(ss.budgetAmountField, allValues, allFields, row)
+      ?? parseAmount(col.defaultValue);
+    const requested = resolveNumericSource(ss.monitoredAmountField, allValues, allFields, row) ?? 0;
+    const currency = col.currencySymbol?.trim() ?? "";
+    const accountCode = resolveTextSource(ss.accountField, allValues, allFields, row) ?? ss.account;
+    const budgetNum = budget ?? 0;
+    const formatted = budgetNum.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    return (
+      <div className="space-y-2">
+        <div className="text-xs text-muted-foreground">Budget: <strong className="text-foreground">{currency ? `${currency} ` : ""}{formatted}</strong></div>
+        <BudgetBanner amount={requested} budget={budget} currency={currency} accountCode={accountCode as string | undefined} />
+      </div>
+    );
+  }
 
   // Calculated column — display computed result (read-only).
   // Show currency symbol when applicable; format numbers nicely.
@@ -940,11 +960,15 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           dimension={col.external?.dimension}
           value={sval}
           onChange={onChange}
+          showCodeOnly={!!col.external?.fillDescriptionColumn}
           onSelectRecord={(rec) => {
             // Items: mirror the picked item's BaseItemUnit into a sibling cell.
             const unit = rec.data?.unit;
             if (col.external?.fillColumn && unit !== undefined) {
               onChangeCell?.(col.external.fillColumn, unit);
+            }
+            if (col.external?.fillDescriptionColumn) {
+              onChangeCell?.(col.external.fillDescriptionColumn, rec.description ?? "");
             }
           }}
           multi={false}
@@ -990,7 +1014,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
 
   const emptyRow = (): Record<string, unknown> => {
     const r: Record<string, unknown> = {};
-    allCols.forEach((c) => { if (c.defaultValue && c.key) r[c.key] = c.defaultValue; });
+    allCols.forEach((c) => { if (c.defaultValue && c.key && c.type !== "budget") r[c.key] = c.defaultValue; });
     return r;
   };
 
@@ -1175,6 +1199,8 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                               col={col}
                               value={row[key] ?? ""}
                               row={row}
+                              allValues={allValues}
+                              allFields={allFields}
                               onChange={(v) => update(ri, key, v)}
                               onChangeCell={(cellKey, cellVal) => update(ri, cellKey, cellVal)}
                               readOnly={cellLocked}
@@ -1589,8 +1615,10 @@ function resolveNumericSource(
   key: string | undefined,
   values: TemplateFormValues,
   allFields: Field[],
+  rowScope?: Record<string, unknown>,
 ): number | null {
   if (!key) return null;
+  if (rowScope && Object.prototype.hasOwnProperty.call(rowScope, key)) return parseAmount(rowScope[key]);
   if (allFields.some((f) => f.key === key && f.type !== "table")) return parseAmount(values[key]);
 
   const [maybeTable, maybeCol] = key.includes(".") ? key.split(".") : [undefined, undefined];
@@ -1602,6 +1630,34 @@ function resolveNumericSource(
   if (!table?.key) return null;
   const rows = Array.isArray(values[table.key]) ? (values[table.key] as Record<string, unknown>[]) : [];
   return rows.reduce((sum, r) => sum + (parseAmount(r?.[colKey]) ?? 0), 0);
+}
+
+/** Resolve a configured account code from a form field or table column. For a
+ * row-level banner, sibling cells take priority; for a form-level banner that
+ * points at a table column, use the first populated value. */
+function resolveTextSource(
+  key: string | undefined,
+  values: TemplateFormValues,
+  allFields: Field[],
+  rowScope?: Record<string, unknown>,
+): string | undefined {
+  if (!key) return undefined;
+  if (rowScope && Object.prototype.hasOwnProperty.call(rowScope, key)) {
+    const value = rowScope[key];
+    return value == null || value === "" ? undefined : String(value);
+  }
+  const field = allFields.find((f) => f.key === key && f.type !== "table");
+  if (field) {
+    const value = values[key];
+    return value == null || value === "" ? undefined : String(value);
+  }
+  const [maybeTable, maybeCol] = key.includes(".") ? key.split(".") : [undefined, key];
+  const table = allFields.find((f) => f.type === "table" && f.key && (!maybeTable || f.key === maybeTable)
+    && (f.columns ?? []).some((c) => c.key === maybeCol));
+  if (!table?.key) return undefined;
+  const rows = Array.isArray(values[table.key]) ? values[table.key] as Record<string, unknown>[] : [];
+  const value = rows.map((r) => r?.[maybeCol]).find((v) => v != null && String(v).trim() !== "");
+  return value == null ? undefined : String(value);
 }
 
 /** "Pick a row" linked table: choose one row from a table in THIS form,
@@ -1918,6 +1974,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       parseAmount(field.defaultValue);
     const requested = resolveNumericSource(ss.monitoredAmountField, allValues, allFields) ?? 0;
     const budgetNum = budget ?? 0;
+    const accountCode = resolveTextSource(ss.accountField, allValues, allFields) ?? ss.account;
     const currency = field.currencySymbol?.trim() ?? "";
     const formattedAmount = budgetNum.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
     const formattedBudget = currency ? `${currency} ${formattedAmount}` : formattedAmount;
@@ -1934,7 +1991,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
               amount={requested}
               budget={budget}
               currency={currency}
-              accountCode={ss.account as string | undefined}
+              accountCode={accountCode as string | undefined}
             />
           )}
         </div>
@@ -1999,6 +2056,23 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
             rows={4} className={`${inp} resize-y`}
             onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }} />
         )} />
+      );
+      break;
+
+    case "yes_no":
+      control_el = (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => {
+          const on = f.value === true || String(f.value).toLowerCase() === "true" || f.value === "1";
+          return (
+            <label className={`inline-flex items-center gap-2 ${dis ? "cursor-default" : "cursor-pointer"}`}>
+              <input type="checkbox" role="switch" checked={on} disabled={dis}
+                onChange={(e) => { const value = e.target.checked ? "true" : "false"; f.onChange(value); onChangeCb(key, value); }}
+                className="peer sr-only" />
+              <span className="relative h-6 w-11 rounded-full bg-slate-300 transition-colors peer-checked:bg-[#287EAD] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[#287EAD] after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-transform peer-checked:after:translate-x-5" />
+              <span className="text-sm text-slate-600">{on ? "Yes" : "No"}</span>
+            </label>
+          );
+        }} />
       );
       break;
 
@@ -2220,16 +2294,20 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
             dimension={field.external?.dimension}
             value={(f.value as string | string[]) ?? (field.external?.multi ? [] : "")}
             onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+            showCodeOnly={!!field.external?.fillDescriptionField}
             onSelectRecord={(rec) => {
               // Items: mirror the picked item's BaseItemUnit into a sibling field.
               const unit = rec.data?.unit;
               if (field.external?.fillField && unit !== undefined) {
                 onChangeCb(field.external.fillField, unit);
               }
+              if (field.external?.fillDescriptionField) {
+                onChangeCb(field.external.fillDescriptionField, rec.description ?? "");
+              }
             }}
             multi={field.external?.multi ?? false}
             disabled={dis}
-            showSelectedName={!(field.external?.multi ?? false)}
+            showSelectedName={!(field.external?.multi ?? false) && !field.external?.fillDescriptionField}
           />
         )} />
       );

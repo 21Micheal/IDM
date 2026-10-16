@@ -6,8 +6,9 @@
  * so a rule behaves identically in the builder Preview, on the live form and
  * on the server.
  *
- * equals / not_equals keep their original EXACT comparison. Every other
- * operator compares trimmed and case-insensitively; numbers compare
+ * equals / not_equals remain exact except that the Yes/No toggle's stored
+ * true/false values are equivalent to the Yes/No labels shown in rule editors.
+ * Every other operator compares trimmed and case-insensitively; numbers compare
  * numerically, everything else (incl. ISO dates) by code point.
  */
 
@@ -49,9 +50,16 @@ export function matchOperator(operator: string | undefined, sv: string, expected
   const lower = sv.trim().toLowerCase();
   const tl = target.toLowerCase();
   const nonblank = sv.trim() !== "";
+  const booleanAlias = (value: string): string | null => {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "yes") return "yes";
+    if (normalized === "false" || normalized === "no") return "no";
+    return null;
+  };
+  const actualBool = booleanAlias(sv), expectedBool = booleanAlias(exp);
   switch (operator) {
-    case "equals": return sv === exp;
-    case "not_equals": return sv !== exp;
+    case "equals": return actualBool !== null && expectedBool !== null ? actualBool === expectedBool : sv === exp;
+    case "not_equals": return actualBool !== null && expectedBool !== null ? actualBool !== expectedBool : sv !== exp;
     case "is_empty": return !nonblank;
     case "is_not_empty": return nonblank;
     case "greater_than": return nonblank && ruleCompare(sv, target) > 0;

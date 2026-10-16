@@ -166,10 +166,18 @@ def match_operator(operator, sv: str, expected: str) -> bool:
     lower = sv.strip().lower()
     tl = target.lower()
     nonblank = sv.strip() != ""
+    def boolean_alias(value):
+        normalized = (value or "").strip().lower()
+        if normalized in ("true", "yes"):
+            return "yes"
+        if normalized in ("false", "no"):
+            return "no"
+        return None
+    actual_bool, expected_bool = boolean_alias(sv), boolean_alias(expected)
     if operator == "equals":
-        return sv == (expected or "")
+        return actual_bool == expected_bool if actual_bool is not None and expected_bool is not None else sv == (expected or "")
     if operator == "not_equals":
-        return sv != (expected or "")
+        return actual_bool != expected_bool if actual_bool is not None and expected_bool is not None else sv != (expected or "")
     if operator == "is_empty":
         return not nonblank
     if operator == "is_not_empty":
@@ -1022,7 +1030,7 @@ def _coerce_numeric(field_type, raw) -> float:
         h = _parse_int(parts[0])
         m = _parse_int(parts[1]) if len(parts) > 1 else None
         return float((h or 0) * 60 + (m or 0))
-    if field_type in ("boolean", "checkbox", "calc_boolean"):
+    if field_type in ("boolean", "checkbox", "yes_no", "calc_boolean"):
         if isinstance(raw, str):
             return 1.0 if raw.strip().lower() in ("yes", "true", "1") else 0.0
         return 1.0 if raw else 0.0

@@ -14,7 +14,7 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "idm_user", "-p${DB_PASSWORD:-idm_password}"]
       interval: 10s
@@ -28,7 +28,7 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_password}", "ping"]
       interval: 10s
@@ -45,7 +45,7 @@ services:
     volumes:
       - es_data:/usr/share/elasticsearch/data
     ports:
-      - "9200:9200"
+      - "127.0.0.1:9200:9200"
 
   backend:
     build:
@@ -63,6 +63,8 @@ services:
       - MEDIA_ROOT=/app/media
       - NGROK_URL=${NGROK_URL}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1,backend,frontend,nginx},.ngrok-free.dev
+      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS:-http://localhost:3000}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
       - TZ=Africa/Nairobi
       # ── SunSystems Connect ──────────────────────────────────────────────────
       - SUNSYSTEMS_BASE_URL=${SUNSYSTEMS_BASE_URL:-}
@@ -79,7 +81,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -101,6 +103,7 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - MEDIA_ROOT=/app/media
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
       - DJANGO_SETTINGS_MODULE=IDM.settings
       - TZ=Africa/Nairobi
       - DEPLOYMENT_MODE=procurement
@@ -154,7 +157,7 @@ services:
       - ./frontend:/app
       - /app/node_modules
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
 
   nginx:
     image: nginx:alpine
