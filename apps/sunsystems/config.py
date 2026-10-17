@@ -124,6 +124,7 @@ def get_purchase_order_postings(document) -> list[dict]:
 
     mapping_config = deepcopy(config)
     _apply_analysis_panel_mapping(mapping_config, document)
+    _apply_po_line_amount_columns(mapping_config, document)
     # Separate PO profiles do not carry the builder's shared UI defaults.
     # Preserve them here so line-level blanks can fall back to the configured
     # order quantity (and other legacy UI defaults) during SSC compilation.
@@ -144,6 +145,43 @@ def get_purchase_order_postings(document) -> list[dict]:
         }
         for index, item in enumerate(expanded)
     ]
+
+
+def _apply_po_line_amount_columns(mapping: dict, document) -> dict:
+    """Use each table's current Line amount role as its PO transaction value.
+
+    The form schema is authoritative for line amounts. This also fixes older
+    saved PO profiles whose amount binding predates a column being mapped to
+    the Line amount role.
+    """
+    po = mapping.get("purchase_order") if isinstance(mapping, dict) else None
+    if not isinstance(po, dict):
+        return mapping
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    tables = {
+        str(field.get("key")): field
+        for section in form.get("sections") or [] if isinstance(section, dict)
+        for field in section.get("fields") or []
+        if isinstance(field, dict) and field.get("type") == "table" and field.get("key")
+    }
+    for spec in po.get("lines") or []:
+        if not isinstance(spec, dict):
+            continue
+        table = tables.get(str(spec.get("repeat_over") or ""))
+        if not table:
+            continue
+        amount_column = next(
+            (
+                column for column in table.get("columns") or []
+                if isinstance(column, dict)
+                and str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "line_amount"
+                and column.get("key")
+            ),
+            None,
+        )
+        if amount_column:
+            spec["amount"] = {"row_field": amount_column["key"]}
+    return mapping
 
 
 def get_imprest_request_postings(document) -> list[dict]:

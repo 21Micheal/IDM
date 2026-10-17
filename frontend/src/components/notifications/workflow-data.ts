@@ -235,10 +235,11 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
     instances.find((row) => row.status === "in_progress") ??
     instances[0];
 
-  // Use the instance's own phase field as the authoritative source. This prevents
-  // a stale or missing caller-supplied phase from causing the retirement instance's
-  // completed steps to show "Approved" instead of "Fully approved" (or vice-versa).
-  const effectivePhase = (instance?.phase as WorkflowPhase | undefined) ?? workflowPhase ?? null;
+  // The document's current phase describes the primary requisition/LPO lane.
+  // The workflow instance can lag while its parallel Imprest lane is advancing,
+  // so prefer the caller's current document phase and only use instance phase
+  // when the document does not provide one.
+  const effectivePhase = workflowPhase ?? (instance?.phase as WorkflowPhase | undefined) ?? null;
 
   const template = instance?.template
     ? await workflowAPI

@@ -500,11 +500,39 @@ def _row_line_item(row: dict, columns: list) -> dict:
     quantity = pick("qty", "quantity")
     unit_price = pick("unit price")
     net_price = pick("net")
-    vat_percent = pick("%vat", "vat%", "vat %")
+    line_amount = pick_role("line_amount")
+    if line_amount not in (None, ""):
+        # Travel itinerary carries the actual requested amount; the Travel
+        # table's Line amount role is the explicit link to that value.
+        net_price = line_amount
+        if not unit_price:
+            unit_price = line_amount
+    vat_percent = pick("tax rate", "%vat", "vat%", "vat %")
+    if _dec(vat_percent) == 0:
+        # Budget Line keeps the selected Tax analysis code and its resolved
+        # numeric rate together. Use that rate when older calculated table
+        # cells still contain their initial zero value.
+        for column in columns:
+            if str(column.get("type") or "").strip().lower() != "budget_line":
+                continue
+            budget_line = row.get(column.get("key"))
+            if isinstance(budget_line, dict):
+                budget_line_rate = _as_text(budget_line.get("tax_rate"))
+                if _dec(budget_line_rate) > 0:
+                    vat_percent = budget_line_rate
+                    break
     vat = ""
-    gross_value = pick("gross")
+    gross_value = pick("lpo amount", "gross value", "gross")
     # A bare "VAT" column (not "VAT%"/"VAT ") is the tax amount.
     for column in columns:
+        if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() in {"vat", "vat_amount", "tax_amount"}:
+            raw = row.get(column.get("key"))
+            if raw not in (None, ""):
+                vat = _as_text(raw)
+                break
+    for column in columns:
+        if vat:
+            break
         label = str(column.get("label", "")).strip().lower()
         if label in ("vat", "tax") and row.get(column.get("key")) not in (None, ""):
             vat = _as_text(row.get(column.get("key")))
@@ -740,15 +768,40 @@ def _first_currency(values: dict, lines: list[dict]) -> str:
 
 
 def _ticket_expiry_date(values: dict, sections: list) -> str:
-    """Find the form value whose field label is Ticket expiry date."""
+    """Find the ticket expiry date in a top-level field or itinerary row."""
     for section in sections or []:
         for field in section.get("fields") or []:
             label = " ".join(str(field.get(k) or "") for k in ("label", "title")).strip().lower()
             if "ticket expiry date" in label:
                 value = _as_text(values.get(field.get("key")))
                 if value:
-                    return value
+                    return _format_lpo_date(value)
+            if field.get("type") != "table":
+                continue
+            rows = values.get(field.get("key"))
+            if not isinstance(rows, list):
+                continue
+            for column in field.get("columns") or []:
+                column_label = " ".join(str(column.get(k) or "") for k in ("label", "title")).strip().lower()
+                if "ticket expiry date" not in column_label or not column.get("key"):
+                    continue
+                for row in rows:
+                    if isinstance(row, dict):
+                        value = _as_text(row.get(column["key"]))
+                        if value:
+                            return _format_lpo_date(value)
     return ""
+
+
+def _format_lpo_date(value: str) -> str:
+    """Format ISO date/datetime values like the other LPO header dates."""
+    from datetime import date, datetime
+    raw = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00")) if "T" in raw else date.fromisoformat(raw[:10])
+        return parsed.strftime("%d %b %Y")
+    except (TypeError, ValueError):
+        return raw
 
 
 def _requestor_name(values: dict, sections: list) -> str:

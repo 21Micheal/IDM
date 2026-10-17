@@ -544,7 +544,7 @@ class WorkflowService:
             return
 
         if execution_lane == "main" and step.post_lpo_after_approval and doc is not None:
-            if WorkflowService._start_lpo_posting_gate(instance, step, doc):
+            if WorkflowService._start_lpo_posting_gate(instance, step, doc, actor=actor):
                 return
 
         WorkflowService._advance_step(
@@ -1411,7 +1411,7 @@ class WorkflowService:
             WorkflowService._complete(instance, "approved", execution_lane=execution_lane)
 
     @staticmethod
-    def _start_lpo_posting_gate(instance: WorkflowInstance, step: WorkflowStep, document) -> bool:
+    def _start_lpo_posting_gate(instance: WorkflowInstance, step: WorkflowStep, document, actor=None) -> bool:
         """Post configured POs after a marked approval and hold the workflow here.
 
         Returns True when the configured PO postings are gated. If there are no
@@ -1446,7 +1446,9 @@ class WorkflowService:
                 posting.error = ""
                 posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
                 document_id = str(document.pk)
-                actor_id = str(instance.started_by_id) if instance.started_by_id else None
+                actor_id = str(actor.pk) if actor and getattr(actor, "pk", None) else (
+                    str(instance.started_by_id) if instance.started_by_id else None
+                )
                 _queue_after_commit(
                     lambda did=document_id, current_stage=stage, aid=actor_id: post_journal_for_document.delay(did, current_stage, aid)
                 )

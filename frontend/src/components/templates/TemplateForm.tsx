@@ -147,6 +147,14 @@ function minimumDate(configured?: string | number): string {
   return configuredDate && configuredDate > today ? configuredDate : today;
 }
 
+function minimumDateTime(configured?: string | number): string {
+  const configuredValue = typeof configured === "string" ? configured : "";
+  const minimumDay = minimumDate(configuredValue);
+  return configuredValue.startsWith(minimumDay) && configuredValue.includes("T")
+    ? configuredValue
+    : `${minimumDay}T00:00`;
+}
+
 // Field types whose value is derived from `field.calc.expression` rather than
 // typed by the person filling the form. Mirrors the builder's CALCULATED_TYPES.
 const CALCULATED_FIELD_TYPES = new Set(["calc_number", "calc_currency", "calc_text", "calc_date", "calc_boolean"]);
@@ -973,7 +981,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
     case "date":
       return <input type="date" value={sval} min={minimumDate(col.min)} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "datetime":
-      return <input type="datetime-local" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="datetime-local" value={sval} min={minimumDateTime(col.min)} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "time":
       return <input type="time" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "email":
@@ -1079,7 +1087,9 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
       if (item != null && typeof item !== "object") next[key] = String(item);
     });
     setDraft(next);
-    setTaxRateDraft(taxRateValue == null ? "" : String(taxRateValue));
+    setTaxRateDraft(current.tax_rate == null
+      ? (taxRateValue == null ? "" : String(taxRateValue))
+      : String(current.tax_rate));
     setOpen(true);
   };
 
@@ -1167,7 +1177,7 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
             </div>
             <div className="flex justify-end gap-2 border-t border-border bg-muted/20 px-5 py-3">
               <button type="button" onClick={() => setOpen(false)} className="border border-border bg-white px-4 py-2 text-sm font-medium text-foreground hover:bg-muted">Cancel</button>
-              <button type="button" onClick={() => { onChange(draft); if (taxRateColumn) onTaxRateChange?.(taxRateDraft); setOpen(false); }} className="bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90">Save Budget Line</button>
+              <button type="button" onClick={() => { onChange(taxRateColumn ? { ...draft, tax_rate: taxRateDraft } : draft); if (taxRateColumn) onTaxRateChange?.(taxRateDraft); setOpen(false); }} className="bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90">Save Budget Line</button>
             </div>
           </div>
         </div>,
@@ -2659,7 +2669,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       control_el = (
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
           <input type={htmlType} value={String(f.value ?? "")} disabled={dis}
-            placeholder={field.placeholder} min={type === "date" ? minimumDate(field.min) : field.min} max={field.max}
+            placeholder={field.placeholder} min={type === "date" ? minimumDate(field.min) : type === "datetime" ? minimumDateTime(field.min) : field.min} max={field.max}
             maxLength={field.maxLength} className={inp}
             onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }} />
         )} />
@@ -3044,14 +3054,14 @@ export function pastDateFieldLabels(
       if (!key || field.hidden || !evalVisible(field, values, allFields, processStep, null, viewer)) continue;
       if (conditionalEditBlockedForViewer(field, viewer)) continue;
       if (!sectionEditable || !evalEditableForViewer(field, values, allFields, processStep, viewer)) continue;
-      if (field.type === "date") {
+      if (field.type === "date" || field.type === "datetime") {
         const value = String(values[key] ?? "").slice(0, 10);
         if (value && value < today) invalid.push(field.label ?? key);
       }
       if (field.type !== "table") continue;
       const rows = Array.isArray(values[key]) ? values[key] as Record<string, unknown>[] : [];
       for (const column of field.columns ?? []) {
-        if (column.type !== "date" || column.hidden || !column.key) continue;
+        if (!(["date", "datetime"] as string[]).includes(column.type) || column.hidden || !column.key) continue;
         rows.forEach((row, index) => {
           if (!evalVisible(column, values, allFields, processStep, row, viewer)) return;
           if (!evalEditable(column, values, allFields, processStep, row, viewer)) return;
