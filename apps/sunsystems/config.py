@@ -170,6 +170,49 @@ def get_imprest_request_postings(document) -> list[dict]:
 
     po = config.get("purchase_order") or {}
     values = get_form_values(document)
+    # The Imprest profile can intentionally have no PurchaseOrder line specs;
+    # it only carries the separate Imprest request table/account settings. The
+    # shared analysis bindings live on the main LPO profile, so use that as the
+    # authoritative source (and apply the configured Analysis Codes panel to
+    # it as well).
+    lpo_mapping = deepcopy(sunsystems.get("purchase_order") or {})
+    _apply_analysis_panel_mapping(lpo_mapping, document)
+    lpo_po = lpo_mapping.get("purchase_order") or {}
+    # Imprest request postings share the requisition's Analysis Dimensions with
+    # the LPO. Those bindings are often row-scoped on the LPO line spec (for
+    # example, a Budget Line column), so resolving po.analysis against an
+    # Imprest itinerary row silently produced empty values and the journal
+    # builder substituted '#'. Resolve the configured LPO analysis against its
+    # own source row once, then reuse those codes for every Imprest line. The
+    # Imprest table still supplies its own account code independently.
+    shared_analysis: dict[str, str] = {}
+    analysis_specs = []
+    if isinstance(lpo_po.get("analysis"), dict):
+        analysis_specs.append((lpo_po.get("analysis"), None))
+    for po_line_spec in _po_line_specs(lpo_po):
+        line_analysis = po_line_spec.get("analysis")
+        if not isinstance(line_analysis, dict):
+            continue
+        source_rows = values.get(str(po_line_spec.get("repeat_over") or ""))
+        source_row = next(
+            (
+                candidate for candidate in (source_rows if isinstance(source_rows, list) else [])
+                if isinstance(candidate, dict)
+                and any(value not in (None, "", [], {}) for value in candidate.values())
+            ),
+            None,
+        )
+        analysis_specs.append((line_analysis, source_row))
+    for analysis_spec, source_row in analysis_specs:
+        for slot, slot_spec in analysis_spec.items():
+            if str(slot) in shared_analysis:
+                continue
+            code_spec = slot_spec.get("code") if isinstance(slot_spec, dict) else slot_spec
+            code = resolve_value(code_spec, values, source_row)
+            # '#' is SunSystems' Not Analysed marker. Treat it as missing here
+            # so a populated row-level LPO binding can supply the same slot.
+            if code and code.strip() != "#":
+                shared_analysis[str(slot)] = code
     sunsystems = get_sunsystems_config(document)
     ui = sunsystems.get("ui") if isinstance(sunsystems.get("ui"), dict) else {}
     imprest_groups: dict[str, dict] = {}
@@ -271,13 +314,10 @@ def get_imprest_request_postings(document) -> list[dict]:
                 "date": {"const": row_value(spec.get("date") or po.get("date") or config.get("date"))},
                 "description": {"const": row_value(spec.get("description") or po.get("comment") or po.get("description"))},
             }
-            analysis = {}
-            for slot, po_analysis in (po.get("analysis") or {}).items():
-                code = po_analysis.get("code") if isinstance(po_analysis, dict) else po_analysis
-                if code is not None:
-                    analysis[str(slot)] = {"const": row_value(code)}
-            for slot, code in (spec.get("analysis") or {}).items():
-                analysis[str(slot)] = {"const": row_value(code)}
+            analysis = {
+                slot: {"const": code}
+                for slot, code in shared_analysis.items()
+            }
             if analysis:
                 common["analysis"] = analysis
             lines.extend([
@@ -322,6 +362,82 @@ def get_imprest_request_postings(document) -> list[dict]:
             "mapping": journal,
         })
     return postings
+
+
+def has_imprest_request_lines(document) -> bool:
+    """Whether an Imprest request was entered and needs its approval lane.
+
+    The request intent may be captured in a separate Imprest request table,
+    while the approver enters/finalizes the actual posted amount in the
+    General / Imprest itinerary table. Therefore either a populated itinerary
+    line or a positive currency/amount value in another Imprest-enabled table
+    starts the lane.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    meta = getattr(document, "metadata", None) or {}
+    form = meta.get("form") if isinstance(meta.get("form"), dict) else {}
+    values = get_form_values(document)
+    for section in form.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for field in section.get("fields") or []:
+            if not isinstance(field, dict) or field.get("type") != "table":
+                continue
+            columns = [column for column in field.get("columns") or [] if isinstance(column, dict)]
+            rows = values.get(field.get("key"))
+            if not isinstance(rows, list):
+                continue
+            itinerary_table = field.get("workflowRole") == "rfq_required_lines"
+            imprest_enabled = bool(
+                (field.get("sunsystems") or {}).get("imprestRequest", {}).get("enabled")
+            )
+            if not itinerary_table and not imprest_enabled:
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                # A separate request table signals intent through its
+                # positive requested amount. Its default item/currency values
+                # alone must not start an Imprest workflow.
+                if not itinerary_table:
+                    for column in columns:
+                        key = column.get("key")
+                        if not key or str(column.get("type") or "").lower() not in {"currency", "number"}:
+                            continue
+                        raw = row.get(key)
+                        if raw in (None, "", [], {}):
+                            continue
+                        try:
+                            if Decimal(str(raw).replace(",", "").strip()) > 0:
+                                return True
+                        except (InvalidOperation, ValueError):
+                            continue
+                    continue
+
+                # The actual amount can be entered by the approver after the
+                # lane starts. A populated itinerary line is sufficient;
+                # an entirely empty/default-only row still skips the lane.
+                for column in columns:
+                    key = column.get("key")
+                    role = str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower()
+                    if not key or role == "quantity":
+                        continue
+                    raw = row.get(key)
+                    if raw in (None, "", [], {}):
+                        continue
+                    if role == "line_amount":
+                        try:
+                            if Decimal(str(raw).replace(",", "").strip()) > 0:
+                                return True
+                        except (InvalidOperation, ValueError):
+                            continue
+                        continue
+                    default = column.get("defaultValue", column.get("default_value"))
+                    if default not in (None, "") and str(raw).strip() == str(default).strip():
+                        continue
+                    return True
+    return False
 
 
 def _apply_analysis_panel_mapping(mapping: dict, document) -> dict:
@@ -419,15 +535,22 @@ def get_imprest_retirement_postings(document) -> list[dict]:
             if not isinstance(retirement, dict) or not retirement.get("enabled") or not isinstance(rows, list) or not rows:
                 continue
 
-            account_column = next((c for c in columns if (c.get("sunsystems") or {}).get("role") == "account_code"), None)
             supplier_column = next((c for c in columns if (c.get("sunsystems") or {}).get("role") == "supplier_code"), None)
             first_row = next((row for row in rows if isinstance(row, dict) and any(v not in (None, "", [], {}) for v in row.values())), {})
+            # The reconciliation table does not need a duplicate Account Code
+            # column. When a retirement scenario line is configured to use an
+            # account-code source, reuse the debit account already resolved by
+            # the Imprest request mapping. Manual scenario accounts remain
+            # available for counterpart/clearing accounts.
+            request_debit_account = base_line.get("account")
 
             def scenario_account(line: dict) -> dict:
                 source = str(line.get("accountSource") or "manual").strip().lower()
-                col = account_column if source == "account_code" else supplier_column if source == "supplier_code" else None
+                col = supplier_column if source == "supplier_code" else None
                 if col:
                     return {"const": str(first_row.get(col.get("key")) or "")}
+                if source == "account_code" and request_debit_account:
+                    return deepcopy(request_debit_account)
                 return {"const": str(line.get("account") or "")}
 
             scenarios = {}

@@ -1856,14 +1856,20 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       ...(imprestRequest?.enabled && f.workflowRole === "rfq_required_lines"
         ? {
             ...(imprestAccountSource === "account_code" && imprestAccountCol
-              ? { imprest_request_account: { row_field: imprestAccountCol.key } }
+              ? { imprest_request_account: {
+                  row_field: imprestAccountCol.key,
+                  ...(imprestAccountCol.type === "budget_line" ? { key: "account_code" } : {}),
+                } }
               : imprestAccountSource === "supplier_code" && supplierCol
                 ? { imprest_request_account: { row_field: supplierCol.key } }
                 : imprestAccountSource === "manual" && imprestManualAccount
                   ? { imprest_request_account: { const: imprestManualAccount } }
                   : {}),
             ...(imprestCounterAccountSource === "account_code" && imprestAccountCol
-              ? { imprest_request_counter_account: { row_field: imprestAccountCol.key } }
+              ? { imprest_request_counter_account: {
+                  row_field: imprestAccountCol.key,
+                  ...(imprestAccountCol.type === "budget_line" ? { key: "account_code" } : {}),
+                } }
               : imprestCounterAccountSource === "supplier_code" && supplierCol
                 ? { imprest_request_counter_account: { row_field: supplierCol.key } }
                 : imprestCounterAccountSource === "manual" && imprestManualCounterAccount
@@ -3459,7 +3465,7 @@ function ColumnConfigModal({
                           { value: "", label: "Do not autofill a rate" },
                           ...siblingColumns
                             .filter((column) => column.id !== draft.id && ["number", "currency", "percentage"].includes(column.type))
-                            .map((column) => ({ value: column.id, label: column.label || column.id })),
+                            .map((column) => ({ value: column.key as string, label: column.label || column.key || "" })),
                         ]}
                         className={iCls}
                         buttonClassName="w-full"
@@ -6568,7 +6574,7 @@ class CalcParser {
  * the server's `_TEXT_CALC_TYPES` exactly. */
 const TEXT_CALC_TYPES = new Set([
   "text", "textarea", "email", "phone", "select", "radio", "multi_select",
-  "reference", "user", "url", "calc_text", "auto_number",
+  "reference", "user", "url", "sunsystems_account", "calc_text", "auto_number",
 ]);
 
 /** Coerce a raw field/column value into the NUMBER a calc formula should see

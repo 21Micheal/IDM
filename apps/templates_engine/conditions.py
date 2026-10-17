@@ -1001,7 +1001,7 @@ class _CalcParser:
 
 _TEXT_CALC_TYPES = {
     "text", "textarea", "email", "phone", "select", "radio", "multi_select",
-    "reference", "user", "url", "calc_text", "auto_number",
+    "reference", "user", "url", "sunsystems_account", "calc_text", "auto_number",
 }
 _NUMERIC_CALC_TYPES = {"number", "currency", "percentage", "rating", "calc_number", "calc_currency"}
 
@@ -1051,6 +1051,10 @@ def _coerce_scope_value(field_type, raw):
     """Calc VALUE (number OR string) for a formula. Text-natured types pass
     through as strings so ``status == "Approved"`` works; the rest coerce to
     numbers."""
+    if field_type == "budget_line":
+        if isinstance(raw, dict):
+            return _js_str(raw.get("account_code"))
+        return _js_str(raw)
     if field_type in _TEXT_CALC_TYPES:
         return _js_str(raw)
     return _coerce_numeric(field_type, raw)
@@ -1361,45 +1365,57 @@ def compute_calculated_values(sections, values: dict) -> dict:
         scope.update(field_scope)
         return scope
 
-    for section in sections or []:
-        for field in section.get("fields", []):
-            key = field.get("key")
-            if not key:
-                continue
+    top_fields = [
+        field
+        for section in sections or []
+        for field in section.get("fields", [])
+        if field.get("key") and field.get("type") != "table"
+        and field.get("calc") and field.get("calc", {}).get("expression")
+    ]
+    calc_column_count = sum(len(info["calc_columns"]) for info in all_tables.values())
 
-            if field.get("type") == "table":
-                info = all_tables.get(key)
-                if not info or not info["calc_columns"]:
-                    continue
-                rows, col_types, calc_cols = info["rows"], info["col_types"], info["calc_columns"]
-                for _pass in range(len(calc_cols)):
-                    changed = False
-                    for col in calc_cols:
-                        col_key = col["key"]
-                        calc = col["calc"]
-                        decimals = calc.get("decimals")
-                        resolved = _resolve_row_aggregates(calc.get("expression", ""), rows, col_types, all_tables)
-                        for row in rows:
-                            if not isinstance(row, dict):
-                                continue
-                            scope = top_scope()
-                            for ck, ctype in col_types.items():
-                                scope[ck] = _coerce_scope_value(ctype, row.get(ck))
-                            result = _round_decimals(_eval_typed(resolved, scope), decimals)
-                            if row.get(col_key) != result:
-                                changed = True
-                            row[col_key] = result
-                    if not changed:
-                        break
-                continue
+    # Alternate field and table calculations until stable. Table formulas can
+    # depend on top-level calc fields declared later in the template (for
+    # example, a Supplier table column copying a selected supplier code).
+    # A single document-order pass left those table values stale.
+    max_passes = max(1, len(top_fields) + calc_column_count + 1)
+    for _outer_pass in range(max_passes):
+        changed = False
 
-            calc = field.get("calc")
-            if not calc or not calc.get("expression"):
-                continue
+        for field in top_fields:
+            key = field["key"]
+            calc = field["calc"]
             resolved = _resolve_row_aggregates(calc.get("expression", ""), None, {}, all_tables)
             result = _round_decimals(_eval_typed(resolved, top_scope()), calc.get("decimals"))
-            # Downstream formulas see the raw value (a date serial, not its text).
+            if field_scope.get(key) != result:
+                changed = True
+            # Downstream formulas see the raw value (a date serial, not text).
             field_scope[key] = result
             out[key] = format_calc_result(field.get("type"), result)
+
+        for info in all_tables.values():
+            rows, col_types, calc_cols = info["rows"], info["col_types"], info["calc_columns"]
+            for _column_pass in range(max(1, len(calc_cols))):
+                column_changed = False
+                for col in calc_cols:
+                    col_key = col["key"]
+                    calc = col["calc"]
+                    resolved = _resolve_row_aggregates(calc.get("expression", ""), rows, col_types, all_tables)
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        scope = top_scope()
+                        for ck, ctype in col_types.items():
+                            scope[ck] = _coerce_scope_value(ctype, row.get(ck))
+                        result = _round_decimals(_eval_typed(resolved, scope), calc.get("decimals"))
+                        if row.get(col_key) != result:
+                            column_changed = True
+                            changed = True
+                        row[col_key] = result
+                if not column_changed:
+                    break
+
+        if not changed:
+            break
 
     return out

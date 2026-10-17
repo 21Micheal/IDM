@@ -1700,16 +1700,32 @@ class WorkflowService:
         """Start marked Imprest approval steps as an independent workflow lane."""
         try:
             from apps.documents.builder_workflow import is_procurement_document
-            from apps.sunsystems.config import get_imprest_request_postings
+            from apps.sunsystems.config import has_imprest_request_lines
 
             if not is_procurement_document(document) or not WorkflowService.is_v2_workflow(instance.template):
                 return False
             lane_orders, _ = WorkflowService._v2_active_step_orders(instance, "imprest_request")
-            if not lane_orders or not get_imprest_request_postings(document):
+            if not lane_orders:
                 return False
 
-            if instance.imprest_request_status:
+            if instance.imprest_request_status == "in_progress":
                 return True
+            if instance.imprest_request_status in {"approved", "rejected", "returned", "cancelled"}:
+                return False
+
+            if not has_imprest_request_lines(document):
+                instance.imprest_request_status = "not_required"
+                instance.imprest_request_completed_at = timezone.now()
+                instance.save(update_fields=[
+                    "imprest_request_status", "imprest_request_completed_at", "updated_at",
+                ])
+                metadata = dict(document.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["imprest_request_workflow_status"] = "not_required"
+                metadata["form"] = form
+                document.metadata = metadata
+                WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+                return False
 
             instance.imprest_request_status = "in_progress"
             instance.imprest_request_current_step_order = lane_orders[0]
@@ -1726,9 +1742,18 @@ class WorkflowService:
             document.metadata = metadata
             WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
             return True
-        except Exception:
+        except WorkflowError:
+            # Do not silently complete the requisition stage with an
+            # in-progress Imprest lane that has no actionable tasks. Let the
+            # approval transaction roll back and surface the approver setup
+            # error to the user.
+            raise
+        except Exception as exc:
             logger.exception("Could not start parallel Imprest request approvals for %s", document.pk)
-            return False
+            raise WorkflowError(
+                "Could not start the independent Imprest request approvals. "
+                "Please check the lane approvers and try again."
+            ) from exc
 
     @staticmethod
     def _queue_imprest_request_postings(document, *, actor=None, message="Queued for Imprest request approval.") -> None:
@@ -1736,8 +1761,15 @@ class WorkflowService:
         from apps.sunsystems.models import JournalPosting, JournalPostingStatus
         from apps.sunsystems.tasks import post_journal_for_document
 
+        items = get_imprest_request_postings(document)
+        if not items:
+            raise WorkflowError(
+                "The Imprest request cannot be approved because its General / Imprest table "
+                "has no positive mapped Line amount. Check the itinerary rows and mappings."
+            )
+
         actor_id = str(actor.pk) if actor and getattr(actor, "pk", None) else None
-        for item in get_imprest_request_postings(document):
+        for item in items:
             stage = int(item["stage"])
             posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
             if not created:

@@ -42,9 +42,15 @@ export interface ExternalSourceDef {
   fetch: (params: { dimension?: string }) => Promise<ExternalRecord[]>;
 }
 
-function taxRateFromName(name: string): string | undefined {
-  if (/\b(ex(?:c)?empt|zero[ -]?rated|not (?:analysed|analyzed))\b/i.test(name)) return "0";
-  const match = name.match(/(?:^|\D)(\d+(?:\.\d+)?)\s*%/);
+function taxRateFromName(name: string, code = ""): string | undefined {
+  const normalized = name.trim();
+  if (/\b(ex(?:c)?empt|zero[ -]?rated|not (?:analysed|analyzed))\b/i.test(normalized) || code.trim() === "#") return "0";
+  // SunSystems tax analysis names are usually "Standard Rate 16%", but
+  // installations may spell this out as "16 percent" or omit the percent
+  // sign after "Rate". Accept those formats while continuing to use the
+  // configured code description as the source of truth.
+  const match = normalized.match(/(?:^|\D)(\d+(?:\.\d+)?)\s*(?:%|percent\b)/i)
+    ?? normalized.match(/\brate\s+(\d+(?:\.\d+)?)\b/i);
   return match?.[1];
 }
 
@@ -92,7 +98,7 @@ export const EXTERNAL_SOURCES: ExternalSourceDef[] = [
               description: c.name,
               data: {
                 dimension_id: c.analysis_dimension_id,
-                ...(dimension === "12" ? { tax_rate: taxRateFromName(c.name) ?? "" } : {}),
+                ...(dimension === "12" ? { tax_rate: taxRateFromName(c.name, c.analysis_code) ?? "" } : {}),
               },
             })),
           )

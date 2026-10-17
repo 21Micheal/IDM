@@ -91,22 +91,26 @@ def _document_has_active_workflow(document: Document) -> bool:
 def resolve_access_stage(document: Document) -> str:
     """
     Map a document to a lifecycle stage for permission checks.
-    Strictly follows admin-configured access stage mappings, with a critical safety check:
-    returned documents default to CREATION stage unless explicitly configured otherwise.
-    This ensures returned documents can be edited by uploaders but NOT approvers.
+    Follows admin-configured access stage mappings. A returned document is the
+    exception: it always re-enters CREATION so the submitter can amend it using
+    draft permissions and form rules. Non-submitters remain view-only below.
     """
     status = (document.status or "").strip()
     status_lower = status.lower()
 
-    # Use admin-configured mapping for this status
+    # A return is always sent back to the submitter for amendment, regardless
+    # of a custom status-to-stage mapping. effective_permissions_for_user()
+    # separately keeps every non-uploader view-only while the document is
+    # returned.
+    if status_lower == "returned":
+        return ACCESS_STAGE_CREATION
+
+    # Use admin-configured mapping for all other statuses.
     stage = _status_to_stage_map().get(status_lower)
     if stage is not None:
         return stage
 
-    # Safety check: returned documents should be CREATION (editable by uploader)
-    # unless explicitly configured otherwise by admin.
-    # This prevents approvers from being able to edit returned documents.
-    if status_lower in ("returned",) or status in LEGACY_EDITABLE_STATUSES:
+    if status in LEGACY_EDITABLE_STATUSES:
         return ACCESS_STAGE_CREATION
 
     # If no explicit mapping exists and document has active workflow, use approval stage

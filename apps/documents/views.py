@@ -1390,6 +1390,14 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         from apps.documents.access import user_has_active_approval_task
         from apps.templates_engine.conditions import is_editable, is_visible
         process_step = builder_process_step(doc)
+        # Returned forms are back with their submitter for amendments. Their
+        # visibility/editability rules should resolve as they did in draft;
+        # other viewers retain the actual returned/workflow process step.
+        if (
+            (doc.status or "").strip().lower() == "returned"
+            and doc.uploaded_by_id == request.user.id
+        ):
+            process_step = "draft"
         viewer = viewer_for_user(request.user)
         prior_render = descriptors_to_names(prior_values)
         lpo_approved = "lpo" in completed_procurement_stages(doc)

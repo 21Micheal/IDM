@@ -778,14 +778,17 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }:
   );
 }
 
-function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentId, attachmentKey, row, allValues, allFields, wrapText = false }: {
+function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentId, attachmentKey, row, allValues, allFields, tableColumns, wrapText = false }: {
   col: Column; value: unknown; onChange: (v: unknown) => void; readOnly?: boolean;
   wrapText?: boolean;
   onChangeCell?: (key: string, value: unknown) => void;
   documentId?: string; attachmentKey?: string; row?: Record<string, unknown>;
-  allValues: TemplateFormValues; allFields: Field[];
+  allValues: TemplateFormValues; allFields: Field[]; tableColumns: Column[];
 }) {
   const base = "w-full bg-transparent py-0.5 text-sm outline-none text-foreground placeholder:text-muted-foreground/50";
+  const columnKey = (configured: string | undefined) => configured
+    ? tableColumns.find((candidate) => candidate.key === configured || candidate.id === configured)?.key ?? configured
+    : undefined;
   if (col.hidden) return null;
   const type = (col.type ?? "text") as ColType;
   const dis = readOnly || col.readonly;
@@ -845,6 +848,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
   }
 
   const sval = typeof value === "string" ? value : value == null ? "" : String(value);
+  const taxRateColumnKey = columnKey(col.budgetLine?.taxRateColumn);
 
   switch (type) {
     case "budget_line":
@@ -855,10 +859,10 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           disabled={dis}
           dimensions={col.budgetLine?.dimensions}
           accountCodes={col.budgetLine?.accountCodes}
-          taxRateColumn={col.budgetLine?.taxRateColumn}
-          taxRateValue={col.budgetLine?.taxRateColumn ? row?.[col.budgetLine.taxRateColumn] : undefined}
+          taxRateColumn={taxRateColumnKey}
+          taxRateValue={taxRateColumnKey ? row?.[taxRateColumnKey] : undefined}
           onTaxRateChange={(rate) => {
-            if (col.budgetLine?.taxRateColumn) onChangeCell?.(col.budgetLine.taxRateColumn, rate);
+            if (taxRateColumnKey) onChangeCell?.(taxRateColumnKey, rate);
           }}
         />
       );
@@ -997,7 +1001,8 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           onChange={(next) => {
             onChange(next);
             if ((!next || (Array.isArray(next) && next.length === 0)) && col.external?.fillTaxRateColumn) {
-              onChangeCell?.(col.external.fillTaxRateColumn, "");
+              const target = columnKey(col.external.fillTaxRateColumn);
+              if (target) onChangeCell?.(target, "");
             }
           }}
           autoFillDefault={Boolean(col.defaultValue && sval === col.defaultValue)}
@@ -1012,7 +1017,8 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
               onChangeCell?.(col.external.fillDescriptionColumn, rec.description ?? "");
             }
             if (col.external?.fillTaxRateColumn) {
-              onChangeCell?.(col.external.fillTaxRateColumn, rec.data?.tax_rate ?? "");
+              const target = columnKey(col.external.fillTaxRateColumn);
+              if (target) onChangeCell?.(target, rec.data?.tax_rate ?? "");
             }
           }}
           multi={false}
@@ -1083,11 +1089,11 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
         type="button"
         disabled={disabled}
         onClick={openEditor}
-        title={summary || "Open Budget Line editor"}
+        title={summary ? "Budget Line saved. Click to review." : "Open Budget Line editor"}
         className={`w-full min-h-8 border border-border bg-white px-2 py-1 text-left text-sm transition-colors ${disabled ? "cursor-default" : "hover:border-primary hover:bg-primary/5"}`}
       >
         {summary
-          ? <span className="block truncate text-foreground">{summary}</span>
+          ? <span className="inline-flex items-center gap-1.5 text-sm font-medium text-emerald-700"><CheckCircle2 className="h-4 w-4 shrink-0" />Saved</span>
           : <span className="text-muted-foreground">{disabled ? "—" : "Select Budget Line…"}</span>}
       </button>
       {open && createPortal(
@@ -1424,6 +1430,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                                 row={row}
                                 allValues={allValues}
                                 allFields={allFields}
+                                tableColumns={cols}
                                 onChange={(v) => update(ri, key, v)}
                                 onChangeCell={(cellKey, cellVal) => update(ri, cellKey, cellVal)}
                                 readOnly={cellLocked}
@@ -2046,7 +2053,11 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   const type = field.type ?? "text";
   const label = field.label ?? key;
   const help  = field.helpText ?? field.help_text;
-  const span  = Math.min(12, Math.max(1, field.colSpan ?? field.width ?? 6));
+  const isCheckbox = type === "boolean" || type === "checkbox";
+  const configuredSpan = Math.min(12, Math.max(1, field.colSpan ?? field.width ?? (isCheckbox ? 3 : 6)));
+  // Checkboxes are compact controls. Keeping them to a quarter of the row
+  // lets paired choices sit together instead of leaving a large empty gap.
+  const span  = isCheckbox ? Math.min(3, configuredSpan) : configuredSpan;
   const style = { gridColumn: `span ${span} / span ${span}` };
   const dis   = readOnly || field.readonly || !editable;
   const err   = errors[key]?.message as string | undefined;
@@ -2216,9 +2227,9 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // Checkbox / boolean — inline label layout
   if (type === "boolean" || type === "checkbox") {
     return (
-      <div className="min-w-0" style={style}>
+      <div className="flex min-h-[62px] min-w-0 flex-col justify-end" style={style}>
         <Controller control={control} name={key} render={({ field: f }) => (
-          <label className={`flex cursor-pointer items-center gap-2.5 text-sm ${validationMessage ? "text-red-700" : "text-foreground"}`}>
+          <label className={`flex h-10 w-full cursor-pointer items-center gap-2.5 text-sm ${validationMessage ? "text-red-700" : "text-foreground"}`}>
             <input type="checkbox" checked={Boolean(f.value)} disabled={dis}
               className={`h-4 w-4 rounded accent-primary ${validationMessage ? "outline outline-1 outline-red-500" : "border-border"}`}
               onChange={(e) => { f.onChange(e.target.checked); onChangeCb(key, e.target.checked); }} />

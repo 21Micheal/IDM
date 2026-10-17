@@ -376,7 +376,7 @@ class CalcParser {
 
 const TEXT_CALC_TYPES = new Set([
   "text", "textarea", "email", "phone", "select", "radio", "multi_select",
-  "reference", "user", "url", "calc_text", "auto_number",
+  "reference", "user", "url", "sunsystems_account", "calc_text", "auto_number",
 ]);
 
 const NUMERIC_CALC_TYPES = new Set([
@@ -413,6 +413,16 @@ function coerceNumeric(fieldType: string | undefined, raw: unknown): number {
 }
 
 function coerceScopeValue(fieldType: string | undefined, raw: unknown): CalcValue {
+  // Budget Line values are structured objects. When a formula references the
+  // field directly (for example, a calc_text field used as the account code),
+  // resolve the selected account code instead of coercing the object to 0.
+  if (fieldType === "budget_line") {
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      const accountCode = (raw as Record<string, unknown>).account_code;
+      return accountCode === null || accountCode === undefined ? "" : String(accountCode);
+    }
+    return raw === null || raw === undefined ? "" : String(raw);
+  }
   if (fieldType && TEXT_CALC_TYPES.has(fieldType)) return raw === null || raw === undefined ? "" : String(raw);
   return coerceNumeric(fieldType, raw);
 }

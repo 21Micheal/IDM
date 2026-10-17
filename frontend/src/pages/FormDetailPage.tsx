@@ -52,6 +52,22 @@ import CustomListbox from "@/components/ui/CustomListbox";
 
 const AUDIT_PAGE_SIZE = 5;
 
+function normalizeApiFileUrl(url?: string | null): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    // The API may build absolute file links using its internal Docker service
+    // name (for example, http://backend:8000). Browser clients must use the
+    // public origin serving this page, which proxies /api/ to the backend.
+    if (parsed.pathname.startsWith("/api/")) {
+      return new URL(`${parsed.pathname}${parsed.search}${parsed.hash}`, window.location.origin).toString();
+    }
+  } catch {
+    // Keep non-API and malformed URLs unchanged so callers can report errors.
+  }
+  return url;
+}
+
 function isApprovalLockedStatus(status?: string): boolean {
   return ["pending_approval", "request_pending", "retirement_pending", "requisition_pending", "rfq_pending", "lpo_pending", "on_hold"].includes(status || "");
 }
@@ -203,7 +219,10 @@ export default function FormDetailPage() {
 
   const lpoPdfQuery = useQuery({
     queryKey: ["lpo-pdf", generatedLpoId],
-    queryFn: () => documentsAPI.previewUrl(generatedLpoId!).then((r) => r.data),
+    queryFn: async () => {
+      const { data } = await documentsAPI.previewUrl(generatedLpoId!);
+      return { ...data, url: normalizeApiFileUrl(data.url) ?? data.url };
+    },
     enabled: Boolean(generatedLpoId),
     refetchInterval: (query) => query.state.data?.viewer === "processing" ? 1_500 : false,
   });
@@ -218,7 +237,11 @@ export default function FormDetailPage() {
     if (!doc) return;
     const hasAdminAccess = Boolean(user?.has_admin_access);
     const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
-    const formProcessStep = doc.builder_process_step || doc.status;
+    // A returned document is back with its submitter for amendments. Evaluate
+    // that user's conditions exactly as they would be on a draft; other users
+    // continue to see the real workflow step and its narrower permissions.
+    const returnedToSubmitter = doc.status === "returned" && doc.uploaded_by?.id === user?.id;
+    const formProcessStep = returnedToSubmitter ? "draft" : doc.builder_process_step || doc.status;
     const viewer = {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
@@ -232,7 +255,7 @@ export default function FormDetailPage() {
     }
 
     // Post-approval edits are driven by the form's visible/editable rules for
-    // this viewer. The page-level Edit form action is only for drafts.
+    // this viewer. Drafts and returned forms use the explicit Edit form action.
     const hasConfiguredEditableSection = hasVisibleEditableSection(
       formData?.sections ?? [],
       formData?.values ?? {},
@@ -456,7 +479,8 @@ export default function FormDetailPage() {
   const hasActiveApprovalTask = Boolean(activeTask && activeTask.status === "in_progress");
 
   function formProcessStep() {
-    return doc.builder_process_step || doc.status;
+    const returnedToSubmitter = doc.status === "returned" && doc.uploaded_by?.id === user?.id;
+    return returnedToSubmitter ? "draft" : doc.builder_process_step || doc.status;
   }
   function canEditConditionalSections() {
     return hasAdminAccess || isOwnerOrSubmitter || hasActiveApprovalTask;
@@ -476,7 +500,7 @@ export default function FormDetailPage() {
     });
   const retirementOnlyEdit = canEditRetirementSection && isApprovalLockedStatus(step) && !hasActiveApprovalTask;
   const retirementSectionReadOnly = !lpoApproved;
-  const canEditForm = doc.status === "draft" && canEdit;
+  const canEditForm = ["draft", "returned"].includes(doc.status) && canEdit;
 
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
@@ -519,7 +543,7 @@ export default function FormDetailPage() {
       : "Submit for approval";
 
   const startFormEdit = () => {
-    if (doc.status !== "draft" || !canEdit) return;
+    if (!(["draft", "returned"].includes(doc.status) && canEdit)) return;
     setFormValues({ ...(formData.values ?? {}) });
     formDirtyRef.current = false;
     setFormEditing(true);
