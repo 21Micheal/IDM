@@ -12,6 +12,8 @@ from apps.accounts.models import User, UserGroup, UserGroupMembership
 from apps.documents.models import Document, DocumentStatus, DocumentType
 from apps.workflows.engine import flatten_steps, resolve_active_path
 from apps.workflows.models import WorkflowInstance, WorkflowStep, WorkflowTemplate
+from apps.workflows.models import WorkflowTask
+from apps.workflows.serializers import WorkflowTemplateWriteSerializer
 from apps.workflows.services import WorkflowService
 
 
@@ -230,6 +232,56 @@ class V2ActivationTests(TestCase):
             self.document.metadata["form"]["completed_workflow_stages"],
             ["requisition", "rfq", "lpo"],
         )
+
+    def test_reordering_reuses_rows_by_graph_node_and_repairs_cursor(self):
+        instance = self._instance()
+        active_step = self.template.steps.get(node_id="b_req1")
+        task = WorkflowTask.objects.create(
+            workflow_instance=instance,
+            step=active_step,
+            assigned_to=self.user,
+            status="in_progress",
+        )
+        original_ids = {step.node_id: step.id for step in self.template.steps.all()}
+        incoming = [
+            {"node_id": step.node_id, "name": step.name, "step_type": step.step_type}
+            for step in self.template.steps.order_by("-order")
+        ]
+
+        WorkflowTemplateWriteSerializer()._upsert_steps(self.template, incoming)
+        reordered_ids = {step.node_id: step.id for step in self.template.steps.all()}
+        WorkflowTemplateWriteSerializer()._upsert_steps(self.template, incoming)
+
+        self.assertEqual(
+            {step.node_id: step.id for step in self.template.steps.all()},
+            original_ids,
+        )
+        self.assertEqual(reordered_ids, original_ids)
+        self.assertEqual(self.template.steps.count(), len(original_ids))
+        task.refresh_from_db()
+        instance.refresh_from_db()
+        self.assertEqual(task.step.node_id, "b_req1")
+        self.assertEqual(instance.current_step_order, task.step.order)
+
+    def test_active_step_cannot_be_removed_by_a_template_edit(self):
+        from rest_framework.exceptions import ValidationError
+
+        instance = self._instance()
+        active_step = self.template.steps.get(node_id="b_req1")
+        WorkflowTask.objects.create(
+            workflow_instance=instance,
+            step=active_step,
+            assigned_to=self.user,
+            status="in_progress",
+        )
+        incoming = [
+            {"node_id": step.node_id, "name": step.name, "step_type": step.step_type}
+            for step in self.template.steps.exclude(node_id="b_req1")
+        ]
+
+        with self.assertRaises(ValidationError) as error:
+            WorkflowTemplateWriteSerializer()._upsert_steps(self.template, incoming)
+        self.assertIn("Resolve active approval tasks", str(error.exception))
 
 
 class ProcurementAutoAdvanceTests(V2ActivationTests):

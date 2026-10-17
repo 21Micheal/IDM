@@ -90,7 +90,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkflowStep
         fields = [
-            "id", "template", "order", "name", "status_label",
+            "id", "template", "order", "node_id", "name", "status_label",
             "step_type",
             "post_lpo_after_approval",
             # approval-step fields
@@ -168,7 +168,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkflowStep
         fields = [
-            "id", "name", "status_label",
+            "id", "node_id", "name", "status_label",
             "step_type",
             "post_lpo_after_approval",
             # approval-step
@@ -481,8 +481,16 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
         return attrs
 
     def _upsert_steps(self, template, steps_data):
+        # Serialize template edits with approval actions so a live task cannot
+        # advance against half-reordered mirror rows.
+        live_instances = list(
+            WorkflowInstance.objects.select_for_update()
+            .filter(Q(template=template) & (Q(status="in_progress") | Q(imprest_request_status="in_progress")))
+            .order_by("pk")
+        )
         existing_steps = list(template.steps.all())
         existing_by_id = {str(step.id): step for step in existing_steps}
+        existing_by_node_id = {step.node_id: step for step in existing_steps if step.node_id}
         # The v2 editor's block IDs are stable, but the flat compatibility
         # mirror does not carry WorkflowStep UUIDs. Reuse the existing row at
         # the same flattened position when no valid UUID was submitted. Without
@@ -509,7 +517,19 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
 
         if template.definition and template.definition.get("version") == 2:
             used_ids = set(incoming_existing_ids)
+            seen_node_ids = set()
             for position, raw in enumerate(steps_data, start=1):
+                node_id = str(raw.get("node_id") or "").strip()
+                if node_id:
+                    if node_id in seen_node_ids:
+                        raise serializers.ValidationError({"steps": "Each workflow graph node can appear only once."})
+                    seen_node_ids.add(node_id)
+                    node_match = existing_by_node_id.get(node_id)
+                    if node_match and str(node_match.id) not in used_ids:
+                        raw["id"] = str(node_match.id)
+                        used_ids.add(str(node_match.id))
+                        incoming_existing_ids.add(str(node_match.id))
+                        continue
                 step_id = raw.get("id")
                 if step_id and str(step_id) in existing_by_id:
                     continue
@@ -543,6 +563,19 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
         # protection so templates with live tasks can still be edited; only orphans
         # without tasks are removed.
         is_v2 = bool(template.definition and template.definition.get("version") == 2)
+
+        if is_v2 and removed_step_ids:
+            active_removed = WorkflowTask.objects.filter(
+                step_id__in=removed_step_ids,
+                status__in=["in_progress", "held"],
+            ).values_list("step__name", flat=True).distinct()
+            active_names = sorted(active_removed)
+            if active_names:
+                raise serializers.ValidationError({
+                    "steps": "Resolve active approval tasks before removing these workflow steps: "
+                    + ", ".join(active_names)
+                    + ". You can still add steps or reorder existing steps."
+                })
 
         if removed_step_ids and not is_v2:
             protected_step_names = list(
@@ -602,6 +635,27 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                 for offset, step in enumerate(leftover, start=1):
                     step.order = 25000 + offset
                     step.save(update_fields=["order"])
+
+        # Keep persisted numeric cursors aligned with their active tasks after
+        # insertions and reorders. Each lane has its own cursor.
+        active_tasks = WorkflowTask.objects.filter(
+            workflow_instance__in=live_instances,
+            status__in=["in_progress", "held"],
+        ).values_list("workflow_instance_id", "execution_lane", "step__order")
+        cursors = {}
+        for instance_id, lane, order in active_tasks:
+            cursors.setdefault(instance_id, {})[lane or "main"] = order
+        for workflow_instance in live_instances:
+            lane_cursors = cursors.get(workflow_instance.id, {})
+            update_fields = []
+            if "main" in lane_cursors and workflow_instance.current_step_order != lane_cursors["main"]:
+                workflow_instance.current_step_order = lane_cursors["main"]
+                update_fields.append("current_step_order")
+            if "imprest_request" in lane_cursors and workflow_instance.imprest_request_current_step_order != lane_cursors["imprest_request"]:
+                workflow_instance.imprest_request_current_step_order = lane_cursors["imprest_request"]
+                update_fields.append("imprest_request_current_step_order")
+            if update_fields:
+                workflow_instance.save(update_fields=update_fields)
 
     @staticmethod
     def _retire_sibling_templates(template: WorkflowTemplate) -> int:

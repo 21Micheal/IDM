@@ -56,11 +56,12 @@ export interface WorkflowStep {
   /** Procurement/document phase this step belongs to (requisition/rfq/lpo). */
   phase?: string;
   /** Independent approval lane that runs alongside the main procurement path. */
-  lane?: "imprest_request";
+  lane?: number;
+  /** Independent execution lane for procurement approval rows. */
+  executionLane?: "imprest_request";
   branchLabel?: string;
   next?: string[];
   description?: string;
-  lane?: number;
   column?: number;
 }
 

@@ -260,6 +260,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     if (hasDocument) {
       qc.invalidateQueries({ queryKey: ["document", documentId] });
       qc.invalidateQueries({ queryKey: ["document-workflow", documentId] });
+      qc.invalidateQueries({ queryKey: ["form-workflow", documentId] });
       qc.invalidateQueries({ queryKey: ["sunsystems-postings", documentId] });
       qc.invalidateQueries({ queryKey: ["notification-workflow", documentId] });
     }
@@ -272,6 +273,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     if (hasDocument) {
       void qc.refetchQueries({ queryKey: ["document", documentId], type: "active" });
       void qc.refetchQueries({ queryKey: ["document-workflow", documentId], type: "active" });
+      void qc.refetchQueries({ queryKey: ["form-workflow", documentId], type: "active" });
       void qc.refetchQueries({ queryKey: ["sunsystems-postings", documentId], type: "active" });
     }
     void qc.refetchQueries({ queryKey: ["workflow", "my-tasks"], type: "active" });

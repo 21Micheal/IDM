@@ -153,6 +153,8 @@ export interface ConditionGroup {
 export interface StepData {
   name: string;
   step_type: "approval" | "notification";
+  /** Stable graph-node identity copied to the flat runtime mirror. */
+  node_id?: string;
   post_lpo_after_approval?: boolean;
   parallel_lane?: "imprest_request" | null;
   order?: number;
@@ -1048,7 +1050,11 @@ export function compileToGraph(blocks: Block[]): CompiledGraph {
 /** Flat list of every step in document order — for list views / legacy `step_count`. */
 export function flattenSteps(blocks: Block[]): StepData[] {
   const out: StepData[] = [];
-  walk(blocks, (b) => { if (b.kind === "approval" || b.kind === "notification") out.push({ ...b.step, order: out.length + 1 }); });
+  walk(blocks, (b) => {
+    if (b.kind === "approval" || b.kind === "notification") {
+      out.push({ ...b.step, node_id: b.id, order: out.length + 1 });
+    }
+  });
   return out;
 }
 

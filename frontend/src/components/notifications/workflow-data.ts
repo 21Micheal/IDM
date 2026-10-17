@@ -67,6 +67,7 @@ type WorkflowTaskRecord = {
 
 type WorkflowTemplateStepRecord = {
   id?: string;
+  node_id?: string | null;
   order: number;
   name: string;
   status_label?: string;
@@ -287,23 +288,27 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
     effectivePhase,
     template?.definition,
     instance?.current_step_order,
+    instance?.imprest_request_current_step_order,
+    instance?.imprest_request_status,
   );
 
   // The workflow is still "live" (worth polling) while at least one stage is
   // running or yet to be reached, and it hasn't ended in a rejection.
   const taskSteps = steps.filter((step) => !step.kind || step.kind === "task");
-  const isActive = orderedTasks.length > 0
-    && taskSteps.some((step) =>
+  const hasActiveTask = orderedTasks.some((task) => ["in_progress", "held"].includes(String(task.status)));
+  const isActive = instance?.status === "in_progress"
+    || instance?.imprest_request_status === "in_progress"
+    || hasActiveTask
+    || taskSteps.some((step) =>
       step.status === "in-progress" ||
       step.status === "on-hold" ||
-      step.status === "returned" ||
-      step.status === "pending",
+      step.status === "returned",
     );
 
   return {
     steps,
     currentStep: (() => {
-      const activeMain = steps.findIndex((step) => step.lane !== "imprest_request" && (step.status === "in-progress" || step.status === "on-hold"));
+      const activeMain = steps.findIndex((step) => step.executionLane !== "imprest_request" && (step.status === "in-progress" || step.status === "on-hold"));
       return activeMain >= 0 ? activeMain : steps.findIndex((step) => step.status === "in-progress" || step.status === "on-hold");
     })(),
     isActive,
@@ -317,6 +322,8 @@ function buildApproverWorkflow(
   workflowPhase?: WorkflowPhase | null,
   templateDefinition?: unknown,
   currentStepOrder?: number | null,
+  imprestRequestCurrentStepOrder?: number | null,
+  imprestRequestStatus?: string,
 ): WorkflowStep[] {
   const grouped = tasksWithHistory.reduce((map, item) => {
     const order = item.task.step?.order ?? map.size + 1;
@@ -360,8 +367,11 @@ function buildApproverWorkflow(
       .sort(([a], [b]) => a - b);
     for (const [orphanOrder, items] of orphanGroups) {
       const active = items.some(({ task }) => task.status === "in_progress" || task.status === "held");
-      const activeTarget = active && currentStepOrder && validOrders.has(currentStepOrder)
-        ? currentStepOrder
+      const isImprestLane = parallelImprestOrders.has(orphanOrder)
+        || items.some(({ task }) => task.execution_lane === "imprest_request");
+      const laneCursor = isImprestLane ? imprestRequestCurrentStepOrder : currentStepOrder;
+      const activeTarget = active && laneCursor && validOrders.has(laneCursor)
+        ? laneCursor
         : undefined;
       const orphanName = items[0]?.task.step?.name?.trim().toLowerCase();
       const nameTarget = sourceStepsRaw.find((step) =>
@@ -375,7 +385,7 @@ function buildApproverWorkflow(
   }
 
   const sourceSteps = phaseMap
-    ? sourceStepsRaw.filter((step) => orderPhase.has(step.order))
+    ? sourceStepsRaw.filter((step) => orderPhase.has(step.order) || parallelImprestOrders.has(step.order))
     : sourceStepsRaw;
 
   // ── Pass 1: derive each step's raw status from its own tasks ────────────────
@@ -388,14 +398,27 @@ function buildApproverWorkflow(
       || items.some((item) => item.task.step?.step_type === "notification");
     const allHistory = items.flatMap((item) => item.history ?? []);
     const latestAction = latestActionForHistory(allHistory);
+    const latestTaskItem = [...items]
+      .filter((item) => item.task.acted_at)
+      .sort((a, b) => Date.parse(String(b.task.acted_at)) - Date.parse(String(a.task.acted_at)))[0];
     const statuses = items.map((item) => mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action));
-    const rawStatus: WorkflowStep["status"] = items.length ? resolveStepStatus(statuses) : "pending";
+    const lane = parallelImprestOrders.has(stepOrder)
+      || items.some(({ task }) => task.execution_lane === "imprest_request");
+    const laneNotRequired = lane && ["not_required", "cancelled"].includes(String(imprestRequestStatus ?? ""))
+      && !items.length;
+    const rawStatus: WorkflowStep["status"] = laneNotRequired
+      ? "skipped"
+      : items.length ? resolveStepStatus(statuses) : "pending";
     // Future tasks may already carry a provisional auto-selected approver.
     // Show that assignee only after the step becomes active or has been acted
     // on; before then, show the configured group instead of a stale person.
     const taskWithAssignee = rawStatus === "pending"
       ? undefined
-      : items.find((item) => item.task.assigned_to);
+      : rawStatus === "in-progress" || rawStatus === "on-hold"
+        ? items.find((item) => ["in_progress", "held"].includes(String(item.task.status)))
+        : [...items]
+            .filter((item) => ["approved", "rejected", "returned", "notified"].includes(String(item.task.status)))
+            .sort((a, b) => Date.parse(String(b.task.acted_at ?? "")) - Date.parse(String(a.task.acted_at ?? "")))[0];
     const rawName = templateStep.name?.trim() || items[0]?.task.step?.name?.trim() || `${ordinal(index + 1)} Approver`;
     const name = isNotification ? (rawName || "Notification") : (rawName || `${ordinal(index + 1)} Approver`);
 
@@ -412,23 +435,23 @@ function buildApproverWorkflow(
         || formatAssigneeType(templateStep.assignee_type);
     const approver = isNotification
       ? recipientLabel
-      : (formatPerson(taskWithAssignee?.task.assigned_to) || configuredApprover || "Unassigned");
+      : templateStep.assignee_type === "group_all"
+        ? configuredApprover || "All group members"
+        : (formatPerson(taskWithAssignee?.task.assigned_to) || configuredApprover || "Unassigned");
 
     return {
       id: isNotification ? `notification-${stepOrder}` : `approver-${stepOrder}`,
       stepOrder,
       index,
       phase: orderPhase.get(stepOrder),
-      lane: parallelImprestOrders.has(stepOrder) || items.some(({ task }) => task.execution_lane === "imprest_request")
-        ? "imprest_request" as const
-        : undefined,
+      executionLane: lane ? "imprest_request" as const : undefined,
       isNotification,
       name,
       approver,
       rawStatus,
       hasTasks: items.length > 0,
-      completedAt: latestAction?.created_at || items.find((item) => item.task.acted_at)?.task.acted_at || undefined,
-      comment: latestAction?.comment || items.find((item) => item.task.comment)?.task.comment || undefined,
+      completedAt: latestTaskItem?.task.acted_at || latestAction?.created_at || undefined,
+      comment: latestTaskItem?.task.comment || latestAction?.comment || undefined,
       description: isNotification
         ? "Automated notification step"
         : (templateStep.instructions || `${ordinal(index + 1)} approval step`),
@@ -449,10 +472,11 @@ function buildApproverWorkflow(
     value ? PROCUREMENT_PHASE_ORDER.indexOf(value as WorkflowPhase) : -1;
   const currentPhaseIndex = phaseIndex(workflowPhase);
 
-  let terminated = false;
+  const terminatedLanes = new Set<string>();
   const resolved = base.map((step) => {
     let status: WorkflowStep["status"] = step.rawStatus;
-    if (terminated && !step.hasTasks) status = "skipped";
+    const laneKey = step.executionLane === "imprest_request" ? "imprest_request" : "main";
+    if (terminatedLanes.has(laneKey) && !step.hasTasks) status = "skipped";
     const stepPhaseIndex = phaseIndex(step.phase);
     if (
       step.phase
@@ -463,20 +487,26 @@ function buildApproverWorkflow(
     ) {
       status = "skipped";
     }
-    if (status === "rejected") terminated = true;
+    if (status === "rejected") terminatedLanes.add(laneKey);
     return { ...step, status };
   });
 
   // ── Pass 3: compose human-readable status text from each step's position ────
   const approvers = resolved.map((step, index) => {
-    const previous = index > 0 ? resolved[index - 1] : undefined;
+    const previous = step.executionLane === "imprest_request"
+      ? [...resolved.slice(0, index)].reverse().find((candidate) => candidate.executionLane === "imprest_request")
+      : [...resolved.slice(0, index)].reverse().find((candidate) => candidate.executionLane !== "imprest_request");
     return {
       id: step.id,
       name: step.name,
       approver: step.approver,
       status: step.status,
       phase: step.phase,
-      statusDisplay: describeStatus({
+      statusDisplay: step.executionLane === "imprest_request" && step.status === "skipped" && !step.hasTasks
+        ? "Not required"
+        : step.executionLane === "imprest_request" && step.status === "pending" && !previous
+          ? "Starts after requisition approval"
+        : describeStatus({
         status: step.status,
         isNotification: step.isNotification,
         stepName: step.name,
@@ -693,15 +723,18 @@ function getWorkflowMeta(orderedTasks: WorkflowTaskRecord[], instance?: Workflow
 }
 
 function mapTaskStatus(taskStatus?: string, action?: string): WorkflowStep["status"] {
-  const normalizedAction = String(action ?? "").toLowerCase();
   const normalizedStatus = String(taskStatus ?? "").toLowerCase();
-  if (normalizedAction === "notified" || normalizedStatus === "notified") return "completed";
-  if (normalizedAction === "approved" || normalizedStatus === "approved" || normalizedStatus === "completed") return "completed";
-  if (normalizedAction === "rejected" || normalizedStatus === "rejected") return "rejected";
-  if (normalizedAction === "returned" || normalizedStatus === "returned") return "returned";
-  if (normalizedAction === "held" || normalizedStatus === "held") return "on-hold";
+  // The persisted task state is authoritative. Histories can lag immediately
+  // after an action, so an older action must never overwrite the current state.
+  if (normalizedStatus === "notified") return "completed";
+  if (["approved", "completed"].includes(normalizedStatus)) return "completed";
+  if (normalizedStatus === "rejected") return "rejected";
+  if (normalizedStatus === "returned") return "returned";
+  if (normalizedStatus === "held") return "on-hold";
   if (normalizedStatus === "in_progress") return "in-progress";
   if (normalizedStatus === "skipped") return "skipped";
+  const normalizedAction = String(action ?? "").toLowerCase();
+  if (normalizedAction === "notified") return "completed";
   return "pending";
 }
 

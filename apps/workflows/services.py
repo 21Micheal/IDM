@@ -458,7 +458,12 @@ class WorkflowService:
     @transaction.atomic
     def approve(task: WorkflowTask, actor, comment: str = "", request=None, signature_placement=None,
                 items=None, use_new_signature: bool = False, signature_image=None) -> None:
-        WorkflowService._assert_actionable(task)
+        # Lock the workflow instance before the task. ``group_any`` creates a
+        # task for every eligible member; locking only a task would let two
+        # members approve different sibling tasks at the same time and advance
+        # the same lane twice.
+        task, instance = WorkflowService._lock_action_task(task)
+        WorkflowService._assert_actionable(task, instance=instance)
 
         task.status   = "approved"
         task.comment  = comment
@@ -467,7 +472,8 @@ class WorkflowService:
 
         action = WorkflowTaskAction.objects.create(task=task, actor=actor, action="approved", comment=comment)
 
-        instance   = task.workflow_instance
+        # Use the task's current mirrored order. The graph node keeps the same
+        # row when steps move, while the instance cursor is repaired on save.
         step       = task.step
         doc        = instance.document
         execution_lane = task.execution_lane or "main"
@@ -475,19 +481,25 @@ class WorkflowService:
         task_step_order = step.order
         cursor_order = instance.imprest_request_current_step_order if execution_lane == "imprest_request" else instance.current_step_order
         if WorkflowService.is_v2_workflow(instance.template) and cursor_order:
-            # WorkflowStep rows are a mutable flat mirror of the v2 definition.
-            # Older tasks can still point at a parked mirror row after a prior
-            # template save, so use the instance cursor to advance the graph.
-            advance_order = cursor_order
-            current_step = instance.template.steps.filter(order=advance_order).first()
-            if current_step and (
-                current_step.name.strip() != step.name.strip()
-                or current_step.step_type != step.step_type
-            ):
+            current_step = instance.template.steps.filter(order=cursor_order).first()
+            same_node = bool(
+                current_step and step.node_id and current_step.node_id
+                and current_step.node_id == step.node_id
+            )
+            same_legacy_step = bool(
+                current_step
+                and not (step.node_id and current_step.node_id)
+                and current_step.name.strip() == step.name.strip()
+                and current_step.step_type == step.step_type
+            )
+            if current_step and not (same_node or same_legacy_step):
                 raise WorkflowError(
                     "This approval task no longer matches the workflow's active step. "
                     "Refresh the task and contact an administrator if it remains available."
                 )
+            # Reorder-safe cursor correction: if the same graph node has moved,
+            # advance from its new position rather than the stale numeric cursor.
+            advance_order = step.order
 
         if step.requires_signature and doc is None:
             raise WorkflowError("Payment run workflow steps cannot require document signatures.")
@@ -547,7 +559,8 @@ class WorkflowService:
     @staticmethod
     @transaction.atomic
     def reject(task: WorkflowTask, actor, comment: str = "") -> None:
-        WorkflowService._assert_actionable(task)
+        task, instance = WorkflowService._lock_action_task(task)
+        WorkflowService._assert_actionable(task, instance=instance)
 
         task.status   = "rejected"
         task.comment  = comment
@@ -556,7 +569,6 @@ class WorkflowService:
 
         action = WorkflowTaskAction.objects.create(task=task, actor=actor, action="rejected", comment=comment)
 
-        instance = task.workflow_instance
         doc      = instance.document
 
         # Handle audit log and notifications for both documents and payment runs
@@ -590,7 +602,8 @@ class WorkflowService:
     def return_for_review(
         task: WorkflowTask, actor, comment: str, return_to: str = "uploader"
     ) -> None:
-        WorkflowService._assert_actionable(task)
+        task, instance = WorkflowService._lock_action_task(task)
+        WorkflowService._assert_actionable(task, instance=instance)
         if not comment.strip():
             raise WorkflowError("A comment explaining what needs fixing is required.")
 
@@ -610,7 +623,6 @@ class WorkflowService:
             task=task, actor=actor, action="returned", comment=comment, return_to=return_to
         )
 
-        instance       = task.workflow_instance
         current_order  = task.step.order
         execution_lane = task.execution_lane or "main"
         doc            = instance.document
@@ -665,7 +677,8 @@ class WorkflowService:
     @staticmethod
     @transaction.atomic
     def hold(task: WorkflowTask, actor, comment: str, hold_hours: int = None) -> None:
-        WorkflowService._assert_actionable(task)
+        task, instance = WorkflowService._lock_action_task(task)
+        WorkflowService._assert_actionable(task, instance=instance)
 
         held_until = timezone.now() + timedelta(hours=hold_hours or 24)
 
@@ -680,7 +693,7 @@ class WorkflowService:
             comment=comment, hold_hours=hold_hours,
         )
 
-        doc        = task.workflow_instance.document
+        doc        = instance.document
         execution_lane = task.execution_lane or "main"
         if doc is not None:
             if execution_lane == "main":
@@ -696,13 +709,13 @@ class WorkflowService:
                 changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "hold_hours": hold_hours},
             )
             WorkflowService._notify_action(action, doc)
-        elif task.workflow_instance.payment_run:
+        elif instance.payment_run:
             AuditLog.objects.create(
                 event=AuditEvent.WORKFLOW_HELD,
                 actor=actor,
                 object_type="PaymentRun",
-                object_id=str(task.workflow_instance.payment_run.pk),
-                object_repr=str(task.workflow_instance.payment_run.payment_reference)[:255],
+                object_id=str(instance.payment_run.pk),
+                object_repr=str(instance.payment_run.payment_reference)[:255],
                 changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "hold_hours": hold_hours},
             )
             WorkflowService._notify_action(action, None)
@@ -714,6 +727,7 @@ class WorkflowService:
     @staticmethod
     @transaction.atomic
     def release_hold(task: WorkflowTask, actor=None, *, auto: bool = False) -> None:
+        task, instance = WorkflowService._lock_action_task(task)
         if task.status != "held":
             raise WorkflowError("This task is not currently on hold.")
 
@@ -731,9 +745,9 @@ class WorkflowService:
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_RELEASED,
             actor=actor,
-            object_type=task.workflow_instance.document.__class__.__name__ if task.workflow_instance.document else "PaymentRun",
-            object_id=str(task.workflow_instance.document.pk) if task.workflow_instance.document else str(task.workflow_instance.payment_run_id),
-            object_repr=str(task.workflow_instance.document)[:255] if task.workflow_instance.document else str(task.workflow_instance.payment_run),
+            object_type=instance.document.__class__.__name__ if instance.document else "PaymentRun",
+            object_id=str(instance.document.pk) if instance.document else str(instance.payment_run_id),
+            object_repr=str(instance.document)[:255] if instance.document else str(instance.payment_run),
             changes={
                 "task_id": str(task.id),
                 "action": "released",
@@ -741,11 +755,11 @@ class WorkflowService:
             },
         )
 
-        doc  = task.workflow_instance.document
+        doc  = instance.document
         if doc is not None:
             WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
             WorkflowService._notify_action(action, doc)
-        elif task.workflow_instance.payment_run:
+        elif instance.payment_run:
             WorkflowService._notify_action(action, None)
 
     # ── Cancel ─────────────────────────────────────────────────────────────
@@ -1310,14 +1324,23 @@ class WorkflowService:
         raise WorkflowError(f"Unsupported assignee type: {step.assignee_type}")
 
     @staticmethod
-    def _assert_actionable(task: WorkflowTask) -> None:
+    def _lock_action_task(task: WorkflowTask) -> tuple[WorkflowTask, WorkflowInstance]:
+        """Serialize every decision in a workflow lane and refresh stale tasks."""
+        instance = WorkflowInstance.objects.select_for_update().get(
+            pk=task.workflow_instance_id
+        )
+        locked_task = WorkflowTask.objects.select_for_update().get(pk=task.pk)
+        return locked_task, instance
+
+    @staticmethod
+    def _assert_actionable(task: WorkflowTask, instance: WorkflowInstance | None = None) -> None:
         if task.status not in ("in_progress", "held"):
             raise WorkflowError(
                 f"This task is '{task.get_status_display()}' and cannot be actioned."
             )
         if (
             task.execution_lane == "imprest_request"
-            and task.workflow_instance.imprest_request_status != "in_progress"
+            and (instance or task.workflow_instance).imprest_request_status != "in_progress"
         ):
             raise WorkflowError("The Imprest request approval lane is no longer active.")
 

@@ -137,6 +137,7 @@ class WorkflowStep(models.Model):
         WorkflowTemplate, on_delete=models.CASCADE, related_name="steps"
     )
     order         = models.PositiveSmallIntegerField(db_index=True)
+    node_id       = models.CharField(max_length=64, null=True, blank=True, db_index=True)
     name          = models.CharField(max_length=120)
     status_label  = models.CharField(max_length=80, default="Pending Approval")
 

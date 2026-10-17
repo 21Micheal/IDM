@@ -64,11 +64,11 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
     [steps],
   );
   const parallelImprestSteps = useMemo(
-    () => taskSteps.filter((step) => step.lane === "imprest_request").sort((a, b) => a.order - b.order),
+    () => taskSteps.filter((step) => step.executionLane === "imprest_request").sort((a, b) => a.order - b.order),
     [taskSteps],
   );
   const mainTaskSteps = useMemo(
-    () => taskSteps.filter((step) => step.lane !== "imprest_request"),
+    () => taskSteps.filter((step) => step.executionLane !== "imprest_request"),
     [taskSteps],
   );
 
@@ -251,7 +251,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
                   {startGroup && (
                     <tr className="bg-[#EEF2F6]">
                       <td colSpan={5} className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-[#475569]">
-                        {step.lane === "imprest_request" ? "Imprest request approval · independent lane" : `${PHASE_LABELS[step.phase ?? ""] ?? step.phase} stage`}
+                        {step.executionLane === "imprest_request" ? "Imprest request approval · independent lane" : `${PHASE_LABELS[step.phase ?? ""] ?? step.phase} stage`}
                       </td>
                     </tr>
                   )}

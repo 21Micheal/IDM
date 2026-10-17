@@ -1226,7 +1226,7 @@ def flatten_steps(definition: Dict[str, Any]) -> List[Dict[str, Any]]:
         for block in blocks_list:
             kind = block.get("kind")
             if kind in ("approval", "notification"):
-                steps.append(block.get("step", {}))
+                steps.append({**(block.get("step", {}) or {}), "node_id": block.get("id")})
             elif kind in ("if_else", "switch"):
                 for branch in block.get("branches", []):
                     walk_blocks(branch.get("blocks", []))
