@@ -728,6 +728,7 @@ export default function FormDetailPage() {
         #requisition-print-root .rq-print-document section { display: block !important; margin: 2.5mm 0; }
         #requisition-print-root .rq-print-document section h2 { margin: 0 0 1.5mm; padding: 1mm 1.5mm; border-bottom: 1pt solid #9aa6af; background: #eef3f7 !important; font-size: 8pt; text-transform: uppercase; }
         #requisition-print-root .rq-print-details { display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1mm 3mm; margin: 1.5mm 0; }
+        #requisition-print-root .rq-print-details-two { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
         #requisition-print-root .rq-print-details > div { display: flex !important; gap: 1mm; min-width: 0; }
         #requisition-print-root .rq-print-details b { min-width: 27mm; }
         #requisition-print-root .rq-print-details span { overflow-wrap: anywhere; }
@@ -735,7 +736,8 @@ export default function FormDetailPage() {
         #requisition-print-root .rq-print-table { margin: 1.5mm 0; }
         #requisition-print-root .rq-print-signatures { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2mm; margin-top: 2mm; }
         #requisition-print-root .rq-print-signature { display: block !important; min-height: 16mm; padding: 1.5mm; border: 0.5pt solid #aeb5bb; }
-        #requisition-print-root .rq-print-signature img { display: block !important; max-width: 35mm; max-height: 10mm; object-fit: contain; }
+        #requisition-print-root .rq-print-signature img { display: block !important; width: auto !important; max-width: 52mm; max-height: 19mm; object-fit: contain; }
+        #requisition-print-root .rq-print-signature-has-image { min-height: 22mm !important; }
         #requisition-print-root .rq-print-signature-line { display: block !important; width: 40mm; height: 8mm; border-bottom: 0.5pt solid #333; }
         #requisition-print-root .rq-print-footnote { display: block !important; margin-top: 3mm; padding-top: 1mm; border-top: 0.5pt solid #9aa6af; font-size: 7pt; }
         #requisition-print-root .overflow-hidden, #requisition-print-root .overflow-x-auto, #requisition-print-root .overflow-auto { overflow: visible !important; }
@@ -939,6 +941,8 @@ export default function FormDetailPage() {
                   sections={(formData.sections ?? []) as Record<string, any>[]}
                   values={(formEditing ? formValues : (formData.values ?? {})) as Record<string, any>}
                   workflowSteps={workflowData?.steps ?? []}
+                  accountingPeriod={String((doc.metadata?.sunsystems as Record<string, any> | undefined)?.ui?.accountingPeriod ?? "")}
+                  businessUnit={String((doc.metadata?.sunsystems as Record<string, any> | undefined)?.ui?.businessUnit ?? "")}
                 />
               </div>
               <div className="bg-white">

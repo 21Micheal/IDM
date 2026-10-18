@@ -1,4 +1,6 @@
 import type { WorkflowStep } from "@/components/notifications/workflow-visualizer";
+import { useQuery } from "@tanstack/react-query";
+import { sunsystemsAPI } from "@/services/api";
 
 type AnyRecord = Record<string, any>;
 
@@ -105,12 +107,12 @@ function SignatureBlocks({ sections, values, match }: { sections: AnyRecord[]; v
   }
   if (!blocks.length) return null;
   return <div className="rq-print-signatures">{blocks.map((block, index) => (
-    <div className="rq-print-signature" key={`${block.role}-${index}`}>
+    <div className={`rq-print-signature${block.image ? " rq-print-signature-has-image" : ""}`} key={`${block.role}-${index}`}>
       <strong>{block.role}</strong>
       {block.image.startsWith("data:image/") || block.image.startsWith("http") || block.image.startsWith("/")
         ? <img src={block.image} alt={`${block.role} signature`} />
         : <div className="rq-print-signature-line" />}
-      <div>Name: {block.name || "—"}</div><div>Date: {block.date || "—"}</div>
+      {!block.image && <><div>Name: {block.name || "—"}</div><div>Date: {block.date || "—"}</div></>}
     </div>
   ))}</div>;
 }
@@ -122,6 +124,8 @@ export default function PrintableRequisition({
   sections,
   values,
   workflowSteps,
+  accountingPeriod,
+  businessUnit,
 }: {
   title: string;
   reference: string;
@@ -129,20 +133,33 @@ export default function PrintableRequisition({
   sections: AnyRecord[];
   values: AnyRecord;
   workflowSteps: WorkflowStep[];
+  accountingPeriod?: string;
+  businessUnit?: string;
 }) {
+  const { data: activityCodes = [] } = useQuery({
+    queryKey: ["print-analysis-codes", "10", businessUnit],
+    queryFn: () => sunsystemsAPI.getAnalysisCodes({ dimension: "10", business_unit: businessUnit }).then((response) => response.data.analysis_codes ?? []),
+    staleTime: 10 * 60 * 1000,
+  });
+  const { data: costCentreCodes = [] } = useQuery({
+    queryKey: ["print-analysis-codes", "05", businessUnit],
+    queryFn: () => sunsystemsAPI.getAnalysisCodes({ dimension: "05", business_unit: businessUnit }).then((response) => response.data.analysis_codes ?? []),
+    staleTime: 10 * 60 * 1000,
+  });
+  const analysisName = (codes: typeof activityCodes, code: string) => text(codes.find((item) => item.analysis_code === code)?.name);
   const fields = sections.flatMap((section) => section.fields || []).filter((field) => field.type !== "table" && !field.hidden);
   const tables = sections.flatMap((section) => section.fields || []).filter((field) => field.type === "table");
   const postingTables = tables.filter((table) => ["requisition_lines", "rfq_required_lines"].includes(table.workflowRole));
   const travelLines = postingTables.flatMap((table) => {
     const rows = Array.isArray(values[table.key]) ? values[table.key] : [];
     const cols = tableColumns(table);
-    const roleColumn = (role: string) => cols.find((column) => column.sunsystems?.role === role);
+    // Posting roles can be assigned to hidden calculated columns (for example,
+    // the Travel table's LPO Amount). Keep those available for print mapping.
+    const roleColumn = (role: string) => (table.columns || []).find((column: AnyRecord) => column.key && column.sunsystems?.role === role);
     const budgetColumn = cols.find((column) => column.type === "budget_line");
     const activityColumn = cols.find((column) => column.external?.source === "analysis_codes" && column.external?.dimension === "10");
     const costCentreColumn = cols.find((column) => column.external?.source === "analysis_codes" && column.external?.dimension === "05");
     const accountColumn = roleColumn("account_code");
-    const descriptionColumn = roleColumn("description") || cols.find((column) => /description of input|^description$/i.test(fieldLabel(column)));
-    const activityDescriptionColumn = cols.find((column) => /activity description/i.test(fieldLabel(column)));
     const amountColumn = roleColumn("line_amount");
     return rows.map((row: AnyRecord) => {
       const budget = budgetColumn && row?.[budgetColumn.key] && typeof row[budgetColumn.key] === "object" ? row[budgetColumn.key] : {};
@@ -152,22 +169,34 @@ export default function PrintableRequisition({
       const activityDescription = text(
         budget["10_description"]
         || budget["10_name"]
-        || row?.[activityDescriptionColumn?.key]
         || row?.[activityColumn?.external?.fillDescriptionColumn]
         || row?.[activityColumn?.key + "_description"],
-      );
+      ) || analysisName(activityCodes, activityCode);
+      const costCentreName = text(budget["05_description"] || budget["05_name"] || row?.[costCentreColumn?.external?.fillDescriptionColumn] || row?.[costCentreColumn?.key + "_description"]) || analysisName(costCentreCodes, costCode);
       return {
         activityCode: activityCode || "—",
         activityDescription: activityDescription || "—",
-        costCentre: costCode || "—",
+        costCentre: costCentreName || costCode || "—",
         accountCode: account || "—",
-        description: text(row?.[descriptionColumn?.key]) || "—",
+        description: table.workflowRole === "rfq_required_lines" ? "Imprest" : "Travel",
         estimated: text(row?.[amountColumn?.key]) || "—",
       };
     });
   });
-  const itinerary = tables.find((table) => /itinerary/i.test(fieldLabel(table)) && !/imprest/i.test(fieldLabel(table)));
+  const isTravelItinerary = (table: AnyRecord) => {
+    if (/itinerary/i.test(fieldLabel(table)) && !/imprest/i.test(fieldLabel(table))) return true;
+    const labels = tableColumns(table).map((column) => normalized(fieldLabel(column))).join(" ");
+    return /destination/.test(labels) && /(date|nights|accommodation|departure|arrival)/.test(labels) && table.workflowRole !== "rfq_required_lines";
+  };
+  const itinerary = tables.find(isTravelItinerary);
   const imprestItinerary = tables.find((table) => table.workflowRole === "rfq_required_lines" || (/itinerary/i.test(fieldLabel(table)) && /imprest/i.test(fieldLabel(table))));
+  const itineraryRows = itinerary ? (Array.isArray(values[itinerary.key]) ? values[itinerary.key] : []) : [];
+  const destination = itinerary ? (() => {
+    const columns = tableColumns(itinerary);
+    const destinationColumns = columns.filter((column) => /destination|city|location|to\b/.test(normalized(fieldLabel(column))));
+    const entries = itineraryRows.flatMap((row: AnyRecord) => destinationColumns.map((column) => text(row?.[column.key])).filter(Boolean));
+    return [...new Set(entries)].join(", ");
+  })() : "";
   const financeSteps = workflowSteps.filter((step) => /finance|budget availability/i.test(step.name));
   const financeStatuses = financeSteps.map((step) => String(step.status).toLowerCase());
   const budgetAvailability = financeStatuses.some((status) => /reject/.test(status))
@@ -181,11 +210,11 @@ export default function PrintableRequisition({
     ["Name of Requesting Officer", findField(fields, values, [/requesting officer/, /requester name/, /requisitioner/, /requested by/]) || text(document.uploaded_by?.full_name) || "—"],
     ["Position", findField(fields, values, [/^position$/])],
     ["Staff Code", findField(fields, values, [/staff code/, /employee number/])],
-    ["Department", findField(fields, values, [/department/]) || "—"],
+    ["Department", findField(fields, values, [/department/]) || text(document.uploaded_by_department_name || document.department_name || document.uploaded_by?.department_name || document.department) || "—"],
     ["Grade", findField(fields, values, [/^grade$/])],
-    ["Accounting Period", findField(fields, values, [/accounting period/, /^period$/])],
+    ["Accounting Period", accountingPeriod || findField(fields, values, [/accounting period/, /^period$/])],
     ["Purpose of Travel", findField(fields, values, [/activity description/, /purpose of travel/])],
-    ["Destination", findField(fields, values, [/destination/])],
+    ["Destination", destination || findField(fields, values, [/destination/])],
     ["Workshop / Activity Dates", [
       findField(fields, values, [/activity start date/, /workshop.*from/, /travel start date/]),
       findField(fields, values, [/activity end date/, /workshop.*to/, /travel end date/]),
@@ -209,9 +238,8 @@ export default function PrintableRequisition({
         {top.map(([label, value]) => <div key={label}><b>{label}</b><span>{value || "—"}</span></div>)}
       </div></section>
       <section><h2>B. Financing of the Trip &amp; Expense Analysis</h2>
-        <div className="rq-print-details rq-print-details-three">
+        <div className="rq-print-details rq-print-details-two">
           <div><b>Trip Funded By</b><span>{findField(fields, values, [/trip funded by/, /funded by/])}</span></div>
-          <div><b>Funding Source / Organization</b><span>{findField(fields, values, [/funding source/, /organization name/, /other organization/])}</span></div>
           <div><b>Funding Coverage</b><span>{fundingCoverage}</span></div>
         </div>
         <table className="rq-print-table"><thead><tr>{["Activity Code", "Activity Description", "Cost Centre / Department", "Account Code", "Description of Input", "Estimated Costs", "Available Budget"].map((label) => <th key={label}>{label}</th>)}</tr></thead>
@@ -222,8 +250,8 @@ export default function PrintableRequisition({
       <section><h2>C. Applicant’s Signature</h2><SignatureBlocks sections={sections} values={values} match={/applicant|requester|requesting officer/i} /></section>
       <section><h2>Budget Holder and Line Manager Recommendations</h2><div className="rq-print-signatures"><SignatureBlocks sections={sections} values={values} match={/budget holder|line manager/i} /></div></section>
       <section><h2>D. Finance Department Verification of Budget Availability</h2><div className="rq-print-answer"><b>Is budget available?</b><span>{budgetAvailability}</span><b>Comments:</b><span>—</span></div><SignatureBlocks sections={sections} values={values} match={/finance/i} /></section>
-      <section><h2>E. Travel Itinerary</h2>{itinerary ? <PrintableTable table={itinerary} rows={Array.isArray(values[itinerary.key]) ? values[itinerary.key] : []} /> : <p>—</p>}<SignatureBlocks sections={sections} values={values} match={/booking officer/i} /></section>
-      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestItinerary ? <PrintableTable table={imprestItinerary} rows={Array.isArray(values[imprestItinerary.key]) ? values[imprestItinerary.key] : []} /> : <p>—</p>}<SignatureBlocks sections={sections} values={values} match={/travel funds|imprest/i} /></section>
+      <section><h2>E. Travel Itinerary</h2>{itinerary ? <PrintableTable table={itinerary} rows={itineraryRows} /> : <p>—</p>}<SignatureBlocks sections={sections} values={values} match={/booking officer/i} /></section>
+      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestItinerary ? <PrintableTable table={imprestItinerary} rows={Array.isArray(values[imprestItinerary.key]) ? values[imprestItinerary.key] : []} /> : <p>—</p>}<SignatureBlocks sections={sections} values={values} match={/finance/i} /></section>
       <section><h2>G. Authorisation of the Trip</h2>
         <div className="rq-print-details rq-print-details-three"><div><b>Trip Authorised?</b><span>{lpoApprover ? "Yes" : "Pending"}</span></div><div><b>Authorised By</b><span>{lpoApprover?.approver || "—"}</span></div><div><b>Position / Date</b><span>{lpoApprover?.completedAt ? new Date(lpoApprover.completedAt).toLocaleDateString() : "—"}</span></div></div>
         <SignatureBlocks sections={sections} values={values} match={/authori[sz]ation|authori[sz]ed by|lpo approver/i} />

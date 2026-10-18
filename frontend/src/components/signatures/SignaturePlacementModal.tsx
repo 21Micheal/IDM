@@ -210,7 +210,7 @@ export async function compositeSignatureWithMetadata(
         }
 
         if (showName) {
-          const text = `Digitally signed by: ${name}`;
+          const text = name;
           const size = fitFont(text, 800, nameFont);
           ctx.fillStyle = "#0B1220";
           ctx.fillText(text, padding, currentY + size - 2);
