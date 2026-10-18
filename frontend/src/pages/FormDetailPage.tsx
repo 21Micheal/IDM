@@ -23,6 +23,7 @@ import { useParams, useNavigate, useLocation, useSearchParams, Link } from "reac
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
 import TemplateForm, { hasVisibleEditableSection, hasVisibleRetirementEditSection, pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
+import PrintableRequisition from "@/components/templates/PrintableRequisition";
 import BudgetBanner from "@/components/templates/BudgetBanner";
 import JournalPostingCard from "@/components/templates/JournalPostingCard";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
@@ -562,18 +563,10 @@ export default function FormDetailPage() {
       const printRoot = document.createElement("main");
       printRoot.id = "requisition-print-root";
       printRoot.setAttribute("aria-label", "Requisition print preview");
-      const heading = document.createElement("header");
-      heading.className = "requisition-print-heading";
-      const title = document.createElement("h1");
-      title.textContent = doc.title || "Requisition";
-      const reference = document.createElement("p");
-      reference.textContent = doc.reference_number || "";
-      heading.append(title, reference);
-      printRoot.appendChild(heading);
-
       const formCopy = source.cloneNode(true) as HTMLElement;
       formCopy.removeAttribute("id");
-      formCopy.querySelector(".requisition-print-heading")?.remove();
+      formCopy.classList.remove("hidden");
+      formCopy.classList.remove("requisition-print-source");
       const originalInputs = source.querySelectorAll<HTMLInputElement>("input");
       const copiedInputs = formCopy.querySelectorAll<HTMLInputElement>("input");
       originalInputs.forEach((input, index) => {
@@ -718,18 +711,33 @@ export default function FormDetailPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
-      <style>{`@page { size: A4 landscape; margin: 0; }
+      <style>{`@page { size: A4 portrait; margin: 8mm; }
       @media print {
         body * { visibility: hidden !important; }
         body:not(.requisition-print-enabled) * { display: none !important; }
         body.requisition-print-enabled > #root { display: none !important; }
         body.requisition-print-enabled #requisition-print-root,
         body.requisition-print-enabled #requisition-print-root * { visibility: visible !important; }
-        body.requisition-print-enabled #requisition-print-root { display: block !important; position: static !important; width: 100% !important; padding: 12mm !important; color: #1f2933 !important; background: white !important; font-family: Arial, sans-serif !important; }
+        body.requisition-print-enabled #requisition-print-root { display: block !important; position: static !important; width: 100% !important; padding: 0 !important; color: #1f2933 !important; background: white !important; font-family: Arial, sans-serif !important; }
         #requisition-print-root * { color: #1f2933 !important; }
-        #requisition-print-root .requisition-print-heading { display: block !important; margin-bottom: 8mm; border-bottom: 2px solid #287ead; padding-bottom: 4mm; }
-        #requisition-print-root .requisition-print-heading h1 { margin: 0; font-size: 20pt; }
-        #requisition-print-root .requisition-print-heading p { margin: 2mm 0 0; color: #52606a; font-size: 10pt; }
+        #requisition-print-root .rq-print-document { display: block !important; width: 100% !important; color: #1f2933 !important; font: 8pt Arial, sans-serif !important; }
+        #requisition-print-root .rq-print-org { display: block !important; padding: 2mm 0 3mm; margin-bottom: 3mm; border-bottom: 1.5pt solid #287ead; text-align: center; font-size: 10pt; font-weight: 700; line-height: 1.5; }
+        #requisition-print-root .rq-print-title { display: flex !important; justify-content: space-between; align-items: baseline; border-bottom: 1pt solid #9aa6af; padding: 1mm 0 2mm; margin-bottom: 3mm; }
+        #requisition-print-root .rq-print-title h1 { margin: 0; font-size: 12pt; text-transform: uppercase; }
+        #requisition-print-root .rq-print-title span { font-weight: 700; }
+        #requisition-print-root .rq-print-document section { display: block !important; margin: 2.5mm 0; }
+        #requisition-print-root .rq-print-document section h2 { margin: 0 0 1.5mm; padding: 1mm 1.5mm; border-bottom: 1pt solid #9aa6af; background: #eef3f7 !important; font-size: 8pt; text-transform: uppercase; }
+        #requisition-print-root .rq-print-details { display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1mm 3mm; margin: 1.5mm 0; }
+        #requisition-print-root .rq-print-details > div { display: flex !important; gap: 1mm; min-width: 0; }
+        #requisition-print-root .rq-print-details b { min-width: 27mm; }
+        #requisition-print-root .rq-print-details span { overflow-wrap: anywhere; }
+        #requisition-print-root .rq-print-answer { display: grid !important; grid-template-columns: 40mm 1fr 20mm 2fr; gap: 2mm; }
+        #requisition-print-root .rq-print-table { margin: 1.5mm 0; }
+        #requisition-print-root .rq-print-signatures { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2mm; margin-top: 2mm; }
+        #requisition-print-root .rq-print-signature { display: block !important; min-height: 16mm; padding: 1.5mm; border: 0.5pt solid #aeb5bb; }
+        #requisition-print-root .rq-print-signature img { display: block !important; max-width: 35mm; max-height: 10mm; object-fit: contain; }
+        #requisition-print-root .rq-print-signature-line { display: block !important; width: 40mm; height: 8mm; border-bottom: 0.5pt solid #333; }
+        #requisition-print-root .rq-print-footnote { display: block !important; margin-top: 3mm; padding-top: 1mm; border-top: 0.5pt solid #9aa6af; font-size: 7pt; }
         #requisition-print-root .overflow-hidden, #requisition-print-root .overflow-x-auto, #requisition-print-root .overflow-auto { overflow: visible !important; }
         #requisition-print-root .min-w-full { min-width: 0 !important; width: 100% !important; }
         #requisition-print-root table { width: 100% !important; table-layout: fixed !important; border-collapse: collapse !important; }
@@ -923,7 +931,17 @@ export default function FormDetailPage() {
                   />
                 );
               })()}
-              <div id="requisition-printable" className="bg-white">
+              <div id="requisition-printable" className="hidden requisition-print-source" aria-hidden="true">
+                <PrintableRequisition
+                  title="Travel Requisition and Authorisation Form"
+                  reference={doc.reference_number || ""}
+                  document={doc}
+                  sections={(formData.sections ?? []) as Record<string, any>[]}
+                  values={(formEditing ? formValues : (formData.values ?? {})) as Record<string, any>}
+                  workflowSteps={workflowData?.steps ?? []}
+                />
+              </div>
+              <div className="bg-white">
               <TemplateForm
                 sections={formData.sections ?? []}
                 values={formEditing ? formValues : (formData.values ?? {})}

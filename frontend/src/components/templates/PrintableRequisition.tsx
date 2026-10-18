@@ -1,0 +1,234 @@
+import type { WorkflowStep } from "@/components/notifications/workflow-visualizer";
+
+type AnyRecord = Record<string, any>;
+
+function text(value: unknown): string {
+  if (value == null || value === "") return "";
+  if (Array.isArray(value)) return value.map(text).filter(Boolean).join(", ");
+  if (typeof value === "object") {
+    const item = value as AnyRecord;
+    if (item.data_url || item.dataUrl || item.image_data) return String(item.data_url || item.dataUrl || item.image_data);
+    return String(item.label || item.name || item.description || item.code || item.value || "");
+  }
+  return String(value).trim();
+}
+
+function normalized(value: unknown): string {
+  return text(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function fieldLabel(field: AnyRecord): string {
+  return text(field.label || field.title || field.key);
+}
+
+function displayDate(value: unknown): string {
+  const raw = text(value);
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : raw;
+}
+
+function findField(fields: AnyRecord[], values: AnyRecord, patterns: RegExp[]): string {
+  for (const field of fields) {
+    const label = normalized(fieldLabel(field));
+    if (!patterns.some((pattern) => pattern.test(label))) continue;
+    const value = text(values[field.key]);
+    if (value) return value;
+  }
+  return "";
+}
+
+function tableColumns(table: AnyRecord): AnyRecord[] {
+  return (table.columns || []).filter((column: AnyRecord) => !column.hidden && column.key);
+}
+
+function cellValue(value: unknown): string {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const item = value as AnyRecord;
+    if (item.data_url || item.dataUrl) return "Signature on file";
+    if (item.account_code) {
+      const codes = Object.entries(item)
+        .filter(([key, code]) => /^\d{2}$/.test(key) && code)
+        .map(([, code]) => text(code));
+      return [text(item.account_code), ...codes].filter(Boolean).join(" · ");
+    }
+  }
+  return text(value) || "—";
+}
+
+function PrintableTable({ table, rows, columns }: { table: AnyRecord; rows: AnyRecord[]; columns?: AnyRecord[] }) {
+  const visibleColumns = columns ?? tableColumns(table);
+  return (
+    <table className="rq-print-table">
+      <thead><tr>{visibleColumns.map((column) => <th key={column.key}>{fieldLabel(column)}</th>)}</tr></thead>
+      <tbody>
+        {rows.length ? rows.map((row, index) => (
+          <tr key={index}>{visibleColumns.map((column) => <td key={column.key}>{["date", "datetime"].includes(column.type) ? displayDate(row?.[column.key]) || "—" : cellValue(row?.[column.key])}</td>)}</tr>
+        )) : <tr><td colSpan={Math.max(visibleColumns.length, 1)}>—</td></tr>}
+      </tbody>
+      {(table.columns || []).some((column: AnyRecord) => column.showTotal && visibleColumns.includes(column)) && (
+        <tfoot><tr>{visibleColumns.map((column, index) => {
+          const firstTotalIndex = visibleColumns.findIndex((item) => item.showTotal);
+          const total = column.showTotal
+            ? rows.reduce((sum, row) => sum + (Number(String(row?.[column.key] ?? "").replace(/,/g, "")) || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+            : "";
+          const labelCell = firstTotalIndex === 0 ? index === 0 : index === firstTotalIndex - 1;
+          const content = firstTotalIndex === 0 && index === 0
+            ? `${table.totalLabel || "Total"}: ${total}`
+            : labelCell ? (table.totalLabel || "Total") : total;
+          return <td key={column.key}>{content}</td>;
+        })}</tr></tfoot>
+      )}
+    </table>
+  );
+}
+
+function SignatureBlocks({ sections, values, match }: { sections: AnyRecord[]; values: AnyRecord; match?: RegExp }) {
+  const blocks: Array<{ role: string; image: string; name: string; date: string }> = [];
+  for (const section of sections) {
+    const fields: AnyRecord[] = section.fields || [];
+    const signatureFields = fields.filter((field) => field.type === "signature" || /signature|signed image/i.test(fieldLabel(field)));
+    for (const signature of signatureFields) {
+      const sectionLabel = text(section.label || section.title);
+      if (match && !match.test(`${sectionLabel} ${fieldLabel(signature)} ${text(signature.key)}`)) continue;
+      const imageValue = values[signature.key];
+      const image = typeof imageValue === "string" ? imageValue : text(imageValue?.url || imageValue?.data_url || imageValue?.dataUrl || imageValue?.image_data);
+      const base = normalized(fieldLabel(signature)).replace(/\b(signature|signed|image|sign)\b/g, " ").replace(/\s+/g, " ").trim();
+      const related = fields.filter((field) => field.key !== signature.key && base && normalized(fieldLabel(field)).includes(base));
+      const nameField = related.find((field) => /name|prepared by|approver|requester/i.test(fieldLabel(field)))
+        || fields.find((field) => field.key !== signature.key && /^name$/i.test(fieldLabel(field)));
+      const dateField = related.find((field) => /date/i.test(fieldLabel(field)))
+        || fields.find((field) => field.key !== signature.key && /^date$/i.test(fieldLabel(field)));
+      const name = text(values[nameField?.key]) || text(values[`${signature.key}_name`]);
+      const date = displayDate(values[dateField?.key] || values[`${signature.key}_date`]);
+      blocks.push({ role: fieldLabel(signature).replace(/signature/i, "").trim() || sectionLabel || "Signature", image, name, date });
+    }
+  }
+  if (!blocks.length) return null;
+  return <div className="rq-print-signatures">{blocks.map((block, index) => (
+    <div className="rq-print-signature" key={`${block.role}-${index}`}>
+      <strong>{block.role}</strong>
+      {block.image.startsWith("data:image/") || block.image.startsWith("http") || block.image.startsWith("/")
+        ? <img src={block.image} alt={`${block.role} signature`} />
+        : <div className="rq-print-signature-line" />}
+      <div>Name: {block.name || "—"}</div><div>Date: {block.date || "—"}</div>
+    </div>
+  ))}</div>;
+}
+
+export default function PrintableRequisition({
+  title,
+  reference,
+  document,
+  sections,
+  values,
+  workflowSteps,
+}: {
+  title: string;
+  reference: string;
+  document: AnyRecord;
+  sections: AnyRecord[];
+  values: AnyRecord;
+  workflowSteps: WorkflowStep[];
+}) {
+  const fields = sections.flatMap((section) => section.fields || []).filter((field) => field.type !== "table" && !field.hidden);
+  const tables = sections.flatMap((section) => section.fields || []).filter((field) => field.type === "table");
+  const postingTables = tables.filter((table) => ["requisition_lines", "rfq_required_lines"].includes(table.workflowRole));
+  const travelLines = postingTables.flatMap((table) => {
+    const rows = Array.isArray(values[table.key]) ? values[table.key] : [];
+    const cols = tableColumns(table);
+    const roleColumn = (role: string) => cols.find((column) => column.sunsystems?.role === role);
+    const budgetColumn = cols.find((column) => column.type === "budget_line");
+    const activityColumn = cols.find((column) => column.external?.source === "analysis_codes" && column.external?.dimension === "10");
+    const costCentreColumn = cols.find((column) => column.external?.source === "analysis_codes" && column.external?.dimension === "05");
+    const accountColumn = roleColumn("account_code");
+    const descriptionColumn = roleColumn("description") || cols.find((column) => /description of input|^description$/i.test(fieldLabel(column)));
+    const activityDescriptionColumn = cols.find((column) => /activity description/i.test(fieldLabel(column)));
+    const amountColumn = roleColumn("line_amount");
+    return rows.map((row: AnyRecord) => {
+      const budget = budgetColumn && row?.[budgetColumn.key] && typeof row[budgetColumn.key] === "object" ? row[budgetColumn.key] : {};
+      const activityCode = text(row?.[activityColumn?.key] || budget["10"]);
+      const costCode = text(row?.[costCentreColumn?.key] || budget["05"]);
+      const account = text(row?.[accountColumn?.key] || budget.account_code);
+      const activityDescription = text(
+        budget["10_description"]
+        || budget["10_name"]
+        || row?.[activityDescriptionColumn?.key]
+        || row?.[activityColumn?.external?.fillDescriptionColumn]
+        || row?.[activityColumn?.key + "_description"],
+      );
+      return {
+        activityCode: activityCode || "—",
+        activityDescription: activityDescription || "—",
+        costCentre: costCode || "—",
+        accountCode: account || "—",
+        description: text(row?.[descriptionColumn?.key]) || "—",
+        estimated: text(row?.[amountColumn?.key]) || "—",
+      };
+    });
+  });
+  const itinerary = tables.find((table) => /itinerary/i.test(fieldLabel(table)) && !/imprest/i.test(fieldLabel(table)));
+  const imprestItinerary = tables.find((table) => table.workflowRole === "rfq_required_lines" || (/itinerary/i.test(fieldLabel(table)) && /imprest/i.test(fieldLabel(table))));
+  const financeSteps = workflowSteps.filter((step) => /finance|budget availability/i.test(step.name));
+  const financeStatuses = financeSteps.map((step) => String(step.status).toLowerCase());
+  const budgetAvailability = financeStatuses.some((status) => /reject/.test(status))
+    ? "No"
+    : financeStatuses.some((status) => /approv|complete/.test(status))
+      ? "Yes"
+      : "Pending confirmation";
+  const lpoApprover = [...workflowSteps].reverse().find((step) => step.phase === "lpo" && /approv|complete/i.test(String(step.status)));
+  const totalEstimated = travelLines.reduce((sum, line) => sum + (Number(String(line.estimated).replace(/,/g, "")) || 0), 0);
+  const top = [
+    ["Name of Requesting Officer", findField(fields, values, [/requesting officer/, /requester name/, /requisitioner/, /requested by/]) || text(document.uploaded_by?.full_name) || "—"],
+    ["Position", findField(fields, values, [/^position$/])],
+    ["Staff Code", findField(fields, values, [/staff code/, /employee number/])],
+    ["Department", findField(fields, values, [/department/]) || "—"],
+    ["Grade", findField(fields, values, [/^grade$/])],
+    ["Accounting Period", findField(fields, values, [/accounting period/, /^period$/])],
+    ["Purpose of Travel", findField(fields, values, [/activity description/, /purpose of travel/])],
+    ["Destination", findField(fields, values, [/destination/])],
+    ["Workshop / Activity Dates", [
+      findField(fields, values, [/activity start date/, /workshop.*from/, /travel start date/]),
+      findField(fields, values, [/activity end date/, /workshop.*to/, /travel end date/]),
+    ].filter(Boolean).map(displayDate).join(" – ")],
+    ["Expected Travel Date", displayDate(findField(fields, values, [/expected.*travel date/, /travel date/]))],
+  ];
+  const fundingCoverage = fields
+    .filter((field) => /fully|partially/i.test(fieldLabel(field)))
+    .filter((field) => {
+      const value = values[field.key];
+      return value === true || value === "true" || value === "yes" || value === "1";
+    })
+    .map(fieldLabel)
+    .join(" / ") || "—";
+
+  return (
+    <article className="rq-print-document">
+      <div className="rq-print-org">EAST AFRICAN COMMUNITY CIVIL AVIATION SAFETY AND SECURITY OVERSIGHT AGENCY</div>
+      <div className="rq-print-title"><h1>{title || "Travel Requisition"}</h1><span>{reference}</span></div>
+      <section><h2>A. Details of Requesting Officer and the Trip</h2><div className="rq-print-details">
+        {top.map(([label, value]) => <div key={label}><b>{label}</b><span>{value || "—"}</span></div>)}
+      </div></section>
+      <section><h2>B. Financing of the Trip &amp; Expense Analysis</h2>
+        <div className="rq-print-details rq-print-details-three">
+          <div><b>Trip Funded By</b><span>{findField(fields, values, [/trip funded by/, /funded by/])}</span></div>
+          <div><b>Funding Source / Organization</b><span>{findField(fields, values, [/funding source/, /organization name/, /other organization/])}</span></div>
+          <div><b>Funding Coverage</b><span>{fundingCoverage}</span></div>
+        </div>
+        <table className="rq-print-table"><thead><tr>{["Activity Code", "Activity Description", "Cost Centre / Department", "Account Code", "Description of Input", "Estimated Costs", "Available Budget"].map((label) => <th key={label}>{label}</th>)}</tr></thead>
+          <tbody>{travelLines.length ? travelLines.map((line, index) => <tr key={index}><td>{line.activityCode}</td><td>{line.activityDescription}</td><td>{line.costCentre}</td><td>{line.accountCode}</td><td>{line.description}</td><td>{line.estimated}</td><td /></tr>) : <tr><td colSpan={7}>—</td></tr>}</tbody>
+          <tfoot><tr><td colSpan={5}>TOTAL</td><td>{totalEstimated.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td><td /></tr></tfoot>
+        </table>
+      </section>
+      <section><h2>C. Applicant’s Signature</h2><SignatureBlocks sections={sections} values={values} match={/applicant|requester|requesting officer/i} /></section>
+      <section><h2>Budget Holder and Line Manager Recommendations</h2><div className="rq-print-signatures"><SignatureBlocks sections={sections} values={values} match={/budget holder|line manager/i} /></div></section>
+      <section><h2>D. Finance Department Verification of Budget Availability</h2><div className="rq-print-answer"><b>Is budget available?</b><span>{budgetAvailability}</span><b>Comments:</b><span>—</span></div><SignatureBlocks sections={sections} values={values} match={/finance/i} /></section>
+      <section><h2>E. Travel Itinerary</h2>{itinerary ? <PrintableTable table={itinerary} rows={Array.isArray(values[itinerary.key]) ? values[itinerary.key] : []} /> : <p>—</p>}<SignatureBlocks sections={sections} values={values} match={/booking officer/i} /></section>
+      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestItinerary ? <PrintableTable table={imprestItinerary} rows={Array.isArray(values[imprestItinerary.key]) ? values[imprestItinerary.key] : []} /> : <p>—</p>}<SignatureBlocks sections={sections} values={values} match={/travel funds|imprest/i} /></section>
+      <section><h2>G. Authorisation of the Trip</h2>
+        <div className="rq-print-details rq-print-details-three"><div><b>Trip Authorised?</b><span>{lpoApprover ? "Yes" : "Pending"}</span></div><div><b>Authorised By</b><span>{lpoApprover?.approver || "—"}</span></div><div><b>Position / Date</b><span>{lpoApprover?.completedAt ? new Date(lpoApprover.completedAt).toLocaleDateString() : "—"}</span></div></div>
+        <SignatureBlocks sections={sections} values={values} match={/authori[sz]ation|authori[sz]ed by|lpo approver/i} />
+        {lpoApprover && <div className="rq-print-signature"><strong>Approver</strong><div className="rq-print-signature-line" /><div>Name: {lpoApprover.approver}</div><div>Date: {lpoApprover.completedAt ? new Date(lpoApprover.completedAt).toLocaleDateString() : "—"}</div></div>}
+      </section>
+    </article>
+  );
+}

@@ -1153,13 +1153,20 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
                           const updated = { ...previous };
                           if (code) updated[dimension] = code;
                           else delete updated[dimension];
+                          if (!code) delete updated[`${dimension}_description`];
                           if (dimension === "12" && !code) setTaxRateDraft("");
                           return updated;
                         })}
                         autoFillDefault={dimension === "12" && Boolean(draft[dimension])}
-                        onSelectRecord={dimension === "12" && taxRateColumn
-                          ? (record) => setTaxRateDraft(record.data?.tax_rate == null ? "" : String(record.data.tax_rate))
-                          : undefined}
+                        onSelectRecord={(record) => {
+                          setDraft((previous) => ({
+                            ...previous,
+                            [`${dimension}_description`]: record.description ?? "",
+                          }));
+                          if (dimension === "12" && taxRateColumn) {
+                            setTaxRateDraft(record.data?.tax_rate == null ? "" : String(record.data.tax_rate));
+                          }
+                        }}
                         multi={false}
                         compact
                         showSelectedName
