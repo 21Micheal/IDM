@@ -13,7 +13,6 @@ import { useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { Plus, Search as SearchIcon, X, ClipboardList, Loader2, FileText } from "lucide-react";
 import { documentsAPI, sunsystemsAPI } from "@/services/api";
-import StatusBadge from "@/components/documents/StatusBadge";
 import CustomListbox from "@/components/ui/CustomListbox";
 import { cn } from "@/lib/utils";
 import { getReqAmount, getReqSupplier } from "@/lib/requisitionFields";
@@ -41,6 +40,41 @@ function getLpoDocuments(doc: any): Array<{ id: string; reference?: string }> {
   return form?.lpo_document_id
     ? [{ id: form.lpo_document_id, reference: form.lpo_reference }]
     : [];
+}
+
+function hasPendingApproval(doc: any): boolean {
+  const status = String(doc?.status || "").toLowerCase();
+  return Boolean(doc?.has_pending_approval)
+    || ["pending_approval", "request_pending", "on_hold"].includes(status);
+}
+
+function statusPresentation(doc: any): { label: string; className: string } {
+  const key = hasPendingApproval(doc) ? "pending_approval" : String(doc?.status || "unknown").toLowerCase();
+  const labels: Record<string, string> = {
+    pending_approval: "Pending approval",
+    request_pending: "Pending approval",
+    on_hold: "On hold",
+    pending_review: "Pending review",
+    approved: "Approved",
+    rejected: "Rejected",
+    draft: "Draft",
+    returned: "Returned",
+    archived: "Archived",
+  };
+  const colors: Record<string, string> = {
+    pending_approval: "text-amber-700",
+    request_pending: "text-amber-700",
+    on_hold: "text-amber-700",
+    pending_review: "text-amber-700",
+    approved: "text-emerald-700",
+    rejected: "text-rose-700",
+    returned: "text-amber-700",
+    archived: "text-sky-700",
+  };
+  return {
+    label: labels[key] || key.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()),
+    className: colors[key] || "text-[#5E6870]",
+  };
 }
 
 function getRetirementOutcome(doc: any): { label: string; status: "exact" | "under" | "over"; amount: number | null } | null {
@@ -157,7 +191,11 @@ export default function RequisitionsPage() {
         const supplier = getReqSupplier(doc, supplierAccounts).toLowerCase();
         if (!title.includes(q) && !ref.includes(q) && !supplier.includes(q)) return false;
       }
-      if (statusFilter && doc.status !== statusFilter) return false;
+      if (statusFilter === "pending_approval") {
+        if (!hasPendingApproval(doc)) return false;
+      } else if (statusFilter && doc.status !== statusFilter) {
+        return false;
+      }
       if (departmentFilter) {
         const dept = doc?.department_name || doc?.uploaded_by_department_name || doc?.uploaded_by?.department_name;
         if (dept !== departmentFilter) return false;
@@ -175,6 +213,13 @@ export default function RequisitionsPage() {
     setPage(1);
   }, [search, statusFilter, departmentFilter, dateFrom, dateTo, amountMin, amountMax]);
 
+  useEffect(() => {
+    const requestedStatus = new URLSearchParams(location.search).get("status") || "";
+    if (STATUS_CHIPS.some((chip) => chip.value === requestedStatus)) {
+      setStatusFilter(requestedStatus);
+    }
+  }, [location.search]);
+
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
   const pageRows = useMemo(() => {
     const start = (page - 1) * PAGE_SIZE;
@@ -184,7 +229,11 @@ export default function RequisitionsPage() {
   const statusCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const chip of STATUS_CHIPS) {
-      counts[chip.value] = chip.value ? poolRows.filter((d) => d.status === chip.value).length : poolRows.length;
+      counts[chip.value] = !chip.value
+        ? poolRows.length
+        : chip.value === "pending_approval"
+          ? poolRows.filter(hasPendingApproval).length
+          : poolRows.filter((d) => d.status === chip.value).length;
     }
     return counts;
   }, [poolRows]);
@@ -198,32 +247,38 @@ export default function RequisitionsPage() {
   };
 
   return (
-    <div className="mx-auto max-w-[1400px] space-y-4 p-6">
+    <div className="mx-auto max-w-[1500px] space-y-6 p-5 lg:p-8">
 
       {/* ── Header ── */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-[#1F2933]">Requisitions Register</h1>
-          <p className="mt-0.5 text-xs text-[#5E6870]">All purchase requisitions raised in this portal.</p>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#EAF3F8] text-[#287EAD]">
+            <ClipboardList className="h-6 w-6" />
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#287EAD]">Procurement</p>
+            <h1 className="mt-0.5 text-2xl font-bold tracking-tight text-[#1F2933]">Requisitions</h1>
+            <p className="mt-0.5 text-sm text-[#6E767D]">Review requests, approval progress, and purchase orders.</p>
+          </div>
         </div>
         <button
           type="button"
           onClick={() => navigate("/new")}
-          className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#1E6F99]"
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#287EAD] px-4 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#1E6F99]"
         >
           <Plus className="h-4 w-4" /> New Requisition
         </button>
       </div>
 
       {/* ── Status chips ── */}
-      <div className="flex flex-wrap items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
         {STATUS_CHIPS.map((chip) => (
           <button
             key={chip.value}
             type="button"
             onClick={() => setStatusFilter(chip.value)}
             className={cn(
-              "inline-flex items-center gap-1.5 border px-3 py-1.5 text-xs font-semibold transition-colors",
+              "inline-flex items-center gap-2 border px-3 py-1.5 text-xs font-semibold transition-colors",
               statusFilter === chip.value
                 ? "border-[#287EAD] bg-[#287EAD] text-white"
                 : "border-[#C8CDD2] bg-white text-[#5E6870] hover:border-[#287EAD] hover:text-[#287EAD]"
@@ -231,8 +286,8 @@ export default function RequisitionsPage() {
           >
             {chip.label}
             <span className={cn(
-              "px-1.5 text-[10px] font-bold",
-              statusFilter === chip.value ? "opacity-70" : "text-[#8C969E]"
+              "px-1.5 text-[10px] font-bold tabular-nums",
+              statusFilter === chip.value ? "text-white/75" : "text-[#8C969E]"
             )}>
               {statusCounts[chip.value] ?? 0}
             </span>
@@ -241,14 +296,14 @@ export default function RequisitionsPage() {
       </div>
 
       {/* ── Filter bar ── */}
-      <div className="flex flex-wrap items-center gap-2 border border-[#C8CDD2] bg-white p-2.5 shadow-sm">
-        <div className="relative min-w-[220px] flex-1">
+      <div className="flex flex-wrap items-center gap-2.5 rounded-xl border border-[#E3E8EC] bg-white p-3 shadow-sm">
+        <div className="relative min-w-[240px] flex-1">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#9AA5B1]" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search title, reference, supplier…"
-            className="w-full border border-[#C8CDD2] py-1.5 pl-9 pr-3 text-sm focus:border-[#287EAD] focus:outline-none"
+            className="w-full rounded-md border border-[#D6DDE2] py-2 pl-9 pr-3 text-sm placeholder:text-[#9AA5B1] focus:border-[#287EAD] focus:outline-none focus:ring-2 focus:ring-[#287EAD]/10"
           />
         </div>
         <CustomListbox
@@ -259,22 +314,22 @@ export default function RequisitionsPage() {
             ...departmentOptions.map((department) => ({ value: department, label: department })),
           ]}
           className="min-w-[180px]"
-          buttonClassName="w-full border border-[#C8CDD2] bg-white px-3 py-1.5 text-left text-sm text-[#1F2933]"
+          buttonClassName="w-full rounded-md border border-[#D6DDE2] bg-white px-3 py-2 text-left text-sm text-[#1F2933]"
           ariaLabel="Filter by department"
         />
-        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="border border-[#C8CDD2] px-3 py-1.5 text-sm" />
-        <input type="date" value={dateTo}   onChange={(e) => setDateTo(e.target.value)}   className="border border-[#C8CDD2] px-3 py-1.5 text-sm" />
-        <input value={amountMin} onChange={(e) => setAmountMin(e.target.value)} placeholder="Min amount" inputMode="numeric" className="w-28 border border-[#C8CDD2] px-3 py-1.5 text-sm" />
-        <input value={amountMax} onChange={(e) => setAmountMax(e.target.value)} placeholder="Max amount" inputMode="numeric" className="w-28 border border-[#C8CDD2] px-3 py-1.5 text-sm" />
+        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} aria-label="Created from" className="rounded-md border border-[#D6DDE2] px-3 py-2 text-sm text-[#5E6870] focus:border-[#287EAD] focus:outline-none" />
+        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} aria-label="Created to" className="rounded-md border border-[#D6DDE2] px-3 py-2 text-sm text-[#5E6870] focus:border-[#287EAD] focus:outline-none" />
+        <input value={amountMin} onChange={(e) => setAmountMin(e.target.value)} placeholder="Min amount" inputMode="numeric" className="w-32 rounded-md border border-[#D6DDE2] px-3 py-2 text-sm placeholder:text-[#9AA5B1] focus:border-[#287EAD] focus:outline-none" />
+        <input value={amountMax} onChange={(e) => setAmountMax(e.target.value)} placeholder="Max amount" inputMode="numeric" className="w-32 rounded-md border border-[#D6DDE2] px-3 py-2 text-sm placeholder:text-[#9AA5B1] focus:border-[#287EAD] focus:outline-none" />
         {activeFilterCount > 0 && (
-          <button type="button" onClick={clearFilters} className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50">
+          <button type="button" onClick={clearFilters} className="inline-flex items-center gap-1 rounded-md px-2 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50">
             <X className="h-3.5 w-3.5" /> Clear ({activeFilterCount})
           </button>
         )}
       </div>
 
       {/* ── Table ── */}
-      <div className="overflow-x-auto border border-[#C8CDD2] bg-white shadow-sm">
+      <div className="overflow-x-auto rounded-xl border border-[#E3E8EC] bg-white shadow-sm">
         {isLoading ? (
           <div className="flex h-48 items-center justify-center">
             <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
@@ -285,53 +340,59 @@ export default function RequisitionsPage() {
             <p className="text-sm text-[#5E6870]">No requisitions match the current filters.</p>
           </div>
         ) : (
-          <table className="w-full text-left text-sm">
+          <table className="w-full min-w-[1080px] text-left text-sm">
             <thead>
-              <tr className="border-b border-[#C8CDD2] bg-[#F5F7F8] text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
-                <th className="px-4 py-2.5 font-semibold">#</th>
-                <th className="px-4 py-2.5 font-semibold">Requisition</th>
-                <th className="px-4 py-2.5 font-semibold">Supplier</th>
-                <th className="px-4 py-2.5 font-semibold">Requester</th>
-                {showDepartmentColumn && <th className="px-4 py-2.5 font-semibold">Department</th>}
-                <th className="px-4 py-2.5 font-semibold">Amount</th>
-                <th className="px-4 py-2.5 font-semibold">Status</th>
-                <th className="px-4 py-2.5 font-semibold">Retirement</th>
-                <th className="px-4 py-2.5 font-semibold">Outcome</th>
-                <th className="px-4 py-2.5 font-semibold">LPO</th>
-                <th className="px-4 py-2.5 font-semibold">Created</th>
+              <tr className="border-b border-[#E3E8EC] bg-[#F7F9FA] text-[10px] font-bold uppercase tracking-wider text-[#6E767D]">
+                <th className="px-4 py-3">#</th>
+                <th className="px-4 py-3">Requisition</th>
+                <th className="px-4 py-3">Supplier</th>
+                <th className="px-4 py-3">Requester</th>
+                {showDepartmentColumn && <th className="px-4 py-3">Department</th>}
+                <th className="px-4 py-3 text-right">Amount</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Retirement</th>
+                <th className="px-4 py-3">Outcome</th>
+                <th className="px-4 py-3">LPO</th>
+                <th className="px-4 py-3">Created</th>
               </tr>
             </thead>
             <tbody>
               {pageRows.map((doc: any, i: number) => (
                 <tr
                   key={doc.id}
-                  className="cursor-pointer border-b border-[#F0F2F4] last:border-0 transition-colors hover:bg-[#F3F8FB]"
+                  className="cursor-pointer border-b border-[#EEF1F3] last:border-0 transition-colors hover:bg-[#F7FAFC]"
                   onClick={() => navigate(`/${doc.id}`)}
                 >
-                  <td className="px-4 py-2.5 text-xs text-[#9AA5B1]">{(page - 1) * PAGE_SIZE + i + 1}</td>
-                  <td className="px-4 py-2.5 font-semibold text-[#1F2933]">
-                    {doc.reference_number || "—"}
+                  <td className="px-4 py-3 text-xs tabular-nums text-[#9AA5B1]">{(page - 1) * PAGE_SIZE + i + 1}</td>
+                  <td className="px-4 py-3">
+                    <span className="font-semibold text-[#1F2933]">{doc.reference_number || "—"}</span>
+                    <span className="mt-0.5 block max-w-[230px] truncate text-[11px] font-normal text-[#8A949C]">{doc.title || "Purchase requisition"}</span>
                   </td>
-                  <td className="px-4 py-2.5 text-xs text-[#5E6870]">{getReqSupplier(doc, supplierAccounts)}</td>
-                  <td className="px-4 py-2.5 text-xs text-[#5E6870]">
+                  <td className="px-4 py-3 text-xs text-[#5E6870]">{getReqSupplier(doc, supplierAccounts)}</td>
+                  <td className="px-4 py-3 text-xs text-[#5E6870]">
                     {doc.uploaded_by?.full_name || doc.uploaded_by?.email || "—"}
                   </td>
-                  {showDepartmentColumn && <td className="px-4 py-2.5 text-xs text-[#5E6870]">{getReqDepartment(doc)}</td>}
-                  <td className="px-4 py-2.5 font-mono text-xs font-semibold text-[#1F2933]">{formatMoney(getReqAmount(doc), doc.currency)}</td>
-                  <td className="px-4 py-2.5"><StatusBadge status={doc.status} /></td>
+                  {showDepartmentColumn && <td className="px-4 py-3 text-xs text-[#5E6870]">{getReqDepartment(doc)}</td>}
+                  <td className="px-4 py-3 text-right font-mono text-xs font-semibold tabular-nums text-[#1F2933]">{formatMoney(getReqAmount(doc), doc.currency)}</td>
+                  <td className="px-4 py-3">
+                    {(() => {
+                      const status = statusPresentation(doc);
+                      return <span className={cn("text-xs font-semibold", status.className)}>{status.label}</span>;
+                    })()}
+                  </td>
 
                   {/* Travel retirement status */}
-                  <td className="px-4 py-2.5">
+                  <td className="px-4 py-3">
                     {doc.form_summary?.retirement ? (
                       <span className={cn(
-                        "inline-flex items-center border px-2 py-0.5 text-[11px] font-semibold",
+                        "text-[11px] font-semibold",
                         doc.form_summary.retirement.status === "overdue" || doc.form_summary.retirement.status === "top_up_due"
-                          ? "border-red-200 bg-red-50 text-red-700"
+                          ? "text-red-700"
                           : doc.form_summary.retirement.status === "refund_due"
-                            ? "border-amber-200 bg-amber-50 text-amber-700"
+                            ? "text-amber-700"
                             : doc.form_summary.retirement.status === "exact"
-                              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                              : "border-[#C8CDD2] bg-[#F5F7F8] text-[#5E6870]",
+                              ? "text-emerald-700"
+                              : "text-[#5E6870]",
                       )} title={doc.form_summary.retirement.due_date ? `Due ${doc.form_summary.retirement.due_date}` : undefined}>
                         {doc.form_summary.retirement.label}
                       </span>
@@ -339,18 +400,18 @@ export default function RequisitionsPage() {
                   </td>
 
                   {/* Retirement outcome */}
-                  <td className="px-4 py-2.5">
+                  <td className="px-4 py-3">
                     {(() => {
                       const outcome = getRetirementOutcome(doc);
                       if (!outcome) return <span className="text-[#C8CDD2]">—</span>;
                       return (
                         <span className={cn(
-                          "inline-flex items-center border px-2 py-0.5 text-[11px] font-semibold",
+                          "text-[11px] font-semibold",
                           outcome.status === "exact"
-                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                            ? "text-emerald-700"
                             : outcome.status === "over"
-                              ? "border-red-200 bg-red-50 text-red-700"
-                              : "border-amber-200 bg-amber-50 text-amber-700",
+                              ? "text-red-700"
+                              : "text-amber-700",
                         )}>
                           {outcome.amount === null
                             ? outcome.label
@@ -361,7 +422,7 @@ export default function RequisitionsPage() {
                   </td>
 
                   {/* LPO chips */}
-                  <td className="px-4 py-2.5">
+                  <td className="px-4 py-3">
                     <div className="flex flex-wrap gap-1">
                       {getLpoDocuments(doc).map((lpo, index) => (
                         <button
@@ -380,7 +441,7 @@ export default function RequisitionsPage() {
                     </div>
                   </td>
 
-                  <td className="px-4 py-2.5 text-xs text-[#5E6870]">
+                  <td className="px-4 py-3 text-xs text-[#6E767D]">
                     {doc.created_at ? formatDistanceToNow(new Date(doc.created_at), { addSuffix: true }) : "—"}
                   </td>
                 </tr>

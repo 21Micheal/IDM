@@ -19,6 +19,7 @@ No other changes to this file.
 """
 from rest_framework import serializers
 import logging
+from django.core.exceptions import ObjectDoesNotExist
 from .models import (
     Document, DocumentType, MetadataField,
     DocumentVersion, DocumentComment, Tag, OCRStatus,
@@ -759,6 +760,7 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
     preview, relationship, and bulk-action calculations from the general list.
     """
     metadata = serializers.SerializerMethodField()
+    has_pending_approval = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
@@ -766,8 +768,22 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
             "id", "title", "reference_number", "document_type_name", "status",
             "supplier", "amount", "currency", "uploaded_by", "department_name",
             "uploaded_by_department_name", "created_at", "updated_at", "metadata",
-            "form_summary",
+            "form_summary", "has_pending_approval",
         ]
+
+    def get_has_pending_approval(self, obj):
+        """Whether either the main workflow or detached Imprest lane is active."""
+        try:
+            workflow = obj.workflow_instance
+        except ObjectDoesNotExist:
+            workflow = None
+        return bool(
+            workflow
+            and (
+                workflow.status == "in_progress"
+                or workflow.imprest_request_status == "in_progress"
+            )
+        )
 
     def get_metadata(self, obj):
         metadata = obj.metadata if isinstance(obj.metadata, dict) else {}

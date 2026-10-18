@@ -1395,15 +1395,15 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   };
 
   return (
-    <div className="col-span-12 space-y-3">
-      <div className="text-xs font-semibold text-foreground">
+    <div className="form-renderer-table col-span-12 space-y-3">
+      <div className="text-xs font-semibold tracking-wide text-foreground">
         {field.label}
         {field.required && <span className="ml-1 text-red-500">*</span>}
         {(field.helpText ?? field.help_text) && (
           <span className="ml-2 font-normal text-muted-foreground">{field.helpText ?? field.help_text}</span>
         )}
       </div>
-      <div className="overflow-x-auto border border-border bg-white shadow-sm">
+      <div className="overflow-x-auto rounded-xl border border-border bg-white shadow-sm">
         <div className="min-w-full">
           <table className="w-full text-sm border-separate border-spacing-0">
             <thead>
@@ -1438,7 +1438,9 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                       const cellIssue = columnIssue(col, ri, row[key]);
                       return (
                         <td key={col.id ?? ci}
-                            className={`w-[230px] flex-shrink-0 px-2 py-2 align-top border-r border-border/30 last:border-r-0 focus-within:bg-sky-50/40 ${protectedCell ? "bg-slate-50" : "bg-white"}`}>
+                            data-protected-cell={protectedCell ? "true" : undefined}
+                            data-calculated-cell={col.calc?.expression ? "true" : undefined}
+                            className={`w-[230px] flex-shrink-0 px-2 py-2 align-top border-r border-border/30 last:border-r-0 focus-within:bg-sky-50/40 ${col.calc?.expression ? "bg-emerald-50/70" : protectedCell ? "bg-sky-50/70" : "bg-white"}`}>
                           {shown ? (
                             <div className={cellIssue ? "w-full min-w-0 rounded-sm ring-1 ring-red-500 [&_input]:!border-red-500 [&_textarea]:!border-red-500 [&_select]:!border-red-500 [&_button]:!border-red-500" : "w-full min-w-0"}>
                               <TableColInput
@@ -2150,7 +2152,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
           {label}
           {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
         </label>
-        <div className={`${inp} flex items-center`} style={{ backgroundColor: "#F6F7F8", color: "#8C969E" }}>
+        <div data-protected-value="true" className={`${inp} form-protected-value flex items-center`} style={{ backgroundColor: "#F6F7F8", color: "#8C969E" }}>
           {shown || <span className="italic">Filled automatically on save</span>}
         </div>
       </div>
@@ -2173,7 +2175,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
             {label}
             {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
           </label>
-          <div className={`${inp} flex items-center`} style={{ backgroundColor: "#F6F7F8" }}>
+          <div data-protected-value="true" className={`${inp} form-protected-value flex items-center`} style={{ backgroundColor: "#F6F7F8" }}>
             {hasValue || field.calc?.expression
               ? <ReadonlyToggle on={truthyValue(raw)} />
               : <span className="text-sm italic text-muted-foreground">No rule configured</span>}
@@ -2188,7 +2190,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
           {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
           {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
         </label>
-        <div className={`${inp} flex items-center gap-1.5`} style={{ backgroundColor: "#F6F7F8", color: "#1F2933", fontWeight: 600 }}>
+        <div data-protected-value="true" className={`${inp} form-protected-value flex items-center gap-1.5`} style={{ backgroundColor: "#F6F7F8", color: "#1F2933", fontWeight: 600 }}>
           {symbol && <span style={{ color: "#8C969E", fontWeight: 500 }}>{symbol}</span>}
           {hasValue ? (
             String(raw)
@@ -2208,7 +2210,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     return (
       <div className="min-w-0" style={style}>
         {labelForAuto(label, field)}
-        <div className={`${inp} flex items-center`} style={{ backgroundColor: "#F6F7F8", color: "#8C969E" }}>
+        <div data-protected-value="true" className={`${inp} form-protected-value flex items-center`} style={{ backgroundColor: "#F6F7F8", color: "#8C969E" }}>
           {shown ? String(shown) : <span className="italic">Assigned automatically on submit</span>}
         </div>
       </div>
@@ -2244,7 +2246,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // Checkbox / boolean — inline label layout
   if (type === "boolean" || type === "checkbox") {
     return (
-      <div className="flex min-h-[62px] min-w-0 flex-col justify-end" style={style}>
+      <div className="form-renderer-checkbox flex min-h-[62px] min-w-0 flex-col justify-end" style={style}>
         <Controller control={control} name={key} render={({ field: f }) => (
           <label className={`flex h-10 w-full cursor-pointer items-center gap-2.5 text-sm ${validationMessage ? "text-red-700" : "text-foreground"}`}>
             <input type="checkbox" checked={Boolean(f.value)} disabled={dis}
@@ -2467,7 +2469,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
           if (dis) {
             const shown = formatNumeric(raw, cfg.decimals, cfg.grouping);
             return (
-              <div className={`${inp} flex items-center gap-1.5`} style={{ backgroundColor: "#F6F7F8", color: "#1F2933" }}>
+              <div data-protected-value="true" className={`${inp} form-protected-value flex items-center gap-1.5`} style={{ backgroundColor: "#F6F7F8", color: "#1F2933" }}>
                 {currencySymbol && shown && <span className="text-muted-foreground">{currencySymbol}</span>}
                 {shown ? `${shown}${isPct ? " %" : ""}` : <span className="italic text-muted-foreground">—</span>}
               </div>
@@ -2868,7 +2870,15 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // NOT blanket the form in `pointer-events-none` — that would also block the
   // attachment download buttons (the approver needs to open attachments).
   return (
-    <div className="space-y-6">
+    <div className="form-renderer space-y-5">
+      <div className="form-renderer-legend flex flex-wrap items-center justify-end gap-2 text-[11px] text-[#587081]" aria-label="Field value legend">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-[#D4E2EB] bg-[#F1F7FB] px-2.5 py-1">
+          <span className="h-1.5 w-1.5 rounded-full bg-[#7FB1CF]" /> Protected / auto-filled
+        </span>
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-[#CFE9DC] bg-[#EFFAF5] px-2.5 py-1">
+          <span className="h-1.5 w-1.5 rounded-full bg-[#57A987]" /> Calculated
+        </span>
+      </div>
       {ordered.map((section, si) => {
         // Hidden / conditionally-hidden / role-restricted sections drop out
         // entirely. Whether the viewer is ALLOWED TO EDIT a conditionally-
@@ -2888,9 +2898,9 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
           && (!retirementSectionReadOnly || !isRetirementExpenseSection(section));
         const sectionLocked = !readOnly && !sectionEditable;
         return (
-          <div key={section.id ?? si} className="overflow-hidden" style={{ border: "1px solid #C8CDD2", backgroundColor: "#FFFFFF" }}>
+          <div key={section.id ?? si} className="form-renderer-section overflow-hidden rounded-2xl border border-[#D8E2E9] bg-white shadow-sm">
             {/* Section header */}
-            <div style={{ borderBottom: "1px solid #C8CDD2", backgroundColor: "#EEF6FB", paddingLeft: "20px", paddingRight: "20px", paddingTop: "12px", paddingBottom: "12px" }}>
+            <div className="form-renderer-section-header border-b border-[#E3EBF0] bg-gradient-to-r from-[#F3F8FC] to-[#FAFCFD] px-5 py-3.5">
               <h3 className="flex items-center gap-2 font-bold" style={{ fontSize: "14px", color: "#1F2933" }}>
                 {section.title ?? `Section ${si + 1}`}
                 {sectionLocked && (
@@ -2910,7 +2920,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
               )}
             </div>
             {/* Fields — 12-column grid */}
-            <div className="p-5 grid grid-cols-12 gap-x-4 gap-y-5">
+            <div className="form-renderer-grid grid grid-cols-12 gap-x-4 gap-y-5 p-5 sm:p-6">
               {visibleFields.map((f, fi) => (
                 <FormField
                   key={f.id ?? fi}

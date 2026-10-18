@@ -489,6 +489,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             qs = qs.select_related("edit_locked_by").prefetch_related(
                 "tags", "versions", "workflow_instance__tasks__step"
             )
+        else:
+            qs = qs.select_related("workflow_instance")
         # UNCLASS placeholders are hidden from every listing, but single-object
         # lookups (retrieve/preview_url/file) opt in via get_object() so the
         # bulk-review screen can preview unreviewed email/scan drafts. Access is

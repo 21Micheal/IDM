@@ -213,7 +213,7 @@ export default function FormFillModal({
   const isPending = isCreating || submitting;
 
   return (
-    <div className="flex h-full flex-col bg-white">
+    <div className="form-fill-shell flex h-full flex-col bg-[#F3F7FA]">
       {/* ── Portal into Layout's blue bar ── */}
       <WorkspaceCommandBar
         actions={
@@ -228,7 +228,7 @@ export default function FormFillModal({
         }
       >
         <div className="flex items-center gap-3 flex-shrink-0">
-          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center bg-white/20">
+          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-white/20 shadow-inner">
             <LayoutTemplate className="h-4 w-4" />
           </div>
           <div className="hidden sm:block">
@@ -238,7 +238,7 @@ export default function FormFillModal({
         </div>
 
         {/* Inline title input */}
-        <div className="flex flex-1 items-center gap-2 border border-white/30 bg-white/10 px-3 py-1.5 min-w-0 max-w-xs">
+          <div className="flex flex-1 items-center gap-2 rounded-lg border border-white/30 bg-white/10 px-3 py-1.5 min-w-0 max-w-sm">
           <FileText className="h-3.5 w-3.5 flex-shrink-0 text-white/70" />
           <input
             value={title}
@@ -258,8 +258,9 @@ export default function FormFillModal({
       </WorkspaceCommandBar>
 
       {/* ── Sub-header hint ── */}
-      <div className="flex-shrink-0 border-b border-[#C8CDD2] bg-[#F5F7F8] px-6 py-2.5">
-        <p className="text-xs text-[#3D454D]">
+      <div className="flex-shrink-0 border-b border-[#DCE6ED] bg-white px-5 py-3 sm:px-7">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 rounded-xl border border-sky-100 bg-sky-50/70 px-4 py-2.5">
+        <p className="text-xs leading-5 text-[#3D5668]">
           Complete all required fields — marked <span className="text-red-600 font-bold">*</span>.
           {fileCount > 0 && (
             <span className="ml-2 text-[#287EAD] font-semibold">
@@ -267,10 +268,11 @@ export default function FormFillModal({
             </span>
           )}
         </p>
+        </div>
       </div>
 
       {/* ── Form body ── */}
-      <div className="flex-1 overflow-y-auto bg-white px-6 py-6">
+      <div className="form-renderer flex-1 overflow-y-auto bg-[#F3F7FA] px-4 py-5 sm:px-7 sm:py-7">
         {sections.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <LayoutTemplate className="h-12 w-12 text-[#AEB5BB] mb-4" />
@@ -280,7 +282,7 @@ export default function FormFillModal({
             </p>
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="mx-auto max-w-7xl space-y-5">
             {Boolean((template.sunsystems?.budget as any)?.enabled) && (() => {
               const budgetMeta = (template.sunsystems?.budget ?? {}) as Record<string, any>;
               const amountField = budgetMeta.amount_field as string | undefined;
@@ -306,21 +308,21 @@ export default function FormFillModal({
       </div>
 
       {/* ── Footer actions ── */}
-      <div className="flex-shrink-0 flex items-center justify-between border-t border-[#C8CDD2] bg-white px-6 py-4">
+      <div className="flex-shrink-0 flex flex-wrap items-center justify-between gap-3 border-t border-[#DCE6ED] bg-white/95 px-4 py-3 shadow-[0_-6px_20px_rgba(31,55,72,0.04)] backdrop-blur sm:px-7 sm:py-4">
         <button
           onClick={requestClose}
           disabled={isPending}
-          className="px-5 py-2 text-sm font-semibold text-[#5E6870] hover:text-[#1F2933] border border-[#C8CDD2] bg-white hover:bg-[#F7F8F9] transition-colors disabled:opacity-50"
+          className="rounded-lg px-5 py-2.5 text-sm font-semibold text-[#52616B] hover:text-[#1F2933] border border-[#D3DEE6] bg-white hover:bg-[#F7FAFC] transition-colors disabled:opacity-50"
         >
           Cancel
         </button>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {/* Save as draft — no required-field gate */}
           <button
             onClick={handleSaveAsDraft}
             disabled={isPending}
-            className="flex items-center gap-2 border border-[#AEB5BB] bg-white px-5 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6] transition-colors disabled:opacity-50"
+            className="flex items-center gap-2 rounded-lg border border-[#D3DEE6] bg-white px-5 py-2.5 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F8FB] transition-colors disabled:opacity-50"
           >
             {isCreating && !submitting ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -334,7 +336,7 @@ export default function FormFillModal({
           <button
             onClick={handleStartWorkflow}
             disabled={isPending}
-            className="flex items-center gap-2 bg-[#287EAD] px-7 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors disabled:opacity-60"
+            className="flex items-center gap-2 rounded-lg bg-[#287EAD] px-7 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-[#1E6F99] hover:shadow transition-colors disabled:opacity-60"
           >
             {submitting || (isCreating && submitting) ? (
               <>

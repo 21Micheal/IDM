@@ -710,7 +710,7 @@ export default function FormDetailPage() {
   ];
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
+    <div className="form-detail-page flex min-h-0 flex-1 flex-col bg-[#F2F6F9] text-[#1F2933]">
       <style>{`@page { size: A4 portrait; margin: 8mm; }
       @media print {
         body * { visibility: hidden !important; }
@@ -794,7 +794,7 @@ export default function FormDetailPage() {
       </WorkspaceCommandBar>
 
       <div className={cn(
-        "scrollbar-minimal relative grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 lg:grid-cols-12",
+        "scrollbar-minimal relative mx-auto grid min-h-0 w-full max-w-[1720px] flex-1 grid-cols-1 items-start gap-5 overflow-y-auto px-4 py-5 sm:px-6 lg:grid-cols-12 lg:gap-6",
         detailsOpen ? "pr-8" : "pr-12",
       )}>
 
@@ -803,7 +803,7 @@ export default function FormDetailPage() {
           type="button"
           onClick={() => setDetailsOpen((o) => !o)}
           title={detailsOpen ? "Hide details panel" : "Show details panel"}
-          className="absolute right-0 top-0 z-20 flex h-10 w-10 items-center justify-center border-l border-b border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#EEF6FB] hover:text-[#287EAD] transition-colors"
+          className="absolute right-2 top-2 z-20 flex h-9 w-9 items-center justify-center rounded-xl border border-[#D7E2E9] bg-white text-[#5E6870] shadow-sm hover:bg-[#EEF6FB] hover:text-[#287EAD] transition-colors"
         >
           {detailsOpen
             ? <PanelRightClose className="h-4 w-4" />
@@ -815,8 +815,8 @@ export default function FormDetailPage() {
           "space-y-4",
           detailsOpen ? "lg:col-span-8" : "lg:col-span-12",
         )}>
-          <div className="border border-[#C8CDD2] bg-white shadow-sm">
-            <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
+          <div className="overflow-hidden rounded-2xl border border-[#D7E2E9] bg-white shadow-[0_4px_18px_rgba(31,55,72,0.05)]">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2EAF0] bg-gradient-to-r from-white to-[#F7FAFC] px-4 py-3 sm:px-5">
               <div className="flex items-center gap-2 min-w-0">
                 <p className="text-sm font-bold text-[#1F2933]">Form</p>
                 {doc.reference_number && (
@@ -945,7 +945,7 @@ export default function FormDetailPage() {
                   businessUnit={String((doc.metadata?.sunsystems as Record<string, any> | undefined)?.ui?.businessUnit ?? "")}
                 />
               </div>
-              <div className="bg-white">
+              <div className="form-renderer bg-white px-4 py-5 sm:px-5 sm:py-6">
               <TemplateForm
                 sections={formData.sections ?? []}
                 values={formEditing ? formValues : (formData.values ?? {})}
@@ -1066,8 +1066,8 @@ export default function FormDetailPage() {
 
         {/* Side column — tabs (only shown when detailsOpen is true) */}
         {detailsOpen && (
-          <div className="space-y-3 lg:col-span-4">
-            <div className="border-b border-[#C8CDD2] bg-white px-3 pt-2">
+          <div className="overflow-hidden rounded-2xl border border-[#D7E2E9] bg-white shadow-[0_4px_18px_rgba(31,55,72,0.05)] lg:col-span-4">
+            <div className="border-b border-[#E2EAF0] bg-[#FAFCFD] px-3 pt-2">
               <nav className="-mb-px flex flex-wrap gap-1">
                 {tabs.map((tab) => (
                   <button key={tab.id} onClick={() => setActiveTab(tab.id)}
@@ -1081,7 +1081,7 @@ export default function FormDetailPage() {
               </nav>
             </div>
 
-            <div className="min-h-[24rem] border border-[#C8CDD2] bg-white p-4 shadow-sm">
+            <div className="min-h-[24rem] bg-white p-4 sm:p-5">
               {activeTab === "details" && (
                 <div className="grid grid-cols-[120px_1fr] gap-x-3 gap-y-3 text-sm">
                   <span className="text-[#5E6870]">Document Type</span>

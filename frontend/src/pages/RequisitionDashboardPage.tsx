@@ -83,6 +83,12 @@ function isRequisitionDoc(doc: any): boolean {
   return Boolean(doc?.metadata?.form?.sections) || doc?.document_type_name?.toLowerCase().includes("requisition");
 }
 
+function hasPendingApproval(doc: any): boolean {
+  const status = String(doc?.status || "").toLowerCase();
+  return Boolean(doc?.has_pending_approval)
+    || ["pending_approval", "request_pending", "on_hold"].includes(status);
+}
+
 function getReqDepartment(doc: any): string {
   return doc?.department_name || doc?.uploaded_by_department_name || doc?.uploaded_by?.department_name || "—";
 }
@@ -236,7 +242,8 @@ export default function RequisitionDashboardPage() {
   const filteredRecentReqs = useMemo(() => {
     if (recentDocsFilter === "attention") {
       return requisitionRows.filter((r) =>
-        ["pending_approval", "pending_review", "request_pending", "on_hold", "rejected"].includes(r.status)
+        hasPendingApproval(r)
+        || ["pending_review", "rejected"].includes(String(r.status || "").toLowerCase())
       );
     }
     return requisitionRows;
@@ -254,12 +261,12 @@ export default function RequisitionDashboardPage() {
   const pendingCount = useMemo(
     () =>
       requisitionRows.filter((r) =>
-        ["pending_approval", "request_pending", "on_hold"].includes(r.builder_process_step || r.status)
+        hasPendingApproval(r)
       ).length,
     [requisitionRows]
   );
   const approvedCount = useMemo(
-    () => requisitionRows.filter((r) => r.status === "approved").length,
+    () => requisitionRows.filter((r) => r.status === "approved" && !hasPendingApproval(r)).length,
     [requisitionRows]
   );
 
@@ -459,8 +466,8 @@ export default function RequisitionDashboardPage() {
                           {formatMoney(getReqAmount(doc), doc.currency)}
                         </td>
                         <td className="px-5 py-4 align-middle">
-                          <span className={clsx("text-xs font-semibold", getDashboardStatusTextClass(doc.status))}>
-                            {getDashboardStatusLabel(doc.status)}
+                          <span className={clsx("text-xs font-semibold", getDashboardStatusTextClass(hasPendingApproval(doc) ? "pending_approval" : doc.status))}>
+                            {getDashboardStatusLabel(hasPendingApproval(doc) ? "pending_approval" : doc.status)}
                           </span>
                         </td>
                         <td className="hidden whitespace-nowrap px-5 py-4 text-xs text-[#5E6870] lg:table-cell">
@@ -655,7 +662,7 @@ export default function RequisitionDashboardPage() {
                   </span>
                   <span className="min-w-0 pt-0.5">
                     <span className="block truncate text-xs font-bold text-[#1F2933]">
-                      {task.document_title || "Requisition"}
+                      {task.document_ref || task.document_title || "Requisition"}
                     </span>
                     <span className="mt-1 block truncate text-[11px] text-[#287EAD]">
                       {task.step?.name || "Approval Step"}

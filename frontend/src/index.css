@@ -319,3 +319,125 @@
     font-size: 0.875rem;
   }
 }
+
+/* Built form renderer: calm, rounded controls with a distinct visual language
+   for user entry, calculated values, and values protected by the workflow. */
+.form-renderer {
+  color: #1f2933;
+}
+.form-renderer .input {
+  min-height: 42px;
+  border-color: #cbd8e1;
+  border-radius: 0.625rem;
+  box-shadow: 0 1px 2px rgb(15 35 50 / 3%);
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+.form-renderer .input:hover:not(:disabled) {
+  border-color: #9bb9cb;
+}
+.form-renderer .input:focus,
+.form-renderer .input:focus-visible {
+  border-color: #287ead;
+  box-shadow: 0 0 0 3px rgb(40 126 173 / 13%);
+}
+.form-renderer .input:disabled,
+.form-renderer .form-protected-value {
+  border-color: #d4e2eb;
+  border-style: dashed;
+  border-radius: 0.625rem;
+  background: #f1f7fb !important;
+  color: #314b5d !important;
+  box-shadow: none;
+  opacity: 1;
+}
+.form-renderer-section {
+  box-shadow: 0 2px 8px rgb(31 55 72 / 4%);
+}
+.form-renderer-section-header h3 {
+  letter-spacing: -0.01em;
+}
+.form-renderer-table th {
+  background: #f3f7fa;
+}
+.form-renderer-table td[data-protected-cell="true"] {
+  background: #f1f7fb;
+}
+.form-renderer-table td[data-calculated-cell="true"] {
+  background: #effaf5;
+}
+.form-renderer-table tbody tr:hover td {
+  filter: brightness(0.985);
+}
+.form-renderer-table button,
+.form-renderer button {
+  border-radius: 0.5rem;
+}
+.form-fill-shell .form-renderer-section,
+.form-detail-page .form-renderer-section {
+  margin-bottom: 0.25rem;
+}
+.form-detail-page button:not([role="tab"]),
+.form-fill-shell button {
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+.form-detail-page .form-renderer-section-header,
+.form-fill-shell .form-renderer-section-header {
+  min-height: 3.5rem;
+}
+.form-detail-page .form-renderer-table table,
+.form-fill-shell .form-renderer-table table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.form-detail-page .form-renderer-table thead th,
+.form-fill-shell .form-renderer-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: #4a6272;
+}
+.form-detail-page .form-renderer-table tfoot td,
+.form-fill-shell .form-renderer-table tfoot td {
+  background: #f5f9fc;
+}
+.form-detail-page .form-renderer-table td[data-protected-cell="true"]::before,
+.form-fill-shell .form-renderer-table td[data-protected-cell="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.5rem;
+  bottom: 0.5rem;
+  width: 2px;
+  border-radius: 2px;
+  background: #7fb1cf;
+}
+.form-detail-page .form-renderer-table td[data-protected-cell="true"],
+.form-detail-page .form-renderer-table td[data-calculated-cell="true"],
+.form-fill-shell .form-renderer-table td[data-protected-cell="true"],
+.form-fill-shell .form-renderer-table td[data-calculated-cell="true"] {
+  position: relative;
+}
+.form-detail-page .form-renderer-table td[data-calculated-cell="true"]::before,
+.form-fill-shell .form-renderer-table td[data-calculated-cell="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.5rem;
+  bottom: 0.5rem;
+  width: 2px;
+  border-radius: 2px;
+  background: #57a987;
+}
+@media (max-width: 640px) {
+  .form-renderer-grid > div,
+  .form-renderer-grid > .form-renderer-table {
+    grid-column: span 12 / span 12 !important;
+  }
+  .form-renderer-grid > .form-renderer-checkbox {
+    grid-column: span 6 / span 6 !important;
+  }
+  .form-renderer-grid {
+    row-gap: 1rem;
+    padding: 1rem;
+  }
+}
