@@ -130,6 +130,11 @@ class DocumentTemplate(models.Model):
         blank=True,
         help_text="Optional travel retirement settings (return-date field and policy deadline).",
     )
+    print_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Print layout settings, including the workflow approval assigned to each signature slot.",
+    )
 
     # How many times this template has been used to create a document
     use_count = models.PositiveIntegerField(default=0)

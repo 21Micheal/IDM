@@ -700,6 +700,24 @@ export interface TravelRetirementConfig {
   deadlineDays?: number;
 }
 
+export interface PrintSignatureSlotConfig {
+  /** Workflow phase/lane which supplies this signature. */
+  stage: "requisition" | "rfq" | "lpo" | "retirement" | "imprest_request";
+  /** __first__ / __last__ selects by approval order; otherwise this is a step name. */
+  step: string;
+}
+
+export interface PrintConfig {
+  signatureSlots?: {
+    budgetHolder?: PrintSignatureSlotConfig;
+    lineManager?: PrintSignatureSlotConfig;
+    finance?: PrintSignatureSlotConfig;
+    bookingOfficer?: PrintSignatureSlotConfig;
+    imprestRequest?: PrintSignatureSlotConfig;
+    authorization?: PrintSignatureSlotConfig;
+  };
+}
+
 export interface TemplateSection {
   id: string;
   title: string;
@@ -756,6 +774,7 @@ export interface Template {
   skip_rfq?: boolean;
   requisition_category?: "standard" | "travel";
   travel_retirement?: TravelRetirementConfig;
+  print_config?: PrintConfig;
 }
 
 export type EditableTemplate = Omit<Template, "type"> & { type?: Template["type"] };
@@ -7683,6 +7702,60 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
     "placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
 
   const [settingsPane, setSettingsPane] = useState<"procurement" | "finance">("procurement");
+  const defaultSignatureSlots: NonNullable<PrintConfig["signatureSlots"]> = {
+    budgetHolder: { stage: "requisition", step: "__contains__:budget holder" },
+    lineManager: { stage: "requisition", step: "__first__" },
+    finance: { stage: "requisition", step: "__contains__:finance" },
+    bookingOfficer: { stage: "lpo", step: "__contains__:booking officer" },
+    imprestRequest: { stage: "imprest_request", step: "__first__" },
+    authorization: { stage: "lpo", step: "__last__" },
+  };
+  const signatureSlots = { ...defaultSignatureSlots, ...(template.print_config?.signatureSlots ?? {}) };
+  const updateSignatureSlot = (key: keyof NonNullable<PrintConfig["signatureSlots"]>, patch: Partial<PrintSignatureSlotConfig>) => {
+    const current = signatureSlots[key] ?? defaultSignatureSlots[key]!;
+    onCommit({
+      print_config: {
+        ...(template.print_config ?? {}),
+        signatureSlots: {
+          ...signatureSlots,
+          [key]: { ...current, ...patch },
+        },
+      },
+    });
+  };
+  const signatureSlotRows: Array<{ key: keyof NonNullable<PrintConfig["signatureSlots"]>; label: string; help: string }> = [
+    { key: "budgetHolder", label: "Budget Holder", help: "Choose the approval that signs beside the Line Manager." },
+    { key: "lineManager", label: "Line Manager", help: "The first approval in the selected phase is used by default." },
+    { key: "finance", label: "Finance verification", help: "Choose the workflow approval that signs the budget verification." },
+    { key: "bookingOfficer", label: "Travel booking", help: "Choose the workflow approval shown beside the Travel Itinerary." },
+    { key: "imprestRequest", label: "Imprest request", help: "Uses the independent Imprest Request approval lane." },
+    { key: "authorization", label: "Trip authorization", help: "The last approval in the selected phase is used by default." },
+  ];
+  const phaseOptions = [
+    { value: "requisition", label: "Requisition" },
+    { value: "rfq", label: "RFQ" },
+    { value: "lpo", label: "LPO" },
+    { value: "retirement", label: "Retirement" },
+    { value: "imprest_request", label: "Imprest Request lane" },
+  ];
+  const getSignatureStepOptions = (stage: string, selectedStep: string) => {
+    const covered = processSteps
+      .filter((step) => step.stage === stage || (stage === "imprest_request" && step.stage === "requisition"))
+      .flatMap((step) => step.covered ?? []);
+    const names = [...new Set(covered)].filter(Boolean);
+    const options = [
+      { value: "__first__", label: "First completed approval in this phase" },
+      { value: "__last__", label: "Last completed approval in this phase" },
+      { value: "__contains__:finance", label: "Any step name containing ‘Finance’" },
+      { value: "__contains__:budget holder", label: "Any step name containing ‘Budget Holder’" },
+      { value: "__contains__:booking officer", label: "Any step name containing ‘Booking Officer’" },
+      ...names.map((name) => ({ value: name, label: name })),
+    ];
+    if (selectedStep && !options.some((option) => option.value === selectedStep)) {
+      options.push({ value: selectedStep, label: `${selectedStep} (saved selection)` });
+    }
+    return options;
+  };
 
   return (
     <div className="mx-auto max-w-6xl p-6">
@@ -7900,6 +7973,48 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
                         </div>
                       </div>
                     )}
+                  </div>
+
+                  <div className="border-t border-[#EEF0F2] pt-5 space-y-4">
+                    <div>
+                      <p className="text-sm font-semibold text-[#1F2933]">Printed form signature routing</p>
+                      <p className="mt-0.5 text-xs text-[#5E6870]">Choose which workflow approval supplies each printed signature. Changes to workflow order can be handled here without editing the print renderer.</p>
+                    </div>
+                    <div className="space-y-3">
+                      {signatureSlotRows.map(({ key, label: slotLabel, help }) => {
+                        const slot = signatureSlots[key]!;
+                        return (
+                          <div key={key} className="grid gap-3 rounded border border-[#E1E5E8] bg-[#F8FAFB] p-3 sm:grid-cols-[minmax(130px,0.8fr)_minmax(160px,0.9fr)_minmax(220px,1.4fr)] sm:items-end">
+                            <div>
+                              <p className="text-xs font-semibold text-[#1F2933]">{slotLabel}</p>
+                              <p className="mt-1 text-[10px] leading-4 text-[#7B858D]">{help}</p>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-semibold uppercase tracking-wide text-[#5E6870]">Workflow phase</label>
+                              <CustomListbox
+                                value={slot.stage}
+                                onChange={(value) => updateSignatureSlot(key, { stage: value as PrintSignatureSlotConfig["stage"] })}
+                                options={phaseOptions}
+                                className={iCls}
+                                buttonClassName="w-full"
+                                ariaLabel={`${slotLabel} workflow phase`}
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-semibold uppercase tracking-wide text-[#5E6870]">Approval step</label>
+                              <CustomListbox
+                                value={slot.step}
+                                onChange={(value) => updateSignatureSlot(key, { step: value })}
+                                options={getSignatureStepOptions(slot.stage, slot.step)}
+                                className={iCls}
+                                buttonClassName="w-full"
+                                ariaLabel={`${slotLabel} approval step`}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 </>
               ) : (

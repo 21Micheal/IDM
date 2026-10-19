@@ -117,22 +117,20 @@ function SignatureBlocks({ sections, values, match }: { sections: AnyRecord[]; v
   ))}</div>;
 }
 
+type PrintSignatureMapping = { stage: string; step: string };
+
 function WorkflowApprovalSignatures({
   document,
   workflowSteps,
-  match,
-  phase,
-  executionLane,
-  firstApprovalOnly = false,
+  mapping,
   roleLabel,
+  showPlaceholder = false,
 }: {
   document: AnyRecord;
   workflowSteps: WorkflowStep[];
-  match?: RegExp;
-  phase?: string;
-  executionLane?: WorkflowStep["executionLane"];
-  firstApprovalOnly?: boolean;
+  mapping: PrintSignatureMapping;
   roleLabel?: string;
+  showPlaceholder?: boolean;
 }) {
   const signedRecords: AnyRecord[] = [
     ...(Array.isArray(document.signatures) ? document.signatures : []),
@@ -140,20 +138,42 @@ function WorkflowApprovalSignatures({
   ];
   const isApprovedTask = (step: WorkflowStep) =>
     step.kind === "task"
-    && /completed|approved/i.test(String(step.status))
-    && (!match || match.test(step.name))
-    && (executionLane ? step.executionLane === executionLane : !step.executionLane);
-  let approvedSteps = workflowSteps.filter((step) => isApprovedTask(step) && (!phase || step.phase === phase));
-  // Older workflow snapshots may not have a phase on each task. For the first
-  // requisition approver, fall back to the earliest completed main-lane task.
-  if (firstApprovalOnly && phase === "requisition" && !approvedSteps.length) {
+    && /completed|approved/i.test(String(step.status));
+  const isImprestLane = mapping.stage === "imprest_request";
+  const phase = isImprestLane ? undefined : mapping.stage;
+  let approvedSteps = workflowSteps.filter((step) =>
+    isApprovedTask(step)
+    && (isImprestLane ? step.executionLane === "imprest_request" : !step.executionLane)
+    && (!phase || step.phase === phase),
+  );
+  // Keep legacy workflow snapshots usable when phase metadata is absent.
+  if (!approvedSteps.length && !isImprestLane && phase) {
     approvedSteps = workflowSteps.filter((step) =>
-      isApprovedTask(step) && !["rfq", "lpo", "retirement"].includes(String(step.phase || "").toLowerCase()),
+      isApprovedTask(step)
+      && !step.executionLane
+      && !["rfq", "lpo", "retirement"].includes(String(step.phase || "").toLowerCase()),
     );
   }
   approvedSteps.sort((a, b) => a.order - b.order);
-  if (firstApprovalOnly) approvedSteps = approvedSteps.slice(0, 1);
-  if (!approvedSteps.length) return null;
+  if (mapping.step === "__first__") approvedSteps = approvedSteps.slice(0, 1);
+  else if (mapping.step === "__last__") approvedSteps = approvedSteps.slice(-1);
+  else if (mapping.step.startsWith("__contains__:")) {
+    const token = normalized(mapping.step.slice("__contains__:".length));
+    approvedSteps = approvedSteps.filter((step) => normalized(step.name).includes(token));
+  }
+  else approvedSteps = approvedSteps.filter((step) => normalized(step.name) === normalized(mapping.step));
+  if (!approvedSteps.length) {
+    if (!showPlaceholder) return null;
+    return (
+      <div className="rq-print-signatures">
+        <div className="rq-print-signature">
+          <strong>{roleLabel || "Approver"}</strong>
+          <div className="rq-print-signature-line" />
+          <div>Name: —</div><div>Date: —</div>
+        </div>
+      </div>
+    );
+  }
   return <div className="rq-print-signatures">{approvedSteps.map((step, index) => {
     const record = signedRecords.find((item) => normalized(item.step_name) === normalized(step.name));
     const image = text(record?.signature_data);
@@ -176,6 +196,7 @@ export default function PrintableRequisition({
   sections,
   values,
   workflowSteps,
+  printConfig,
   accountingPeriod,
   businessUnit,
 }: {
@@ -185,9 +206,20 @@ export default function PrintableRequisition({
   sections: AnyRecord[];
   values: AnyRecord;
   workflowSteps: WorkflowStep[];
+  printConfig?: AnyRecord;
   accountingPeriod?: string;
   businessUnit?: string;
 }) {
+  const configuredSlots = printConfig?.signatureSlots ?? {};
+  const signatureSlots: Record<string, PrintSignatureMapping> = {
+    budgetHolder: { stage: "requisition", step: "__contains__:budget holder" },
+    lineManager: { stage: "requisition", step: "__first__" },
+    finance: { stage: "requisition", step: "__contains__:finance" },
+    bookingOfficer: { stage: "lpo", step: "__contains__:booking officer" },
+    imprestRequest: { stage: "imprest_request", step: "__first__" },
+    authorization: { stage: "lpo", step: "__last__" },
+    ...configuredSlots,
+  };
   const { data: activityCodes = [] } = useQuery({
     queryKey: ["print-analysis-codes", "10", businessUnit],
     queryFn: () => sunsystemsAPI.getAnalysisCodes({ dimension: "10", business_unit: businessUnit }).then((response) => response.data.analysis_codes ?? []),
@@ -308,13 +340,18 @@ export default function PrintableRequisition({
         </table>
       </section>
       <section><h2>C. Applicant’s Signature</h2><SignatureBlocks sections={sections} values={values} match={/applicant|requester|requesting officer/i} /></section>
-      <section><h2>Budget Holder and Line Manager Recommendations</h2><WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} phase="requisition" firstApprovalOnly roleLabel="Line Manager" /></section>
-      <section><h2>D. Finance Department Verification of Budget Availability</h2><div className="rq-print-answer"><b>Is budget available?</b><span>{budgetAvailability}</span><b>Comments:</b><span>—</span></div><WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} match={/finance/i} /></section>
-      <section><h2>E. Travel Itinerary</h2>{itinerary ? <PrintableTable table={itinerary} rows={itineraryRows} /> : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} match={/booking officer/i} /></section>
-      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestTables.length ? imprestTables.map(({ table, rows }) => <div key={table.key}><h3 className="rq-print-subheading">{fieldLabel(table)}</h3><PrintableTable table={table} rows={rows} /></div>) : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} executionLane="imprest_request" /></section>
+      <section><h2>Budget Holder and Line Manager Recommendations</h2>
+        <div className="rq-print-signature-pair">
+          <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.budgetHolder} roleLabel="Budget Holder" showPlaceholder />
+          <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.lineManager} roleLabel="Line Manager" showPlaceholder />
+        </div>
+      </section>
+      <section><h2>D. Finance Department Verification of Budget Availability</h2><div className="rq-print-answer"><b>Is budget available?</b><span>{budgetAvailability}</span><b>Comments:</b><span>—</span></div><WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.finance} roleLabel="Finance" /></section>
+      <section><h2>E. Travel Itinerary</h2>{itinerary ? <PrintableTable table={itinerary} rows={itineraryRows} /> : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.bookingOfficer} roleLabel="Booking Officer" /></section>
+      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestTables.length ? imprestTables.map(({ table, rows }) => <div key={table.key}><h3 className="rq-print-subheading">{fieldLabel(table)}</h3><PrintableTable table={table} rows={rows} /></div>) : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.imprestRequest} roleLabel="Imprest Request" showPlaceholder /></section>
       <section><h2>G. Authorisation of the Trip</h2>
         <div className="rq-print-details rq-print-details-three"><div><b>Trip Authorised?</b><span>{lpoApprover ? "Yes" : "Pending"}</span></div><div><b>Authorised By</b><span>{lpoApprover?.approver || "—"}</span></div><div><b>Position / Date</b><span>{lpoApprover?.completedAt ? new Date(lpoApprover.completedAt).toLocaleDateString() : "—"}</span></div></div>
-        <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} match={/lpo|purchase|authori[sz]/i} />
+        <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.authorization} roleLabel="Trip authorization" />
       </section>
     </article>
   );

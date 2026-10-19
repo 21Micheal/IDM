@@ -1730,6 +1730,7 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
             "skip_rfq": bool(getattr(template, "skip_rfq", False)),
             "requisition_category": getattr(template, "requisition_category", "standard") or "standard",
             "travel_retirement": getattr(template, "travel_retirement", {}) or {},
+            "print_config": getattr(template, "print_config", {}) or {},
             "sections": template.sections,
             "values": values,
         }

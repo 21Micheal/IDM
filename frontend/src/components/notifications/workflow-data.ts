@@ -503,6 +503,7 @@ function buildApproverWorkflow(
       approver: step.approver,
       status: step.status,
       phase: step.phase,
+      executionLane: step.executionLane,
       statusDisplay: step.executionLane === "imprest_request" && step.status === "skipped" && !step.hasTasks
         ? "Not required"
         : step.executionLane === "imprest_request" && step.status === "pending" && !previous

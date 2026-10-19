@@ -825,7 +825,7 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
         }
         for key in (
             "lpo_documents", "lpo_document_id", "lpo_reference",
-            "retirement_variance", "workflow_type", "workflow_phase",
+            "retirement_variance", "workflow_type", "workflow_phase", "print_config",
         ):
             if key in form:
                 compact_form[key] = form[key]
