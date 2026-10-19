@@ -273,7 +273,7 @@ export default function Layout({
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,
   });
-  const unreadCount = notificationsData?.count ?? 0;
+  const unreadCount = notificationsData?.unread_count ?? notificationsData?.count ?? 0;
 
   // Pending approval tasks count
   const { data: myTasks = [] } = useQuery({

@@ -6,7 +6,6 @@ import { notificationsAPI, normalizeListResponse } from "@/services/api";
 import type { Notification } from "@/types";
 import { NotificationList, inferNotificationPriority } from "@/components/notifications/notifications-list";
 import clsx from "clsx";
-import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 type Filter = "unread" | "all" | "urgent";
 const TASK_NOTIFICATION_TYPES = new Set(["task_assigned", "task_sla_warning", "task_overdue"]);
@@ -75,81 +74,81 @@ export default function NotificationsPage() {
 
   return (
     <div className="flex h-full flex-col bg-[#EDEDED]">
-      <WorkspaceCommandBar
-        actions={
-          <>
-            <div className="flex border border-white/25 bg-white/10">
-              {filters.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setFilter(item.id)}
-                  className={clsx(
-                    "inline-flex items-center gap-2 border-r border-white/20 px-3 py-2 text-sm font-semibold last:border-r-0",
-                    filter === item.id ? "bg-white text-[#1F2933]" : "text-white hover:bg-white/15",
-                  )}
-                >
-                  {item.label}
-                  <span className={clsx("text-xs", filter === item.id ? "text-[#287EAD]" : "text-white/75")}>
-                    {item.count}
-                  </span>
-                </button>
-              ))}
-            </div>
-
-            <button
-              type="button"
-              onClick={() => markAllReadMutation.mutate()}
-              disabled={markAllReadMutation.isPending || unreadCount === 0}
-              className={clsx(
-                "inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold transition-colors",
-                markAllReadMutation.isPending || unreadCount === 0
-                  ? "cursor-not-allowed text-white/45"
-                  : "text-white hover:bg-white/15",
-              )}
-            >
-              {markAllReadMutation.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <CheckCheck className="h-4 w-4" />
-              )}
-              Mark all read
-            </button>
-
-            <button
-              type="button"
-              onClick={() => clearReadMutation.mutate()}
-              disabled={clearReadMutation.isPending || readCount === 0}
-              className={clsx(
-                "inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold transition-colors",
-                clearReadMutation.isPending || readCount === 0
-                  ? "cursor-not-allowed text-white/45"
-                  : "text-white hover:bg-white/15 hover:border-red-300/50",
-              )}
-            >
-              {clearReadMutation.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Trash2 className="h-4 w-4" />
-              )}
-              Clear read
-              {readCount > 0 && (
-                <span className="text-xs text-white/75">{readCount}</span>
-              )}
-            </button>
-          </>
-        }
-      >
-        <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
-          <Bell className="h-5 w-5 text-white" />
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 bg-[#287EAD] px-4 py-2 text-white">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center border border-white/25 bg-white/10">
+            <Bell className="h-5 w-5 text-white" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold">Notifications</h1>
+            <p className="mt-0.5 text-sm text-white/75">
+              Document updates, shared items, and operational alerts.
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-xl font-semibold">Notifications</h1>
-          <p className="mt-0.5 text-sm text-white/75">
-            Document updates, shared items, and operational alerts.
-          </p>
+
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          <div className="flex border border-white/25 bg-white/10">
+            {filters.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setFilter(item.id)}
+                className={clsx(
+                  "inline-flex items-center gap-2 border-r border-white/20 px-3 py-2 text-sm font-semibold last:border-r-0",
+                  filter === item.id ? "bg-white text-[#1F2933]" : "text-white hover:bg-white/15",
+                )}
+              >
+                {item.label}
+                <span className={clsx("text-xs", filter === item.id ? "text-[#287EAD]" : "text-white/75")}>
+                  {item.count}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => markAllReadMutation.mutate()}
+            disabled={markAllReadMutation.isPending || unreadCount === 0}
+            className={clsx(
+              "inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold transition-colors",
+              markAllReadMutation.isPending || unreadCount === 0
+                ? "cursor-not-allowed text-white/45"
+                : "text-white hover:bg-white/15",
+            )}
+          >
+            {markAllReadMutation.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <CheckCheck className="h-4 w-4" />
+            )}
+            Mark all read
+          </button>
+
+          <button
+            type="button"
+            onClick={() => clearReadMutation.mutate()}
+            disabled={clearReadMutation.isPending || readCount === 0}
+            className={clsx(
+              "inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold transition-colors",
+              clearReadMutation.isPending || readCount === 0
+                ? "cursor-not-allowed text-white/45"
+                : "text-white hover:bg-white/15 hover:border-red-300/50",
+            )}
+          >
+            {clearReadMutation.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4" />
+            )}
+            Clear read
+            {readCount > 0 && (
+              <span className="text-xs text-white/75">{readCount}</span>
+            )}
+          </button>
         </div>
-      </WorkspaceCommandBar>
+      </div>
 
       <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5">
         <div className="mx-auto w-full max-w-4xl">
