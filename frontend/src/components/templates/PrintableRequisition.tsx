@@ -131,12 +131,16 @@ function WorkflowApprovalSignatures({
   mapping,
   roleLabel,
   showPlaceholder = false,
+  showName = true,
+  showDate = true,
 }: {
   document: AnyRecord;
   workflowSteps: WorkflowStep[];
   mapping: PrintSignatureMapping;
   roleLabel?: string;
   showPlaceholder?: boolean;
+  showName?: boolean;
+  showDate?: boolean;
 }) {
   const signedRecords: AnyRecord[] = [
     ...(Array.isArray(document.signatures) ? document.signatures : []),
@@ -175,7 +179,8 @@ function WorkflowApprovalSignatures({
         <div className="rq-print-signature">
           <strong>{roleLabel || "Approver"}</strong>
           <div className="rq-print-signature-line" />
-          <div>Name: —</div><div>Date: —</div>
+          {showName && <div>Name: —</div>}
+          {showDate && <div>Date: —</div>}
         </div>
       </div>
     );
@@ -189,14 +194,14 @@ function WorkflowApprovalSignatures({
       <div className={`rq-print-signature${image ? " rq-print-signature-has-image" : ""}`} key={`${step.id}-${index}`}>
         <strong>{roleLabel || step.name}</strong>
         {image ? <img src={image} alt={`${name} signature`} /> : <div className="rq-print-signature-line" />}
-        <div>Name: {name || "—"}</div><div>Date: {date || "—"}</div>
+        {showName && <div>Name: {name || "—"}</div>}
+        {showDate && <div>Date: {date || "—"}</div>}
       </div>
     );
   })}</div>;
 }
 
 export default function PrintableRequisition({
-  title,
   reference,
   document,
   sections,
@@ -331,7 +336,7 @@ export default function PrintableRequisition({
   return (
     <article className="rq-print-document">
       <div className="rq-print-org">EAST AFRICAN COMMUNITY CIVIL AVIATION SAFETY AND SECURITY OVERSIGHT AGENCY</div>
-      <div className="rq-print-title"><h1>{title || "Travel Requisition"}</h1><span>{reference}</span></div>
+      <div className="rq-print-title"><h2>TRAVEL REQUISITION AND AUTHORISATION FORM</h2><span>{reference}</span></div>
       <section><h2>A. Details of Requesting Officer and the Trip</h2><div className="rq-print-details">
         {top.map(([label, value]) => <div key={label}><b>{label}</b><span>{value || "—"}</span></div>)}
       </div></section>
@@ -356,8 +361,8 @@ export default function PrintableRequisition({
       <section><h2>E. Travel Itinerary</h2>{itinerary ? <PrintableTable table={itinerary} rows={itineraryRows} /> : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.bookingOfficer} roleLabel="Booking Officer" /></section>
       <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestTables.length ? imprestTables.map(({ table, rows }) => <div key={table.key}><h3 className="rq-print-subheading">{fieldLabel(table)}</h3><PrintableTable table={table} rows={rows} /></div>) : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.imprestRequest} roleLabel="Imprest Request" showPlaceholder /></section>
       <section><h2>G. Authorisation of the Trip</h2>
-        <div className="rq-print-details rq-print-details-three"><div><b>Trip Authorised?</b><span>{lpoApprover ? "Yes" : "Pending"}</span></div><div><b>Authorised By</b><span>{lpoApprover?.approver || "—"}</span></div><div><b>Position / Date</b><span>{lpoApprover?.completedAt ? new Date(lpoApprover.completedAt).toLocaleDateString() : "—"}</span></div></div>
-        <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.authorization} roleLabel="Trip authorization" />
+        <div className="rq-print-details rq-print-details-three"><div><b>Trip Authorised?</b><span>{lpoApprover ? "Yes" : "Pending"}</span></div><div><b>Authorised By</b><span>{lpoApprover?.approverFullName || lpoApprover?.approver || "—"}</span></div><div><b>Position</b><span>{lpoApprover?.approverPosition || "—"}</span></div></div>
+        <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.authorization} roleLabel="Signature" showPlaceholder showName={false} showDate />
       </section>
     </article>
   );

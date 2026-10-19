@@ -47,6 +47,8 @@ export interface WorkflowStep {
   id: string;
   name: string;
   approver: string;
+  approverFullName?: string;
+  approverPosition?: string;
   status: WorkflowStatus;
   statusDisplay?: string;
   completedAt?: string;

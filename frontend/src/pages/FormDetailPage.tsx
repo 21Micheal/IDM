@@ -722,10 +722,10 @@ export default function FormDetailPage() {
         body.requisition-print-enabled #requisition-print-root { display: block !important; position: static !important; width: 100% !important; padding: 0 !important; color: #1f2933 !important; background: white !important; font-family: Arial, sans-serif !important; }
         #requisition-print-root * { color: #1f2933 !important; }
         #requisition-print-root .rq-print-document { display: block !important; width: 100% !important; color: #1f2933 !important; font: 8pt Arial, sans-serif !important; }
-        #requisition-print-root .rq-print-org { display: block !important; padding: 2mm 0 3mm; margin-bottom: 3mm; border-bottom: 1.5pt solid #287ead; text-align: center; font-size: 10pt; font-weight: 700; line-height: 1.5; }
-        #requisition-print-root .rq-print-title { display: flex !important; justify-content: space-between; align-items: baseline; border-bottom: 1pt solid #9aa6af; padding: 1mm 0 2mm; margin-bottom: 3mm; }
-        #requisition-print-root .rq-print-title h1 { margin: 0; font-size: 12pt; text-transform: uppercase; }
-        #requisition-print-root .rq-print-title span { font-weight: 700; }
+        #requisition-print-root .rq-print-org { display: block !important; padding: 2mm 0 1mm; margin-bottom: 0; border: 0; text-align: center; font-size: 10pt; font-weight: 700; line-height: 1.5; }
+        #requisition-print-root .rq-print-title { position: relative; display: flex !important; justify-content: center; align-items: baseline; border-bottom: 1.5pt solid #287ead; padding: 1mm 0 2.5mm; margin-bottom: 3mm; text-align: center; }
+        #requisition-print-root .rq-print-title h2 { margin: 0; padding: 0; border: 0; background: transparent !important; font-size: 9pt; font-weight: 600; text-transform: uppercase; }
+        #requisition-print-root .rq-print-title span { position: absolute; right: 0; font-weight: 700; }
         #requisition-print-root .rq-print-document section { display: block !important; margin: 2.5mm 0; }
         #requisition-print-root .rq-print-document section h2 { margin: 0 0 1.5mm; padding: 1mm 1.5mm; border-bottom: 1pt solid #9aa6af; background: #eef3f7 !important; font-size: 8pt; text-transform: uppercase; }
         #requisition-print-root .rq-print-details { display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1mm 3mm; margin: 1.5mm 0; }

@@ -39,6 +39,7 @@ type WorkflowTaskRecord = {
     full_name?: string;
     first_name?: string;
     last_name?: string;
+    job_description?: string;
   };
   workflow_instance?: {
     document?: {
@@ -449,6 +450,8 @@ function buildApproverWorkflow(
       isNotification,
       name,
       approver,
+      approverFullName: formatPerson(taskWithAssignee?.task.assigned_to),
+      approverPosition: taskWithAssignee?.task.assigned_to?.job_description || "",
       rawStatus,
       hasTasks: items.length > 0,
       completedAt: latestTaskItem?.task.acted_at || latestAction?.created_at || undefined,
@@ -501,6 +504,8 @@ function buildApproverWorkflow(
       id: step.id,
       name: step.name,
       approver: step.approver,
+      approverFullName: step.approverFullName,
+      approverPosition: step.approverPosition,
       status: step.status,
       phase: step.phase,
       executionLane: step.executionLane,
