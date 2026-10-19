@@ -23,10 +23,16 @@ function fieldLabel(field: AnyRecord): string {
   return text(field.label || field.title || field.key);
 }
 
-function displayDate(value: unknown): string {
+function displayDate(value: unknown, includeTime = false): string {
   const raw = text(value);
-  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  return match ? `${match[3]}/${match[2]}/${match[1]}` : raw;
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!match) return raw;
+  const date = `${match[3]}/${match[2]}/${match[1]}`;
+  if (!includeTime || !match[4]) return date;
+  const hour = Number(match[4]);
+  const suffix = hour >= 12 ? "PM" : "AM";
+  const hour12 = hour % 12 || 12;
+  return `${date} ${hour12}:${match[5]} ${suffix}`;
 }
 
 function findField(fields: AnyRecord[], values: AnyRecord, patterns: RegExp[]): string {
@@ -64,7 +70,7 @@ function PrintableTable({ table, rows, columns }: { table: AnyRecord; rows: AnyR
       <thead><tr>{visibleColumns.map((column) => <th key={column.key}>{fieldLabel(column)}</th>)}</tr></thead>
       <tbody>
         {rows.length ? rows.map((row, index) => (
-          <tr key={index}>{visibleColumns.map((column) => <td key={column.key}>{["date", "datetime"].includes(column.type) ? displayDate(row?.[column.key]) || "—" : cellValue(row?.[column.key])}</td>)}</tr>
+          <tr key={index}>{visibleColumns.map((column) => <td key={column.key}>{["date", "datetime"].includes(column.type) ? displayDate(row?.[column.key], column.type === "datetime") || "—" : cellValue(row?.[column.key])}</td>)}</tr>
         )) : <tr><td colSpan={Math.max(visibleColumns.length, 1)}>—</td></tr>}
       </tbody>
       {(table.columns || []).some((column: AnyRecord) => column.showTotal && visibleColumns.includes(column)) && (

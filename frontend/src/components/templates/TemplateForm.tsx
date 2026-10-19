@@ -1008,7 +1008,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
     case "date":
       return <input type="date" value={sval} min={minimumDate(col.min)} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "datetime":
-      return <input type="datetime-local" value={sval} min={minimumDateTime(col.min)} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="datetime-local" value={sval} min={minimumDateTime(col.min)} disabled={dis} onChange={(e) => { onChange(e.target.value); e.currentTarget.blur(); }} className={base} />;
     case "time":
       return <input type="time" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "email":
@@ -2404,7 +2404,10 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
           <textarea {...f} value={String(f.value ?? "")} disabled={dis} placeholder={field.placeholder}
             rows={4} className={`${inp} resize-y`}
-            onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }} />
+            onChange={(e) => {
+              f.onChange(e.target.value);
+              onChangeCb(key, e.target.value);
+            }} />
         )} />
       );
       break;
@@ -2707,7 +2710,11 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
           <input type={htmlType} value={String(f.value ?? "")} disabled={dis}
             placeholder={field.placeholder} min={type === "date" ? minimumDate(field.min) : type === "datetime" ? minimumDateTime(field.min) : field.min} max={field.max}
             maxLength={field.maxLength} className={inp}
-            onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }} />
+            onChange={(e) => {
+              f.onChange(e.target.value);
+              onChangeCb(key, e.target.value);
+              if (type === "datetime") e.currentTarget.blur();
+            }} />
         )} />
       );
     }
