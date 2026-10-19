@@ -32,19 +32,19 @@ const baseSections: Array<{
   icon: React.ElementType;
   opsOnly?: boolean;
 }> = [
-  {
-    id: "governance",
-    title: "Governance",
-    description: "Duplicates, metadata, and stage access",
-    icon: ShieldCheck,
-  },
-  {
-    id: "security",
-    title: "Security",
-    description: "Session lifetime and inactivity sign-out",
-    icon: Clock,
-  },
-];
+    {
+      id: "governance",
+      title: "Governance",
+      description: "Duplicates, metadata, and stage access",
+      icon: ShieldCheck,
+    },
+    {
+      id: "security",
+      title: "Security",
+      description: "Session lifetime and inactivity sign-out",
+      icon: Clock,
+    },
+  ];
 
 /** Render a minutes value as a human-friendly "Xh Ym" / "X min" string. */
 function formatMinutes(total: number): string {
@@ -191,7 +191,7 @@ function SettingsWorkspace() {
   }
 
   return (
-    <div className="grid min-h-[calc(100vh-12rem)] grid-cols-1 border border-[#C8CDD2] bg-white lg:grid-cols-[290px_1fr]">
+    <div className="grid grid-cols-1 border border-[#C8CDD2] bg-white lg:grid-cols-[260px_1fr]">
       <aside className="border-b border-[#C8CDD2] bg-[#F6F7F8] lg:border-b-0 lg:border-r">
         <div className="border-b border-[#C8CDD2] px-4 py-3">
           <p className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Settings groups</p>
@@ -481,16 +481,19 @@ function SettingsWorkspace() {
 
 export default function AdminPage() {
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
-      <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-6 py-4">
-        <h1 className="text-xl font-semibold tracking-tight text-[#1F2933]">DMS Settings</h1>
-        <p className="mt-1 text-sm text-[#5E6870]">
-          Configure document handling, preview access, retention, and upload governance.
-        </p>
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
+      <div className="flex shrink-0 items-center gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-6 py-4">
+        <div>
+          <h1 className="text-base font-semibold tracking-tight text-[#1F2933]">System Settings</h1>
+          <p className="mt-0.5 text-sm text-[#5E6870]">
+            Document handling, session security, and upload governance.
+          </p>
+        </div>
       </div>
-      <div className="p-5 pr-8">
+      <div className="flex-1 overflow-y-auto p-5">
         <SettingsWorkspace />
       </div>
     </div>
   );
 }
+

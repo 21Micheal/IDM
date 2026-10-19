@@ -187,13 +187,13 @@ export default function FormDetailPage() {
 
   const formData = (doc?.metadata as Record<string, any> | undefined)?.form as
     | {
-        sections?: unknown[];
-        values?: Record<string, unknown>;
-        print_config?: Record<string, any>;
-        lpo_document_id?: string;
-        lpo_reference?: string;
-        lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string }>;
-      }
+      sections?: unknown[];
+      values?: Record<string, unknown>;
+      print_config?: Record<string, any>;
+      lpo_document_id?: string;
+      lpo_reference?: string;
+      lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string }>;
+    }
     | undefined;
   const generatedLpos = formData?.lpo_documents?.length
     ? formData.lpo_documents
@@ -287,7 +287,7 @@ export default function FormDetailPage() {
     if (!searchParams.get("task") || !activeTask) return;
     const el = taskPanelRef.current;
     if (el) el.scrollIntoView({ behavior: "smooth", block: "end" });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTask]);
 
   // Approval tasks can arrive after the document query. Enter edit mode when
@@ -606,9 +606,9 @@ export default function FormDetailPage() {
             ? "✓"
             : type === "date" && input.value
               ? (() => {
-                  const [year, month, day] = input.value.split("-");
-                  return `${day}/${month}/${year}`;
-                })()
+                const [year, month, day] = input.value.split("-");
+                return `${day}/${month}/${year}`;
+              })()
               : input.value.trim();
         const text = document.createElement("span");
         text.className = "requisition-print-value";
@@ -951,21 +951,21 @@ export default function FormDetailPage() {
                 />
               </div>
               <div className="form-renderer bg-white px-4 py-5 sm:px-5 sm:py-6">
-              <TemplateForm
-                sections={formData.sections ?? []}
-                values={formEditing ? formValues : (formData.values ?? {})}
-                validationIssues={formEditing ? missingFields : []}
-                onChange={(k, v) => { formDirtyRef.current = true; setFormValues((prev) => ({ ...prev, [k]: v })); }}
-                readOnly={!formEditing}
-                documentId={doc.id}
-                documentStatus={step}
-                canEditConditionalSections={canEditConditionalSections()}
-                retirementOnlyEdit={retirementOnlyEdit}
-                retirementSectionReadOnly={retirementSectionReadOnly}
-                onLaunchSignatureModal={(fieldKey?: string) => {
-                  setTargetSignatureField(fieldKey ?? null);
-                  setIsSigningOpen(true);
-                }}
+                <TemplateForm
+                  sections={formData.sections ?? []}
+                  values={formEditing ? formValues : (formData.values ?? {})}
+                  validationIssues={formEditing ? missingFields : []}
+                  onChange={(k, v) => { formDirtyRef.current = true; setFormValues((prev) => ({ ...prev, [k]: v })); }}
+                  readOnly={!formEditing}
+                  documentId={doc.id}
+                  documentStatus={step}
+                  canEditConditionalSections={canEditConditionalSections()}
+                  retirementOnlyEdit={retirementOnlyEdit}
+                  retirementSectionReadOnly={retirementSectionReadOnly}
+                  onLaunchSignatureModal={(fieldKey?: string) => {
+                    setTargetSignatureField(fieldKey ?? null);
+                    setIsSigningOpen(true);
+                  }}
                 />
               </div>
             </div>
@@ -997,12 +997,12 @@ export default function FormDetailPage() {
                 // Use the formFieldValues from the modal result if available
                 const fieldValues = result.formFieldValues || {};
                 const updates: Record<string, unknown> = {};
-                
+
                 // Apply form field values from modal
                 Object.entries(fieldValues).forEach(([key, value]) => {
                   updates[key] = value;
                 });
-                
+
                 // Also process items for signature styling
                 result.items.forEach((item) => {
                   if (item.kind === "signature" && item.image_data) {
@@ -1023,7 +1023,7 @@ export default function FormDetailPage() {
                     updates[`${item.field_key || ""}_name`] = item.text;
                   }
                 });
-                
+
                 setFormValues((prev) => ({ ...prev, ...updates }));
                 formDirtyRef.current = true;
                 setIsSigningOpen(false);
@@ -1197,8 +1197,8 @@ export default function FormDetailPage() {
                 const phase = String((formData as any)?.workflow_phase ?? doc?.builder_workflow_phase ?? "").toLowerCase();
                 const lpoApprovalSteps = (workflowData?.steps ?? []).filter((step) =>
                   step.kind === "task"
-                    && /^approver-\d+$/.test(step.id)
-                    && (!step.phase || step.phase === "lpo"),
+                  && /^approver-\d+$/.test(step.id)
+                  && (!step.phase || step.phase === "lpo"),
                 );
                 const activeOrder = activeTask?.step?.order ?? 0;
                 const laterLpoStepExists = lpoApprovalSteps.some((step) =>

@@ -340,11 +340,7 @@ export default function Layout({
         label: "External Data",
         icon: Package,
       },
-      {
-        to: "/analytics",
-        label: "Spend Analytics",
-        icon: BarChart3,
-      },
+
       {
         to: "/audit",
         label: hasAdminAccess ? "Audit Trail" : "Document Activity",
@@ -521,10 +517,21 @@ export default function Layout({
                 {!collapsed && (
                   <span className="truncate flex-1">{item.label}</span>
                 )}
-                {!collapsed && item.count !== undefined && item.count > 0 && (
-                  <span className="bg-[#287EAD]/25 px-2 py-0.5 text-xs font-semibold text-[#54B3E5]">
-                    {item.count}
-                  </span>
+                {item.count !== undefined && item.count > 0 && (
+                  collapsed ? (
+                    <span className="absolute right-1 top-1 flex h-4 min-w-[16px] items-center justify-center bg-[#287EAD] px-1 text-[9px] font-bold text-white">
+                      {item.count > 9 ? "9+" : item.count}
+                    </span>
+                  ) : (
+                    <span className={cn(
+                      "ml-auto min-w-[20px] px-1.5 py-0.5 text-center text-xs font-bold",
+                      isActive
+                        ? "bg-white/25 text-white"
+                        : "bg-[#287EAD]/25 text-[#54B3E5]"
+                    )}>
+                      {item.count > 99 ? "99+" : item.count}
+                    </span>
+                  )
                 )}
                 {!collapsed && item.badge && !isActive && (
                   <span className="rounded bg-[#287EAD]/20 px-1.5 py-0.5 text-[10px] font-semibold text-[#54B3E5]">
