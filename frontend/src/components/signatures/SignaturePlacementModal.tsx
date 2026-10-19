@@ -4,23 +4,20 @@
  * Capabilities:
  *  1. PDF Mode (traditional): Loads PDF document, allows draggable and resizable signature, date,
  *     name, and custom text stamps with multi-page navigation and zoom.
- *  2. Form Mode (direct web form): Lets users apply their saved signature or draw/type a new
- *     signature, choose a formatted date (East Africa Time / Africa/Nairobi), and apply them
+ *  2. Form Mode (direct web form): Lets users apply their saved profile signature with fixed
+ *     signer details (East Africa Time / Africa/Nairobi), and apply them
  *     directly to form fields (e.g., `requester_signature`, `signature`, `date`, `signed_by`)
  *     or stamp them onto the form canvas.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Loader2, Type as TypeIcon, CalendarClock, Trash2, Undo2,
-  PenLine, ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
-  Bold, Italic, AlignLeft, AlignCenter, AlignRight, CheckCircle2,
-  Sparkles, FileText, Check, Layers
+  Loader2, Type as TypeIcon, CalendarClock, Undo2, PenLine,
+  Sparkles, FileText
 } from "lucide-react";
 import clsx from "clsx";
 import { documentsAPI, profileAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
-import SignaturePad from "@/components/profile/SignaturePad";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 
 const pdfWorkerPath = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
@@ -80,29 +77,8 @@ export interface FormTargetField {
   kind: "signature" | "date" | "text";
 }
 
-interface DateFormatOption {
-  id: string;
-  label: string;
-  format: (d: Date) => string;
-}
-
-const DATE_FORMATS: DateFormatOption[] = [
-  { id: "dmy", label: "22 Jun 2026", format: (d) => fmt(d, { day: "2-digit", month: "short", year: "numeric" }) },
-  { id: "iso", label: "2026-06-22", format: (d) => isoDate(d) },
-  { id: "mdy", label: "Jun 22, 2026", format: (d) => fmt(d, { month: "short", day: "2-digit", year: "numeric" }) },
-  { id: "full", label: "22 Jun 2026, 14:30 EAT", format: (d) => `${fmt(d, { day: "2-digit", month: "short", year: "numeric" })}, ${fmt(d, { hour: "2-digit", minute: "2-digit", hour12: false })} EAT` },
-];
-
 function fmt(d: Date, opts: Intl.DateTimeFormatOptions) {
   return new Intl.DateTimeFormat("en-GB", { timeZone: EAT_TZ, ...opts }).format(d);
-}
-
-function isoDate(d: Date) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: EAT_TZ, year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)!.value;
-  return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -257,23 +233,16 @@ export default function SignaturePlacementModal({
   const [hostEl, setHostEl] = useState<HTMLDivElement | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(0);
-  const [scale, setScale] = useState(1.2);
-  const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
+  const scale = 1.2;
   const [error, setError] = useState("");
 
   const [items, setItems] = useState<PlacedItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [history, setHistory] = useState<PlacedItem[][]>([]);
 
-  // Signature source
-  const [useNewSignature, setUseNewSignature] = useState(false);
-  const [newSignature, setNewSignature] = useState<string | null>(null);
+  // Keep signer identity and signing date fixed for the duration of this session.
   const [compositePreview, setCompositePreview] = useState<string | null>(null);
-
-  // Date config
-  const [dateFormatId, setDateFormatId] = useState(DATE_FORMATS[0].id);
-  const [dateValue, setDateValue] = useState<string>(() => isoDate(new Date()));
+  const [signedAt] = useState(() => new Date());
 
   // Form mode field mapping selections & below-signature display toggles
   const [selectedSigField, setSelectedSigField] = useState<string>(() => {
@@ -281,9 +250,6 @@ export default function SignaturePlacementModal({
     const defaultSig = formFields.find((f) => f.kind === "signature");
     return defaultSig ? defaultSig.key : "signature";
   });
-  const [includeName, setIncludeName] = useState(true);
-  const [includeDate, setIncludeDate] = useState(true);
-  const [customSignerName, setCustomSignerName] = useState(effectiveSignerName);
 
   // Sync targetFieldKey if changed externally
   useEffect(() => {
@@ -293,7 +259,7 @@ export default function SignaturePlacementModal({
   }, [targetFieldKey]);
 
   // Query PDF preview only if documentId is present
-  const { data: preview, isLoading: previewLoading } = useQuery({
+  const { data: preview } = useQuery({
     queryKey: ["signature-placement-preview", documentId],
     queryFn: () => (documentId ? documentsAPI.previewUrl(documentId).then((r) => r.data) : Promise.resolve(null)),
     enabled: !!documentId && mode !== "form",
@@ -304,7 +270,7 @@ export default function SignaturePlacementModal({
     queryFn: () => profileAPI.getSignature().then((r) => r.data.signature ?? null),
   });
 
-  const activeSignatureImage = useNewSignature ? newSignature : savedSignature?.image_data ?? null;
+  const activeSignatureImage = savedSignature?.image_data ?? null;
   const hasSignatureSource = !!activeSignatureImage;
 
   // Resolve actual operating mode
@@ -322,8 +288,6 @@ export default function SignaturePlacementModal({
     let cancelled = false;
     let loadingTask: { promise: Promise<PDFDocumentProxy>; destroy?: () => void } | null = null;
     setPdfDoc(null);
-    setTotalPages(0);
-    setPageSize({ width: 0, height: 0 });
     const previewUrl = preview?.url;
     if (!previewUrl || preview.viewer !== "pdfjs") return;
 
@@ -341,7 +305,6 @@ export default function SignaturePlacementModal({
       .then((loaded) => {
         if (cancelled) return;
         setPdfDoc(loaded);
-        setTotalPages(loaded.numPages);
         setCurrentPage(1);
       })
       .catch((err) => {
@@ -370,7 +333,6 @@ export default function SignaturePlacementModal({
       canvas.className = "block shadow-sm bg-white";
       hostEl.innerHTML = "";
       hostEl.appendChild(canvas);
-      setPageSize({ width: viewport.width, height: viewport.height });
       renderTask = page.render({ canvasContext: canvas.getContext("2d")!, viewport });
       renderTask.promise.catch((err) => {
         if (!cancelled && err?.name !== "RenderingCancelledException") setError("Failed to render PDF page.");
@@ -405,11 +367,10 @@ export default function SignaturePlacementModal({
     if (selectedId === id) setSelectedId(null);
   };
 
-  const currentDateText = useMemo(() => {
-    const d = new Date(`${dateValue}T12:00:00`);
-    const opt = DATE_FORMATS.find((f) => f.id === dateFormatId) ?? DATE_FORMATS[0];
-    return opt.format(d);
-  }, [dateValue, dateFormatId]);
+  const currentDateText = useMemo(
+    () => fmt(signedAt, { day: "2-digit", month: "short", year: "numeric" }),
+    [signedAt],
+  );
 
   useEffect(() => {
     if (activeMode !== "form" || !activeSignatureImage) {
@@ -418,20 +379,20 @@ export default function SignaturePlacementModal({
     }
     let cancelled = false;
     compositeSignatureWithMetadata(activeSignatureImage, {
-      name: customSignerName || effectiveSignerName,
-      includeName,
+      name: effectiveSignerName,
+      includeName: true,
       date: currentDateText,
-      includeDate,
+      includeDate: true,
       scale: 1,
     }).then((url) => {
       if (!cancelled) setCompositePreview(url);
     });
     return () => { cancelled = true; };
-  }, [activeMode, activeSignatureImage, customSignerName, effectiveSignerName, includeName, includeDate, currentDateText]);
+  }, [activeMode, activeSignatureImage, effectiveSignerName, currentDateText]);
 
   const addSignatureItem = () => {
     if (!hasSignatureSource) {
-      setError("Please draw or choose a signature first.");
+      setError("No saved profile signature was found. Add your signature in your profile to continue.");
       return;
     }
     setError("");
@@ -466,7 +427,7 @@ export default function SignaturePlacementModal({
       italic: false,
       align: "center",
       color: "#1F2933",
-      ...(kind === "date" ? { date_iso: new Date(`${dateValue}T12:00:00`).toISOString(), date_format: dateFormatId } : {}),
+      ...(kind === "date" ? { date_iso: signedAt.toISOString(), date_format: "dmy" } : {}),
     };
     updateItems([...items, item]);
     setSelectedId(item.id);
@@ -475,18 +436,18 @@ export default function SignaturePlacementModal({
   // Submit / Confirm logic
   const handleConfirm = async () => {
     if (!hasSignatureSource) {
-      setError("Please provide a signature before continuing.");
+      setError("No saved profile signature was found. Add your signature in your profile to continue.");
       return;
     }
 
     // Composite name and date below the signature image into one neat graphic
     let finalSignatureUrl = activeSignatureImage!;
-    if (activeMode === "form" && (includeName || includeDate)) {
+    if (activeMode === "form") {
       finalSignatureUrl = await compositeSignatureWithMetadata(activeSignatureImage!, {
-        name: customSignerName || effectiveSignerName,
-        includeName,
+        name: effectiveSignerName,
+        includeName: true,
         date: currentDateText,
-        includeDate,
+        includeDate: true,
         scale: 2,
       });
     }
@@ -514,7 +475,7 @@ export default function SignaturePlacementModal({
         y_percent: firstSig.y_percent,
         width_percent: firstSig.width_percent,
       } : null,
-      useNewSignature: Boolean(useNewSignature && newSignature),
+      useNewSignature: false,
       signatureImage: finalSignatureUrl,
       formFieldValues: formValuesToApply,
     };
@@ -558,86 +519,18 @@ export default function SignaturePlacementModal({
             {/* Signature Source */}
             <div>
               <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] mb-2 block">
-                Signature Source
+                Profile Signature
               </label>
-              <div className="grid grid-cols-2 gap-2 mb-3">
-                <button
-                  type="button"
-                  onClick={() => setUseNewSignature(false)}
-                  disabled={!savedSignature?.image_data}
-                  className={clsx(
-                    "flex flex-col items-center justify-center rounded border p-2.5 text-xs font-medium transition",
-                    !useNewSignature
-                      ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD] font-semibold"
-                      : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F4F6F8]",
-                    !savedSignature?.image_data && "opacity-50 cursor-not-allowed"
-                  )}
-                >
-                  <CheckCircle2 className="h-4 w-4 mb-1" />
-                  Saved Signature
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setUseNewSignature(true)}
-                  className={clsx(
-                    "flex flex-col items-center justify-center rounded border p-2.5 text-xs font-medium transition",
-                    useNewSignature
-                      ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD] font-semibold"
-                      : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F4F6F8]"
-                  )}
-                >
-                  <PenLine className="h-4 w-4 mb-1" />
-                  Draw / Upload New
-                </button>
-              </div>
-
-              {/* Signature display / pad */}
-              {!useNewSignature ? (
-                <div className="rounded border border-[#C8CDD2] bg-white p-3 text-center min-h-[100px] flex items-center justify-center">
-                  {signatureLoading ? (
-                    <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
-                  ) : savedSignature?.image_data ? (
-                    <img
-                      src={savedSignature.image_data}
-                      alt="Saved Signature"
-                      className="max-h-20 object-contain mx-auto"
-                    />
-                  ) : (
-                    <div className="text-xs text-amber-700">
-                      No saved signature found. Switch to "Draw / Upload New".
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="rounded border border-[#C8CDD2] bg-white p-2">
-                  <SignaturePad onChange={setNewSignature} />
-                </div>
-              )}
-            </div>
-
-            {/* Date Selection */}
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] mb-2 block">
-                Date & Format (EAT)
-              </label>
-              <div className="space-y-2">
-                <input
-                  type="date"
-                  value={dateValue}
-                  onChange={(e) => setDateValue(e.target.value)}
-                  className="w-full rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs text-[#1F2933] outline-none focus:border-[#287EAD]"
-                />
-                <select
-                  value={dateFormatId}
-                  onChange={(e) => setDateFormatId(e.target.value)}
-                  className="w-full rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs text-[#1F2933] outline-none focus:border-[#287EAD]"
-                >
-                  {DATE_FORMATS.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.label} ({f.format(new Date(`${dateValue}T12:00:00`))})
-                    </option>
-                  ))}
-                </select>
+              <div className="rounded border border-[#C8CDD2] bg-white p-3 text-center min-h-[100px] flex items-center justify-center">
+                {signatureLoading ? (
+                  <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
+                ) : savedSignature?.image_data ? (
+                  <img src={savedSignature.image_data} alt="Saved profile signature" className="max-h-20 object-contain mx-auto" />
+                ) : (
+                  <div className="text-xs text-amber-700">
+                    No saved signature found. Add one in your profile before signing.
+                  </div>
+                )}
               </div>
             </div>
 
@@ -659,44 +552,10 @@ export default function SignaturePlacementModal({
                     />
                   </div>
 
-                  {/* Include Name Checkbox */}
-                  <div className="rounded border border-[#E4E7EB] bg-white p-2.5 space-y-2">
-                    <label className="flex items-center gap-2 cursor-pointer font-medium text-[#1F2933]">
-                      <input
-                        type="checkbox"
-                        checked={includeName}
-                        onChange={(e) => setIncludeName(e.target.checked)}
-                        className="h-3.5 w-3.5 rounded border-[#C8CDD2] text-[#287EAD] focus:ring-[#287EAD]"
-                      />
-                      Include Name below signature
-                    </label>
-                    {includeName && (
-                      <input
-                        type="text"
-                        value={customSignerName}
-                        onChange={(e) => setCustomSignerName(e.target.value)}
-                        placeholder="Signer full name"
-                        className="w-full rounded border border-[#C8CDD2] bg-[#FAFBFB] px-2.5 py-1 text-xs outline-none focus:border-[#287EAD]"
-                      />
-                    )}
-                  </div>
-
-                  {/* Include Date Checkbox */}
-                  <div className="rounded border border-[#E4E7EB] bg-white p-2.5 space-y-2">
-                    <label className="flex items-center gap-2 cursor-pointer font-medium text-[#1F2933]">
-                      <input
-                        type="checkbox"
-                        checked={includeDate}
-                        onChange={(e) => setIncludeDate(e.target.checked)}
-                        className="h-3.5 w-3.5 rounded border-[#C8CDD2] text-[#287EAD] focus:ring-[#287EAD]"
-                      />
-                      Include Date below signature (EAT)
-                    </label>
-                    {includeDate && (
-                      <div className="rounded bg-[#F4F6F8] p-1.5 text-[11px] text-[#5E6870]">
-                        Stamp: <span className="font-semibold text-[#1F2933]">{currentDateText}</span>
-                      </div>
-                    )}
+                  <div className="rounded border border-[#E4E7EB] bg-white p-2.5 space-y-2 text-[#5E6870]">
+                    <div>Signer: <span className="font-semibold text-[#1F2933]">{effectiveSignerName}</span></div>
+                    <div>Date (EAT): <span className="font-semibold text-[#1F2933]">{currentDateText}</span></div>
+                    <p className="text-[11px]">Name and date are recorded automatically and cannot be edited.</p>
                   </div>
                 </div>
               </div>
@@ -825,7 +684,7 @@ export default function SignaturePlacementModal({
                       </div>
                     ) : (
                       <p className="text-xs text-[#5E6870] py-6">
-                        No signature selected yet. Draw or choose a saved signature on the left.
+                        Add a signature in your profile to enable signing.
                       </p>
                     )}
                   </div>
@@ -840,7 +699,7 @@ export default function SignaturePlacementModal({
         {/* Footer */}
         <div className="flex items-center justify-between border-t border-[#E4E7EB] bg-white px-6 py-4">
           <p className="text-xs text-[#5E6870]">
-            Signatures and date stamps are verified and securely bound upon confirmation.
+            The saved profile signature, account name, and current EAT date are used for this signing action.
           </p>
           <div className="flex items-center gap-3">
             <button
