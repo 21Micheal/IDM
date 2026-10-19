@@ -30,6 +30,13 @@ yarn-debug.log*
 yarn-error.log*
 .eslintcache
 
+# Local backups (dumps, volume tars, plaintext .env)
+/backups/
+*.dump
+*.tar
+*.tar.gz
+.env
+
 # IDEs
 .vscode/
 .idea/
@@ -61,3 +68,4 @@ test_sunsystems_payment_run.py
 PROCUREMENT.md
 full-Layout.tsx
 full-App.tsx
+postgres_backup.sh
