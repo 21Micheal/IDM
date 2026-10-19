@@ -734,6 +734,7 @@ export default function FormDetailPage() {
         #requisition-print-root .rq-print-details span { overflow-wrap: anywhere; }
         #requisition-print-root .rq-print-answer { display: grid !important; grid-template-columns: 40mm 1fr 20mm 2fr; gap: 2mm; }
         #requisition-print-root .rq-print-table { margin: 1.5mm 0; }
+        #requisition-print-root .rq-print-subheading { margin: 2mm 0 1mm; color: #405767 !important; font-size: 7.5pt; font-weight: 700; text-transform: uppercase; }
         #requisition-print-root .rq-print-signatures { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2mm; margin-top: 2mm; }
         #requisition-print-root .rq-print-signature { display: block !important; min-height: 16mm; padding: 1.5mm; border: 0.5pt solid #aeb5bb; }
         #requisition-print-root .rq-print-signature img { display: block !important; width: auto !important; max-width: 52mm; max-height: 19mm; object-fit: contain; }

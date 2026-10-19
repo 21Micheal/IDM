@@ -29,7 +29,7 @@ from .models import (
 )
 from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
-from apps.workflows.models import WorkflowTemplate, WorkflowTask
+from apps.workflows.models import WorkflowTemplate, WorkflowTask, WorkflowTaskAction
 from apps.workflows.serializers import DocumentSignatureSerializer
 from django.db import transaction, IntegrityError
 from django.db.models import Q
@@ -867,6 +867,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     shared_with_me = serializers.SerializerMethodField()
     share_access_level = serializers.SerializerMethodField()
     signatures = serializers.SerializerMethodField()
+    approval_signatures = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -887,6 +888,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "builder_workflow_phase", "builder_process_step", "builder_next_stage", "can_submit_retirement",
             "current_version", "versions", "comments", "permissions",
             "created_at", "updated_at", "shared_with_me", "share_access_level", "signatures",
+            "approval_signatures",
         ]
         read_only_fields = [
             "id", "reference_number", "file", "file_name", "file_size", "file_mime_type",
@@ -981,10 +983,54 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
 
     def get_signatures(self, obj):
         return DocumentSignatureSerializer(
-            obj.signatures.select_related("signer", "task__step", "signed_version").all(),
+            obj.signatures.select_related("signer", "task__step", "signed_version", "source_signature").all(),
             many=True,
             context=self.context,
         ).data
+
+    def get_approval_signatures(self, obj):
+        """Resolve saved user signatures for approved workflow actions.
+
+        Some requisition approval steps record the approver on the workflow
+        action without requiring a PDF signature-placement action. For the
+        authorization print, use the approver's saved signature and the action
+        timestamp as its signed mark. Explicit document signature records still
+        take precedence in the renderer when available.
+        """
+        actions = WorkflowTaskAction.objects.filter(
+            task__workflow_instance__document=obj,
+            action="approved",
+            actor__isnull=False,
+        ).select_related("actor", "task__step").order_by("created_at")
+        results = []
+        signature_cache = {}
+        for action in actions:
+            actor = action.actor
+            if actor.pk not in signature_cache:
+                signature_cache[actor.pk] = actor.signatures.filter(is_active=True).order_by("-created_at").first()
+            signature = signature_cache[actor.pk]
+            image_data = None
+            if signature:
+                try:
+                    signature.image.open("rb")
+                    raw = signature.image.read()
+                    import base64
+                    content_type = "image/jpeg" if signature.image.name.lower().endswith((".jpg", ".jpeg")) else "image/png"
+                    image_data = f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
+                except Exception:
+                    image_data = None
+                finally:
+                    try:
+                        signature.image.close()
+                    except Exception:
+                        pass
+            results.append({
+                "step_name": action.task.step.name,
+                "signer": {"id": str(actor.pk), "full_name": actor.get_full_name() or actor.email},
+                "signed_at": action.created_at,
+                "signature_data": image_data,
+            })
+        return results
 
     def get_comments(self, obj):
         request = self.context.get("request")

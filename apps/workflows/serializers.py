@@ -819,13 +819,39 @@ class DocumentSignatureSerializer(serializers.ModelSerializer):
     signer = UserSummarySerializer(read_only=True)
     step_name = serializers.CharField(source="task.step.name", read_only=True)
     signed_version_number = serializers.IntegerField(source="signed_version.version_number", read_only=True)
+    signature_data = serializers.SerializerMethodField()
 
     class Meta:
         model = DocumentSignature
         fields = [
             "id", "signer", "step_name", "signed_version", "signed_version_number",
-            "page_number", "checksum", "signed_at",
+            "page_number", "checksum", "signed_at", "signature_data",
         ]
+
+    def get_signature_data(self, obj):
+        """Include the signer image with the authorized document detail response.
+
+        This endpoint has already enforced document-view access. Embedding the
+        small signature image lets the travel authorization print reproduce the
+        approval marks without relying on an <img> request that cannot attach
+        the API authorization header.
+        """
+        signature = obj.source_signature
+        if not signature:
+            return None
+        try:
+            signature.image.open("rb")
+            raw = signature.image.read()
+        except Exception:
+            return None
+        finally:
+            try:
+                signature.image.close()
+            except Exception:
+                pass
+        import base64
+        content_type = "image/jpeg" if signature.image.name.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 class WorkflowTaskSerializer(serializers.ModelSerializer):

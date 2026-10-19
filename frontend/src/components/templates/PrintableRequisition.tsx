@@ -117,6 +117,58 @@ function SignatureBlocks({ sections, values, match }: { sections: AnyRecord[]; v
   ))}</div>;
 }
 
+function WorkflowApprovalSignatures({
+  document,
+  workflowSteps,
+  match,
+  phase,
+  executionLane,
+  firstApprovalOnly = false,
+  roleLabel,
+}: {
+  document: AnyRecord;
+  workflowSteps: WorkflowStep[];
+  match?: RegExp;
+  phase?: string;
+  executionLane?: WorkflowStep["executionLane"];
+  firstApprovalOnly?: boolean;
+  roleLabel?: string;
+}) {
+  const signedRecords: AnyRecord[] = [
+    ...(Array.isArray(document.signatures) ? document.signatures : []),
+    ...(Array.isArray(document.approval_signatures) ? document.approval_signatures : []),
+  ];
+  const isApprovedTask = (step: WorkflowStep) =>
+    step.kind === "task"
+    && /completed|approved/i.test(String(step.status))
+    && (!match || match.test(step.name))
+    && (executionLane ? step.executionLane === executionLane : !step.executionLane);
+  let approvedSteps = workflowSteps.filter((step) => isApprovedTask(step) && (!phase || step.phase === phase));
+  // Older workflow snapshots may not have a phase on each task. For the first
+  // requisition approver, fall back to the earliest completed main-lane task.
+  if (firstApprovalOnly && phase === "requisition" && !approvedSteps.length) {
+    approvedSteps = workflowSteps.filter((step) =>
+      isApprovedTask(step) && !["rfq", "lpo", "retirement"].includes(String(step.phase || "").toLowerCase()),
+    );
+  }
+  approvedSteps.sort((a, b) => a.order - b.order);
+  if (firstApprovalOnly) approvedSteps = approvedSteps.slice(0, 1);
+  if (!approvedSteps.length) return null;
+  return <div className="rq-print-signatures">{approvedSteps.map((step, index) => {
+    const record = signedRecords.find((item) => normalized(item.step_name) === normalized(step.name));
+    const image = text(record?.signature_data);
+    const name = text(record?.signer?.full_name || step.approver);
+    const date = displayDate(record?.signed_at || step.completedAt);
+    return (
+      <div className={`rq-print-signature${image ? " rq-print-signature-has-image" : ""}`} key={`${step.id}-${index}`}>
+        <strong>{roleLabel || step.name}</strong>
+        {image ? <img src={image} alt={`${name} signature`} /> : <div className="rq-print-signature-line" />}
+        <div>Name: {name || "—"}</div><div>Date: {date || "—"}</div>
+      </div>
+    );
+  })}</div>;
+}
+
 export default function PrintableRequisition({
   title,
   reference,
@@ -149,6 +201,9 @@ export default function PrintableRequisition({
   const analysisName = (codes: typeof activityCodes, code: string) => text(codes.find((item) => item.analysis_code === code)?.name);
   const fields = sections.flatMap((section) => section.fields || []).filter((field) => field.type !== "table" && !field.hidden);
   const tables = sections.flatMap((section) => section.fields || []).filter((field) => field.type === "table");
+  // Section B summarizes both posted funding lines. The separate detailed
+  // Travel table is not printed; Section E contains the Travel Itinerary.
+  // For Imprest, use the issued itinerary rather than the request table.
   const postingTables = tables.filter((table) => ["requisition_lines", "rfq_required_lines"].includes(table.workflowRole));
   const travelLines = postingTables.flatMap((table) => {
     const rows = Array.isArray(values[table.key]) ? values[table.key] : [];
@@ -189,7 +244,12 @@ export default function PrintableRequisition({
     return /destination/.test(labels) && /(date|nights|accommodation|departure|arrival)/.test(labels) && table.workflowRole !== "rfq_required_lines";
   };
   const itinerary = tables.find(isTravelItinerary);
-  const imprestItinerary = tables.find((table) => table.workflowRole === "rfq_required_lines" || (/itinerary/i.test(fieldLabel(table)) && /imprest/i.test(fieldLabel(table))));
+  // Only the approved/issued itinerary is printed here; never substitute the
+  // requester-entered amount from the separate Imprest Request table.
+  const imprestTables = tables.filter((table) => table.workflowRole === "rfq_required_lines").map((table) => ({
+    table,
+    rows: Array.isArray(values[table.key]) ? values[table.key] as AnyRecord[] : [],
+  }));
   const itineraryRows = itinerary ? (Array.isArray(values[itinerary.key]) ? values[itinerary.key] : []) : [];
   const destination = itinerary ? (() => {
     const columns = tableColumns(itinerary);
@@ -248,14 +308,13 @@ export default function PrintableRequisition({
         </table>
       </section>
       <section><h2>C. Applicant’s Signature</h2><SignatureBlocks sections={sections} values={values} match={/applicant|requester|requesting officer/i} /></section>
-      <section><h2>Budget Holder and Line Manager Recommendations</h2><div className="rq-print-signatures"><SignatureBlocks sections={sections} values={values} match={/budget holder|line manager/i} /></div></section>
-      <section><h2>D. Finance Department Verification of Budget Availability</h2><div className="rq-print-answer"><b>Is budget available?</b><span>{budgetAvailability}</span><b>Comments:</b><span>—</span></div><SignatureBlocks sections={sections} values={values} match={/finance/i} /></section>
-      <section><h2>E. Travel Itinerary</h2>{itinerary ? <PrintableTable table={itinerary} rows={itineraryRows} /> : <p>—</p>}<SignatureBlocks sections={sections} values={values} match={/booking officer/i} /></section>
-      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestItinerary ? <PrintableTable table={imprestItinerary} rows={Array.isArray(values[imprestItinerary.key]) ? values[imprestItinerary.key] : []} /> : <p>—</p>}<SignatureBlocks sections={sections} values={values} match={/finance/i} /></section>
+      <section><h2>Budget Holder and Line Manager Recommendations</h2><WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} phase="requisition" firstApprovalOnly roleLabel="Line Manager" /></section>
+      <section><h2>D. Finance Department Verification of Budget Availability</h2><div className="rq-print-answer"><b>Is budget available?</b><span>{budgetAvailability}</span><b>Comments:</b><span>—</span></div><WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} match={/finance/i} /></section>
+      <section><h2>E. Travel Itinerary</h2>{itinerary ? <PrintableTable table={itinerary} rows={itineraryRows} /> : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} match={/booking officer/i} /></section>
+      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestTables.length ? imprestTables.map(({ table, rows }) => <div key={table.key}><h3 className="rq-print-subheading">{fieldLabel(table)}</h3><PrintableTable table={table} rows={rows} /></div>) : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} executionLane="imprest_request" /></section>
       <section><h2>G. Authorisation of the Trip</h2>
         <div className="rq-print-details rq-print-details-three"><div><b>Trip Authorised?</b><span>{lpoApprover ? "Yes" : "Pending"}</span></div><div><b>Authorised By</b><span>{lpoApprover?.approver || "—"}</span></div><div><b>Position / Date</b><span>{lpoApprover?.completedAt ? new Date(lpoApprover.completedAt).toLocaleDateString() : "—"}</span></div></div>
-        <SignatureBlocks sections={sections} values={values} match={/authori[sz]ation|authori[sz]ed by|lpo approver/i} />
-        {lpoApprover && <div className="rq-print-signature"><strong>Approver</strong><div className="rq-print-signature-line" /><div>Name: {lpoApprover.approver}</div><div>Date: {lpoApprover.completedAt ? new Date(lpoApprover.completedAt).toLocaleDateString() : "—"}</div></div>}
+        <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} match={/lpo|purchase|authori[sz]/i} />
       </section>
     </article>
   );
