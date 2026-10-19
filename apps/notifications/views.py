@@ -53,18 +53,22 @@ class NotificationViewSet(
 
     @action(detail=False, methods=["post"])
     def mark_all_read(self, request):
-        updated = self.get_queryset().filter(is_read=False).update(is_read=True)
+        queryset = self.get_queryset().filter(is_read=False)
+        if _parse_bool(request.data.get("exclude_task_alerts", False)):
+            queryset = queryset.exclude(type__in=TASK_NOTIFICATION_TYPES)
+        updated = queryset.update(is_read=True)
         return Response({
-            "detail": "All notifications marked read.",
+            "detail": "Notifications marked read.",
             "updated": updated,
         })
 
     @action(detail=False, methods=["post"])
     def clear_read(self, request):
         """Permanently delete all read notifications for the current user."""
-        deleted, _ = Notification.objects.filter(
-            recipient=request.user, is_read=True
-        ).delete()
+        queryset = Notification.objects.filter(recipient=request.user, is_read=True)
+        if _parse_bool(request.data.get("exclude_task_alerts", False)):
+            queryset = queryset.exclude(type__in=TASK_NOTIFICATION_TYPES)
+        deleted, _ = queryset.delete()
         return Response({
             "detail": "Read notifications cleared.",
             "deleted": deleted,

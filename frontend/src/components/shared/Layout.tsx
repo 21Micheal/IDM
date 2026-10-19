@@ -90,6 +90,7 @@ function NotificationsTray({ attentionCount }: { attentionCount: number }) {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["notifications"] });
       qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+      qc.invalidateQueries({ queryKey: ["notifications", "summary"] });
     },
   });
 
@@ -102,9 +103,7 @@ function NotificationsTray({ attentionCount }: { attentionCount: number }) {
   };
 
   const notices = allNotifications.filter((n) => !TASK_NOTIF_TYPES.has(n.type));
-  const taskAlerts = allNotifications.filter((n) => TASK_NOTIF_TYPES.has(n.type));
   const unreadNotices = notices.filter((n) => !n.is_read).slice(0, 5);
-  const unreadTaskAlerts = taskAlerts.filter((n) => !n.is_read).slice(0, 3);
   const visibleTasks = tasks.slice(0, 5) as any[];
   const noticeUnread = notices.filter((n) => !n.is_read).length;
 
@@ -157,7 +156,7 @@ function NotificationsTray({ attentionCount }: { attentionCount: number }) {
                   <ClipboardCheck className="h-4 w-4 text-[#287EAD]" />
                   Tasks
                 </span>
-                <span className="font-bold text-[#287EAD]">{tasks.length + unreadTaskAlerts.length}</span>
+                <span className="font-bold text-[#287EAD]">{tasks.length}</span>
               </button>
             </div>
 
@@ -201,20 +200,6 @@ function NotificationsTray({ attentionCount }: { attentionCount: number }) {
                     Open queue <ArrowRight className="h-3.5 w-3.5" />
                   </button>
                 </div>
-                {unreadTaskAlerts.length > 0 && (
-                  <div className="mb-2 space-y-1">
-                    {unreadTaskAlerts.map((n) => (
-                      <button
-                        key={n.id}
-                        type="button"
-                        onClick={() => openNotif(n)}
-                        className="block w-full border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2 text-left hover:bg-[#DDEFF9]"
-                      >
-                        <p className="line-clamp-2 text-sm font-bold text-[#1F2933]">{n.message}</p>
-                      </button>
-                    ))}
-                  </div>
-                )}
                 {visibleTasks.length === 0 ? (
                   <div className="border border-dashed border-[#C8CDD2] bg-[#F5F7F8] px-3 py-5 text-center text-sm text-[#5E6870]">
                     No active tasks.
@@ -266,14 +251,14 @@ export default function Layout({
   }, [location.pathname]);
 
   // Notifications count
-  const { data: notificationsData } = useQuery({
-    queryKey: ["notifications", "unread-count"],
-    queryFn: () => notificationsAPI.unreadCount().then((res) => res.data),
+  const { data: notificationsSummary } = useQuery({
+    queryKey: ["notifications", "summary"],
+    queryFn: () => notificationsAPI.summary().then((res) => res.data),
     ...QUERY_ONE_MINUTE_STALE,
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,
   });
-  const unreadCount = notificationsData?.unread_count ?? notificationsData?.count ?? 0;
+  const unreadCount = notificationsSummary?.unread_notifications ?? 0;
 
   // Pending approval tasks count
   const { data: myTasks = [] } = useQuery({

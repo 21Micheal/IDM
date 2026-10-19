@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { workflowAPI, notificationsAPI, normalizeListResponse } from "@/services/api";
 import { useLocation, useNavigate } from "react-router-dom";
-import { CheckCircle, Clock, Filter, GitBranch, Loader2, Search, X } from "lucide-react";
+import { AlertTriangle, CheckCircle, Clock, Filter, Loader2, Search, X } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import type { Notification } from "@/types";
 import { useEffect, useMemo, useState } from "react";
@@ -20,7 +20,6 @@ import {
   hasWorkflowTaskFilters,
   type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
-import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import CustomListbox from "@/components/ui/CustomListbox";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 
@@ -200,10 +199,17 @@ export default function WorkflowPage() {
       if (n.is_read || !n.link) return false;
       const targetId = notificationTaskId(n.link);
       return activeTaskIds.has(targetId) || activeDocumentIds.has(targetId);
-    })
-    .slice(0, 5);
+    });
+  const taskAlertsByTask = new Map<string, Notification[]>();
+  for (const notification of visibleTaskAlerts) {
+    const targetId = notificationTaskId(notification.link);
+    const task = (tasks ?? []).find((item) => item.id === targetId || getTaskDocumentId(item) === targetId);
+    if (!task) continue;
+    taskAlertsByTask.set(task.id, [...(taskAlertsByTask.get(task.id) ?? []), notification]);
+  }
 
   const allTasks = tasks ?? [];
+  const overdueCount = allTasks.filter((task) => task.due_at && new Date(task.due_at) < new Date()).length;
   const openTask = (task: WorkflowTask) => {
     if (task.target_type === "payment_run" || task.payment_run_id) {
       setSelectedPaymentRunTask(task);
@@ -245,23 +251,30 @@ export default function WorkflowPage() {
 
   return (
     <div className="flex h-full flex-col bg-[#EDEDED]">
-      <WorkspaceCommandBar
-        actions={
-          <div className="border border-white/25 bg-white/10 px-3 py-2 text-sm font-semibold">
-            {allTasks.length} open
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 bg-[#287EAD] px-4 py-1.5 text-white">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-8 w-8 items-center justify-center border border-white/25 bg-white/10">
+            <CheckCircle className="h-4 w-4" />
           </div>
-        }
-      >
-        <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
-          <GitBranch className="h-5 w-5 text-white" />
+          <div>
+            <h1 className="text-lg font-semibold leading-tight">Approvals</h1>
+            <p className="text-xs text-white/75">Review and action your assigned work.</p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-xl font-semibold">Workflow tasks</h1>
-          <p className="mt-0.5 text-sm text-white/75">Documents waiting for your review or approval.</p>
+        <div className="flex items-center gap-2">
+          <div className="border border-white/25 bg-white/10 px-2.5 py-1 text-xs font-semibold">
+            {allTasks.length} open task{allTasks.length !== 1 ? "s" : ""}
+          </div>
+          {overdueCount > 0 && (
+            <div className="inline-flex items-center gap-1 border border-white/25 bg-white/10 px-2.5 py-1 text-xs font-semibold">
+              <AlertTriangle className="h-3.5 w-3.5" /> {overdueCount} overdue
+            </div>
+          )}
         </div>
-      </WorkspaceCommandBar>
+      </header>
 
-      <div className="scrollbar-minimal min-h-0 flex-1 space-y-4 overflow-y-auto p-5 pr-0">
+      <div className="scrollbar-minimal min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+        <div className="mx-auto w-full max-w-4xl space-y-4">
         {isLoading && (
           <div className="flex h-40 items-center justify-center border border-[#C8CDD2] bg-white">
             <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
@@ -270,8 +283,8 @@ export default function WorkflowPage() {
 
         {!isLoading && !tasks?.length && (
           <div className="border border-[#C8CDD2] bg-white p-12 text-center">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center border border-emerald-200 bg-emerald-50">
-              <CheckCircle className="h-7 w-7 text-emerald-700" />
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center border border-[#E2E7EB] bg-[#F7F9FA]">
+              <CheckCircle className="h-6 w-6 text-[#68737D]" />
             </div>
             <p className="font-semibold text-[#1F2933]">All caught up</p>
             <p className="mt-1 text-sm text-[#5E6870]">No pending approval tasks.</p>
@@ -279,7 +292,7 @@ export default function WorkflowPage() {
         )}
 
         {!isLoading && allTasks.length > 0 && (
-        <section className="border border-[#C8CDD2] bg-white p-4">
+        <section className="border border-[#D6DDE2] bg-white p-4">
           <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-sm font-semibold text-[#1F2933]">Filter approval queue</p>
@@ -364,33 +377,6 @@ export default function WorkflowPage() {
       )}
 
       <div className="space-y-2">
-        {visibleTaskAlerts.length > 0 && (
-          <section className="border border-amber-200 bg-amber-50 p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <p className="text-sm font-bold text-amber-900">Task alerts</p>
-              <p className="text-xs text-amber-900">{taskAlertNotifications.length} total</p>
-            </div>
-            <div className="space-y-2">
-              {visibleTaskAlerts.map((notification) => (
-                <button
-                  key={notification.id}
-                  type="button"
-                  onClick={() => {
-                    if (!notification.is_read) markReadMutation.mutate(notification.id);
-                    const targetId = notificationTaskId(notification.link);
-                    const task = allTasks.find((item) => item.id === targetId || getTaskDocumentId(item) === targetId);
-                    if (task) openTask(task);
-                    else navigate(notification.link || "/approvals");
-                  }}
-                  className="block w-full border border-amber-200 bg-amber-50 px-3 py-2 text-left hover:bg-amber-100"
-                >
-                  <p className="line-clamp-2 text-sm font-bold text-amber-900">{notification.message}</p>
-                  <p className="mt-1 text-xs text-amber-800">{new Date(notification.created_at).toLocaleString()}</p>
-                </button>
-              ))}
-            </div>
-          </section>
-        )}
         {!isLoading && allTasks.length > 0 && filteredTasks.length === 0 && (
           <div className="border border-[#C8CDD2] bg-white p-8 text-center">
             <p className="font-semibold text-[#1F2933]">No matching tasks</p>
@@ -411,31 +397,44 @@ export default function WorkflowPage() {
           const isOverdue = task.due_at && new Date(task.due_at) < new Date();
 
           return (
-            <div key={task.id} className="border border-[#C8CDD2] bg-white">
+            <div key={task.id} className="border border-[#D6DDE2] bg-white">
               <button
                 type="button"
                 onClick={() => {
+                  (taskAlertsByTask.get(task.id) ?? [])
+                    .filter((notification) => !notification.is_read)
+                    .forEach((notification) => markReadMutation.mutate(notification.id));
                   if (documentId || isPaymentRun) openTask(task);
                 }}
-                className="flex w-full items-start gap-4 p-4 text-left transition-colors hover:bg-[#F5F7F8]"
+                className="flex w-full items-start gap-4 p-4 text-left transition-colors hover:bg-[#F6FAFC]"
               >
-                <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center border border-[#C8CDD2] bg-[#EEF6FB]">
-                  <Clock className="h-5 w-5 text-[#287EAD]" />
+                <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center border border-[#E2E7EB] bg-[#F7F9FA]">
+                  <Clock className="h-4 w-4 text-[#68737D]" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="min-w-0">
-                    <h3 className="truncate font-semibold text-[#1F2933] hover:text-[#287EAD]">
-                      {documentTitle}
-                    </h3>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="truncate font-semibold text-[#1F2933] hover:text-[#287EAD]">
+                        {documentTitle}
+                      </h3>
+                      {(taskAlertsByTask.get(task.id) ?? []).map((notification) => (
+                        <span
+                          key={notification.id}
+                          className="shrink-0 border border-[#E2E7EB] bg-[#F7F9FA] px-2 py-0.5 text-[10px] font-semibold text-[#5E6870]"
+                        >
+                          {notification.type === "task_overdue" ? "Overdue alert" : notification.type === "task_sla_warning" ? "Due soon alert" : "New task alert"}
+                        </span>
+                      ))}
+                    </div>
                     <p className="mt-0.5 font-mono text-xs text-[#5E6870]">
                       {documentRef}
                     </p>
                   </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#5E6870]">
-                    <span>Type: <span className="font-semibold text-[#1F2933]">{documentType}</span></span>
-                    {!isPaymentRun && <span>Format: <span className="font-semibold text-[#1F2933]">{documentFormat}</span></span>}
-                    <span>Department: <span className="font-semibold text-[#1F2933]">{department}</span></span>
-                    <span>Step: <span className="font-semibold text-[#1F2933]">{task.step.name}</span></span>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#5E6870]">
+                    <span className="border border-[#E2E7EB] bg-[#F7F9FA] px-2 py-1">{documentType}</span>
+                    {!isPaymentRun && <span className="border border-[#E2E7EB] bg-[#F7F9FA] px-2 py-1">{documentFormat}</span>}
+                    <span className="border border-[#E2E7EB] bg-[#F7F9FA] px-2 py-1">{department}</span>
+                    <span className="border border-[#E2E7EB] bg-[#F7F9FA] px-2 py-1 font-semibold text-[#1F2933]">{task.step.name}</span>
                     {uploaderName && (
                       <span>{isPaymentRun ? "Submitted by" : "Uploader"}: <span className="font-semibold text-[#1F2933]">{uploaderName}</span></span>
                     )}
@@ -445,13 +444,7 @@ export default function WorkflowPage() {
                       </span>
                     )}
                     {task.due_at && (
-                      <span
-                        className={
-                          isOverdue
-                            ? "font-semibold text-red-700"
-                            : ""
-                        }
-                      >
+                      <span className={`inline-flex items-center gap-1 border px-2 py-1 font-semibold ${isOverdue ? "border-rose-200 bg-rose-50 text-rose-700" : "border-[#E2E7EB] bg-[#F7F9FA] text-[#5E6870]"}`}>
                         Due {formatDistanceToNow(new Date(task.due_at), { addSuffix: true })}
                       </span>
                     )}
@@ -461,6 +454,7 @@ export default function WorkflowPage() {
             </div>
           );
         })}
+      </div>
       </div>
       </div>
       {selectedPaymentRunTask && (

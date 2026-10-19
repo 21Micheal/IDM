@@ -27,22 +27,25 @@ export default function NotificationsPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["notifications"] });
       qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+      qc.invalidateQueries({ queryKey: ["notifications", "summary"] });
     },
   });
 
   const markAllReadMutation = useMutation({
-    mutationFn: () => notificationsAPI.markAllRead(),
+    mutationFn: () => notificationsAPI.markAllRead({ exclude_task_alerts: true }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["notifications"] });
       qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+      qc.invalidateQueries({ queryKey: ["notifications", "summary"] });
     },
   });
 
   const clearReadMutation = useMutation({
-    mutationFn: () => notificationsAPI.clearRead(),
+    mutationFn: () => notificationsAPI.clearRead({ exclude_task_alerts: true }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["notifications"] });
       qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+      qc.invalidateQueries({ queryKey: ["notifications", "summary"] });
     },
   });
 
@@ -82,7 +85,7 @@ export default function NotificationsPage() {
           <div>
             <h1 className="text-xl font-semibold">Notifications</h1>
             <p className="mt-0.5 text-sm text-white/75">
-              Document updates, shared items, and operational alerts.
+              Document updates, sharing changes, and workflow outcomes.
             </p>
           </div>
         </div>
