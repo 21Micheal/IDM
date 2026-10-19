@@ -466,8 +466,8 @@ export default function RequisitionDashboardPage() {
                           {formatMoney(getReqAmount(doc), doc.currency)}
                         </td>
                         <td className="px-5 py-4 align-middle">
-                          <span className={clsx("text-xs font-semibold", getDashboardStatusTextClass(hasPendingApproval(doc) ? "pending_approval" : doc.status))}>
-                            {getDashboardStatusLabel(hasPendingApproval(doc) ? "pending_approval" : doc.status)}
+                          <span className={clsx("text-xs font-semibold", getDashboardStatusTextClass(doc.status))}>
+                            {getDashboardStatusLabel(doc.status)}
                           </span>
                         </td>
                         <td className="hidden whitespace-nowrap px-5 py-4 text-xs text-[#5E6870] lg:table-cell">

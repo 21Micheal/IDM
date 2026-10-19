@@ -49,10 +49,10 @@ function hasPendingApproval(doc: any): boolean {
 }
 
 function statusPresentation(doc: any): { label: string; className: string } {
-  const key = hasPendingApproval(doc) ? "pending_approval" : String(doc?.status || "unknown").toLowerCase();
+  const key = String(doc?.status || "unknown").toLowerCase();
   const labels: Record<string, string> = {
     pending_approval: "Pending approval",
-    request_pending: "Pending approval",
+    request_pending: "Request pending",
     on_hold: "On hold",
     pending_review: "Pending review",
     approved: "Approved",

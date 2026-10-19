@@ -700,12 +700,39 @@ function evalEditableForViewer(
 
 // ── Table column cell ─────────────────────────────────────────────────────────
 
-function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }: {
+const COMMON_IMAGE_ACCEPT = ".jpg,.jpeg,.png,.gif,.webp,.bmp,.tif,.tiff,.heic,.heif";
+const COMMON_ATTACHMENT_ACCEPT = `${COMMON_IMAGE_ACCEPT},.pdf,.doc,.docx,.rtf,.odt`;
+const COMMON_ATTACHMENT_EXTENSIONS = new Set(COMMON_ATTACHMENT_ACCEPT.split(",").map((extension) => extension.slice(1)));
+
+function chooseCommonAttachment(
+  event: React.ChangeEvent<HTMLInputElement>,
+  onChange: (file?: File) => void,
+  imageOnly = false,
+) {
+  const input = event.currentTarget;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  const allowedExtensions = imageOnly
+    ? new Set(COMMON_IMAGE_ACCEPT.split(",").map((item) => item.slice(1)))
+    : COMMON_ATTACHMENT_EXTENSIONS;
+  if (!allowedExtensions.has(extension)) {
+    toast.error(imageOnly
+      ? "Choose a common image file (JPG, PNG, GIF, WebP, BMP, TIFF, HEIC, or HEIF)."
+      : "Choose an image, PDF, or Word document (DOC, DOCX, RTF, or ODT).");
+    return;
+  }
+  onChange(file);
+}
+
+function TableFileCell({ value, onChange, disabled, documentId, attachmentKey, imageOnly = false }: {
   value: unknown;
   onChange: (v: unknown) => void;
   disabled?: boolean;
   documentId?: string;
   attachmentKey?: string;
+  imageOnly?: boolean;
 }) {
   const [downloading, setDownloading] = useState(false);
   const descriptor = isAttachmentValue(value) ? value : null;
@@ -763,8 +790,8 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }:
         {!disabled && (
           <label className="flex-shrink-0 cursor-pointer text-[10px] font-semibold text-primary hover:underline">
             Replace
-            <input type="file" className="sr-only"
-              onChange={(e) => onChange(e.target.files?.[0] ?? undefined)} />
+            <input type="file" accept={imageOnly ? COMMON_IMAGE_ACCEPT : COMMON_ATTACHMENT_ACCEPT} className="sr-only"
+              onChange={(e) => chooseCommonAttachment(e, onChange, imageOnly)} />
           </label>
         )}
       </div>
@@ -779,8 +806,8 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }:
         <Paperclip className="h-3.5 w-3.5 flex-shrink-0 text-sky-700" />
         <span className="min-w-0 flex-1 truncate">Choose attachment</span>
         <span className="flex-shrink-0 rounded border border-slate-200 bg-slate-50 px-2 py-1 font-medium text-slate-700">Browse</span>
-        <input type="file" className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-          onChange={(e) => onChange(e.target.files?.[0] ?? undefined)} />
+        <input type="file" accept={imageOnly ? COMMON_IMAGE_ACCEPT : COMMON_ATTACHMENT_ACCEPT} className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          onChange={(e) => chooseCommonAttachment(e, onChange, imageOnly)} />
       </label>
     )
   );
@@ -850,7 +877,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
 
   if (type === "file" || type === "image") {
     return (
-      <TableFileCell value={value} onChange={onChange} disabled={dis}
+      <TableFileCell value={value} onChange={onChange} disabled={dis} imageOnly={type === "image"}
         documentId={documentId} attachmentKey={attachmentKey} />
     );
   }
@@ -898,8 +925,8 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           value={sval}
           onChange={onChange}
           options={selectOptions}
-          className={base}
-          buttonClassName="w-full"
+          className="h-full w-full"
+          buttonClassName="h-full min-h-9 w-full px-2 py-2"
           ariaLabel="Select option"
           disabled={dis}
         />
@@ -972,7 +999,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
       const selected = Array.isArray(value) ? (value as string[]) : sval ? sval.split(",").map((x) => x.trim()).filter(Boolean) : [];
       if (dis) return <span className="py-0.5 text-sm text-foreground">{selected.join(", ") || <span className="italic text-muted-foreground">—</span>}</span>;
       return (
-        <select multiple value={selected} className={`${base} h-auto min-h-[52px]`}
+        <select multiple value={selected} className={`${base} h-full min-h-[52px] w-full`}
           onChange={(e) => onChange(Array.from(e.target.selectedOptions).map((o) => o.value))}>
           {(col.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
@@ -1030,7 +1057,6 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
             }
           }}
           multi={false}
-          compact
           disabled={dis}
           className="w-full"
         />
@@ -1436,11 +1462,12 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                       const cellLocked = readOnly || !colEditableInRow(col, row);
                       const protectedCell = cellLocked || Boolean(col.calc?.expression);
                       const cellIssue = columnIssue(col, ri, row[key]);
+                      const fillsCell = ["select", "radio", "multi_select", "external", "sunsystems_account", "reference", "user"].includes(col.type ?? "");
                       return (
                         <td key={col.id ?? ci}
                             data-protected-cell={protectedCell ? "true" : undefined}
                             data-calculated-cell={col.calc?.expression ? "true" : undefined}
-                            className={`w-[230px] flex-shrink-0 px-2 py-2 align-top border-r border-border/30 last:border-r-0 focus-within:bg-sky-50/40 ${col.calc?.expression ? "bg-emerald-50/70" : protectedCell ? "bg-sky-50/70" : "bg-white"}`}>
+                            className={`w-[230px] flex-shrink-0 ${fillsCell ? "p-0" : "px-2 py-2"} align-top border-r border-border/30 last:border-r-0 focus-within:bg-sky-50/40 ${col.calc?.expression ? "bg-emerald-50/70" : protectedCell ? "bg-sky-50/70" : "bg-white"}`}>
                           {shown ? (
                             <div className={cellIssue ? "w-full min-w-0 rounded-sm ring-1 ring-red-500 [&_input]:!border-red-500 [&_textarea]:!border-red-500 [&_select]:!border-red-500 [&_button]:!border-red-500" : "w-full min-w-0"}>
                               <TableColInput
@@ -1752,10 +1779,10 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
       <input
         ref={inputRef}
         type="file"
-        accept={imageOnly ? "image/*" : undefined}
+        accept={imageOnly ? COMMON_IMAGE_ACCEPT : COMMON_ATTACHMENT_ACCEPT}
         disabled={disabled}
         className="sr-only"
-        onChange={(e) => pick(e.target.files?.[0] ?? null)}
+        onChange={(e) => chooseCommonAttachment(e, (file) => pick(file ?? null), imageOnly)}
       />
     </label>
   );
