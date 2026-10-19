@@ -798,7 +798,7 @@ export default function FormDetailPage() {
       </WorkspaceCommandBar>
 
       <div className={cn(
-        "scrollbar-minimal relative mx-auto grid min-h-0 w-full max-w-[1720px] flex-1 grid-cols-1 items-start gap-5 overflow-y-auto px-4 py-5 sm:px-6 lg:grid-cols-12 lg:gap-6",
+        "scrollbar-minimal relative mx-auto grid min-h-0 w-full max-w-[1800px] flex-1 grid-cols-1 items-start gap-5 overflow-y-auto px-4 py-5 sm:px-6 lg:grid-cols-12 lg:gap-6",
         detailsOpen ? "pr-8" : "pr-12",
       )}>
 

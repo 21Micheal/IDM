@@ -230,7 +230,11 @@ export default function ExternalSelect({
   const singleValue = Array.isArray(value) ? value[0] ?? "" : value;
   const defaultAutoFillRef = useRef("");
   useEffect(() => {
-    if (!autoFillDefault || multi || !singleValue || rows.length === 0) return;
+    if (!autoFillDefault) {
+      defaultAutoFillRef.current = "";
+      return;
+    }
+    if (multi || !singleValue || rows.length === 0) return;
     // Older templates may have a display label saved as "CODE — description".
     // Resolve the actual record by code and normalize the stored value.
     const record = byCode.get(singleValue) ?? rows.find((candidate) => {

@@ -1027,7 +1027,21 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           compact
         />
       );
-    case "external":
+    case "external": {
+      const fillUnitKey = columnKey(col.external?.fillColumn);
+      const fillDescriptionKey = columnKey(col.external?.fillDescriptionColumn);
+      const fillTaxRateKey = columnKey(col.external?.fillTaxRateColumn);
+      const defaultValue = String(col.defaultValue ?? "");
+      const selectedDefault = Boolean(
+        defaultValue && (sval === defaultValue
+          || (sval && defaultValue.startsWith(sval) && /^\s+[—–-]\s*/.test(defaultValue.slice(sval.length)))),
+      );
+      const hasAutoFillTargets = Boolean(fillUnitKey || fillDescriptionKey || fillTaxRateKey);
+      const autoFillTargetsMissing = Boolean(
+        (fillUnitKey && !row?.[fillUnitKey])
+        || (fillDescriptionKey && !row?.[fillDescriptionKey])
+        || (fillTaxRateKey && !row?.[fillTaxRateKey]),
+      );
       return (
         <ExternalSelect
           source={col.external?.source ?? "items"}
@@ -1040,20 +1054,19 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
               if (target) onChangeCell?.(target, "");
             }
           }}
-          autoFillDefault={Boolean(col.defaultValue && sval === col.defaultValue)}
+          autoFillDefault={Boolean(selectedDefault && (!hasAutoFillTargets || autoFillTargetsMissing))}
           showCodeOnly={!!col.external?.fillDescriptionColumn}
           onSelectRecord={(rec) => {
             // Items: mirror the picked item's BaseItemUnit into a sibling cell.
             const unit = rec.data?.unit;
-            if (col.external?.fillColumn && unit !== undefined) {
-              onChangeCell?.(col.external.fillColumn, unit);
+            if (fillUnitKey && unit !== undefined && (!selectedDefault || !row?.[fillUnitKey])) {
+              onChangeCell?.(fillUnitKey, unit);
             }
-            if (col.external?.fillDescriptionColumn) {
-              onChangeCell?.(col.external.fillDescriptionColumn, rec.description ?? "");
+            if (fillDescriptionKey && (!selectedDefault || !row?.[fillDescriptionKey])) {
+              onChangeCell?.(fillDescriptionKey, rec.description ?? "");
             }
-            if (col.external?.fillTaxRateColumn) {
-              const target = columnKey(col.external.fillTaxRateColumn);
-              if (target) onChangeCell?.(target, rec.data?.tax_rate ?? "");
+            if (fillTaxRateKey && (!selectedDefault || !row?.[fillTaxRateKey])) {
+              onChangeCell?.(fillTaxRateKey, rec.data?.tax_rate ?? "");
             }
           }}
           multi={false}
@@ -1061,6 +1074,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           className="w-full"
         />
       );
+    }
     default:
       if (wrapText) {
         return (

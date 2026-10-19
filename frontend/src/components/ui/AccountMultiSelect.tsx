@@ -131,6 +131,9 @@ export default function AccountMultiSelect({
     : accounts;
 
   const isSelected  = (code: string) => valueArray.includes(code);
+  const selectedAccount = valueArray.length === 1
+    ? accounts.find((account) => account.account_code === valueArray[0])
+    : undefined;
   const toggle      = (code: string) => {
     if (isMulti) {
       const newValue = isSelected(code) ? valueArray.filter((c) => c !== code) : [...valueArray, code];
@@ -176,12 +179,11 @@ export default function AccountMultiSelect({
   } else if (valueArray.length === 0) {
     triggerLabel = <span className="text-[#8C969E]">{placeholder}</span>;
   } else if (valueArray.length === 1) {
-    const acct = accounts.find((a) => a.account_code === valueArray[0]);
     triggerLabel = (
-      <span className="truncate">
+      <span className="block min-w-0 truncate">
         <span className="font-mono font-bold text-[#287EAD]">{valueArray[0]}</span>
-        {acct?.description && (
-          <span className="ml-2 text-[#1F2933]">{acct.description}</span>
+        {selectedAccount?.description && (
+          <span className="ml-2 text-[#1F2933]">{selectedAccount.description}</span>
         )}
       </span>
     );
@@ -195,14 +197,15 @@ export default function AccountMultiSelect({
   }
 
   return (
-    <div className={`relative w-full ${className}`}>
+    <div className={`relative min-w-0 w-full max-w-full ${className}`}>
       {/* ── Trigger button ── */}
       <button
         ref={triggerRef}
         type="button"
         disabled={isLoading}
         onClick={() => setOpen((v) => !v)}
-        className={`flex h-9 w-full items-center justify-between gap-2 rounded border bg-white px-3 text-sm transition-colors ${
+        title={selectedAccount ? `${selectedAccount.account_code} — ${selectedAccount.description}` : undefined}
+        className={`flex h-9 min-w-0 w-full max-w-full items-center justify-between gap-2 overflow-hidden rounded border bg-white px-3 text-sm transition-colors ${
           open
             ? "border-[#287EAD] ring-1 ring-[#287EAD]"
             : "border-[#AEB5BB] hover:border-[#287EAD]"
