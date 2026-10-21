@@ -1,8 +1,8 @@
 # Standalone production-style Compose stack for the procurement/forms deployment.
 # PostgreSQL is the only database. No OCR or Office-preview workers are started.
 #
-# Prepare .env from .env.procurement.example, then run:
-#   docker compose -p idm --env-file .env -f docker-compose.procurement.prod.yml up -d --build
+# Store runtime secrets in /opt/flaxem/config/.env, then run from this directory:
+#   docker compose -p idm --env-file /opt/flaxem/config/.env -f docker-compose.procurement.prod.yml up -d --build
 
 x-procurement-app: &procurement-app
   build:
@@ -10,25 +10,39 @@ x-procurement-app: &procurement-app
     dockerfile: Dockerfile
   image: idm-procurement:prod
   restart: unless-stopped
-  env_file:
-    - .env
   environment:
     DEBUG: "False"
-    SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
-    SECURE_SSL: ${SECURE_SSL:-False}
+    SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in /opt/flaxem/config/.env}
+    SECURE_SSL: ${SECURE_SSL:-True}
+    ALLOWED_HOSTS: ${ALLOWED_HOSTS:?Set ALLOWED_HOSTS in /opt/flaxem/config/.env}
+    CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:?Set CSRF_TRUSTED_ORIGINS in /opt/flaxem/config/.env}
+    FRONTEND_URL: ${FRONTEND_URL:?Set FRONTEND_URL in /opt/flaxem/config/.env}
     DB_ENGINE: postgres
     DB_HOST: postgres
     DB_PORT: "5432"
     DB_NAME: idm_db
     DB_USER: idm_user
-    DB_PASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+    DB_PASSWORD: ${PGPASSWORD:?Set PGPASSWORD in /opt/flaxem/config/.env}
     DATABASE_URL: ""
-    REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+    REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in /opt/flaxem/config/.env}@redis:6379/0
     ELASTICSEARCH_URL: http://elasticsearch:9200
     MEDIA_ROOT: /app/media
     DJANGO_SETTINGS_MODULE: IDM.settings
     DEPLOYMENT_MODE: procurement
     TZ: Africa/Nairobi
+    EMAIL_BACKEND: ${EMAIL_BACKEND:-django.core.mail.backends.smtp.EmailBackend}
+    EMAIL_HOST: ${EMAIL_HOST:-}
+    EMAIL_PORT: ${EMAIL_PORT:-587}
+    EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
+    EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+    EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+    DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-procurement@example.local}
+    SUNSYSTEMS_BASE_URL: ${SUNSYSTEMS_BASE_URL:-}
+    SUNSYSTEMS_USERNAME: ${SUNSYSTEMS_USERNAME:-}
+    SUNSYSTEMS_PASSWORD: ${SUNSYSTEMS_PASSWORD:-}
+    SUNSYSTEMS_BUSINESS_UNIT: ${SUNSYSTEMS_BUSINESS_UNIT:-}
+    SUNSYSTEMS_BUDGET_CODE: ${SUNSYSTEMS_BUDGET_CODE:-A}
+    SUNSYSTEMS_VERIFY_TLS: ${SUNSYSTEMS_VERIFY_TLS:-True}
   volumes:
     - media_files:/app/media
   extra_hosts:
@@ -48,7 +62,7 @@ services:
     environment:
       POSTGRES_DB: idm_db
       POSTGRES_USER: idm_user
-      POSTGRES_PASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+      POSTGRES_PASSWORD: ${PGPASSWORD:?Set PGPASSWORD in /opt/flaxem/config/.env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -60,11 +74,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in /opt/flaxem/config/.env}"]
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a '${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}' ping | grep -q PONG"]
+      test: ["CMD-SHELL", "redis-cli -a '${REDIS_PASSWORD:?Set REDIS_PASSWORD in /opt/flaxem/config/.env}' ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -137,7 +151,27 @@ services:
 
 volumes:
   postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/flaxem/data/postgres
   redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/flaxem/data/redis
   es_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/flaxem/data/elasticsearch
   media_files:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/flaxem/data/media
   spa_static:
