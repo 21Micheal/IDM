@@ -7,17 +7,74 @@ from django.core.mail import EmailMultiAlternatives, send_mail
 from django.conf import settings
 from django.db import IntegrityError
 import logging
+import html
 
 logger = logging.getLogger(__name__)
 
 
 def _email_footer(link: str = "") -> str:
     base = settings.FRONTEND_URL.rstrip("/")
-    footer = "\n\n"
+    footer = "\n\nSystem Access\n"
     if link:
-        footer += f"Open it directly: {base}{link}\n"
-    footer += f"Log in to DMS: {base}\n"
+        footer += f"{base}{link}\n"
+    else:
+        footer += f"{base}\n"
+    footer += "\nKind regards,\nProcurement Department\n\nThis is an automated email. Please do not reply directly to this message.\n"
     return footer
+
+
+def _structured_email_html(body: str, link: str = "", *, include_footer: bool = True) -> str:
+    """Render notification text in a consistent, readable email layout."""
+    lines = (body or "").splitlines()
+    blocks = []
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line:
+            index += 1
+            continue
+        if line.lower().startswith("hello ") or line.lower().startswith("dear "):
+            blocks.append(f'<h2 style="margin:0 0 20px;color:#243247;font-size:20px">{html.escape(line.rstrip(","))},</h2>')
+            index += 1
+            continue
+        if line in {"Reference Details", "Action Required"}:
+            blocks.append(f'<h3 style="margin:22px 0 8px;color:#243247">{html.escape(line)}</h3>')
+            index += 1
+            continue
+        # Indented "Label: Value" lines become a compact reference-details table.
+        if lines[index].startswith(("  ", "\t")) and ":" in line:
+            rows = []
+            while index < len(lines):
+                candidate = lines[index].strip()
+                if not lines[index].startswith(("  ", "\t")) or ":" not in candidate:
+                    break
+                label, value = candidate.split(":", 1)
+                rows.append(
+                    '<tr><th style="width:34%;padding:10px 12px;text-align:left;background:#f5f7f9;'
+                    'border:1px solid #d9dee3;color:#243247">{}</th><td style="padding:10px 12px;'
+                    'border:1px solid #d9dee3">{}</td></tr>'.format(
+                        html.escape(label.strip()), html.escape(value.strip())
+                    )
+                )
+                index += 1
+            blocks.append('<table role="presentation" style="width:100%;border-collapse:collapse;margin:12px 0 20px"><tbody>{}</tbody></table>'.format("".join(rows)))
+            continue
+        blocks.append(f'<p style="margin:0 0 14px;line-height:1.55">{html.escape(line)}</p>')
+        index += 1
+
+    footer = ""
+    if include_footer:
+        base = settings.FRONTEND_URL.rstrip("/")
+        access_url = f"{base}{link}" if link else base
+        footer = (
+            '<h3 style="margin:22px 0 8px;color:#243247">System Access</h3>'
+            f'<p style="margin:0 0 20px"><a href="{html.escape(access_url, quote=True)}">'
+            f'{html.escape(access_url)}</a></p>'
+            '<p style="margin:0 0 14px;line-height:1.55">Kind regards,<br>Procurement Department</p>'
+            '<p style="margin:0;color:#5e6870"><em>This is an automated email. Please do not reply directly to this message.</em></p>'
+        )
+    return ('<div style="font-family:Arial,sans-serif;font-size:15px;color:#243247;max-width:800px;'
+            'margin:0 auto;padding:20px 16px">' + "".join(blocks) + footer + '</div>')
 
 
 def _send_email_to_address(
@@ -35,13 +92,10 @@ def _send_email_to_address(
         return
     try:
         message = body + (_email_footer(link) if include_footer else "")
-        html = None
-        if html_message:
-            html = html_message + (
-                f"<p style=\"font-family:Arial,sans-serif;font-size:12px;color:#5E6870;\">"
-                f"{_email_footer(link).strip().replace(chr(10), '<br>')}</p>"
-                if include_footer else ""
-            )
+        html = _structured_email_html(body, link, include_footer=include_footer) if not html_message else html_message
+        if html_message and include_footer:
+            footer_html = _structured_email_html("", link, include_footer=True)
+            html += footer_html[footer_html.index("<h3"):footer_html.rindex("</div>")]
         if reply_to:
             outgoing = EmailMultiAlternatives(
                 subject=subject,
@@ -86,13 +140,10 @@ def _send_email(
 
     try:
         message = body + (_email_footer(link) if include_footer else "")
-        html = None
-        if html_message:
-            html = html_message + (
-                f"<p style=\"font-family:Arial,sans-serif;font-size:12px;color:#5E6870;\">"
-                f"{_email_footer(link).strip().replace(chr(10), '<br>')}</p>"
-                if include_footer else ""
-            )
+        html = _structured_email_html(body, link, include_footer=include_footer) if not html_message else html_message
+        if html_message and include_footer:
+            footer_html = _structured_email_html("", link, include_footer=True)
+            html += footer_html[footer_html.index("<h3"):footer_html.rindex("</div>")]
         send_mail(
             subject=subject,
             message=message,
@@ -325,7 +376,6 @@ def _notify_delegates_of_task(task, *, only_delegation=None) -> None:
         f"  Step: {task.step.name}\n"
         f"  Instructions: {task.step.instructions or 'None'}\n"
         + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
-        + f"\nPlease log in to DMS to action this request.\n"
     )
 
     if only_delegation is not None:
@@ -392,22 +442,24 @@ def notify_task_assigned(
         body = _render_approver_email_template(custom_body or "", **render_ctx) or (
             f"Hello {task.assigned_to.first_name},\n\n"
             f"A {target_ctx['target_label']} requires your approval.\n\n"
+            "Reference Details\n"
             f"{details}\n"
+            "Action Required\n"
             f"  Step: {task.step.name}\n"
             f"  Instructions: {task.step.instructions or 'None'}\n"
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
-            + f"\nPlease log in to DMS to action this request.\n"
         )
     else:
         subject = f"DMS — Approval required: {render_ctx['document_ref']}"
         body = (
             f"Hello {task.assigned_to.first_name},\n\n"
             f"A {target_ctx['target_label']} requires your approval.\n\n"
+            "Reference Details\n"
             f"{details}\n"
+            "Action Required\n"
             f"  Step: {task.step.name}\n"
             f"  Instructions: {task.step.instructions or 'None'}\n"
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
-            + f"\nPlease log in to DMS to action this request.\n"
         )
 
     _send_email(task.assigned_to, subject=subject, body=body, link=link)
