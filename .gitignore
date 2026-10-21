@@ -15,6 +15,10 @@ staticfiles/
 .env
 .env.uat
 .env.*.local
+.env.example
+.env.postgres.example
+.env.uat.example
+.env.windows.example
 .venv
 env/
 venv/
