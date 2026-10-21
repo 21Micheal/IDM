@@ -36,6 +36,20 @@ starting services:
 /opt/flaxem/data/media
 ```
 
+These new, empty directories must exist before Compose creates the bind-backed
+volumes. Do not recursively change ownership of existing data directories;
+inspect them first.
+The service images need ownership of their data paths. Use the images to set
+the expected owners (Docker group access permits this without host `sudo`):
+
+```bash
+mkdir -p /opt/flaxem/data/{postgres,redis,elasticsearch,media}
+docker pull postgres:16-alpine redis:7-alpine docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+docker run --rm --user 0 --entrypoint chown -v /opt/flaxem/data/postgres:/data postgres:16-alpine -R postgres:postgres /data
+docker run --rm --user 0 --entrypoint chown -v /opt/flaxem/data/redis:/data redis:7-alpine -R redis:redis /data
+docker run --rm --user 0 --entrypoint chown -v /opt/flaxem/data/elasticsearch:/data docker.elastic.co/elasticsearch/elasticsearch:8.12.0 -R 1000:0 /data
+```
+
 The Compose file maps named volumes to these paths, so they remain under
 `/opt/flaxem/data` while retaining stable Docker volume names for backup and
 restore.
@@ -87,7 +101,7 @@ the approved secure method. It contains sensitive application data. From the
 project directory, start only PostgreSQL, Redis, and Elasticsearch:
 
 ```bash
-docker compose -p idm \
+docker compose -p requisition \
   --env-file /opt/flaxem/config/.env \
   -f docker-compose.procurement.prod.yml up -d postgres redis elasticsearch
 ```
@@ -96,17 +110,17 @@ Wait for PostgreSQL to become healthy, then restore `database.dump` into the
 empty target database. Replace the backup path below with its actual location:
 
 ```bash
-cat /path/to/backup/database.dump | docker compose -p idm \
+cat /path/to/backup/database.dump | docker compose -p requisition \
   --env-file /opt/flaxem/config/.env \
   -f docker-compose.procurement.prod.yml exec -T postgres \
   pg_restore -U idm_user -d idm_db --no-owner --no-privileges
 ```
 
-Restore the uploaded files into the named media volume:
+Restore the uploaded files into the media data directory:
 
 ```bash
 docker run --rm \
-  -v idm_media_files:/dest \
+  -v /opt/flaxem/data/media:/dest \
   -v /path/to/backup:/backup:ro \
   alpine tar -xzf /backup/media_files.tar.gz -C /dest
 ```
@@ -119,10 +133,10 @@ source deployment and backup unchanged until the new deployment is verified.
 From `/opt/flaxem/app/source`:
 
 ```bash
-docker compose -p idm \
+docker compose -p requisition \
   --env-file /opt/flaxem/config/.env \
   -f docker-compose.procurement.prod.yml up -d --build
-docker compose -p idm \
+docker compose -p requisition \
   --env-file /opt/flaxem/config/.env \
   -f docker-compose.procurement.prod.yml ps
 ```
@@ -131,7 +145,7 @@ After the services are healthy, rebuild the search index and verify login,
 requisition submission, approval, attachments, and integrations:
 
 ```bash
-docker compose -p idm \
+docker compose -p requisition \
   --env-file /opt/flaxem/config/.env \
   -f docker-compose.procurement.prod.yml exec -T backend \
   python manage.py search_index --rebuild -f

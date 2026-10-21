@@ -14,10 +14,11 @@ umask 077
 
 # ---------------------------------------------------------------- config ----
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-COMPOSE_PROJECT="idm"
+PROJECT_NAME="${PROJECT_NAME:-requisition}"
+ENV_FILE="${ENV_FILE:-$PROJECT_DIR/.env}"
 COMPOSE_FILES=("docker-compose.procurement.prod.yml")
 POSTGRES_SERVICE="postgres"
-MEDIA_VOLUME="idm_media_files"
+MEDIA_VOLUME="${MEDIA_VOLUME:-${PROJECT_NAME}_media_files}"
 OUT_ROOT=""
 KEEP=0            # 0 = keep everything
 SKIP_MEDIA=0      # set to 1 to omit media snapshot
@@ -34,7 +35,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-COMPOSE=(docker compose -p "$COMPOSE_PROJECT")
+COMPOSE=(docker compose -p "$PROJECT_NAME")
+if [ -f "$ENV_FILE" ]; then COMPOSE+=(--env-file "$ENV_FILE"); fi
 for f in "${COMPOSE_FILES[@]}"; do COMPOSE+=(-f "$f"); done
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
@@ -54,7 +56,7 @@ done
 # not running. This also prevents a missing-container error from looking like a
 # pg_dump failure.
 if ! "${COMPOSE[@]}" ps --status running -q "$POSTGRES_SERVICE" | grep -q .; then
-  die "PostgreSQL service '$POSTGRES_SERVICE' is not running in Compose project '$COMPOSE_PROJECT'. Start the deployment with: docker compose -p $COMPOSE_PROJECT --env-file .env -f ${COMPOSE_FILES[0]} up -d postgres"
+  die "PostgreSQL service '$POSTGRES_SERVICE' is not running in Compose project '$PROJECT_NAME'. Start the deployment with: docker compose -p $PROJECT_NAME --env-file $ENV_FILE -f ${COMPOSE_FILES[0]} up -d postgres"
 fi
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -139,18 +141,18 @@ Contents:
 
 Restore:
   # 1. bring up postgres
-  docker compose -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILES[0]} up -d postgres
+  docker compose -p ${PROJECT_NAME} --env-file ${ENV_FILE} -f ${COMPOSE_FILES[0]} up -d postgres
 
   # 2. restore the dump
-  cat database.dump | docker compose -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILES[0]} exec -T postgres \\
+  cat database.dump | docker compose -p ${PROJECT_NAME} --env-file ${ENV_FILE} -f ${COMPOSE_FILES[0]} exec -T postgres \\
     pg_restore -U "\$POSTGRES_USER" -d "\$POSTGRES_DB" --clean --if-exists
 
-  # 3. (optional) restore media files to the volume
-  docker run --rm -v ${MEDIA_VOLUME}:/dest -v .:/backup alpine \\
+  # 3. (optional) restore media files to the configured host directory
+  docker run --rm -v /opt/flaxem/data/media:/dest -v .:/backup alpine \\
     tar -xzf /backup/media_files.tar.gz -C /dest
 
   # 4. restart the full stack
-  docker compose -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILES[0]} up -d
+  docker compose -p ${PROJECT_NAME} --env-file ${ENV_FILE} -f ${COMPOSE_FILES[0]} up -d
 EOF
 
 chmod -R go-rwx "$BACKUP_DIR"

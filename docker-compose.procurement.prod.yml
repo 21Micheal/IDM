@@ -2,21 +2,22 @@
 # PostgreSQL is the only database. No OCR or Office-preview workers are started.
 #
 # Store runtime secrets in /opt/flaxem/config/.env, then run from this directory:
-#   docker compose -p idm --env-file /opt/flaxem/config/.env -f docker-compose.procurement.prod.yml up -d --build
+#   docker compose -p requisition --env-file /opt/flaxem/config/.env -f docker-compose.procurement.prod.yml up -d --build
 
 x-procurement-app: &procurement-app
   build:
     context: .
     dockerfile: Dockerfile
-  image: idm-procurement:prod
+  image: requisition-procurement:prod
   restart: unless-stopped
   environment:
     DEBUG: "False"
     SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in /opt/flaxem/config/.env}
-    SECURE_SSL: ${SECURE_SSL:-True}
+    SECURE_SSL: ${SECURE_SSL:-False}
     ALLOWED_HOSTS: ${ALLOWED_HOSTS:?Set ALLOWED_HOSTS in /opt/flaxem/config/.env}
     CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:?Set CSRF_TRUSTED_ORIGINS in /opt/flaxem/config/.env}
     FRONTEND_URL: ${FRONTEND_URL:?Set FRONTEND_URL in /opt/flaxem/config/.env}
+    CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
     DB_ENGINE: postgres
     DB_HOST: postgres
     DB_PORT: "5432"
@@ -27,6 +28,8 @@ x-procurement-app: &procurement-app
     REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in /opt/flaxem/config/.env}@redis:6379/0
     ELASTICSEARCH_URL: http://elasticsearch:9200
     MEDIA_ROOT: /app/media
+    SERVE_MEDIA_PUBLIC: ${SERVE_MEDIA_PUBLIC:-False}
+    STORAGE_QUOTA_GB: ${STORAGE_QUOTA_GB:-50}
     DJANGO_SETTINGS_MODULE: IDM.settings
     DEPLOYMENT_MODE: procurement
     TZ: Africa/Nairobi
@@ -43,6 +46,28 @@ x-procurement-app: &procurement-app
     SUNSYSTEMS_BUSINESS_UNIT: ${SUNSYSTEMS_BUSINESS_UNIT:-}
     SUNSYSTEMS_BUDGET_CODE: ${SUNSYSTEMS_BUDGET_CODE:-A}
     SUNSYSTEMS_VERIFY_TLS: ${SUNSYSTEMS_VERIFY_TLS:-True}
+    SUNSYSTEMS_SECURITY_PATH: ${SUNSYSTEMS_SECURITY_PATH:-SecurityProvider}
+    SUNSYSTEMS_EXECUTOR_PATH: ${SUNSYSTEMS_EXECUTOR_PATH:-ComponentExecutor}
+    SUNSYSTEMS_BUDGET_STUB: ${SUNSYSTEMS_BUDGET_STUB:-True}
+    FLAXEM_OPS_ALERT_EMAIL: ${FLAXEM_OPS_ALERT_EMAIL:-}
+    LDAP_SERVER_URI: ${LDAP_SERVER_URI:-}
+    LDAP_BIND_DN: ${LDAP_BIND_DN:-}
+    LDAP_BIND_PASSWORD: ${LDAP_BIND_PASSWORD:-}
+    LDAP_USER_SEARCH_BASE: ${LDAP_USER_SEARCH_BASE:-}
+    IMAP_HOST: ${IMAP_HOST:-}
+    IMAP_PORT: ${IMAP_PORT:-993}
+    IMAP_USE_SSL: ${IMAP_USE_SSL:-True}
+    IMAP_USERNAME: ${IMAP_USERNAME:-}
+    IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+    IMAP_FOLDER: ${IMAP_FOLDER:-INBOX}
+    IMAP_VERIFY_TLS: ${IMAP_VERIFY_TLS:-True}
+    IMAP_POLL_INTERVAL_SECONDS: ${IMAP_POLL_INTERVAL_SECONDS:-300}
+    GRAPH_TENANT_ID: ${GRAPH_TENANT_ID:-}
+    GRAPH_CLIENT_ID: ${GRAPH_CLIENT_ID:-}
+    GRAPH_CLIENT_SECRET: ${GRAPH_CLIENT_SECRET:-}
+    GRAPH_MAILBOX: ${GRAPH_MAILBOX:-}
+    GRAPH_FOLDER: ${GRAPH_FOLDER:-inbox}
+    GRAPH_VERIFY_TLS: ${GRAPH_VERIFY_TLS:-True}
   volumes:
     - media_files:/app/media
   extra_hosts:
@@ -126,7 +151,7 @@ services:
       target: builder
       args:
         VITE_API_URL: ""
-    image: idm-procurement-frontend:prod
+    image: requisition-procurement-frontend:prod
     command: sh -c "rm -rf /out/* && cp -a /app/dist/. /out/"
     volumes:
       - spa_static:/out
