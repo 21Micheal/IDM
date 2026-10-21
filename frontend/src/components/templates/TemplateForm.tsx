@@ -2565,7 +2565,8 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
     // Star rating — buttons, not a number box.
     case "rating": {
-      const maxStars = Math.max(1, Math.min(10, field.max ?? 5));
+      const configuredMax = Number(field.max ?? 5);
+      const maxStars = Math.max(1, Math.min(10, Number.isFinite(configuredMax) ? configuredMax : 5));
       control_el = (
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => {
           const current = Number(f.value ?? 0) || 0;
@@ -3126,7 +3127,7 @@ export function pastDateFieldLabels(
       if (field.type !== "table") continue;
       const rows = Array.isArray(values[key]) ? values[key] as Record<string, unknown>[] : [];
       for (const column of field.columns ?? []) {
-        if (!(["date", "datetime"] as string[]).includes(column.type) || column.hidden || !column.key) continue;
+        if (!(["date", "datetime"] as string[]).includes(String(column.type ?? "")) || column.hidden || !column.key) continue;
         rows.forEach((row, index) => {
           if (!evalVisible(column, values, allFields, processStep, row, viewer)) return;
           if (!evalEditable(column, values, allFields, processStep, row, viewer)) return;

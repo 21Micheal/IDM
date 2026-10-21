@@ -186,7 +186,7 @@ export async function compositeSignatureWithMetadata(
         }
 
         if (showName) {
-          const text = name;
+          const text = name ?? "";
           const size = fitFont(text, 800, nameFont);
           ctx.fillStyle = "#0B1220";
           ctx.fillText(text, padding, currentY + size - 2);
@@ -322,8 +322,6 @@ export default function SignaturePlacementModal({
     let cancelled = false;
     let renderTask: { promise: Promise<void>; cancel?: () => void } | null = null;
     hostEl.innerHTML = "";
-    setPageSize({ width: 0, height: 0 });
-
     pdfDoc.getPage(currentPage).then((page) => {
       if (cancelled) return;
       const viewport = page.getViewport({ scale });

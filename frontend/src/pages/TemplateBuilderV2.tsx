@@ -2303,7 +2303,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                     date: Calendar, datetime: Calendar, time: Clock, select: List,
                     boolean: CheckSquare, radio: CircleDot, rating: Star, email: Mail, phone: Phone, reference: Link2,
                     user: UserIcon, file: Paperclip, image: ImageIcon, multi_select: List,
-                    url: UrlIcon, percentage: Percent, external: Package, sunsystems_account: Building2, budget: Wallet,
+                    url: UrlIcon, percentage: Percent, external: Package, sunsystems_account: Building2, budget: Wallet, budget_line: Wallet,
                   } as Record<TableColumnType, React.ElementType>)[(c.type ?? "text") as TableColumnType] ?? Type;
                   return (
                     <div
@@ -3483,7 +3483,7 @@ function ColumnConfigModal({
                         options={[
                           { value: "", label: "Do not autofill a rate" },
                           ...siblingColumns
-                            .filter((column) => column.id !== draft.id && ["number", "currency", "percentage"].includes(column.type))
+                            .filter((column) => column.id !== draft.id && ["number", "currency", "percentage"].includes(String(column.type ?? "")))
                             .map((column) => ({ value: column.key as string, label: column.label || column.key || "" })),
                         ]}
                         className={iCls}
@@ -3519,7 +3519,7 @@ function ColumnConfigModal({
                     </Row>
                   )}
                   {draft.external?.source === "analysis_codes" && draft.external.dimension === "12" && (() => {
-                    const targets = siblingColumns.filter((c) => c.id !== draft.id && c.key && ["number", "currency", "percentage"].includes(c.type));
+                    const targets = siblingColumns.filter((c) => c.id !== draft.id && c.key && ["number", "currency", "percentage"].includes(String(c.type ?? "")));
                     if (!targets.length) return <Row label="Tax rate target"><span className="text-xs text-amber-700">Add a numeric sibling column for the tax rate.</span></Row>;
                     return (
                       <Row label="Auto-fill tax rate into" hint="Reads the percentage in the selected Tax code name; Exempt, Zero Rated, and Not Analysed fill 0. Use this column in your VAT formula.">

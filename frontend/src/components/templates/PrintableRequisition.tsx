@@ -321,7 +321,7 @@ export default function PrintableRequisition({
     ["Workshop / Activity Dates", [
       findField(fields, values, [/activity start date/, /workshop.*from/, /travel start date/]),
       findField(fields, values, [/activity end date/, /workshop.*to/, /travel end date/]),
-    ].filter(Boolean).map(displayDate).join(" – ")],
+    ].filter(Boolean).map((value) => displayDate(value)).join(" – ")],
     ["Expected Travel Date", displayDate(findField(fields, values, [/expected.*travel date/, /travel date/]))],
   ];
   const fundingCoverage = fields

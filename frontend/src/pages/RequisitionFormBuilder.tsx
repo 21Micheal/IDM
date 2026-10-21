@@ -10,9 +10,8 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "react-toastify";
-import TemplateBuilderV2 from "@/pages/TemplateBuilderV2";
+import TemplateBuilderV2, { type Template } from "@/pages/TemplateBuilderV2";
 import { templatesAPI, documentTypesAPI } from "@/services/api";
-import type { Template } from "@/pages/TemplatesPage";
 
 export default function RequisitionFormBuilder() {
   const navigate = useNavigate();

@@ -45,6 +45,8 @@ export interface FieldOption { value: string; label: string }
 export interface WorkflowField {
   /** Stable id used in conditions. Form fields: the form field id. */
   id: string;
+  /** Optional form schema key, used by form-driven assignment fields. */
+  key?: string;
   label: string;
   type: FieldType;
   options?: FieldOption[];
