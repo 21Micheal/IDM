@@ -66,6 +66,17 @@ services:
       - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS:-http://localhost:3000}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
       - TZ=Africa/Nairobi
+      - EMAIL_HOST=${EMAIL_HOST:-}
+      - EMAIL_PORT=${EMAIL_PORT:-587}
+      - EMAIL_USE_TLS=${EMAIL_USE_TLS:-true}
+      - EMAIL_HOST_USER=${EMAIL_HOST_USER:-}
+      - EMAIL_HOST_PASSWORD=${EMAIL_HOST_PASSWORD:-}
+      - EMAIL_AUTH_METHOD=${EMAIL_AUTH_METHOD:-password}
+      - EMAIL_OAUTH_TENANT_ID=${EMAIL_OAUTH_TENANT_ID:-}
+      - EMAIL_OAUTH_CLIENT_ID=${EMAIL_OAUTH_CLIENT_ID:-}
+      - EMAIL_OAUTH_CLIENT_SECRET=${EMAIL_OAUTH_CLIENT_SECRET:-}
+      - EMAIL_OAUTH_SCOPE=${EMAIL_OAUTH_SCOPE:-https://outlook.office365.com/.default}
+      - DEFAULT_FROM_EMAIL=${DEFAULT_FROM_EMAIL:-procurement@example.local}
       # ── SunSystems Connect ──────────────────────────────────────────────────
       - SUNSYSTEMS_BASE_URL=${SUNSYSTEMS_BASE_URL:-}
       - SUNSYSTEMS_USERNAME=${SUNSYSTEMS_USERNAME:-}
@@ -107,6 +118,17 @@ services:
       - DJANGO_SETTINGS_MODULE=IDM.settings
       - TZ=Africa/Nairobi
       - DEPLOYMENT_MODE=procurement
+      - EMAIL_HOST=${EMAIL_HOST:-}
+      - EMAIL_PORT=${EMAIL_PORT:-587}
+      - EMAIL_USE_TLS=${EMAIL_USE_TLS:-true}
+      - EMAIL_HOST_USER=${EMAIL_HOST_USER:-}
+      - EMAIL_HOST_PASSWORD=${EMAIL_HOST_PASSWORD:-}
+      - EMAIL_AUTH_METHOD=${EMAIL_AUTH_METHOD:-password}
+      - EMAIL_OAUTH_TENANT_ID=${EMAIL_OAUTH_TENANT_ID:-}
+      - EMAIL_OAUTH_CLIENT_ID=${EMAIL_OAUTH_CLIENT_ID:-}
+      - EMAIL_OAUTH_CLIENT_SECRET=${EMAIL_OAUTH_CLIENT_SECRET:-}
+      - EMAIL_OAUTH_SCOPE=${EMAIL_OAUTH_SCOPE:-https://outlook.office365.com/.default}
+      - DEFAULT_FROM_EMAIL=${DEFAULT_FROM_EMAIL:-procurement@example.local}
     volumes:
       - .:/app
       - media_files:/app/media

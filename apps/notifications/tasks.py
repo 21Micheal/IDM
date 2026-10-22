@@ -437,7 +437,7 @@ def notify_task_assigned(
 
     if custom_subject or custom_body:
         subject = _render_approver_email_template(custom_subject or "", **render_ctx) or (
-            f"DMS — Approval required: {render_ctx['document_ref']}"
+            f"EAC Travel REQ — Approval required: {render_ctx['document_ref']}"
         )
         body = _render_approver_email_template(custom_body or "", **render_ctx) or (
             f"Hello {task.assigned_to.first_name},\n\n"
@@ -450,7 +450,7 @@ def notify_task_assigned(
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
         )
     else:
-        subject = f"DMS — Approval required: {render_ctx['document_ref']}"
+        subject = f"EAC Travel REQ — Approval required: {render_ctx['document_ref']}"
         body = (
             f"Hello {task.assigned_to.first_name},\n\n"
             f"A {target_ctx['target_label']} requires your approval.\n\n"

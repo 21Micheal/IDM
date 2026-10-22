@@ -507,6 +507,15 @@ EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
 EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="dms@example.com")
+EMAIL_AUTH_METHOD = env("EMAIL_AUTH_METHOD", default="password").lower()
+EMAIL_OAUTH_TENANT_ID = env("EMAIL_OAUTH_TENANT_ID", default="")
+EMAIL_OAUTH_CLIENT_ID = env("EMAIL_OAUTH_CLIENT_ID", default="")
+EMAIL_OAUTH_CLIENT_SECRET = env("EMAIL_OAUTH_CLIENT_SECRET", default="")
+EMAIL_OAUTH_SCOPE = env(
+    "EMAIL_OAUTH_SCOPE", default="https://outlook.office365.com/.default"
+)
+if EMAIL_AUTH_METHOD == "oauth2":
+    EMAIL_BACKEND = "IDM.email_backend.OAuth2SMTPEmailBackend"
 
 LOGGING = {
     'version': 1,

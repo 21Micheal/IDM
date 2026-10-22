@@ -94,6 +94,11 @@ Configure SMTP and SunSystems settings as applicable. Preserve the source
 for its database. This setup uses HTTP; do not use it for sensitive production
 traffic over an untrusted network.
 
+The Compose stack maps `financeserver.eacassoa.org` to `SUNSYSTEMS_HOST_IP`
+inside the application containers because the host resolves this internal name
+but Docker DNS may not. The example uses the IP currently returned by Sofia's
+host lookup; update it in `/opt/flaxem/config/.env` if IT changes that address.
+
 ## 4. Restore the PostgreSQL database and media
 
 Transfer the successful PostgreSQL backup directory from the source host using
