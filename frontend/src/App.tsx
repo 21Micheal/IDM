@@ -2,7 +2,6 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
-import { oidcLogout } from "@/lib/oidcClient";
 import { useSessionUiStore } from "@/store/sessionUiStore";
 import { authAPI } from "@/services/api";
 import { VaultToaster } from "@/components/ui/vault-toast";
@@ -11,7 +10,6 @@ import SessionDialogs from "@/components/shared/SessionDialogs";
 
 const Layout = lazy(() => import("@/components/shared/Layout"));
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
-const OIDCCallbackPage = lazy(() => import("@/pages/OIDCCallbackPage"));
 const PasswordResetConfirmPage = lazy(() => import("@/pages/PasswordResetConfirmPage"));
 const ForceChangePasswordPage = lazy(() => import("@/pages/ForceChangePasswordPage"));
 const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
@@ -48,88 +46,26 @@ const PaymentRunPage = lazy(() => import("@/pages/PaymentRunPage"));
 // ── Guards ────────────────────────────────────────────────────────────────────
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  // Wait for Zustand to rehydrate from localStorage before deciding to redirect.
-  // Without this, every tab open / page refresh lands on /login for one render.
-  const [hydrated, setHydrated] = useState(() => useAuthStore.persist.hasHydrated());
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const location = useLocation();
-
-  useEffect(() => {
-    if (hydrated) return;
-    return useAuthStore.persist.onFinishHydration(() => setHydrated(true));
-  }, [hydrated]);
-
-  if (!hydrated) return <RouteFallback />;
-  return isAuthenticated
-    ? <>{children}</>
-    : <Navigate to="/login" state={{ from: location.pathname + location.search }} replace />;
+  return isAuthenticated ? <>{children}</> : <Navigate to="/login" state={{ from: location.pathname + location.search }} replace />;
 }
 
 function AuthBootstrap({ children }: { children: React.ReactNode }) {
-  // Wait for Zustand persist to load from localStorage before running auth checks.
-  const [hydrated, setHydrated] = useState(() => useAuthStore.persist.hasHydrated());
   const accessToken = useAuthStore((s) => s.accessToken);
   const user = useAuthStore((s) => s.user);
   const setUser = useAuthStore((s) => s.setUser);
-  const setTokens = useAuthStore((s) => s.setTokens);
   const logout = useAuthStore((s) => s.logout);
   const isSessionExpired = useAuthStore((s) => s.isSessionExpired);
-  const [ready, setReady] = useState(false);
+  const [ready, setReady] = useState(!accessToken || user?.has_admin_access !== undefined);
 
   useEffect(() => {
-    if (hydrated) return;
-    return useAuthStore.persist.onFinishHydration(() => setHydrated(true));
-  }, [hydrated]);
-  const [breakGlassProcessed, setBreakGlassProcessed] = useState(false);
-
-  // Handle break-glass login from special admin route
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.has('break_glass') && !breakGlassProcessed) {
-      const access = sessionStorage.getItem('break_glass_access');
-      const refresh = sessionStorage.getItem('break_glass_refresh');
-      const userStr = sessionStorage.getItem('break_glass_user');
-      
-      if (access && refresh && userStr) {
-        try {
-          const userData = JSON.parse(userStr);
-          setTokens(access, refresh);
-          setUser(userData);
-          // Clean up
-          sessionStorage.removeItem('break_glass_access');
-          sessionStorage.removeItem('break_glass_refresh');
-          sessionStorage.removeItem('break_glass_user');
-          // Remove the flag from URL
-          window.history.replaceState({}, '', window.location.pathname);
-          console.log('Break-glass login processed successfully');
-          setBreakGlassProcessed(true);
-          setReady(true);
-        } catch (e) {
-          console.error('Failed to process break-glass login:', e);
-          logout();
-          setBreakGlassProcessed(true);
-          setReady(true);
-        }
-      } else {
-        setBreakGlassProcessed(true);
-        setReady(true);
-      }
-    }
-  }, [setTokens, setUser, logout, breakGlassProcessed, setReady]);
-
-  useEffect(() => {
-    // Skip normal auth validation if break-glass was processed or not yet hydrated
-    if (breakGlassProcessed || !hydrated) {
-      return () => {};
-    }
-
     let cancelled = false;
 
     if (!accessToken || isSessionExpired()) {
       if (accessToken) {
         // We had a session and it has lapsed (e.g. tab reopened after the idle
         // window) — surface the "expired" notice, not a silent bounce to login.
-        oidcLogout().catch(() => {});
         useSessionUiStore.getState().showExpiredNotice();
         logout();
       }
@@ -168,9 +104,9 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [hydrated, accessToken, isSessionExpired, logout, setUser, user?.has_admin_access, breakGlassProcessed]);
+  }, [accessToken, isSessionExpired, logout, setUser, user?.has_admin_access]);
 
-  if (!hydrated || !ready) return <RouteFallback />;
+  if (!ready) return <RouteFallback />;
   return <>{children}</>;
 }
 
@@ -230,13 +166,10 @@ function SessionGuard() {
 
     const endSession = () => {
       if (!useAuthStore.getState().isAuthenticated) return;
-      // Clear OIDC session to prevent stale session issues
-      const idToken = useAuthStore.getState().idToken;
       // Raise the expiry notice before clearing auth so the modal shows over the
       // login page the user is about to be redirected to.
       useSessionUiStore.getState().showExpiredNotice();
       logout();
-      oidcLogout(idToken).catch(() => {});
     };
 
     // Throttle activity writes — we only need ~per-30s resolution for the timer.
@@ -429,7 +362,6 @@ export default function App() {
           <Routes>
             {/* Public */}
             <Route path="/login" element={<LoginPage />} />
-            <Route path="/auth/callback" element={<OIDCCallbackPage />} />
             <Route path="/reset-password" element={<PasswordResetConfirmPage />} />
 
             {/* First-login password wall — requires auth but bypasses the layout */}

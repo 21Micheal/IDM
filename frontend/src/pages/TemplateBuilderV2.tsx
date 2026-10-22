@@ -26,13 +26,24 @@
  *  - Preview renders correctly typed inputs for every table column (dropdown
  *    becomes <select>, currency shows prefix, etc.) with validation.
  *
+ * v3.2 — Buttons, on-demand sections, linked tables:
+ *  - New "Button" field. action = "add_block" (reveals an on-demand section
+ *    at the end of the form / below the button / after a chosen section) or
+ *    "calculate" (one-shot formula that writes into a target field).
+ *  - Sections can be marked "Add on demand": hidden until a button adds them.
+ *  - Reference fields gain a "Table" source (tableRef): reuse a table's
+ *    layout from THIS form or ANOTHER form's template ("embed"), or pick a
+ *    row from it ("row_picker"). Embedded tables behave like native tables
+ *    (calc columns, SUM(table.col), validation) because they are resolved
+ *    into plain table fields at the edge — see materializeTableRefs().
+ *
  * Backwards-compatible with your existing Template / TemplateField /
  * TableColumn shapes — only adds optional fields. `outputTemplate` still
  * normalizes back to width/help_text/type=boolean for your API.
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { useQueryClient, useMutation, useQuery } from "@tanstack/react-query";
+import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext, type ReactNode } from "react";
+import { useQueryClient, useMutation, useQuery, useQueries } from "@tanstack/react-query";
 import {
   DndContext, PointerSensor, useSensor, useSensors,
   useDraggable, useDroppable, DragOverlay,
@@ -41,19 +52,23 @@ import {
 } from "@dnd-kit/core";
 import { useForm, type UseFormRegister, type FieldErrors } from "react-hook-form";
 import { toast } from "sonner";
+import CustomListbox from "@/components/ui/CustomListbox";
+import { EXTERNAL_SOURCES } from "@/components/ui/ExternalSelect";
+import { ANALYSIS_DIMENSIONS, ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
 import {
   ArrowLeft, Save, Undo2, Redo2, Eye, LayoutGrid, Settings,
   Plus, Trash2, GripVertical, Copy, Search, CheckCircle2,
   RotateCcw, Type, AlignLeft, Hash, Mail, Phone, Calendar,
   Clock, Pencil, List, CircleDot, CheckSquare, Paperclip,
   Image as ImageIcon, Table2, Heading, Minus, ChevronUp,
-  ChevronDown, AlertCircle, Tag, Layers, ArrowRight,
+  ChevronDown, AlertCircle, Tag, Layers, ArrowRight, Wallet,
   ChevronRight, X, Loader2, Sliders, Link2, User as UserIcon,
   Wrench, FileCode, Calculator, Star, Percent, Link as UrlIcon, ListOrdered,
   Info, Files, ToggleLeft, MoveLeft, MoveRight, CopyPlus, Sigma,
+  Building2, MousePointerClick, RefreshCw, Pin, AlertTriangle, Package,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { documentTypesAPI, groupsAPI, workflowAPI } from "@/services/api";
+import { documentTypesAPI, groupsAPI, normalizeListResponse, workflowAPI } from "@/services/api";
 import { FORMULA_OPTIONS } from "@/components/templates/formulas";
 import { CURRENCY_CODES, currencySymbolFor } from "@/lib/currencies";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
@@ -70,7 +85,11 @@ export type FieldType =
   | "url" | "percentage" | "rating" | "auto_number"
   | "multi_file"
   | "calc_number" | "calc_currency" | "calc_text" | "calc_date" | "calc_boolean"
-  | "info" | "spacer";
+  | "info" | "spacer"
+  | "sunsystems_account"
+  | "external"
+  | "budget"
+  | "button";
 
 /* Field types that are auto-derived rather than typed by the person filling
  * the form: calculated values (formula over sibling field keys) and the
@@ -92,8 +111,8 @@ export interface CalcConfig {
 
 export type TableColumnType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
-  | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "percentage" | "url" | "multi_select" | "image";
+  | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
+  | "percentage" | "rating" | "url" | "multi_select" | "image" | "external" | "sunsystems_account";
 
 export interface TableColumn {
   id: string;
@@ -122,6 +141,7 @@ export interface TableColumn {
   currencyFromColumn?: string;
   dateFormat?: string;
   referenceSource?: string;    // e.g. "users", "departments", "vendors"
+  referenceGroupId?: string;
   readonly?: boolean;
   hidden?: boolean;
   /* Conditional visibility/editability — same rule-group model as
@@ -145,6 +165,8 @@ export interface TableColumn {
   calc?: CalcConfig | null;
   /* SunSystems binding for table columns (journal line column roles). */
   sunsystems?: ColumnFinanceBinding;
+  /* External (SunSystems-backed) lookup — see ExternalConfig. */
+  external?: ExternalConfig | null;
 }
 
 /* SunSystems / finance bindings (see compileSunSystems). A field/column carries
@@ -154,20 +176,31 @@ export interface FieldFinanceBinding {
   role?: string;
   dc?: "D" | "C";           // for role "journal_amount"
   account?: string;         // SunSystems account code for that line
+  accountSource?: AccountCodeSource;
   /** Offsetting (counter) account that automatically creates the balancing entry.
    *  e.g. set account=71001 dc=D counterAccount=10101 counterDc=C to get both
    *  legs of an imprest advance from a single amount field. */
   counterAccount?: string;
+  counterAccountSource?: AccountCodeSource;
   counterDc?: "D" | "C";
   // Budget role (live-check side) — independent of the journal role, so one
   // amount field can both post a journal line AND be the budget-checked amount.
   // See FINANCE_BUDGET_ROLES. ("budget_amount"/"budget_account"were the old
   // combined `role` values; migrated to this on load — see normalizeField.)
   budgetRole?: string;
+  // Budget banner field references (for the new budget field type)
+  budgetAmountField?: string;
+  monitoredAmountField?: string;
+  /** Marks qualifying table rows for the requisition-stage Imprest advance. */
+  imprestRequest?: ImprestRequestConfig;
 }
 export interface ColumnFinanceBinding {
   role?: string;            // see FINANCE_COLUMN_ROLES
   account?: string;         // for role "account_code": a constant fallback account.
+  accountSource?: AccountCodeSource;
+  counterAccount?: string;
+  counterAccountSource?: AccountCodeSource;
+  counterDc?: "D" | "C";
   // for role "line_amount": THIS line's own default/
   // fallback account (used when the table has no
   // separate "account_code"-role column).
@@ -184,7 +217,22 @@ export interface ColumnFinanceBinding {
    * configurable set of journal lines instead of one line per row. See
    * RetirementConfig below and compileSunSystems' table handling. */
   retirement?: RetirementConfig;
+  imprestRequest?: ImprestRequestConfig;
 }
+
+export interface ImprestRequestConfig {
+  enabled: boolean;
+  transactionType?: string;
+  journalType?: string;
+  postingType?: string;
+  parameters?: Record<string, string>;
+  accountSource?: AccountCodeSource;
+  account?: string;
+  counterAccountSource?: AccountCodeSource;
+  counterAccount?: string;
+}
+
+export type AccountCodeSource = "manual" | "account_code" | "supplier_code";
 
 /* Where a retirement-scenario line's amount comes from: the original
  * issued/requested figure, the actual total spent (summed from the table's
@@ -193,6 +241,7 @@ export type RetirementAmountSource = "issued" | "spent" | "variance";
 
 export interface RetirementLine {
   account: string;
+  accountSource?: AccountCodeSource;
   dc: "D" | "C";
   amountSource: RetirementAmountSource;
 }
@@ -216,6 +265,8 @@ export interface RetirementScenario {
  * _expand_retirement_lines) interprets at posting time. */
 export interface RetirementConfig {
   enabled: boolean;
+  /** Use either a numeric form field or the total from General / Imprest rows. */
+  issuedAmountMode?: "field" | "imprest_request_total";
   issuedAmountField?: string; // top-level field KEY holding the issued amount
   exact: RetirementScenario;
   under: RetirementScenario;
@@ -254,15 +305,57 @@ export interface ConditionalRule {
   value?: string;
 }
 
-/* A single visibility condition. `source` selects what it tests:
+/* A single visibility/editability condition. `source` selects what it tests:
  *  - "field":        a sibling field's value (by key)
- *  - "process_step": the document's current workflow status (status_label) */
-export type ConditionSource = "field" | "process_step";
+ *  - "process_step": the document's current workflow status (status_label)
+ *  - "user_group":   the VIEWER's RBAC group membership. Uses `groups` plus the
+ *                    operators in_list ("member of any of") / not_in_list
+ *                    ("not a member of any of"). Because it is an ordinary
+ *                    condition it can be AND/OR-ed and nested with the other
+ *                    sources, e.g. step = Finance Approval AND group = Finance. */
+export type ConditionSource = "field" | "process_step" | "user_group";
 export interface VisibilityCondition {
   source: ConditionSource;
   fieldKey?: string;          // when source === "field"
   operator: ConditionOperator;
   value?: string;             // a field value, or a status_label for process_step
+  groups?: SectionGroupRef[]; // when source === "user_group"
+}
+
+/* A single process-step choice from the workflow process-steps API. Procurement
+ * steps are STAGE-AWARE: `stage`/`group` bucket them (Requisition/RFQ/LPO) and
+ * `generic` marks the stage-wide option that covers EVERY approval step in that
+ * stage. `covered` lists the workflow-builder step labels folded into it. */
+export interface ProcessStepOption {
+  value: string;
+  label: string;
+  stage?: string | null;
+  generic?: boolean;
+  group?: string;
+  covered?: string[];
+}
+
+/* Stage badge + label used by the stage-aware process-step menus. */
+function ProcessStepOptionLabel({ step }: { step: ProcessStepOption }) {
+  const badge = (step.group ?? "").replace(/\s*stage$/i, "");
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      {badge && (
+        <span className="shrink-0 rounded bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#287EAD]">
+          {badge}
+        </span>
+      )}
+      <span className="truncate">{step.label}</span>
+    </span>
+  );
+}
+
+function processStepOptions(
+  steps: ProcessStepOption[],
+  opts: { includeBlank?: boolean } = {},
+): { value: string; label: ReactNode }[] {
+  const out = steps.map((s) => ({ value: s.value, label: <ProcessStepOptionLabel step={s} /> }));
+  return opts.includeBlank ? [{ value: "", label: "\u2014 choose a step \u2014" }, ...out] : out;
 }
 
 /* A group of conditions combined with AND/OR. A field/section is shown only when
@@ -289,10 +382,13 @@ function toRuleGroup(v: unknown): RuleGroup | null {
     return {
       combinator: obj.combinator === "or" ? "or" : "and",
       conditions: (obj.conditions as VisibilityCondition[]).map((c) => ({
-        source: c.source === "process_step" ? "process_step" : "field",
+        source: c.source === "process_step" || c.source === "user_group" ? c.source : "field",
         fieldKey: c.fieldKey,
         operator: c.operator,
         value: c.value,
+        ...(c.source === "user_group"
+          ? { groups: (c.groups ?? []).map((g) => ({ id: String(g.id), name: String(g.name) })) }
+          : {}),
       })),
       ...(nested.length ? { groups: nested } : {}),
     };
@@ -304,6 +400,29 @@ function toRuleGroup(v: unknown): RuleGroup | null {
     };
   }
   return null;
+}
+
+/* Legacy migration: sections used to carry a separate `visibleToGroups` list that
+ * could not be combined with the rule group. Fold it into the rule group as a
+ * "user_group" condition, AND-ed with whatever rule already exists (so the old
+ * "stage conditions AND group access" behaviour is preserved). Idempotent: once
+ * folded, `visibleToGroups` is dropped and there is nothing left to fold. */
+function withGroupAccess(rule: RuleGroup | null, groups?: SectionGroupRef[]): RuleGroup | null {
+  if (!groups || groups.length === 0) return rule;
+  const cond: VisibilityCondition = { source: "user_group", operator: "in_list", groups: groups.map((g) => ({ id: String(g.id), name: String(g.name) })) };
+  if (!rule || !ruleGroupHasConditions(rule)) return { combinator: "and", conditions: [cond] };
+  if (rule.combinator === "and") return { ...rule, conditions: [...rule.conditions, cond] };
+  /* An OR rule can't simply take another sibling without changing meaning. */
+  return { combinator: "and", conditions: [cond], groups: [rule] };
+}
+
+/* Every RBAC group a rule tree mentions (for canvas badges). */
+function ruleUserGroupNames(g?: RuleGroup | null): string[] {
+  if (!g) return [];
+  return [
+    ...g.conditions.filter((c) => c.source === "user_group").flatMap((c) => (c.groups ?? []).map((x) => x.name)),
+    ...(g.groups ?? []).flatMap(ruleUserGroupNames),
+  ];
 }
 
 const OPERATOR_LABEL: Record<ConditionOperator, string> = {
@@ -326,6 +445,10 @@ const OPERATOR_GROUPS: Array<{ label: string; ops: ConditionOperator[] }> = [
 ];
 
 function summarizeCondition(c: VisibilityCondition): string {
+  if (c.source === "user_group") {
+    const names = (c.groups ?? []).map((g) => g.name).join(", ") || "…";
+    return `user ${c.operator === "not_in_list" ? "not in" : "in"} ${names}`;
+  }
   const left = c.source === "process_step" ? "step" : (c.fieldKey || "field");
   const op = OPERATOR_LABEL[c.operator] ?? c.operator;
   if (VALUELESS_OPERATORS.has(c.operator)) return `${left} ${op}`;
@@ -351,6 +474,26 @@ function ruleGroupHasConditions(g?: RuleGroup | null): boolean {
   return g.conditions.length > 0 || (g.groups ?? []).some(ruleGroupHasConditions);
 }
 
+/* Config for an External (SunSystems-backed) lookup field or table column.
+ * `source` names the entity exposed by ExternalSelect (see EXTERNAL_SOURCES);
+ * `multi` allows several values in one form field (ignored by table cells). */
+export interface ExternalConfig {
+  source: string;
+  /** AnalysisDimensionId, for source "analysis_codes". */
+  dimension?: string;
+  /** Analysis codes layout in a form field: the ten-slot panel (default) or a
+   * single-dimension lookup. Table columns always behave as "single". */
+  mode?: "panel" | "single";
+  multi?: boolean;
+  /** Analysis panel: the ten AnalysisDimensionIds in slot order. */
+  slots?: string[];
+  /** Items autofill: copy the picked item's BaseItemUnit into this sibling
+   * table column (within the same row). */
+  fillColumn?: string;
+  /** Items autofill: copy the picked item's BaseItemUnit into this sibling form field. */
+  fillField?: string;
+}
+
 export interface TemplateField {
   id: string;
   key: string;
@@ -364,8 +507,10 @@ export interface TemplateField {
   colSpan?: number;
   width?: number;
   columns?: TableColumn[];
+  workflowRole?: "requisition_lines" | "rfq_required_lines" | "retirement_expenses" | "rfq_supplier_attachments";
   defaultValue?: string;
   minRows?: number;
+  multi?: boolean;
   /* Extended */
   tooltip?: string;
   additionalText?: string;
@@ -385,6 +530,7 @@ export interface TemplateField {
   currencyFromField?: string;
   dateFormat?: string;
   referenceSource?: string;
+  referenceGroupId?: string;
   formula?: string;            // auto-fill formula, e.g. "current_user", "now"
   /* Calculated value — when set, this field is auto-derived from sibling
    * field keys (see CalcConfig) instead of typed by the person filling the
@@ -400,6 +546,75 @@ export interface TemplateField {
   visibleWhen?: RuleGroup | null;
   /* SunSystems binding (journal line / budget / header role). */
   sunsystems?: FieldFinanceBinding;
+  /* Button config (type === "button") — see ButtonConfig. */
+  button?: ButtonConfig | null;
+  /* Table reference (type === "reference" && referenceSource === "table") —
+   * see TableRef. */
+  tableRef?: TableRef | null;
+  /* External (SunSystems-backed) lookup — see ExternalConfig. */
+  external?: ExternalConfig | null;
+}
+
+/* A button's behaviour. Buttons hold no value; they either
+ *  - "add_block":  reveal an on-demand SECTION (TemplateSection.onDemand) —
+ *                  the section may hold any fields, including a table or a
+ *                  linked table from another form; or
+ *  - "calculate":  evaluate a formula ONCE, on click, and write the result
+ *                  into `targetKey` (same grammar as calculated fields, but
+ *                  user-triggered instead of reactive — handy for "Suggest
+ *                  amount" / "Apply default" style actions). */
+export interface ButtonConfig {
+  action: "add_block" | "calculate";
+  variant?: "primary" | "secondary" | "outline";
+  /* add_block */
+  targetSectionId?: string;
+  /* Where the block lands: the very end of the form (default — below every
+   * other section, including ones added earlier), directly below the section
+   * holding the button, or after a specific section. */
+  placement?: "end_of_form" | "below_button" | "after_section";
+  anchorSectionId?: string;
+  /* calculate */
+  targetKey?: string;
+  calc?: CalcConfig | null;
+}
+
+/* A reference to a TABLE, either in this template or in another one.
+ *  mode "embed"      — reuse the source table's column layout; rows are
+ *                      entered in THIS document (own data, shared schema).
+ *  mode "row_picker" — a dropdown of the source table's rows
+ *                      (`displayColumn` is the label shown).
+ * `sync` (embed only): "live" follows the source template (the saved
+ * `snapshot` is refreshed every time this template is opened/saved);
+ * "pinned" freezes the layout at `snapshot` until re-synced. The snapshot is
+ * ALWAYS written on save so the runtime form renderer can draw the table
+ * without a second template fetch. Finance (SunSystems) bindings are never
+ * inherited — they belong to the source template's accounts. */
+export interface TableRef {
+  scope: "this_form" | "other_form";
+  templateId?: string;
+  templateName?: string;
+  tableKey: string;
+  tableLabel?: string;
+  mode: "embed" | "row_picker";
+  sync?: "live" | "pinned";
+  displayColumn?: string;
+  snapshot?: { columns: TableColumn[]; takenAt: string; minRows?: number };
+}
+
+/* Light-weight entry in the "other forms" picker. */
+export interface TemplateSummary {
+  id: string;
+  name: string;
+  workflow_type?: string;        // form type, e.g. "imprest" | "requisition"
+  document_type_id?: string;
+  document_type_name?: string;
+}
+
+/* How the builder reads OTHER templates (for cross-form table references).
+ * Supplied by the host so this file doesn't need to know your endpoints. */
+export interface ExternalTemplateSource {
+  list: () => Promise<TemplateSummary[]>;
+  get: (id: string) => Promise<Template>;
 }
 
 /* The header/connection config the SunSystems settings card edits. The journal
@@ -407,6 +622,9 @@ export interface TemplateField {
  * bindings (compileSunSystems); this is the editable source of truth. */
 export interface SunSystemsUi {
   journalEnabled?: boolean;
+  /** Independent profiles; absent values keep the legacy postingKind behavior. */
+  ledgerJournalEnabled?: boolean;
+  purchaseOrderEnabled?: boolean;
   postingKind?: "journal" | "purchase_order";
   journalStages?: {
     stage: number;
@@ -441,12 +659,25 @@ export interface SunSystemsUi {
   vlabBase?: string;
   /** VLAB label number for the transaction/amount value line (default "2"). */
   vlabTrans?: string;
+  /** Constant PurchaseOrderReference emitted when the template has no
+   *  "Purchase order number" field. Blank uses the runtime-generated LPO no. */
+  poNumberConst?: string;
+  /** Constant Comment / description on the purchase-order header. */
+  poComment?: string;
 }
 export interface SunSystemsConfig {
   ui?: SunSystemsUi;
   journal?: Record<string, unknown>;
+  purchase_order?: Record<string, unknown>;
+  imprest_request?: Record<string, unknown>;
   budget?: Record<string, unknown>;
   connection?: Record<string, unknown>;
+}
+
+export interface TravelRetirementConfig {
+  enabled?: boolean;
+  returnDateField?: string;
+  deadlineDays?: number;
 }
 
 export interface TemplateSection {
@@ -456,16 +687,22 @@ export interface TemplateSection {
   fields: TemplateField[];
   collapsible?: boolean;
   /* Visibility — mirrors the per-field model. `hidden` always hides the whole
-   * section (and its fields); `visibleWhen` shows it only when a field matches;
-   * `visibleToGroups` restricts the section to members of the listed RBAC groups
-   * (empty/absent = everyone). The three are mutually-exclusive modes in the UI. */
+   * section (and its fields); `visibleWhen` shows it only when its rule group
+   * matches (field values, process step and user groups, AND/OR-nestable). */
   hidden?: boolean;
   visibleWhen?: RuleGroup | null;
+  /** @deprecated Legacy. Read once on load and folded into `visibleWhen` as a
+   *  "user_group" condition (see withGroupAccess); never written any more. */
   visibleToGroups?: SectionGroupRef[];
   /* Editability (cascades to the section's fields). `readonly` = always
    * read-only; `editableWhen` = editable only when the rule group matches. */
   readonly?: boolean;
   editableWhen?: RuleGroup | null;
+  /* "Add on demand": the section is NOT part of the form until a Button
+   * (action "add_block") adds it. `removable` lets the person take it back
+   * out again once added. */
+  onDemand?: boolean;
+  removable?: boolean;
 }
 
 /* A reference to an RBAC group a section is restricted to. `id` is canonical
@@ -492,11 +729,18 @@ export interface Template {
   use_count?: number;
   sections: TemplateSection[];
   sunsystems?: SunSystemsConfig;
+  workflow_type?: "imprest" | "requisition";
+  /* Requisition forms can be configured to bypass RFQ entirely. */
+  requisition_type_field?: string;
+  travel_type_value?: string;
+  skip_rfq?: boolean;
+  requisition_category?: "standard" | "travel";
+  travel_retirement?: TravelRetirementConfig;
 }
 
 export type EditableTemplate = Omit<Template, "type"> & { type?: Template["type"] };
 
-type FieldGroup = "input" | "choice" | "reference" | "advanced" | "calculated" | "layout";
+type FieldGroup = "input" | "choice" | "reference" | "advanced" | "calculated" | "action" | "layout";
 
 const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults: Partial<TemplateField>; hint?: string }> = {
   text: { label: "Short text", group: "input", defaults: { colSpan: 6, placeholder: "Enter text…" } },
@@ -510,13 +754,17 @@ const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults
   time: { label: "Time", group: "input", defaults: { colSpan: 4 } },
   email: { label: "Email", group: "input", defaults: { colSpan: 6, placeholder: "name@company.com" } },
   phone: { label: "Phone", group: "input", defaults: { colSpan: 4, placeholder: "+254 700 000000" } },
+  sunsystems_account: { label: "Supplier", group: "input", defaults: { colSpan: 12, multi: true }, hint: "Live supplier lookup from SunSystems" },
+  external: { label: "External", group: "input", defaults: { colSpan: 12, external: { source: "items" } }, hint: "Live lookup from SunSystems — items, analysis codes, and more" },
+  budget: { label: "Budget Banner", group: "advanced", defaults: { colSpan: 12 }, hint: "Shows available budget for a specified account code" },
   select: { label: "Dropdown", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
   multi_select: { label: "Multi-select", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
   radio: { label: "Radio group", group: "choice", defaults: { colSpan: 6, options: ["Yes", "No"] } },
   boolean: { label: "Checkbox", group: "choice", defaults: { colSpan: 6 } },
   // Legacy alias of `boolean`; kept for stored templates, hidden from the palette.
   checkbox: { label: "Checkbox", group: "choice", defaults: { colSpan: 6 } },
-  reference: { label: "Reference", group: "reference", defaults: { colSpan: 6, referenceSource: "documents" }, hint: "Links to another document/record" },
+  reference: { label: "Reference", group: "reference", defaults: { colSpan: 6, referenceSource: "documents" }, hint: "Links to a record — or to a table in this form or another form" },
+  button: { label: "Button", group: "action", defaults: { colSpan: 4 }, hint: "Adds a section to the form on click, or runs a calculation" },
   user: { label: "User picker", group: "reference", defaults: { colSpan: 6, referenceSource: "users" } },
   signature: { label: "Signature", group: "advanced", defaults: { colSpan: 12 } },
   file: { label: "File upload", group: "advanced", defaults: { colSpan: 6 } },
@@ -548,12 +796,23 @@ const ICONS: Record<FieldType, React.ElementType> = {
   url: UrlIcon, percentage: Percent, rating: Star, auto_number: ListOrdered,
   calc_number: Calculator, calc_currency: Calculator, calc_text: Calculator, calc_date: Calculator,
   calc_boolean: Sigma, multi_file: Files, info: Info, spacer: Minus,
+  sunsystems_account: Building2,
+  external: Package,
+  budget: Wallet,
+  button: MousePointerClick,
 };
 
 /* Presentational-only field types. They never hold a value, so they're
  * skipped by the payload preview, can't be marked required, and never
  * appear as a formula/condition source. */
-const PRESENTATION_TYPES = new Set<FieldType>(["heading", "divider", "info", "spacer"]);
+const PRESENTATION_TYPES = new Set<FieldType>(["heading", "divider", "info", "spacer", "budget", "button"]);
+
+/* Human label for an External source, used by the canvas and preview stubs. */
+function externalSourceLabel(source?: string, plural = true): string {
+  const def = EXTERNAL_SOURCES.find((s) => s.value === (source ?? EXTERNAL_SOURCES[0]?.value));
+  if (!def) return "records";
+  return plural ? def.plural : def.noun;
+}
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -610,6 +869,196 @@ const REFERENCE_SOURCE_OPTIONS = [
   { value: "departments", label: "Departments" },
   { value: "documents", label: "Documents" },
   { value: "document_types", label: "Document types" },
+];
+
+/* ============================================================
+ * Linked tables, buttons & on-demand sections — shared helpers
+ * ============================================================ */
+
+type TableRefStatus = "ok" | "stale" | "loading" | "missing" | "cycle";
+export interface ResolvedTableRef {
+  columns: TableColumn[];
+  minRows?: number;
+  status: TableRefStatus;
+  sourceLabel: string;
+}
+
+/* Everything the canvas / inspector need to know about the OTHER forms.
+ * Provided once by the root component; read with useContext(BuilderEnv). */
+interface BuilderEnvValue {
+  template: Template | null;
+  summaries: TemplateSummary[];
+  summariesLoading: boolean;
+  external: Record<string, Template | undefined>;
+  loadingIds: Set<string>;
+  canLinkExternal: boolean;
+}
+const BuilderEnv = createContext<BuilderEnvValue>({
+  template: null, summaries: [], summariesLoading: false,
+  external: {}, loadingIds: new Set(), canLinkExternal: false,
+});
+
+const isTableRefField = (f: TemplateField) => f.type === "reference" && f.referenceSource === "table";
+const isEmbeddedTableRef = (f: TemplateField) => isTableRefField(f) && f.tableRef?.mode === "embed";
+
+/* Tables a reference can point at: real tables, plus embedded references
+ * (which resolve to tables themselves — chains are cycle-checked). */
+function tableFieldsOf(t?: Template | null): TemplateField[] {
+  return (t?.sections ?? []).flatMap((s) => s.fields ?? []).filter((f) => f.type === "table" || isEmbeddedTableRef(f));
+}
+
+/* Borrowed columns keep their ids/keys (ids only need to be unique within a
+ * table) but lose SunSystems bindings: account codes, journal roles and
+ * retirement setups belong to the SOURCE template's accounting, and silently
+ * posting them from another form's document would be wrong. */
+function cloneColumnsForEmbed(cols: TableColumn[]): TableColumn[] {
+  return cols.map((c) => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { sunsystems, ...rest } = c;
+    return { ...rest };
+  });
+}
+
+/* Resolve a table reference to concrete columns. Pure; never throws.
+ * Order of precedence: pinned snapshot → live source → snapshot fallback
+ * (status "stale") → nothing (status "missing"/"loading"/"cycle"). */
+function resolveTableRef(
+  field: TemplateField,
+  owner: Template,
+  external: Record<string, Template | undefined>,
+  loadingIds: Set<string>,
+  opts: { ignorePinned?: boolean } = {},
+  visited: string[] = [],
+): ResolvedTableRef {
+  const ref = field.tableRef;
+  if (!ref || !ref.tableKey) return { columns: [], status: "missing", sourceLabel: "No table selected" };
+  const sourceLabel = `${ref.scope === "other_form" ? (ref.templateName ?? "Other form") : "This form"} › ${ref.tableLabel ?? ref.tableKey}`;
+  const fromSnapshot = (status: TableRefStatus): ResolvedTableRef =>
+    ref.snapshot
+      ? { columns: cloneColumnsForEmbed(ref.snapshot.columns), minRows: ref.snapshot.minRows, status, sourceLabel }
+      : { columns: [], status: status === "stale" ? "missing" : status, sourceLabel };
+
+  if (ref.mode === "embed" && ref.sync === "pinned" && ref.snapshot && !opts.ignorePinned) return fromSnapshot("ok");
+
+  const me = `${owner.id ?? "self"}:${field.key}`;
+  if (visited.includes(me)) return { columns: [], status: "cycle", sourceLabel };
+  const trail = [...visited, me];
+
+  const sourceOwner = ref.scope === "other_form" ? (ref.templateId ? external[ref.templateId] : undefined) : owner;
+  if (!sourceOwner) return fromSnapshot(ref.templateId && loadingIds.has(ref.templateId) ? "loading" : "stale");
+
+  const src = tableFieldsOf(sourceOwner).find((f) => f.key === ref.tableKey && !(sourceOwner === owner && f.id === field.id));
+  if (!src) return fromSnapshot("stale");
+  if (src.type === "table") {
+    return { columns: cloneColumnsForEmbed(src.columns ?? []), minRows: src.minRows, status: "ok", sourceLabel };
+  }
+  return { ...resolveTableRef(src, sourceOwner, external, loadingIds, {}, trail), sourceLabel };
+}
+
+/* Resolve every EMBEDDED table reference into a plain `table` field.
+ *
+ * This is the key design move: everything downstream — the Preview's table
+ * rows, per-row calc columns, cross-table SUM(table.col), the calc registry,
+ * column visibility — only ever sees ordinary tables, so linked tables get
+ * all of it for free and there is exactly one table implementation to keep
+ * correct. Ids/keys are preserved so selection and formulas keep working. */
+function materializeTableRefs(
+  template: Template,
+  external: Record<string, Template | undefined>,
+  loadingIds: Set<string>,
+): { sections: TemplateSection[]; resolved: Record<string, ResolvedTableRef> } {
+  const resolved: Record<string, ResolvedTableRef> = {};
+  const sections = template.sections.map((s) => ({
+    ...s,
+    fields: s.fields.map((f) => {
+      if (!isEmbeddedTableRef(f)) return f;
+      const r = resolveTableRef(f, template, external, loadingIds);
+      resolved[f.id] = r;
+      return { ...f, type: "table" as const, columns: r.columns, minRows: f.minRows ?? r.minRows ?? 1, colSpan: 12, width: 12 };
+    }),
+  }));
+  return { sections, resolved };
+}
+
+/* Identifiers a borrowed column's formula uses that don't exist in this form —
+ * a layout copied from another template may reference that template's
+ * top-level fields (e.g. `daily_rate`), which resolve to 0 here. */
+function missingCalcKeys(columns: TableColumn[], known: Set<string>): Array<{ column: string; keys: string[] }> {
+  const colKeys = new Set(columns.map((c) => c.key));
+  const out: Array<{ column: string; keys: string[] }> = [];
+  for (const c of columns) {
+    const expr = c.calc?.expression;
+    if (!expr) continue;
+    let toks: CalcToken[];
+    try { toks = calcTokenize(expr); } catch { continue; }
+    const missing = new Set<string>();
+    toks.forEach((t, i) => {
+      if (t.t !== "ident") return;
+      const nxt = toks[i + 1];
+      if (nxt?.t === "op" && nxt.v === "(") return; // function name
+      if (colKeys.has(t.v) || known.has(t.v)) return;
+      missing.add(t.v);
+    });
+    if (missing.size) out.push({ column: c.label || c.key, keys: [...missing] });
+  }
+  return out;
+}
+
+/* Every key a formula in `template` can legitimately use (fields, columns,
+ * table-qualified columns) — taken from the materialized sections so linked
+ * tables count too. */
+function formScopeKeys(sections: TemplateSection[]): Set<string> {
+  const keys = new Set<string>();
+  for (const f of sections.flatMap((s) => s.fields)) {
+    if (f.key) keys.add(f.key);
+    if (f.type === "table") {
+      for (const c of f.columns ?? []) { keys.add(c.key); keys.add(`${f.key}.${c.key}`); }
+    }
+  }
+  return keys;
+}
+
+/* On-demand sections (TemplateSection.onDemand) are absent from the form until
+ * a button adds them. `spawned` is the click-ordered list of additions; each
+ * remembers the section it should follow ("" = the very end of the form).
+ * Several blocks added after the same anchor stack in click order. */
+interface SpawnRecord { sectionId: string; anchorId: string }
+function orderSections(sections: TemplateSection[], spawned: SpawnRecord[]): TemplateSection[] {
+  const byId = new Map(sections.map((x) => [x.id, x]));
+  const out = sections.filter((x) => !x.onDemand);
+  for (const rec of spawned) {
+    const sec = byId.get(rec.sectionId);
+    if (!sec || out.some((x) => x.id === sec.id)) continue;
+    const idx = rec.anchorId ? out.findIndex((x) => x.id === rec.anchorId) : -1;
+    if (idx < 0) { out.push(sec); continue; }
+    let at = idx + 1;
+    while (at < out.length && out[at].onDemand) at++;
+    out.splice(at, 0, sec);
+  }
+  return out;
+}
+
+/* One-line, human description of what a button does — canvas caption. */
+function describeButton(f: TemplateField, sections: TemplateSection[]): string {
+  const b = f.button;
+  if (!b) return "Not configured";
+  if (b.action === "calculate") {
+    return b.targetKey ? `Calculates → ${b.targetKey}` : "Calculate: pick a target field";
+  }
+  const target = sections.find((x) => x.id === b.targetSectionId);
+  if (!target) return "Add section: pick a target";
+  const where = b.placement === "below_button" ? "below this section"
+    : b.placement === "after_section" ? `after “${sections.find((x) => x.id === b.anchorSectionId)?.title ?? "…"}”`
+      : "at the end of the form";
+  return `Adds “${target.title}” ${where}`;
+}
+
+/* Field-level reference sources = the shared list + "table". "table" is
+ * handled by `field.tableRef` (see TableRef) rather than by the generic
+ * record picker, so the runtime must special-case it in referenceSources.ts. */
+const FIELD_REFERENCE_SOURCE_OPTIONS = [
+  ...REFERENCE_SOURCE_OPTIONS,
+  { value: "table", label: "Table (this form or another form)" },
 ];
 
 // Field types that can carry an auto-fill formula (scalar inputs).
@@ -707,9 +1156,14 @@ function CreateDocTypeQuickModal({
           </div>
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document title</label>
-            <select value={titleField} onChange={(e) => setTitleField(e.target.value)} className={iCls}>
-              {QUICK_TITLE_FIELD_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
-            </select>
+            <CustomListbox
+              value={titleField}
+              onChange={setTitleField}
+              options={QUICK_TITLE_FIELD_OPTIONS.map((o) => ({ value: o.key, label: o.label }))}
+              className={iCls}
+              buttonClassName="w-full"
+              ariaLabel="Document title field"
+            />
             <p className="text-[10px] text-[#8C969E]">Which field's value names documents of this type</p>
           </div>
           <div className="space-y-1.5">
@@ -755,6 +1209,7 @@ function cellPlaceholder(c: TableColumn): string {
     case "url": return "https://…";
     case "multi_select": return c.options?.[0] ? `${c.options[0]} +` : "Select many…";
     case "image": return "🖼 image";
+    case "sunsystems_account": return "Select supplier…";
     default: return "—";
   }
 }
@@ -769,6 +1224,7 @@ function newColumn(type: TableColumnType = "text", label = "New Column"): TableC
     options: type === "select" || type === "multi_select" ? ["Option 1", "Option 2"] : undefined,
     currencySymbol: type === "currency" ? "KSh" : undefined,
     referenceSource: type === "reference" ? "documents" : type === "user" ? "users" : undefined,
+    external: type === "external" ? { source: "items" } : undefined,
   };
 }
 
@@ -812,6 +1268,22 @@ function newField(type: FieldType): TemplateField {
     base.readonly = true;
     base.formula = "reference_number";
   }
+  if (type === "budget") {
+    // Budget banner is presentational - shows budget info, doesn't hold a value
+    base.readonly = true;
+  }
+  if (type === "sunsystems_account") {
+    base.width = 12;
+    base.multi = true;
+  }
+  if (type === "external") {
+    base.width = 12;
+    base.external = { source: "items", multi: false };
+  }
+  if (type === "button") {
+    base.label = "Add section";
+    base.button = { action: "add_block", placement: "end_of_form", variant: "primary" };
+  }
   return base;
 }
 
@@ -841,7 +1313,10 @@ function migrateFinanceBinding(ss?: FieldFinanceBinding): FieldFinanceBinding | 
 }
 
 function normalizeField(field: TemplateField): TemplateField {
-  const type = field.type === "checkbox" ? "boolean" : field.type;
+  // "analysis_panel" was folded into External -> Analysis Codes. Upgrade any
+  // field saved while it existed so old templates keep rendering the panel.
+  const legacyPanel = (field.type as string) === "analysis_panel";
+  const type = legacyPanel ? "external" : field.type === "checkbox" ? "boolean" : field.type;
   const colSpan = field.colSpan ?? field.width ?? 6;
   const helpText = field.helpText ?? field.help_text;
   const key = field.key || `field_${uid()}`;
@@ -851,7 +1326,10 @@ function normalizeField(field: TemplateField): TemplateField {
   const sunsystems = migrateFinanceBinding(field.sunsystems);
   const visibleWhen = toRuleGroup(field.visibleWhen);
   const editableWhen = toRuleGroup(field.editableWhen);
-  return { ...field, type, key, colSpan, width: colSpan, helpText, columns, sunsystems, visibleWhen, editableWhen };
+  const external = legacyPanel
+    ? { source: "analysis_codes", ...(field.external ?? {}) }
+    : field.external;
+  return { ...field, type, key, colSpan, width: colSpan, helpText, columns, sunsystems, visibleWhen, editableWhen, external };
 }
 
 function normalizeTemplate(template: EditableTemplate): Template {
@@ -861,12 +1339,15 @@ function normalizeTemplate(template: EditableTemplate): Template {
     type: template.type ?? "built",
     category: template.category ?? "other",
     tags: template.tags ?? [],
-    sections: sections.map((s) => ({
-      ...s,
-      visibleWhen: toRuleGroup(s.visibleWhen),
-      editableWhen: toRuleGroup(s.editableWhen),
-      fields: Array.isArray(s.fields) ? s.fields.map(normalizeField) : [],
-    })),
+    sections: sections.map((s) => {
+      const { visibleToGroups, ...rest } = s;
+      return {
+        ...rest,
+        visibleWhen: withGroupAccess(toRuleGroup(s.visibleWhen), visibleToGroups),
+        editableWhen: toRuleGroup(s.editableWhen),
+        fields: Array.isArray(s.fields) ? s.fields.map(normalizeField) : [],
+      };
+    }),
   };
 }
 
@@ -882,6 +1363,12 @@ export const FINANCE_FIELD_ROLES = [
   { value: "reference", label: "Transaction reference" },
   { value: "transaction_date", label: "Transaction date" },
   { value: "description", label: "Description" },
+  { value: "account_code", label: "Account code" },
+  { value: "supplier_code", label: "Supplier code (PO)" },
+  { value: "item_code", label: "Item code (PO)" },
+  { value: "purchase_transaction_type", label: "Purchase transaction type (PO)" },
+  { value: "po_number", label: "Purchase order number" },
+  { value: "product_group", label: "Product group (PO)" },
 ];
 // Budget roles (live-check side) — independent of the journal role.
 export const FINANCE_BUDGET_ROLES = [
@@ -895,6 +1382,14 @@ export const FINANCE_COLUMN_ROLES = [
   { value: "account_code", label: "Account code" },
   { value: "description", label: "Description" },
   { value: "analysis", label: "Analysis code" },
+  { value: "item_code", label: "Item code" },
+  { value: "supplier_code", label: "Supplier code (PO)" },
+  { value: "product_group", label: "Product group" },
+  { value: "purchase_transaction_type", label: "Purchase transaction type" },
+  { value: "uom", label: "Unit of measure" },
+  { value: "quantity", label: "Quantity" },
+  { value: "unit_price", label: "Unit price" },
+  { value: "currency", label: "Currency" },
 ];
 
 /* A field's budget role, tolerating the legacy combined `role` values
@@ -942,7 +1437,7 @@ function sampleScalar(f: { type: FieldType; label: string; options?: string[]; d
 
 function buildSampleValues(template: Template): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  const skip = new Set(["divider", "heading", "info", "spacer", "file", "image", "multi_file", "signature"]);
+  const skip = new Set(["divider", "heading", "info", "spacer", "file", "image", "multi_file", "signature", "button"]);
   for (const s of template.sections) {
     for (const f of s.fields ?? []) {
       if (!f.key) continue;
@@ -963,10 +1458,32 @@ function buildSampleValues(template: Template): Record<string, unknown> {
 function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const ss = template.sunsystems ?? {};
   const ui: SunSystemsUi = ss.ui ?? {};
-  if (!ui.journalEnabled && !ui.budgetEnabled) return ss;
-
+  const separateProfiles = ui.ledgerJournalEnabled !== undefined || ui.purchaseOrderEnabled !== undefined;
+  const ledgerJournalEnabled = separateProfiles
+    ? Boolean(ui.ledgerJournalEnabled)
+    : Boolean(ui.journalEnabled && (ui.postingKind ?? "journal") === "journal");
+  const purchaseOrderEnabled = separateProfiles
+    ? Boolean(ui.purchaseOrderEnabled)
+    : Boolean(ui.journalEnabled && ui.postingKind === "purchase_order");
   const fields = template.sections.flatMap((s) => s.fields ?? []);
+  const hasImprestRequestConfig = fields.some((field) =>
+    field.type === "table"
+      && field.workflowRole === "rfq_required_lines"
+      && (field.sunsystems?.imprestRequest?.enabled
+        || field.columns?.some((column) => column.sunsystems?.role === "line_amount" && column.sunsystems?.imprestRequest?.enabled)),
+  );
+  if (!ledgerJournalEnabled && !purchaseOrderEnabled && !hasImprestRequestConfig && !ui.budgetEnabled) return ss;
+
   const byRole = (role: string) => fields.find((f) => f.sunsystems?.role === role);
+  const accountSpec = (source: AccountCodeSource | undefined, manual: string | undefined, columns?: TableColumn[]) => {
+    if (source === "account_code" || source === "supplier_code") {
+      const column = columns?.find((candidate) => candidate.sunsystems?.role === source);
+      if (column) return { row_field: column.key };
+      const fieldSpec = valueSpec(byRole(source));
+      if (fieldSpec) return fieldSpec;
+    }
+    return { const: manual ?? "" };
+  };
 
   const currencyField = byRole("currency");
   const currencySpec = valueSpec(currencyField) ?? (ui.currencyConst ? { const: ui.currencyConst } : undefined);
@@ -984,18 +1501,18 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       // Primary line
       lines.push({
         _fieldKey: f.key,
-        account: { const: b.account ?? "" },
+        account: accountSpec(b.accountSource, b.account),
         dc: b.dc ?? "D",
         amount: { field: f.key },
         ...(descSpec ? { description: descSpec } : {}),
       });
       // Counter (offsetting) line — automatic double-entry when counterAccount is set.
       // e.g. Dr 71001 advance_amount → also Cr 10101 same amount (imprest advance).
-      if (b.counterAccount) {
+      if (b.counterAccount || (b.counterAccountSource && b.counterAccountSource !== "manual")) {
         const counterDc = b.counterDc ?? (b.dc === "D" ? "C" : "D");
         lines.push({
           _fieldKey: f.key,
-          account: { const: b.counterAccount },
+          account: accountSpec(b.counterAccountSource, b.counterAccount),
           dc: counterDc,
           amount: { field: f.key },
           ...(descSpec ? { description: descSpec } : {}),
@@ -1007,6 +1524,12 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       const amountCol = cols.find((c) => c.sunsystems?.role === "line_amount");
       if (!amountCol) continue;
       const retirement = amountCol.sunsystems?.retirement;
+      // In a combined requisition, only the explicitly marked expense table
+      // owns the retirement spend mapping. Other table bindings remain part
+      // of the requisition/LPO profile.
+      if (template.travel_retirement?.enabled && f.workflowRole !== "retirement_expenses" && retirement?.enabled) {
+        continue;
+      }
       if (retirement?.enabled) {
         // Imprest/retirement reconciliation: post a fixed set of lines based
         // on comparing SUM(this column) against an issued/requested amount,
@@ -1015,15 +1538,31 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         // which interprets this exact shape at posting time.
         const toScenario = (s: RetirementScenario) => ({
           lines: s.lines.map((l) => ({
-            account: { const: l.account ?? "" },
+            account: accountSpec(l.accountSource, l.account),
             dc: l.dc ?? "D",
             amount_source: l.amountSource ?? "spent",
           })),
         });
+        let issuedAmountSpec: Record<string, unknown> = retirement.issuedAmountField
+          ? { field: retirement.issuedAmountField }
+          : { const: "0" };
+        if (retirement.issuedAmountMode === "imprest_request_total") {
+          const requestTable = fields.find((candidate) => candidate.type === "table" && candidate.workflowRole === "rfq_required_lines");
+          const requestAmountColumn = requestTable?.columns?.find((candidate) => candidate.sunsystems?.role === "line_amount");
+          const requestConfig = requestTable?.sunsystems?.imprestRequest ?? requestAmountColumn?.sunsystems?.imprestRequest;
+          if (requestTable && requestAmountColumn && requestConfig?.enabled) {
+            issuedAmountSpec = {
+              sum_rows: {
+                table: requestTable.key,
+                amount_column: requestAmountColumn.key,
+              },
+            };
+          }
+        }
         lines.push({
           _fieldKey: f.key,
           retirement: {
-            issued_amount: retirement.issuedAmountField ? { field: retirement.issuedAmountField } : { const: "0" },
+            issued_amount: issuedAmountSpec,
             spent_amount: { table: f.key, column: amountCol.key },
             scenarios: {
               exact: toScenario(retirement.exact),
@@ -1032,6 +1571,16 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
             },
           },
         });
+        continue;
+      }
+      const imprestRequest = f.sunsystems?.imprestRequest ?? amountCol.sunsystems?.imprestRequest;
+      if (
+        template.workflow_type === "requisition"
+        && f.workflowRole === "rfq_required_lines"
+        && imprestRequest?.enabled
+      ) {
+        // This amount is handled by the requisition-stage Imprest advance
+        // journal generated from the shared PurchaseOrder field bindings.
         continue;
       }
       const acctCol = cols.find((c) => c.sunsystems?.role === "account_code");
@@ -1048,12 +1597,23 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         // role is "Line amount") take priority; the table-level default
         // (set via the table field's Journal role card) is the fallback for
         // templates that haven't been re-configured since this was added.
-        account: acctCol ? { row_field: acctCol.key } : { const: amountCol.sunsystems?.account ?? b.account ?? "" },
+        account: accountSpec(amountCol.sunsystems?.accountSource ?? b.accountSource ?? (acctCol ? "account_code" : "manual"), amountCol.sunsystems?.account ?? b.account, cols),
         dc: amountCol.sunsystems?.dc ?? b.dc ?? "D",
         amount: { row_field: amountCol.key },
         description: descCol ? { row_field: descCol.key } : descSpec,
         ...(Object.keys(analysis).length ? { analysis } : {}),
       });
+      if (amountCol.sunsystems?.counterAccount || b.counterAccount || (amountCol.sunsystems?.counterAccountSource && amountCol.sunsystems.counterAccountSource !== "manual") || (b.counterAccountSource && b.counterAccountSource !== "manual")) {
+        lines.push({
+          _fieldKey: f.key,
+          repeat_over: f.key,
+          account: accountSpec(amountCol.sunsystems?.counterAccountSource ?? b.counterAccountSource, amountCol.sunsystems?.counterAccount ?? b.counterAccount, cols),
+          dc: amountCol.sunsystems?.counterDc ?? b.counterDc ?? (amountCol.sunsystems?.dc === "C" || b.dc === "C" ? "D" : "C"),
+          amount: { row_field: amountCol.key },
+          description: descCol ? { row_field: descCol.key } : descSpec,
+          ...(Object.keys(analysis).length ? { analysis } : {}),
+        });
+      }
     }
   }
 
@@ -1109,12 +1669,185 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   // for the XML preview which expects a single-stage shape.
   void isMultiStage;
 
-  const purchaseAmountField = byRole("journal_amount");
-  const journal = ui.journalEnabled
-    ? postingKind === "purchase_order"
-      ? {
+  const poNumberSpec = valueSpec(byRole("po_number"));
+  const supplierSpec = valueSpec(byRole("supplier_code"));
+  const itemFieldSpec = valueSpec(byRole("item_code"));
+  const quantityFieldSpec = valueSpec(byRole("quantity"));
+  const purchaseTransactionTypeFieldSpec = valueSpec(byRole("purchase_transaction_type"));
+  const productGroupSpec = valueSpec(byRole("product_group"));
+
+  const poTables = fields.filter((f) => f.type === "table" && f.workflowRole !== "retirement_expenses" && f.workflowRole !== "rfq_required_lines").map((f) => ({
+    field: f,
+    columns: f.columns ?? [],
+    amount: (f.columns ?? []).find((c) => c.sunsystems?.role === "line_amount"),
+    quantity: (f.columns ?? []).find((c) => c.sunsystems?.role === "quantity"),
+    unitPrice: (f.columns ?? []).find((c) => c.sunsystems?.role === "unit_price"),
+  }));
+  const firstMappedTableColumn = (predicate: (column: TableColumn) => boolean) => {
+    for (const table of poTables) {
+      if (!table.amount && !(table.quantity && table.unitPrice)) continue;
+      const column = table.columns.find(predicate);
+      if (column) return { tableKey: table.field.key, column };
+    }
+    return undefined;
+  };
+  const supplierTableSources = poTables.flatMap((table) => {
+    if (!table.amount && !(table.quantity && table.unitPrice)) return [];
+    const column = table.columns.find((c) =>
+      c.sunsystems?.role === "supplier_code" || c.type === "sunsystems_account",
+    );
+    return column ? [{ tableKey: table.field.key, column }] : [];
+  });
+  const supplierTableSpec = supplierTableSources.length
+    ? { sources: supplierTableSources.map(({ tableKey, column }) => ({ table: tableKey, row_field: column.key })) }
+    : undefined;
+  const descriptionTableSource = firstMappedTableColumn((c) => c.sunsystems?.role === "description");
+
+  // Analysis Dimensions 1-10 for the purchase order: the form's ten-slot
+  // analysis panel maps slot N -> AnalysisN, each with its configured
+  // AnalysisDimensionId; dedicated single-dimension fields override their slot.
+  const poAnalysis: Record<string, unknown> = {};
+  const panelField = fields.find(
+    (f) => f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode !== "single",
+  );
+  if (panelField) {
+    const slots = Array.isArray(panelField.external?.slots) && panelField.external!.slots!.length === 10
+      ? panelField.external!.slots!
+      : ANALYSIS_PANEL_SLOTS;
+    slots.forEach((dim, idx) => {
+      poAnalysis[String(idx + 1)] = {
+        category: { const: dim },
+        code: { field: panelField.key, key: String(idx + 1) },
+      };
+    });
+  }
+  for (const f of fields) {
+    // When the ten-slot Analysis Codes panel exists, it is the single source
+    // of truth for PO analysis values. A separate single-dimension control
+    // (for example Cost Centre) must not overwrite the panel's same slot.
+    if (!panelField && f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode === "single" && f.external?.dimension) {
+      const slot = ANALYSIS_PANEL_SLOTS.indexOf(f.external.dimension) + 1;
+      if (slot > 0) poAnalysis[String(slot)] = { category: { const: f.external.dimension }, code: { field: f.key } };
+    }
+  }
+  // Analysis 10 is also available as an explicit PO configuration value. When
+  // set, honor it over the Analysis Codes panel's slot 10 so the builder's
+  // posting config controls retries and new requisitions consistently.
+  if (ui.analysis10Code?.trim()) {
+    const current = poAnalysis["10"] as Record<string, unknown> | undefined;
+    poAnalysis["10"] = {
+      ...(current ?? {}),
+      ...(ui.analysis10Category?.trim() ? { category: { const: ui.analysis10Category.trim() } } : {}),
+      code: { const: ui.analysis10Code.trim() },
+    };
+  }
+
+  // PurchaseOrder lines: one per requisition table that carries a value source
+  // (an explicit amount column, or quantity + unit price). Repeats per row.
+  const poLines: Record<string, unknown>[] = [];
+  const imprestRequestLines: Record<string, unknown>[] = [];
+  for (const f of fields) {
+    if (f.type !== "table") continue;
+    // Retirement expense rows reconcile the advance; they are not PO lines.
+    if (f.workflowRole === "retirement_expenses") continue;
+    const cols = f.columns ?? [];
+    const amtCol = cols.find((c) => c.sunsystems?.role === "line_amount");
+    const itemCol = cols.find((c) => c.sunsystems?.role === "item_code")
+      ?? cols.find((c) => c.type === "external" && c.external?.source === "items")
+      ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "item");
+    const productGroupCol = cols.find((c) => c.sunsystems?.role === "product_group");
+    const transactionTypeCol = f.workflowRole === "rfq_required_lines"
+      ? undefined
+      : cols.find((c) => c.sunsystems?.role === "purchase_transaction_type");
+    const descriptionCol = cols.find((c) => c.sunsystems?.role === "description");
+    const qtyCol = cols.find((c) => c.sunsystems?.role === "quantity");
+    const upCol = cols.find((c) => c.sunsystems?.role === "unit_price");
+    const acctCol = cols.find((c) => c.sunsystems?.role === "account_code")
+      ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "account code");
+    const imprestAccountCol = acctCol ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "account code");
+    const supplierCol = cols.find((c) => c.sunsystems?.role === "supplier_code" || c.type === "sunsystems_account");
+    const curCol = cols.find((c) => c.sunsystems?.role === "currency");
+    const uomCol = cols.find((c) => c.sunsystems?.role === "uom");
+    const analysisCols = cols.filter((c) => c.sunsystems?.role === "analysis");
+    const imprestRequest = f.sunsystems?.imprestRequest ?? amtCol?.sunsystems?.imprestRequest;
+    const imprestAccountSource = amtCol?.sunsystems?.accountSource ?? imprestRequest?.accountSource;
+    const imprestManualAccount = amtCol?.sunsystems?.account ?? imprestRequest?.account;
+    const imprestCounterAccountSource = amtCol?.sunsystems?.counterAccountSource ?? imprestRequest?.counterAccountSource;
+    const imprestManualCounterAccount = amtCol?.sunsystems?.counterAccount ?? imprestRequest?.counterAccount;
+    if (!amtCol && !(qtyCol && upCol)) continue;
+    const lineAnalysis: Record<string, unknown> = {};
+    for (const c of analysisCols) lineAnalysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
+    const lineSpec: Record<string, unknown> = {
+      repeat_over: f.key,
+      table_label: f.label || f.key,
+      account_code: acctCol ? { row_field: acctCol.key } : { const: f.sunsystems?.account ?? ui.accountCode ?? "" },
+      ...(itemCol
+        ? { item_code: { row_field: itemCol.key } }
+        : itemFieldSpec
+          ? { item_code: itemFieldSpec }
+          : (ui.itemCode ? { item_code: { const: ui.itemCode } } : {})),
+      ...(f.workflowRole !== "rfq_required_lines" && productGroupCol
+        ? { product_group: { row_field: productGroupCol.key } }
+        : (f.workflowRole !== "rfq_required_lines" && productGroupSpec ? { product_group: productGroupSpec } : {})),
+      ...(transactionTypeCol ? { purchase_transaction_type: { row_field: transactionTypeCol.key } } : {}),
+      ...(imprestRequest?.enabled && f.workflowRole === "rfq_required_lines"
+        ? {
+            ...(imprestAccountSource === "account_code" && imprestAccountCol
+              ? { imprest_request_account: { row_field: imprestAccountCol.key } }
+              : imprestAccountSource === "supplier_code" && supplierCol
+                ? { imprest_request_account: { row_field: supplierCol.key } }
+                : imprestAccountSource === "manual" && imprestManualAccount
+                  ? { imprest_request_account: { const: imprestManualAccount } }
+                  : {}),
+            ...(imprestCounterAccountSource === "account_code" && imprestAccountCol
+              ? { imprest_request_counter_account: { row_field: imprestAccountCol.key } }
+              : imprestCounterAccountSource === "supplier_code" && supplierCol
+                ? { imprest_request_counter_account: { row_field: supplierCol.key } }
+                : imprestCounterAccountSource === "manual" && imprestManualCounterAccount
+                  ? { imprest_request_counter_account: { const: imprestManualCounterAccount } }
+                  : {}),
+            imprest_request_parameters: {
+              JournalType: imprestRequest.journalType || "FGJ",
+              PostingType: imprestRequest.postingType || "2",
+              AllowBalTran: "1",
+              AllowPostToSuspended: "N",
+              LoadOnly: "N",
+              PostProvisional: "N",
+              PostToHold: "N",
+              ReportingAccount: "999",
+              ReportErrorsOnly: "Y",
+              SuppressSubstitutedMessages: "Y",
+              SuspenseAccount: "999",
+              TransactionAmountAccount: "999",
+              ...(imprestRequest.parameters ?? {}),
+            },
+          }
+        : {}),
+      ...(descriptionCol ? { description: { row_field: descriptionCol.key } } : {}),
+      ...(curCol ? { currency: { row_field: curCol.key } } : (currencySpec ? { currency: currencySpec } : {})),
+      ...(uomCol ? { uom: { row_field: uomCol.key } } : {}),
+      quantity: qtyCol
+        ? { row_field: qtyCol.key, default: ui.quantity || "1" }
+        : { const: ui.quantity || "1" },
+      ...(upCol ? { unit_price: { row_field: upCol.key } } : {}),
+      ...(amtCol ? { amount: { row_field: amtCol.key } } : {}),
+      ...(Object.keys(lineAnalysis).length ? { analysis: lineAnalysis } : {}),
+    };
+    if (f.workflowRole === "rfq_required_lines") {
+      // General / Imprest rows are exclusively the source for the advance
+      // journal. They are never PurchaseOrder lines, even when they contain
+      // item, supplier, or pricing columns.
+      if (imprestRequest?.enabled) imprestRequestLines.push(lineSpec);
+    } else {
+      poLines.push(lineSpec);
+    }
+  }
+
+  const purchaseOrderMapping = {
         enabled: true,
-        post_on: "approved",
+        // The procurement hook fires the synthetic "fully_approved" trigger when
+        // the LPO phase completes (intermediate approvals never post).
+        post_on: "fully_approved",
         component: "PurchaseOrder",
         method: "CreateOrAmend",
         context: {
@@ -1122,33 +1855,73 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           ...(ui.budgetCode ? { budget_code: { const: ui.budgetCode } } : {}),
         },
         ...(currencySpec ? { currency: currencySpec } : {}),
-        ...(referenceSpec ? { reference: referenceSpec } : {}),
-        ...(dateSpec ? { date: dateSpec } : {}),
         purchase_order: {
-          supplier_code: { const: ui.supplierCode || "81105" },
-          transaction_type: { const: ui.purchaseTransactionType || "ASSETS" },
+          // PO reference: a "Purchase order number" field, a fixed constant, or
+          // (default) the LPO number reserved when the LPO document is created.
+          reference: poNumberSpec
+            ? { ...poNumberSpec, default: ui.poNumberConst || "" }
+            : (ui.poNumberConst ? { const: ui.poNumberConst } : { source: "lpo_number" }),
+          // The source requisition's reference becomes SecondReference.
+          ...(referenceSpec ? { second_reference: referenceSpec } : {}),
+          // A bound supplier field wins, but an empty one falls back to the
+          // configured constant so an unfilled RFQ cannot block posting.
+          supplier_code: supplierSpec
+            ? supplierSpec
+            : supplierTableSpec
+              ? supplierTableSpec
+              : { const: ui.supplierCode || "81105" },
+          ...(supplierSpec && supplierTableSpec ? {
+            supplier_code_fallback: supplierTableSpec,
+          } : {}),
+          ...((supplierSpec || supplierTableSpec) && ui.supplierCode
+            ? { supplier_code_default: { const: ui.supplierCode } }
+            : {}),
+          ...(descSpec
+            ? { comment: descSpec }
+            : descriptionTableSource
+              ? { comment: { table: descriptionTableSource.tableKey, row_field: descriptionTableSource.column.key } }
+              : (ui.poComment ? { comment: { const: ui.poComment } } : {})),
+          ...(purchaseTransactionTypeFieldSpec
+            ? { transaction_type: { ...purchaseTransactionTypeFieldSpec, default: ui.purchaseTransactionType || "" } }
+            : ui.purchaseTransactionType
+              ? { transaction_type: { const: ui.purchaseTransactionType } }
+              : {}),
           invoice_address_code: { const: ui.invoiceAddressCode || "0000000000" },
-          item_code: { const: ui.itemCode || "ITM29" },
-          account_code: { const: ui.accountCode || "" },
-          analysis10_category: { const: ui.analysis10Category ?? "11" },
-          analysis10_code: { const: ui.analysis10Code ?? "E" },
-          // quantity / unit_price: only emit when the operator has set them;
-          // the backend defaults quantity to "1"and unit_price to the total amount.
-          ...(ui.quantity ? { quantity: { const: ui.quantity } } : {}),
-          ...(ui.unitPrice ? { unit_price: { const: ui.unitPrice } } : {}),
-          // VLAB numbers: only emit when explicitly set; backend defaults to 1 and 2.
-          ...(ui.vlabBase ? { vlab_base_num: { const: ui.vlabBase } } : {}),
-          ...(ui.vlabTrans ? { vlab_trans_num: { const: ui.vlabTrans } } : {}),
-          ...(purchaseAmountField ? { amount: { field: purchaseAmountField.key } } : {}),
-          ...(currencySpec ? { currency: currencySpec } : {}),
-          ...(referenceSpec ? { reference: referenceSpec } : {}),
           ...(dateSpec ? { date: dateSpec } : {}),
-          ...(descSpec ? { description: descSpec } : {}),
+          ...(currencySpec ? { currency: currencySpec } : {}),
+          ...(imprestRequestLines.length ? { imprest_request_lines: imprestRequestLines } : {}),
+          // A populated table quantity column wins; empty/missing row values
+          // fall back to the form-level quantity mapping or configured default.
+          quantity: quantityFieldSpec
+            ? { ...quantityFieldSpec, default: ui.quantity || "1" }
+            : { const: ui.quantity || "1" },
+          vlab_base_num: { const: "1" },
+          vlab_trans_num: { const: "2" },
+          ...(Object.keys(poAnalysis).length ? { analysis: poAnalysis } : {}),
+          lines: poLines,
         },
-      }
-      : {
+      };
+
+  const legacyJournal = postingKind === "purchase_order"
+    ? purchaseOrderMapping
+    : { enabled: true, stages: journalStages };
+  const journal = separateProfiles
+    ? (ledgerJournalEnabled ? { enabled: true, stages: journalStages } : { enabled: false })
+    : (ui.journalEnabled ? legacyJournal : { enabled: false });
+  const purchase_order = separateProfiles
+    ? (purchaseOrderEnabled ? purchaseOrderMapping : { enabled: false })
+    : { enabled: false };
+  const imprest_request = hasImprestRequestConfig
+    ? {
         enabled: true,
-        stages: journalStages,
+        component: "Journal",
+        method: "Import",
+        context: purchaseOrderMapping.context,
+        purchase_order: {
+          ...purchaseOrderMapping.purchase_order,
+          lines: [],
+          imprest_request_lines: imprestRequestLines,
+        },
       }
     : { enabled: false };
 
@@ -1163,10 +1936,22 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     }
     : { enabled: false };
 
-  return { ...ss, ui, journal, budget };
+  return { ...ss, ui, journal, purchase_order, imprest_request, budget };
 }
 
-function outputTemplate(template: Template, keepId: boolean): Template {
+function outputTemplate(template: Template, keepId: boolean, resolved: Record<string, ResolvedTableRef> = {}): Template {
+  /* Linked tables: always persist a snapshot of the resolved columns so the
+   * runtime renderer can draw the table without fetching the source form.
+   * "live" refs refresh it on every save; "pinned" refs keep theirs until
+   * re-synced. takenAt only moves when the columns actually changed. */
+  const withSnapshot = (f: TemplateField): TableRef | null | undefined => {
+    const ref = f.tableRef;
+    const r = resolved[f.id];
+    if (!ref || ref.mode !== "embed" || r?.status !== "ok") return ref;
+    if (ref.sync === "pinned" && ref.snapshot) return ref;
+    if (ref.snapshot && JSON.stringify(ref.snapshot.columns) === JSON.stringify(r.columns)) return ref;
+    return { ...ref, snapshot: { columns: r.columns, takenAt: new Date().toISOString(), minRows: r.minRows } };
+  };
   const out = {
     ...template,
     type: template.type ?? "built",
@@ -1175,6 +1960,7 @@ function outputTemplate(template: Template, keepId: boolean): Template {
       ...s,
       fields: s.fields.map((f) => ({
         ...f,
+        tableRef: withSnapshot(f),
         type: f.type === "checkbox" ? "boolean" : f.type,
         width: f.colSpan,
         help_text: f.helpText,
@@ -1229,6 +2015,7 @@ const PALETTE_GROUPS: Array<{ key: FieldGroup; label: string }> = [
   { key: "choice", label: "Choice / Dropdown" },
   { key: "reference", label: "Reference" },
   { key: "calculated", label: "Calculated" },
+  { key: "action", label: "Actions" },
   { key: "advanced", label: "Advanced" },
   { key: "layout", label: "Layout" },
 ];
@@ -1236,7 +2023,7 @@ const PALETTE_GROUPS: Array<{ key: FieldGroup; label: string }> = [
 function Palette() {
   const [query, setQuery] = useState("");
   const [openGroups, setOpenGroups] = useState<Record<FieldGroup, boolean>>({
-    input: true, choice: true, reference: false, calculated: false, advanced: false, layout: false,
+    input: true, choice: true, reference: false, calculated: false, action: false, advanced: false, layout: false,
   });
   // Types that exist only for backwards compatibility with saved templates:
   // `checkbox` duplicates `boolean`, and `currency` is now a Number with a
@@ -1313,6 +2100,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
   onUpdateColumn?: (colId: string, patch: Partial<TableColumn>) => void;
 }) {
   const inputPreview = "h-8  border border-zinc-200 bg-white px-3 text-xs text-zinc-400 flex items-center";
+  const env = useContext(BuilderEnv);
   switch (field.type) {
     case "heading":
       return <div className="text-sm font-bold text-zinc-800">{field.label || "Heading"}</div>;
@@ -1341,8 +2129,67 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
     case "select":
     case "multi_select":
       return <div className={cn(inputPreview, "justify-between")}><span>{field.options?.[0] ?? "Select…"}</span><ChevronDown className="h-3 w-3" /></div>;
-    case "reference":
+    case "reference": {
+      if (isTableRefField(field) && field.tableRef) {
+        const r = field.tableRef;
+        const res = env.template ? resolveTableRef(field, env.template, env.external, env.loadingIds) : null;
+        if (r.mode === "row_picker") {
+          return (
+            <div className={cn(inputPreview, "justify-between")}>
+              <span className="flex items-center gap-1.5 truncate"><Link2 className="h-3 w-3 shrink-0" /> Pick a row from {res?.sourceLabel ?? r.tableKey}</span>
+              <ChevronDown className="h-3 w-3 shrink-0" />
+            </div>
+          );
+        }
+        return (
+          <div className="overflow-hidden border border-[#AEB5BB] bg-white">
+            <div className="flex items-center justify-between gap-2 border-b border-[#AEB5BB] bg-[#EEF6FB] px-3 py-2">
+              <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold text-[#287EAD]">
+                <Link2 className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">Linked table — {res?.sourceLabel ?? r.tableKey}</span>
+              </span>
+              <span className="flex shrink-0 items-center gap-1 text-[10px] font-semibold text-[#5E6870]">
+                {r.sync === "pinned" ? <><Pin className="h-3 w-3" /> pinned</> : <><RefreshCw className="h-3 w-3" /> live</>}
+              </span>
+            </div>
+            {res && res.columns.length > 0 ? (
+              <div className="overflow-x-auto">
+                <div className="flex min-w-max border-b border-[#AEB5BB] bg-[#F0F2F4]">
+                  {res.columns.map((c) => (
+                    <div key={c.id} className="w-28 shrink-0 border-r border-[#D0D5DA] px-2 py-1.5 text-[10px] font-semibold text-[#3E4851]">{c.label}</div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 px-3 py-3 text-xs text-amber-700">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {tableRefStatusText(res?.status ?? "missing")}
+              </div>
+            )}
+            {res && res.columns.length > 0 && res.status !== "ok" && (
+              <div className="flex items-center gap-1.5 border-t border-amber-200 bg-amber-50 px-3 py-1.5 text-[10px] text-amber-700">
+                <AlertTriangle className="h-3 w-3 shrink-0" /> {tableRefStatusText(res.status)}
+              </div>
+            )}
+          </div>
+        );
+      }
       return <div className={cn(inputPreview, "justify-between")}><span className="flex items-center gap-1.5"><Link2 className="h-3 w-3" /> Choose {field.referenceSource ?? "record"}…</span></div>;
+    }
+    case "button": {
+      const v = field.button?.variant ?? "primary";
+      return (
+        <div className="space-y-1">
+          <div className={cn(
+            "inline-flex h-8 items-center gap-1.5 px-3 text-xs font-semibold",
+            v === "primary" ? "bg-[#287EAD] text-white" : v === "secondary" ? "bg-[#E5E8EB] text-[#1F2933]" : "border border-[#287EAD] bg-white text-[#287EAD]",
+          )}>
+            {field.button?.action === "calculate" ? <Calculator className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+            {field.label || "Button"}
+          </div>
+          <p className="text-[10px] text-zinc-500">{describeButton(field, env.template?.sections ?? [])}</p>
+        </div>
+      );
+    }
     case "user":
       return <div className={cn(inputPreview, "justify-between")}><span className="flex items-center gap-1.5"><UserIcon className="h-3 w-3" /> Select user…</span></div>;
     case "table": {
@@ -1376,7 +2223,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                     date: Calendar, datetime: Calendar, time: Clock, select: List,
                     boolean: CheckSquare, email: Mail, phone: Phone, reference: Link2,
                     user: UserIcon, file: Paperclip, image: ImageIcon, multi_select: List,
-                    url: UrlIcon, percentage: Percent,
+                    url: UrlIcon, percentage: Percent, external: Package, sunsystems_account: Building2,
                   } as Record<TableColumnType, React.ElementType>)[(c.type ?? "text") as TableColumnType] ?? Type;
                   return (
                     <div
@@ -1484,6 +2331,13 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
       );
     case "spacer":
       return <div className="h-8 border border-dashed border-zinc-200 bg-[repeating-linear-gradient(45deg,#F6F7F8,#F6F7F8_6px,#FFF_6px,#FFF_12px)]" />;
+    case "budget":
+      return (
+        <div className="flex items-center gap-2 rounded border border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2 text-xs text-[#5E6870]">
+          <Wallet className="h-3.5 w-3.5" />
+          <span>Budget Banner</span>
+        </div>
+      );
     case "multi_file":
       return (
         <div className="flex h-10 items-center justify-center border border-dashed border-zinc-200 bg-zinc-50 text-xs text-zinc-400">
@@ -1501,6 +2355,31 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
           <span className="truncate">{field.calc?.expression ? `= ${field.calc.expression}` : "No formula set"}</span>
         </div>
       );
+    case "sunsystems_account":
+      return (
+        <div className={cn(inputPreview, "justify-between border border-zinc-200 bg-white")}>
+          <span className="flex items-center gap-1.5 text-zinc-400">
+            <Building2 className="h-3 w-3" />
+            Select supplier from SunSystems…
+          </span>
+        </div>
+      );
+    case "external": {
+      const isAnalysis = field.external?.source === "analysis_codes";
+      const isPanel = isAnalysis && field.external?.mode !== "single";
+      return (
+        <div className={cn(inputPreview, "justify-between border border-zinc-200 bg-white")}>
+          <span className="flex items-center gap-1.5 text-zinc-400">
+            <Package className="h-3 w-3" />
+            {isPanel
+              ? "10 analysis code slots (Project, Cost Centre, …)"
+              : isAnalysis
+                ? `Select ${analysisDimensionName(field.external?.dimension)} code…`
+                : `Select ${externalSourceLabel(field.external?.source)} from SunSystems…`}
+          </span>
+        </div>
+      );
+    }
     default:
       return <div className={inputPreview}>{field.placeholder || ""}</div>;
   }
@@ -1554,7 +2433,7 @@ function FieldCard({
 
   return (
     <div className={cn("relative flex items-stretch min-w-0", isDragging && "opacity-40")}
-      style={{ gridColumn: `span ${field.type === "table" ? 12 : (field.colSpan ?? 1)} / span ${field.type === "table" ? 12 : (field.colSpan ?? 1)}` }}>
+      style={{ gridColumn: `span ${(field.type === "table" || isEmbeddedTableRef(field)) ? 12 : (field.colSpan ?? 1)} / span ${(field.type === "table" || isEmbeddedTableRef(field)) ? 12 : (field.colSpan ?? 1)}` }}>
       <div ref={dropBefore.setNodeRef}
         className={cn("w-1 shrink-0 transition-all", dropBefore.isOver ? "bg-[#287EAD]" : "bg-transparent")} />
       <div onClick={(e) => { e.stopPropagation(); onSelect(); }}
@@ -1566,7 +2445,7 @@ function FieldCard({
           <div ref={setDragRef} {...listeners} {...attributes}
             className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 cursor-grab active:cursor-grabbing flex-1 min-w-0 overflow-hidden">
             <GripVertical className="h-3.5 w-3.5 text-slate-300 flex-shrink-0" />
-            {(() => { const TypeIcon = ICONS[field.type]; return <TypeIcon className="h-3.5 w-3.5 text-[#287EAD] flex-shrink-0" />; })()}
+            {(() => { const TypeIcon = ICONS[field.type] ?? Type; return <TypeIcon className="h-3.5 w-3.5 text-[#287EAD] flex-shrink-0" />; })()}
             <span className="truncate min-w-0 flex-1" title={`${field.label || "Unlabelled"} — ${FIELD_META[field.type]?.label ?? field.type}`}>
               {field.label || <em className="font-normal text-slate-400">Unlabelled</em>}
             </span>
@@ -1579,10 +2458,16 @@ function FieldCard({
             ) : ruleGroupHasConditions(field.visibleWhen) && (
               <span className="bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Show when ${summarizeRuleGroup(field.visibleWhen)}`}>cond</span>
             )}
+            {ruleUserGroupNames(field.visibleWhen).length > 0 && (
+              <span className="bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold text-[#287EAD] border border-[#287EAD]/30 flex-shrink-0" title={`Visible to: ${ruleUserGroupNames(field.visibleWhen).join(", ")}`}>group</span>
+            )}
             {field.readonly ? (
               <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Always read-only">read-only</span>
             ) : ruleGroupHasConditions(field.editableWhen) && (
               <span className="bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Editable when ${summarizeRuleGroup(field.editableWhen)}`}>edit-cond</span>
+            )}
+            {ruleUserGroupNames(field.editableWhen).length > 0 && (
+              <span className="bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Editable by: ${ruleUserGroupNames(field.editableWhen).join(", ")}`}>edit-group</span>
             )}
           </div>
           <div className="flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100 flex-shrink-0">
@@ -1618,7 +2503,7 @@ function FieldCard({
           <span className="truncate">{field.key}</span>
           <span>{field.colSpan}/12</span>
         </div>
-        {field.type !== "table" && (
+        {field.type !== "table" && !isEmbeddedTableRef(field) && (
           <div onMouseDown={startResize}
             className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize opacity-0 transition group-hover:bg-[#287EAD]/40 group-hover:opacity-100"
             title="Drag to resize" />
@@ -1701,19 +2586,24 @@ function SectionBlock(props: {
               onChange={(e) => props.onUpdateSection(section.id, { title: e.target.value })}
               onClick={(e) => e.stopPropagation()}
               className="min-w-0 flex-1 bg-transparent text-sm font-bold text-[#1F2933] outline-none border-b border-transparent focus:border-[#287EAD] pb-0.5 transition-colors" />
+            {section.onDemand && (
+              <span className="bg-teal-50 px-1.5 py-0.5 text-[9px] font-semibold text-teal-700 border border-teal-200 flex-shrink-0" title="Not part of the form until a Button adds it">on demand</span>
+            )}
             {section.hidden ? (
               <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always hidden from people filling the form">hidden</span>
-            ) : section.visibleToGroups && section.visibleToGroups.length > 0 ? (
-              <span className="bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold text-[#287EAD] border border-[#287EAD]/30 flex-shrink-0" title={`Visible only to: ${section.visibleToGroups.map((g) => g.name).join(", ")}`}>
-                {section.visibleToGroups.length === 1 ? section.visibleToGroups[0].name : `${section.visibleToGroups.length} groups`}
-              </span>
             ) : ruleGroupHasConditions(section.visibleWhen) && (
               <span className="bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Section shows when ${summarizeRuleGroup(section.visibleWhen)}`}>cond</span>
+            )}
+            {ruleUserGroupNames(section.visibleWhen).length > 0 && (
+              <span className="bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold text-[#287EAD] border border-[#287EAD]/30 flex-shrink-0" title={`Visible to: ${ruleUserGroupNames(section.visibleWhen).join(", ")}`}>group</span>
             )}
             {section.readonly ? (
               <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always read-only">read-only</span>
             ) : ruleGroupHasConditions(section.editableWhen) && (
               <span className="bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Section editable when ${summarizeRuleGroup(section.editableWhen)}`}>edit-cond</span>
+            )}
+            {ruleUserGroupNames(section.editableWhen).length > 0 && (
+              <span className="bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Editable by: ${ruleUserGroupNames(section.editableWhen).join(", ")}`}>edit-group</span>
             )}
           </div>
           <input value={section.description ?? ""}
@@ -1835,6 +2725,7 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
   { value: "datetime", label: "Date & Time" },
   { value: "time", label: "Time" },
   { value: "select", label: "Dropdown" },
+  { value: "radio", label: "Radio choices" },
   { value: "boolean", label: "Checkbox" },
   { value: "email", label: "Email" },
   { value: "phone", label: "Phone" },
@@ -1843,8 +2734,11 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
   { value: "file", label: "File / Attachment" },
   { value: "image", label: "Image" },
   { value: "percentage", label: "Percentage" },
+  { value: "rating", label: "Rating" },
   { value: "url", label: "URL / Link" },
   { value: "multi_select", label: "Multi-select" },
+  { value: "external", label: "External" },
+  { value: "sunsystems_account", label: "SunSystems supplier" },
 ];
 
 /* ── Formula reference ────────────────────────────────────────────────────
@@ -2127,6 +3021,11 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
 }) {
   const retirement = column.sunsystems?.retirement;
   const amountFieldOptions = formFields.filter((f) => f.key && (f.type === "number" || f.type === "currency" || CALCULATED_TYPES.has(f.type)));
+  const imprestTable = formFields.find((f) => f.type === "table" && f.workflowRole === "rfq_required_lines");
+  const imprestAmountColumn = imprestTable?.columns?.find((c) => c.sunsystems?.role === "line_amount");
+  const imprestConfig = imprestTable?.sunsystems?.imprestRequest ?? imprestAmountColumn?.sunsystems?.imprestRequest;
+  const hasImprestTotalSource = !!(imprestTable && imprestAmountColumn && imprestConfig?.enabled);
+  const IMPREST_TOTAL_SOURCE = "__imprest_request_total__";
 
   const iCls =
     "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
@@ -2148,15 +3047,29 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
           <div className="space-y-3">
             <div>
               <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Issued / requested amount field</span>
-              <select className={cn(iCls, "mt-1", !retirement.issuedAmountField && amountFieldOptions.length > 0 && "border-amber-400")}
-                value={retirement.issuedAmountField ?? ""}
-                onChange={(e) => onChange({ ...retirement, issuedAmountField: e.target.value || undefined })}>
-                <option value="">— choose a field —</option>
-                {amountFieldOptions.map((f) => <option key={f.id} value={f.key}>{f.label} ({f.key})</option>)}
-              </select>
-              {amountFieldOptions.length === 0 ? (
+              <CustomListbox
+                value={retirement.issuedAmountMode === "imprest_request_total" ? IMPREST_TOTAL_SOURCE : retirement.issuedAmountField ?? ""}
+                onChange={(val) => onChange(val === IMPREST_TOTAL_SOURCE
+                  ? { ...retirement, issuedAmountMode: "imprest_request_total", issuedAmountField: undefined }
+                  : { ...retirement, issuedAmountMode: "field", issuedAmountField: val || undefined })}
+                options={[
+                  { value: "", label: "— choose a field —" },
+                  ...amountFieldOptions.map((f) => ({ value: f.key, label: `${f.label} (${f.key})` })),
+                  ...(hasImprestTotalSource ? [{ value: IMPREST_TOTAL_SOURCE, label: `Imprest request total (${imprestTable?.label || imprestTable?.key})` }] : []),
+                ]}
+                className={cn(iCls, "mt-1", !retirement.issuedAmountField && retirement.issuedAmountMode !== "imprest_request_total" && amountFieldOptions.length > 0 && "border-amber-400")}
+                buttonClassName="w-full"
+                ariaLabel="Issued amount field"
+              />
+              {retirement.issuedAmountMode === "imprest_request_total" && (
+                <p className="mt-1 text-[10px] text-[#5E6870]">Issued amount is calculated by summing the Line amount column for all populated rows in the General / Imprest table.</p>
+              )}
+              {!hasImprestTotalSource && imprestTable && (
+                <p className="mt-1 text-[10px] text-amber-600">To use the request total, enable Imprest request posting on the General / Imprest table and map its Line amount column.</p>
+              )}
+              {amountFieldOptions.length === 0 && !hasImprestTotalSource ? (
                 <p className="mt-1 text-[10px] text-amber-600">Add a Number or Currency field elsewhere on the form to hold the issued/requested amount.</p>
-              ) : !retirement.issuedAmountField && (
+              ) : !retirement.issuedAmountField && retirement.issuedAmountMode !== "imprest_request_total" && (
                 <p className="mt-1 flex items-center gap-1 text-[10px] text-amber-600">
                   <AlertCircle className="h-3 w-3 flex-shrink-0" />
                   Without this, issued is treated as 0 and every submission posts as a full overspend.
@@ -2176,6 +3089,102 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
         )}
       </div>
     </Row>
+  );
+}
+
+function ImprestRequestConfigEditor({ field, siblingColumns, onChange }: {
+  field: TemplateField;
+  siblingColumns: TableColumn[];
+  onChange: (config: ImprestRequestConfig | undefined) => void;
+}) {
+  const amountColumn = siblingColumns.find((candidate) => candidate.sunsystems?.role === "line_amount");
+  const config = field.sunsystems?.imprestRequest ?? amountColumn?.sunsystems?.imprestRequest;
+  const iCls = "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
+  const parameterDefaults: Record<string, string> = {
+    AllowBalTran: "1",
+    AllowPostToSuspended: "N",
+    LoadOnly: "N",
+    PostProvisional: "N",
+    PostToHold: "N",
+    ReportingAccount: "999",
+    ReportErrorsOnly: "Y",
+    SuppressSubstitutedMessages: "Y",
+    SuspenseAccount: "999",
+    TransactionAmountAccount: "999",
+  };
+  const enableConfig = (enabled: boolean) => onChange(enabled ? {
+    ...(config ?? {}),
+    enabled: true,
+    journalType: config?.journalType || "FGJ",
+    postingType: config?.postingType || "2",
+    parameters: { ...parameterDefaults, ...(config?.parameters ?? {}) },
+  } : undefined);
+  return <>
+    <div className="space-y-2">
+      <div>
+        <p className="text-sm font-medium text-[#1F2933]">Imprest request posting</p>
+        <p className="mt-0.5 text-[10px] text-[#8C969E]">At requisition approval, post the advance journal for all populated rows in this table. Common line mappings come from the Purchase Order profile.</p>
+      </div>
+      <div className="space-y-3 border border-[#C8CDD2] bg-white p-3">
+        <ToggleYesNo value={!!config?.enabled} onChange={enableConfig} />
+        {config?.enabled && (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="space-y-1 text-xs font-semibold text-[#475569]">Ledger Journal Type (JournalType)
+                <input className={cn(iCls, "font-mono")} value={config.journalType ?? "FGJ"}
+                  onChange={(e) => onChange({ ...config, enabled: true, journalType: e.target.value })} />
+                <span className="block text-[10px] font-normal text-[#8C969E]">Must be a journal type configured in SunSystems (for example, IMP).</span>
+              </label>
+              <label className="space-y-1 text-xs font-semibold text-[#475569]">Posting behavior (PostingType)
+                <input className={cn(iCls, "font-mono")} value={config.postingType ?? "2"}
+                  onChange={(e) => onChange({ ...config, enabled: true, postingType: e.target.value })} />
+                <span className="block text-[10px] font-normal text-[#8C969E]">2 = post if no errors.</span>
+              </label>
+            </div>
+            <div className="border-t border-[#E1E5E8] pt-3">
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-[#5E6870]">Other Ledger Posting Parameters</p>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+              {Object.entries(parameterDefaults).map(([name, defaultValue]) => (
+                <label key={name} className="space-y-1 text-xs font-semibold text-[#475569]">{name}
+                  <input className={cn(iCls, "font-mono")} value={config.parameters?.[name] ?? defaultValue}
+                    onChange={(e) => onChange({
+                      ...config,
+                      enabled: true,
+                      parameters: { ...parameterDefaults, ...(config.parameters ?? {}), [name]: e.target.value },
+                    })} />
+                  {name === "PostProvisional" && (config.parameters?.[name] ?? defaultValue).toUpperCase() === "Y" && (
+                    <span className="block font-normal text-amber-700">Y requires provisional postings to be enabled for the ledger. Use N if the ledger prohibits rough book postings.</span>
+                  )}
+                </label>
+              ))}
+              </div>
+            </div>
+            {!amountColumn && <p className="text-[10px] text-amber-600">Map a table column to Line amount so the advance total can be calculated.</p>}
+          </>
+        )}
+      </div>
+    </div>
+  </>;
+}
+
+function AccountCodeSourcePicker({ value, onChange }: {
+  value: AccountCodeSource;
+  onChange: (value: AccountCodeSource) => void;
+}) {
+  const cls = "h-8 w-full border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933] outline-none focus:border-[#287EAD]";
+  return (
+    <CustomListbox
+      value={value}
+      onChange={(next) => onChange(next as AccountCodeSource)}
+      options={[
+        { value: "manual", label: "Manual account" },
+        { value: "account_code", label: "Use Account code field/column" },
+        { value: "supplier_code", label: "Use selected Supplier code" },
+      ]}
+      className={cls}
+      buttonClassName="w-full"
+      ariaLabel="Account code source"
+    />
   );
 }
 
@@ -2210,18 +3219,33 @@ function RetirementScenarioEditor({ label, hint, scenario, onChange }: {
       </div>
       <div className="space-y-1.5">
         {scenario.lines.map((line, idx) => (
-          <div key={idx} className="grid grid-cols-[1fr_90px_1fr_auto] gap-1.5 items-center">
-            <input className={cn(iCls, "font-mono")} value={line.account}
-              onChange={(e) => updateLine(idx, { account: e.target.value })}
-              placeholder="Account code" />
-            <select className={iCls} value={line.dc} onChange={(e) => updateLine(idx, { dc: e.target.value as "D" | "C" })}>
-              <option value="D">Debit</option>
-              <option value="C">Credit</option>
-            </select>
-            <select className={iCls} value={line.amountSource}
-              onChange={(e) => updateLine(idx, { amountSource: e.target.value as RetirementAmountSource })}>
-              {AMOUNT_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
+          <div key={idx} className="grid min-w-0 grid-cols-[minmax(0,1fr)_90px_minmax(0,1fr)_auto] gap-1.5 items-center">
+            <div className="space-y-1">
+              <AccountCodeSourcePicker value={line.accountSource ?? "manual"}
+                onChange={(accountSource) => updateLine(idx, { accountSource })} />
+              <input className={cn(iCls, "font-mono")} value={line.account}
+                onChange={(e) => updateLine(idx, { account: e.target.value })}
+                placeholder="Manual account / fallback" />
+            </div>
+            <CustomListbox
+              value={line.dc}
+              onChange={(val) => updateLine(idx, { dc: val as "D" | "C" })}
+              options={[
+                { value: "D", label: "Debit" },
+                { value: "C", label: "Credit" },
+              ]}
+              className={iCls}
+              buttonClassName="w-full"
+              ariaLabel="Debit/Credit"
+            />
+            <CustomListbox
+              value={line.amountSource}
+              onChange={(val) => updateLine(idx, { amountSource: val as RetirementAmountSource })}
+              options={AMOUNT_SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+              className={iCls}
+              buttonClassName="w-full"
+              ariaLabel="Amount source"
+            />
             <button type="button" onClick={() => removeLine(idx)} title="Remove line"
               className="p-1 text-[#5E6870] hover:bg-red-50 hover:text-red-600">
               <Trash2 className="h-3.5 w-3.5" />
@@ -2237,18 +3261,20 @@ function RetirementScenarioEditor({ label, hint, scenario, onChange }: {
 }
 
 function ColumnConfigModal({
-  column, siblingColumns = [], formFields = [], processSteps = [], onClose, onSave, onDelete,
+  column, siblingColumns = [], formFields = [], tableField, processSteps = [], onClose, onSave, onDelete,
 }: {
   column: TableColumn;
   siblingColumns?: TableColumn[];
   formFields?: TemplateField[];
-  processSteps?: { value: string; label: string }[];
+  tableField?: TemplateField;
+  processSteps?: ProcessStepOption[];
   onClose: () => void;
   onSave: (col: TableColumn) => void;
   onDelete: () => void;
 }) {
   const [tab, setTab] = useState<"field" | "advanced">("field");
   const [draft, setDraft] = useState<TableColumn>({ ...column });
+  const referenceGroups = useRbacGroups();
   // Whether the column's ID still follows its Label — see FieldEditor's
   // identical pattern (deriveKeyFromLabel / looksAutoGenerated above). Each
   // time the modal is opened for a column, this starts "on" only if that
@@ -2256,7 +3282,7 @@ function ColumnConfigModal({
   const [autoKey, setAutoKey] = useState(() => looksAutoGenerated(column.key));
 
   const set = (patch: Partial<TableColumn>) => setDraft((d) => ({ ...d, ...patch }));
-  const isDropdown = draft.type === "select";
+  const isDropdown = draft.type === "select" || draft.type === "radio";
   // Sibling columns whose value can hold a currency code (drives this cell's symbol).
   const currencySourceColumns = siblingColumns.filter(
     (c) => c.id !== draft.id && c.key && ["select", "text"].includes(c.type ?? "text"),
@@ -2264,15 +3290,20 @@ function ColumnConfigModal({
   const isNumeric = draft.type === "number" || draft.type === "currency";
   const isText = draft.type === "text" || draft.type === "textarea" || draft.type === "email" || draft.type === "phone";
   const isCalcCol = !!draft.calc;
+  const isImprestRequestTable = tableField?.workflowRole === "rfq_required_lines";
   const keyDuplicate = siblingColumns.some((c) => c.id !== draft.id && c.key === draft.key);
+  const needsWideModal = !!draft.sunsystems?.retirement?.enabled;
 
   const iCls =
     "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
     "placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-2xl overflow-hidden border border-[#C8CDD2] bg-white shadow-2xl">
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-2 sm:p-3">
+      <div className={cn(
+        "flex max-h-[96vh] w-full min-w-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white shadow-2xl",
+        needsWideModal ? "w-[min(98vw,1400px)] max-w-none" : "max-w-2xl",
+      )}>
         {/* Header */}
         <div className="flex items-stretch border-b border-[#C8CDD2]">
           <div className="flex flex-1 items-center gap-2 px-5 py-3">
@@ -2295,7 +3326,7 @@ function ColumnConfigModal({
         </div>
 
         {/* Body */}
-        <div className="max-h-[70vh] overflow-y-auto p-6">
+        <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-4 sm:p-6">
           {tab === "field" && (
             <div className="space-y-4">
               <Row label="Label" required>
@@ -2317,12 +3348,57 @@ function ColumnConfigModal({
               <Row label="Type">
                 {/* Currency is no longer a separate type — a Number column
                     becomes a currency purely through its number format. */}
-                <select value={draft.type === "currency" ? "number" : (draft.type ?? "text")}
-                  onChange={(e) => set({ type: e.target.value as TableColumnType })}
-                  className={iCls}>
-                  {COL_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                </select>
+                <CustomListbox
+                  value={draft.type === "currency" ? "number" : (draft.type ?? "text")}
+                  onChange={(val) => set({ type: val as TableColumnType })}
+                  options={COL_TYPES.map((t) => ({ value: t.value, label: t.label }))}
+                  className={iCls}
+                  buttonClassName="w-full"
+                  ariaLabel="Column type"
+                />
               </Row>
+              {draft.type === "external" && (
+                <>
+                  <Row label="Source">
+                    <CustomListbox
+                      value={draft.external?.source ?? EXTERNAL_SOURCES[0]?.value ?? "items"}
+                      onChange={(val) => set({ external: { ...(draft.external ?? {}), source: val, ...(val === "analysis_codes" && !draft.external?.dimension ? { dimension: "04" } : {}) } })}
+                      options={EXTERNAL_SOURCES.map((s) => ({ value: s.value, label: s.label }))}
+                      className={iCls}
+                      buttonClassName="w-full"
+                      ariaLabel="External source"
+                    />
+                  </Row>
+                  {(draft.external?.source ?? "items") === "analysis_codes" && (
+                    <Row label="Analysis dimension">
+                      <CustomListbox
+                        value={draft.external?.dimension ?? "04"}
+                        onChange={(val) => set({ external: { ...(draft.external ?? { source: "analysis_codes" }), dimension: val } })}
+                        options={ANALYSIS_DIMENSIONS.map((d) => ({ value: d.id, label: `${d.name} (${d.id})` }))}
+                        className={iCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Analysis dimension"
+                      />
+                    </Row>
+                  )}
+                  {(draft.external?.source ?? "items") === "items" && (() => {
+                    const targets = siblingColumns.filter((c) => c.id !== draft.id && c.key);
+                    if (targets.length === 0) return null;
+                    return (
+                      <Row label="Auto-fill unit into" hint="When an item is picked, write its BaseItemUnit into this column in the same row.">
+                        <CustomListbox
+                          value={draft.external?.fillColumn ?? ""}
+                          onChange={(val) => set({ external: { ...(draft.external ?? { source: "items" }), fillColumn: val || undefined } })}
+                          options={[{ value: "", label: "— none —" }, ...targets.map((c) => ({ value: c.key as string, label: c.label || c.key || "" }))]}
+                          className={iCls}
+                          buttonClassName="w-full"
+                          ariaLabel="Auto-fill unit target column"
+                        />
+                      </Row>
+                    );
+                  })()}
+                </>
+              )}
               {isNumeric && (
                 <Row label="Number format" hint="Controls how the cell is displayed and rounded. Turn on “Show as currency” to prefix a symbol.">
                   <NumberFormatEditor
@@ -2359,10 +3435,17 @@ function ColumnConfigModal({
               </Row>
               <Row label="Default value">
                 {isDropdown ? (
-                  <select className={iCls} value={draft.defaultValue ?? ""} onChange={(e) => set({ defaultValue: e.target.value })}>
-                    <option value="">—</option>
-                    {(draft.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
-                  </select>
+                  <CustomListbox
+                    value={draft.defaultValue ?? ""}
+                    onChange={(val) => set({ defaultValue: val })}
+                    options={[
+                      { value: "", label: "—" },
+                      ...(draft.options ?? []).map((o) => ({ value: o, label: o })),
+                    ]}
+                    className={iCls}
+                    buttonClassName="w-full"
+                    ariaLabel="Default value"
+                  />
                 ) : (
                   <input className={iCls} value={draft.defaultValue ?? ""} onChange={(e) => set({ defaultValue: e.target.value })} />
                 )}
@@ -2380,13 +3463,17 @@ function ColumnConfigModal({
                 </Row>
               )}
               <Row label="SunSystems role">
-                <select
+                <CustomListbox
+                  value={draft.sunsystems?.role === "purchase_transaction_type" && isImprestRequestTable ? "" : draft.sunsystems?.role ?? ""}
+                  onChange={(val) => set({ sunsystems: { ...(draft.sunsystems ?? {}), role: val || undefined } })}
+                  options={FINANCE_COLUMN_ROLES
+                    .filter((option) => !(isImprestRequestTable && option.value === "purchase_transaction_type"))
+                    .map((o) => ({ value: o.value, label: o.label }))}
                   className={iCls}
-                  value={draft.sunsystems?.role ?? ""}
-                  onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), role: e.target.value || undefined } })}
-                >
-                  {FINANCE_COLUMN_ROLES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                </select>
+                  buttonClassName="w-full"
+                  ariaLabel="SunSystems role"
+                />
+                {isImprestRequestTable && <p className="mt-1 text-[10px] text-[#8C969E]">This table posts only the Imprest journal, so Purchase transaction type is not used.</p>}
               </Row>
               {draft.sunsystems?.role === "analysis" && (
                 <Row label="Analysis code number (1–10)">
@@ -2402,16 +3489,45 @@ function ColumnConfigModal({
                 <>
                   <div className="grid grid-cols-2 gap-3">
                     <Row label="Debit / Credit">
-                      <select className={iCls} value={draft.sunsystems?.dc ?? "D"}
-                        onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), dc: e.target.value as "D" | "C" } })}>
-                        <option value="D">Debit</option>
-                        <option value="C">Credit</option>
-                      </select>
+                      <CustomListbox
+                        value={draft.sunsystems?.dc ?? "D"}
+                        onChange={(val) => set({ sunsystems: { ...(draft.sunsystems ?? {}), dc: val as "D" | "C" } })}
+                        options={[
+                          { value: "D", label: "Debit" },
+                          { value: "C", label: "Credit" },
+                        ]}
+                        className={iCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Debit/Credit"
+                      />
                     </Row>
-                    <Row label="Default account" hint="Used unless a separate 'Account code' column is set on this table.">
+                    <Row label="Account source">
+                      <AccountCodeSourcePicker value={draft.sunsystems?.accountSource ?? (siblingColumns.some((candidate) => candidate.sunsystems?.role === "account_code") ? "account_code" : "manual")}
+                        onChange={(accountSource) => set({ sunsystems: { ...(draft.sunsystems ?? {}), accountSource } })} />
+                    </Row>
+                    <Row label="Manual account / fallback" hint="Used when the selected source is manual, or its mapped column is unavailable.">
                       <input className={cn(iCls, "font-mono")} value={draft.sunsystems?.account ?? ""}
                         onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), account: e.target.value } })}
                         placeholder="e.g. 37400" />
+                    </Row>
+                  </div>
+                  <div className="border border-dashed border-[#C8CDD2] p-2">
+                    <div className="grid grid-cols-2 gap-2">
+                      <Row label="Counter account source">
+                        <AccountCodeSourcePicker value={draft.sunsystems?.counterAccountSource ?? "manual"}
+                          onChange={(counterAccountSource) => set({ sunsystems: { ...(draft.sunsystems ?? {}), counterAccountSource } })} />
+                      </Row>
+                      <Row label="Counter D/C">
+                        <CustomListbox value={draft.sunsystems?.counterDc ?? (draft.sunsystems?.dc === "C" ? "D" : "C")}
+                          onChange={(counterDc) => set({ sunsystems: { ...(draft.sunsystems ?? {}), counterDc: counterDc as "D" | "C" }})}
+                          options={[{ value: "D", label: "Debit" }, { value: "C", label: "Credit" }]}
+                          className={iCls} buttonClassName="w-full" ariaLabel="Counter D/C" />
+                      </Row>
+                    </div>
+                    <Row label="Counter account">
+                      <input className={cn(iCls, "font-mono")} value={draft.sunsystems?.counterAccount ?? ""}
+                        onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), counterAccount: e.target.value } })}
+                        placeholder="Optional manual counter account" />
                     </Row>
                   </div>
                   <RetirementConfigEditor
@@ -2472,11 +3588,30 @@ function ColumnConfigModal({
                 <Row label="Date format"><input className={cn(iCls, "font-mono")} value={draft.dateFormat ?? "YYYY-MM-DD"} onChange={(e) => set({ dateFormat: e.target.value })} /></Row>
               )}
               {(draft.type === "reference" || draft.type === "user") && (
-                <Row label="Reference source">
-                  <select className={iCls} value={draft.referenceSource ?? (draft.type === "user" ? "users" : "documents")} onChange={(e) => set({ referenceSource: e.target.value })}>
-                    {REFERENCE_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                </Row>
+                <>
+                  <Row label="Reference source">
+                    <CustomListbox
+                      value={draft.referenceSource ?? (draft.type === "user" ? "users" : "documents")}
+                      onChange={(val) => set({ referenceSource: val, ...(val === "users" ? {} : { referenceGroupId: undefined }) })}
+                      options={REFERENCE_SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+                      className={iCls}
+                      buttonClassName="w-full"
+                      ariaLabel="Reference source"
+                    />
+                  </Row>
+                  {(draft.referenceSource ?? (draft.type === "user" ? "users" : "documents")) === "users" && (
+                    <Row label="Limit users to group" hint="Only active members of this group can be selected.">
+                      <CustomListbox
+                        value={draft.referenceGroupId ?? ""}
+                        onChange={(val) => set({ referenceGroupId: val || undefined })}
+                        options={[{ value: "", label: "All users" }, ...referenceGroups.map((group) => ({ value: group.id, label: group.name }))]}
+                        className={iCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Limit user choices to group"
+                      />
+                    </Row>
+                  )}
+                </>
               )}
               <VisibilityEditor
                 value={draft}
@@ -2508,7 +3643,9 @@ function ColumnConfigModal({
           </button>
           <div className="flex gap-2">
             <button onClick={onClose} className="border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">Cancel</button>
-            <button onClick={() => onSave(draft)} className="inline-flex items-center gap-2 bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99]">
+            <button onClick={() => onSave(isImprestRequestTable && draft.sunsystems?.role === "purchase_transaction_type"
+              ? { ...draft, sunsystems: { ...draft.sunsystems, role: undefined } }
+              : draft)} className="inline-flex items-center gap-2 bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99]">
               <CheckCircle2 className="h-4 w-4" /> Save
             </button>
           </div>
@@ -2586,11 +3723,11 @@ function ConfirmDeleteDialog({ open, title, message, confirmLabel = "Delete", on
 
 function Row({ label, required, hint, children }: { label: string; required?: boolean; hint?: string; children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-[180px_1fr] items-start gap-4">
+    <div className="grid min-w-0 grid-cols-[minmax(120px,180px)_minmax(0,1fr)] items-start gap-3 sm:gap-4">
       <label className="pt-2 text-sm font-medium text-[#1F2933]">
         {label}{required && <span className="ml-0.5 text-red-500">*</span>}
       </label>
-      <div>
+      <div className="min-w-0">
         {children}
         {hint && <p className="mt-1 text-[10px] text-[#8C969E]">{hint}</p>}
       </div>
@@ -2647,7 +3784,7 @@ function conditionSourcesFrom(fields: TemplateField[]): Array<{ key: string; lab
       }
       continue;
     }
-    if (f.type === "divider" || f.type === "heading") continue;
+    if (f.type === "divider" || f.type === "heading" || f.type === "button") continue;
     out.push({ key: f.key, label: f.label });
   }
   return out;
@@ -2749,13 +3886,17 @@ function NumberFormatEditor({
         <div className="grid grid-cols-2 gap-2">
           <label className="space-y-1">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Symbol source</span>
-            <select className={cn(inputCls, "h-8")} value={value.currencyFrom ?? ""}
-              onChange={(e) => onChange({ currencyFrom: e.target.value || undefined })}>
-              <option value="">Fixed symbol</option>
-              {symbolSources.map((s) => (
-                <option key={s.key} value={s.key}>From {symbolSourceNoun}: {s.label}</option>
-              ))}
-            </select>
+            <CustomListbox
+              value={value.currencyFrom ?? ""}
+              onChange={(val) => onChange({ currencyFrom: val || undefined })}
+              options={[
+                { value: "", label: "Fixed symbol" },
+                ...symbolSources.map((s) => ({ value: s.key, label: `From ${symbolSourceNoun}: ${s.label}` })),
+              ]}
+              className={cn(inputCls, "h-8")}
+              buttonClassName="w-full"
+              ariaLabel="Symbol source"
+            />
           </label>
           <label className="space-y-1">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
@@ -2883,20 +4024,36 @@ function FinanceBindingFields({ field, onUpdate }: {
           ? "A table becomes a journal line source when one of its columns is marked Line amount."
           : "How this field posts to the SunSystems ledger on approval."}
       >
-        <select className={inputCls} value={role} onChange={(e) => setB({ role: e.target.value || undefined })}>
-          {journalOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
+        <CustomListbox
+          value={role}
+          onChange={(val) => setB({ role: val || undefined })}
+          options={journalOptions}
+          className={inputCls}
+          buttonClassName="w-full"
+          ariaLabel="Journal role"
+        />
       </InspectorRow>
       {showAcct && (
         <>
           <div className="grid grid-cols-2 gap-3">
             <InspectorRow label="Debit / Credit">
-              <select className={inputCls} value={binding.dc ?? "D"} onChange={(e) => setB({ dc: e.target.value as "D" | "C" })}>
-                <option value="D">Debit</option>
-                <option value="C">Credit</option>
-              </select>
+              <CustomListbox
+                value={binding.dc ?? "D"}
+                onChange={(val) => setB({ dc: val as "D" | "C" })}
+                options={[
+                  { value: "D", label: "Debit" },
+                  { value: "C", label: "Credit" },
+                ]}
+                className={inputCls}
+                buttonClassName="w-full"
+                ariaLabel="Debit/Credit"
+              />
             </InspectorRow>
-            <InspectorRow label={isTable ? "Default account" : "Account code"} hint={isTable ? "Used unless a column is 'Account code'." : undefined}>
+            <InspectorRow label="Account source">
+              <AccountCodeSourcePicker value={binding.accountSource ?? "manual"}
+                onChange={(accountSource) => setB({ accountSource })} />
+            </InspectorRow>
+            <InspectorRow label={isTable ? "Default account" : "Manual account / fallback"} hint={isTable ? "Used unless the line amount column selects a row account source." : undefined}>
               <input className={cn(inputCls, "font-mono")} value={binding.account ?? ""} onChange={(e) => setB({ account: e.target.value })} placeholder="e.g. 71001" />
             </InspectorRow>
           </div>
@@ -2905,6 +4062,10 @@ function FinanceBindingFields({ field, onUpdate }: {
               <p className="text-[10px] font-semibold uppercase text-[#5E6870]">Counter entry (double-entry offset)</p>
               <p className="text-[10px] text-[#8C969E]">Automatically posts the balancing leg from the same amount — e.g. Dr 71001 / Cr 10101 for an imprest advance.</p>
               <div className="grid grid-cols-2 gap-2 mt-1.5">
+                <InspectorRow label="Counter account source">
+                  <AccountCodeSourcePicker value={binding.counterAccountSource ?? "manual"}
+                    onChange={(counterAccountSource) => setB({ counterAccountSource })} />
+                </InspectorRow>
                 <InspectorRow label="Counter account">
                   <input className={cn(inputCls, "font-mono")} value={binding.counterAccount ?? ""}
                     onChange={(e) => {
@@ -2916,48 +4077,56 @@ function FinanceBindingFields({ field, onUpdate }: {
                     placeholder="e.g. 10101 (leave blank to skip)" />
                 </InspectorRow>
                 <InspectorRow label="Counter D/C">
-                  <select className={inputCls}
+                  <CustomListbox
                     value={binding.counterDc ?? (binding.dc === "C" ? "D" : "C")}
-                    onChange={(e) => setB({ counterDc: e.target.value as "D" | "C" })}>
-                    <option value="D">Debit</option>
-                    <option value="C">Credit</option>
-                  </select>
+                    onChange={(val) => setB({ counterDc: val as "D" | "C" })}
+                    options={[
+                      { value: "D", label: "Debit" },
+                      { value: "C", label: "Credit" },
+                    ]}
+                    className={inputCls}
+                    buttonClassName="w-full"
+                    ariaLabel="Counter D/C"
+                  />
                 </InspectorRow>
               </div>
             </div>
           )}
         </>
       )}
-      {!isTable && (
-        <InspectorRow label="Budget role" hint="Independent of the journal role — the same field can do both.">
-          <select className={inputCls} value={binding.budgetRole ?? ""} onChange={(e) => setB({ budgetRole: e.target.value || undefined })}>
-            {FINANCE_BUDGET_ROLES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        </InspectorRow>
-      )}
     </div>
   );
 }
 
-/* Visibility modes shared by fields and sections. `hidden` = always hidden,
- * `visibleWhen` = conditional, `visibleToGroups` = role-restricted (sections
- * only), none = always visible. */
-type VisibilityMode = "visible" | "hidden" | "conditional" | "groups";
+/* Visibility modes shared by fields, sections and columns. `hidden` = always
+ * hidden, `visibleWhen` = conditional (process step / field value / user group,
+ * freely combined and nestable), none = always visible. */
+type VisibilityMode = "visible" | "hidden" | "conditional";
 
 interface VisibilityState {
   hidden?: boolean;
   visibleWhen?: RuleGroup | null;
-  visibleToGroups?: SectionGroupRef[];
 }
 
 function visibilityModeOf(item: VisibilityState): VisibilityMode {
   if (item.hidden) return "hidden";
-  // A defined (even empty) list means "groups"mode is selected — keeps the
-  // picker open while the user is still choosing. Other modes clear it to
-  // undefined, so an empty list never lingers once a different mode is chosen.
-  if (item.visibleToGroups !== undefined) return "groups";
   if (item.visibleWhen) return "conditional";
   return "visible";
+}
+
+/* RBAC groups for "user group" conditions. Shared react-query cache, so every
+ * rule editor on screen reuses one request. */
+function useRbacGroups(): SectionGroupRef[] {
+  const { data = [] } = useQuery({
+    queryKey: ["groups", "list"],
+    queryFn: async () => {
+      const res = await groupsAPI.list();
+      const rows = (res.data?.results ?? res.data ?? []) as Array<{ id: string; name: string }>;
+      return rows.map((g) => ({ id: String(g.id), name: String(g.name) }));
+    },
+    staleTime: 60_000,
+  });
+  return data;
 }
 
 function defaultCondition(sources: { key: string }[]): VisibilityCondition {
@@ -2969,12 +4138,13 @@ function defaultCondition(sources: { key: string }[]): VisibilityCondition {
 function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: {
   group: RuleGroup;
   sources: { key: string; label: string }[];
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
   onChange: (g: RuleGroup) => void;
   /* Nesting level. One extra level is allowed (depth 1) — deeper rule trees
    * are unreadable in a side panel and are better modelled as two rules. */
   depth?: number;
 }) {
+  const groupOptions = useRbacGroups();
   const updateCond = (i: number, patch: Partial<VisibilityCondition>) =>
     onChange({ ...group, conditions: group.conditions.map((c, idx) => (idx === i ? { ...c, ...patch } : c)) });
   const removeCond = (i: number) =>
@@ -3009,16 +4179,25 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
       {group.conditions.map((c, i) => (
         <div key={i} className="space-y-1.5 border border-[#E5E8EB] bg-[#FAFBFC] p-2">
           <div className="flex items-center gap-1.5">
-            <select className={cn(inputCls, "h-8 flex-1")} value={c.source}
-              onChange={(e) => {
-                const source = e.target.value as ConditionSource;
+            <CustomListbox
+              value={c.source}
+              onChange={(val) => {
+                const source = val as ConditionSource;
                 updateCond(i, source === "process_step"
-                  ? { source, fieldKey: undefined, operator: "equals", value: processSteps[0]?.value ?? "" }
-                  : { source, fieldKey: sources[0]?.key ?? "", value: "" });
-              }}>
-              <option value="field">Form field</option>
-              <option value="process_step">Process step</option>
-            </select>
+                  ? { source, fieldKey: undefined, groups: undefined, operator: "equals", value: processSteps[0]?.value ?? "" }
+                  : source === "user_group"
+                    ? { source, fieldKey: undefined, groups: [], operator: "in_list", value: undefined }
+                    : { source, fieldKey: sources[0]?.key ?? "", groups: undefined, operator: "equals", value: "" });
+              }}
+              options={[
+                { value: "field", label: "Form field" },
+                { value: "process_step", label: "Process step" },
+                { value: "user_group", label: "User group" },
+              ]}
+              className={cn(inputCls, "h-8 flex-1")}
+              buttonClassName="w-full"
+              ariaLabel="Condition source"
+            />
             <button type="button" onClick={() => removeCond(i)} title="Remove condition"
               className="p-1 text-[#8C969E] hover:bg-red-50 hover:text-red-500">
               <X className="h-3.5 w-3.5" />
@@ -3026,36 +4205,79 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
           </div>
 
           {c.source === "field" && (
-            <select className={cn(inputCls, "h-8")} value={c.fieldKey ?? ""}
-              onChange={(e) => updateCond(i, { fieldKey: e.target.value })}>
-              <option value="">— choose a field —</option>
-              {sources.map((s) => <option key={s.key} value={s.key}>{s.label} ({s.key})</option>)}
-            </select>
+            <CustomListbox
+              value={c.fieldKey ?? ""}
+              onChange={(val) => updateCond(i, { fieldKey: val })}
+              options={[
+                { value: "", label: "— choose a field —" },
+                ...sources.map((s) => ({ value: s.key, label: `${s.label} (${s.key})` })),
+              ]}
+              className={cn(inputCls, "h-8")}
+              buttonClassName="w-full"
+              ariaLabel="Field"
+            />
           )}
 
+          {c.source === "user_group" && (
+            <div className="space-y-1.5">
+              <CustomListbox
+                value={c.operator === "not_in_list" ? "not_in_list" : "in_list"}
+                onChange={(val) => updateCond(i, { operator: val as ConditionOperator })}
+                options={[
+                  { value: "in_list", label: "User is a member of any of…" },
+                  { value: "not_in_list", label: "User is not a member of any of…" },
+                ]}
+                className={cn(inputCls, "h-8")}
+                buttonClassName="w-full"
+                ariaLabel="Group membership operator"
+              />
+              {groupOptions.length === 0 && <p className="text-[10px] text-amber-600">No groups defined yet.</p>}
+              <div className="max-h-40 overflow-y-auto border border-[#E5E8EB] divide-y divide-[#F0F2F3] bg-white">
+                {groupOptions.map((g) => {
+                  const picked = (c.groups ?? []).some((x) => x.id === g.id);
+                  return (
+                    <label key={g.id} className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs text-[#1F2933] hover:bg-[#F6F7F8]">
+                      <input type="checkbox" checked={picked} className="h-3.5 w-3.5 accent-[#287EAD]"
+                        onChange={() => updateCond(i, {
+                          groups: picked ? (c.groups ?? []).filter((x) => x.id !== g.id) : [...(c.groups ?? []), { id: g.id, name: g.name }],
+                        })} />
+                      <span className="truncate">{g.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              {(c.groups ?? []).length === 0 && (
+                <p className="text-[10px] text-amber-600">Pick at least one group, or this condition has no effect.</p>
+              )}
+            </div>
+          )}
+
+          {c.source !== "user_group" && (
           <div className="grid grid-cols-2 gap-1.5">
-            <select className={cn(inputCls, "h-8")} value={c.operator}
-              onChange={(e) => updateCond(i, { operator: e.target.value as ConditionOperator })}>
-              {OPERATOR_GROUPS.map((g) => {
+            <CustomListbox
+              value={c.operator}
+              onChange={(val) => updateCond(i, { operator: val as ConditionOperator })}
+              options={OPERATOR_GROUPS.flatMap((g) => {
                 /* A process step is a plain label: only text-ish operators apply. */
                 const ops = c.source === "process_step"
                   ? g.ops.filter((o) => ["equals", "not_equals", "contains", "not_contains", "starts_with", "ends_with", "in_list", "not_in_list"].includes(o))
                   : g.ops;
-                if (!ops.length) return null;
-                return (
-                  <optgroup key={g.label} label={g.label}>
-                    {ops.map((o) => <option key={o} value={o}>{OPERATOR_LABEL[o]}</option>)}
-                  </optgroup>
-                );
+                return ops.map((o) => ({ value: o, label: `${g.label}: ${OPERATOR_LABEL[o]}` }));
               })}
-            </select>
+              className={cn(inputCls, "h-8")}
+              buttonClassName="w-full"
+              ariaLabel="Operator"
+            />
             {!VALUELESS_OPERATORS.has(c.operator) && (
               c.source === "process_step" && !LIST_OPERATORS.has(c.operator) ? (
-                <select className={cn(inputCls, "h-8")} value={c.value ?? ""}
-                  onChange={(e) => updateCond(i, { value: e.target.value })}>
-                  <option value="">— choose a step —</option>
-                  {processSteps.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-                </select>
+                <CustomListbox
+                  value={c.value ?? ""}
+                  onChange={(val) => updateCond(i, { value: val })}
+                  options={processStepOptions(processSteps, { includeBlank: true })}
+                  className={cn(inputCls, "h-8")}
+                  buttonClassName="w-full"
+                  ariaLabel="Process step"
+                />
               ) : RANGE_OPERATORS.has(c.operator) ? (
                 <div className="flex items-center gap-1">
                   <input className={cn(inputCls, "h-8 min-w-0")} value={(c.value ?? "").split(",")[0] ?? ""} placeholder="From"
@@ -3071,9 +4293,20 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
               )
             )}
           </div>
-          {LIST_OPERATORS.has(c.operator) && (
+          )}
+          {c.source !== "user_group" && LIST_OPERATORS.has(c.operator) && (
             <p className="text-[10px] text-[#8C969E]">Separate each accepted value with a comma.</p>
           )}
+          {c.source === "process_step" && (() => {
+            const selected = processSteps.find((s) => s.value === (c.value ?? ""));
+            if (!selected?.covered?.length) return null;
+            const stageName = (selected.group ?? "").replace(/\s*stage$/i, "") || "stage";
+            return (
+              <p className="text-[10px] text-[#287EAD]">
+                Covers every {stageName} approval step: {selected.covered.join(", ")}.
+              </p>
+            );
+          })()}
           <p className="text-[10px] text-[#8C969E]">{summarizeCondition(c)}</p>
         </div>
       ))}
@@ -3116,42 +4349,31 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
   );
 }
 
-/* Unified visibility control used by both the field inspector and the section
- * inspector. A single mode selector:
+/* Unified visibility control for fields, sections and table columns. One mode
+ * selector:
  *   Always visible · Always hidden · Show only when <rule group>
- *   · Visible only to groups…   (sections only — pass `groupOptions`)
- * `sources` are the fields whose values can drive a conditional rule;
- * `processSteps` are the workflow statuses for "process step"conditions. */
-function VisibilityEditor({ value, sources, onChange, subject, groupOptions, processSteps = [] }: {
+ * The rule group combines (AND/OR, nestable) any mix of form-field values,
+ * process steps and USER GROUPS, so "step = Finance Approval AND user in
+ * Finance" is just two conditions in one group.
+ * `sources` are the fields whose values can drive a rule; `processSteps` are the
+ * workflow statuses for "process step" conditions. */
+function VisibilityEditor({ value, sources, onChange, subject, processSteps = [] }: {
   value: VisibilityState;
   sources: { key: string; label: string }[];
   onChange: (patch: VisibilityState) => void;
   subject: "field" | "section" | "column";
-  groupOptions?: { id: string; name: string }[];
-  processSteps?: { value: string; label: string }[];
+  processSteps?: ProcessStepOption[];
 }) {
   const mode = visibilityModeOf(value);
   const rule = value.visibleWhen ?? null;
-  const allowsGroups = Array.isArray(groupOptions);
-  const selectedGroups = value.visibleToGroups ?? [];
-  const isGroupSelected = (id: string) => selectedGroups.some((g) => g.id === id);
 
   const setMode = (m: VisibilityMode) => {
-    const cleared = { hidden: false, visibleWhen: null, visibleToGroups: undefined } as VisibilityState;
-    if (m === "visible") onChange(cleared);
-    else if (m === "hidden") onChange({ ...cleared, hidden: true });
-    else if (m === "groups") onChange({ ...cleared, visibleToGroups: selectedGroups });
+    if (m === "visible") onChange({ hidden: false, visibleWhen: null });
+    else if (m === "hidden") onChange({ hidden: true, visibleWhen: null });
     else onChange({
-      ...cleared,
+      hidden: false,
       visibleWhen: rule ?? { combinator: "and", conditions: [defaultCondition(sources)] },
     });
-  };
-
-  const toggleGroup = (g: { id: string; name: string }) => {
-    const next = isGroupSelected(g.id)
-      ? selectedGroups.filter((s) => s.id !== g.id)
-      : [...selectedGroups, { id: g.id, name: g.name }];
-    onChange({ hidden: false, visibleWhen: null, visibleToGroups: next });
   };
 
   return (
@@ -3160,37 +4382,24 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
       hint={
         mode === "hidden"
           ? `This ${subject} is always hidden from people filling the form.`
-          : mode === "groups"
-            ? "Only members of the selected groups (and admins) see this section."
-            : `Control when this ${subject} appears for people filling the form.`
+          : mode === "conditional"
+            ? `Shown only while the rules below match. Mix process step, field value and user group conditions.`
+            : `Control when this ${subject} appears — by process step, field value or user group.`
       }
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
-        <select className={inputCls} value={mode} onChange={(e) => setMode(e.target.value as VisibilityMode)}>
-          <option value="visible">Always visible</option>
-          <option value="hidden">Always hidden</option>
-          <option value="conditional">Show only when…</option>
-          {allowsGroups && <option value="groups">Visible only to groups…</option>}
-        </select>
-        {mode === "groups" && allowsGroups && (
-          <div className="space-y-1">
-            {groupOptions!.length === 0 && (
-              <p className="text-[10px] text-amber-600">No groups defined yet.</p>
-            )}
-            <div className="max-h-40 overflow-y-auto border border-[#E5E8EB] divide-y divide-[#F0F2F3]">
-              {groupOptions!.map((g) => (
-                <label key={g.id} className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs text-[#1F2933] hover:bg-[#F6F7F8]">
-                  <input type="checkbox" checked={isGroupSelected(g.id)} onChange={() => toggleGroup(g)}
-                    className="h-3.5 w-3.5 accent-[#287EAD]" />
-                  <span className="truncate">{g.name}</span>
-                </label>
-              ))}
-            </div>
-            {selectedGroups.length === 0 && (
-              <p className="text-[10px] text-amber-600">Pick at least one group, or the section stays visible to everyone.</p>
-            )}
-          </div>
-        )}
+        <CustomListbox
+          value={mode}
+          onChange={(val) => setMode(val as VisibilityMode)}
+          options={[
+            { value: "visible", label: "Always visible" },
+            { value: "hidden", label: "Always hidden" },
+            { value: "conditional", label: "Show only when…" },
+          ]}
+          className={inputCls}
+          buttonClassName="w-full"
+          ariaLabel="Visibility mode"
+        />
         {mode === "conditional" && rule && (
           <RuleGroupEditor group={rule} sources={sources} processSteps={processSteps}
             onChange={(g) => onChange({ visibleWhen: g })} />
@@ -3220,7 +4429,7 @@ function EditabilityEditor({ value, sources, onChange, subject, processSteps = [
   sources: { key: string; label: string }[];
   onChange: (patch: EditabilityState) => void;
   subject: "field" | "section" | "column";
-  processSteps?: { value: string; label: string }[];
+  processSteps?: ProcessStepOption[];
 }) {
   const mode = editabilityModeOf(value);
   const rule = value.editableWhen ?? null;
@@ -3237,16 +4446,23 @@ function EditabilityEditor({ value, sources, onChange, subject, processSteps = [
         mode === "readonly"
           ? `This ${subject} is always read-only.`
           : mode === "conditional"
-            ? `Editable only while the rules below match — read-only at every other step.`
+            ? `Editable only while the rules below match (process step, field value, user group) — read-only otherwise.`
             : `Control when people can edit this ${subject}.`
       }
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
-        <select className={inputCls} value={mode} onChange={(e) => setMode(e.target.value as EditabilityMode)}>
-          <option value="editable">Always editable</option>
-          <option value="readonly">Always read-only</option>
-          <option value="conditional">Editable only when…</option>
-        </select>
+        <CustomListbox
+          value={mode}
+          onChange={(val) => setMode(val as EditabilityMode)}
+          options={[
+            { value: "editable", label: "Always editable" },
+            { value: "readonly", label: "Always read-only" },
+            { value: "conditional", label: "Editable only when…" },
+          ]}
+          className={inputCls}
+          buttonClassName="w-full"
+          ariaLabel="Editability mode"
+        />
         {mode === "conditional" && rule && (
           <RuleGroupEditor group={rule} sources={sources} processSteps={processSteps}
             onChange={(g) => onChange({ editableWhen: g })} />
@@ -3384,14 +4600,313 @@ function CalcFormulaEditor({ field, siblings, onUpdate }: {
   );
 }
 
+function tableRefStatusText(st: TableRefStatus): string {
+  switch (st) {
+    case "loading": return "Loading the source form…";
+    case "stale": return "Source form unavailable — showing the last saved layout.";
+    case "cycle": return "Circular reference — this table (indirectly) points back at itself.";
+    case "missing": return "Source table not found — pick a table.";
+    default: return "";
+  }
+}
+
+const segCls = (active: boolean) =>
+  cn("flex-1 px-2 py-1.5 text-xs font-semibold transition-colors", active ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]");
+
+const BUTTON_PLACEMENT_OPTIONS = [
+  { value: "end_of_form", label: "End of the form (below everything)" },
+  { value: "below_button", label: "Directly below this section" },
+  { value: "after_section", label: "After a specific section…" },
+];
+
+/* Inspector panel for a Button field. */
+function ButtonEditor({ field, onUpdate, allFields }: {
+  field: TemplateField;
+  onUpdate: (patch: Partial<TemplateField>) => void;
+  allFields: TemplateField[];
+}) {
+  const env = useContext(BuilderEnv);
+  const sections = env.template?.sections ?? [];
+  const b: ButtonConfig = field.button ?? { action: "add_block", placement: "end_of_form", variant: "primary" };
+  const set = (patch: Partial<ButtonConfig>) => onUpdate({ button: { ...b, ...patch } });
+  const ownSection = sections.find((x) => x.fields.some((f) => f.id === field.id));
+  const onDemand = sections.filter((x) => x.onDemand && x.id !== ownSection?.id);
+  const anchors = sections.filter((x) => !x.onDemand);
+  const siblings = allFields.filter((f) => f.id !== field.id && f.key && f.type !== "button");
+  const NON_TARGET = new Set<string>(["table", "file", "image", "multi_file", "signature", "reference", "user", "sunsystems_account", "external"]);
+  const targets = siblings.filter((f) => !PRESENTATION_TYPES.has(f.type) && !CALCULATED_TYPES.has(f.type) && !NON_TARGET.has(f.type));
+
+  return (
+    <div className="space-y-4 border border-[#C8CDD2] bg-white p-3">
+      <InspectorRow label="When clicked">
+        <div className="flex border border-[#C8CDD2]">
+          <button type="button" className={segCls(b.action === "add_block")} onClick={() => set({ action: "add_block" })}>Add a section</button>
+          <button type="button" className={segCls(b.action === "calculate")} onClick={() => set({ action: "calculate" })}>Calculate a value</button>
+        </div>
+      </InspectorRow>
+      <InspectorRow label="Style">
+        <CustomListbox
+          value={b.variant ?? "primary"}
+          onChange={(val) => set({ variant: val as ButtonConfig["variant"] })}
+          options={[{ value: "primary", label: "Primary (filled)" }, { value: "secondary", label: "Secondary (grey)" }, { value: "outline", label: "Outline" }]}
+          className={inputCls} buttonClassName="w-full" ariaLabel="Button style"
+        />
+      </InspectorRow>
+
+      {b.action === "add_block" && (
+        <>
+          <InspectorRow label="Section to add" hint="Only sections marked “Add on demand” can be added by a button.">
+            <CustomListbox
+              value={b.targetSectionId ?? ""}
+              onChange={(val) => set({ targetSectionId: val || undefined })}
+              options={[{ value: "", label: onDemand.length ? "Select a section…" : "No on-demand sections yet" }, ...onDemand.map((x) => ({ value: x.id, label: x.title || "Untitled section" }))]}
+              className={inputCls} buttonClassName="w-full" ariaLabel="Section to add"
+            />
+          </InspectorRow>
+          {onDemand.length === 0 && (
+            <p className="flex items-start gap-1.5 border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+              Select the section you want to add later and switch on “Add on demand” in its settings.
+            </p>
+          )}
+          <InspectorRow label="Where it appears">
+            <CustomListbox
+              value={b.placement ?? "end_of_form"}
+              onChange={(val) => set({ placement: val as ButtonConfig["placement"] })}
+              options={BUTTON_PLACEMENT_OPTIONS}
+              className={inputCls} buttonClassName="w-full" ariaLabel="Placement"
+            />
+          </InspectorRow>
+          {b.placement === "after_section" && (
+            <InspectorRow label="After section">
+              <CustomListbox
+                value={b.anchorSectionId ?? ""}
+                onChange={(val) => set({ anchorSectionId: val || undefined })}
+                options={[{ value: "", label: "Select a section…" }, ...anchors.map((x) => ({ value: x.id, label: x.title || "Untitled section" }))]}
+                className={inputCls} buttonClassName="w-full" ariaLabel="Anchor section"
+              />
+            </InspectorRow>
+          )}
+        </>
+      )}
+
+      {b.action === "calculate" && (
+        <>
+          <InspectorRow label="Write the result into" hint="Calculated fields can't be targets — they already recompute on their own.">
+            <CustomListbox
+              value={b.targetKey ?? ""}
+              onChange={(val) => set({ targetKey: val || undefined })}
+              options={[{ value: "", label: "Select a field…" }, ...targets.map((f) => ({ value: f.key, label: `${f.label} (${f.key})` }))]}
+              className={inputCls} buttonClassName="w-full" ariaLabel="Target field"
+            />
+          </InspectorRow>
+          <CalcFormulaEditor
+            field={{ ...field, type: "calc_number", calc: b.calc ?? { expression: "", decimals: 2 } }}
+            siblings={siblings}
+            onUpdate={(patch) => { if (patch.calc !== undefined) set({ calc: patch.calc }); }}
+          />
+          <p className="text-[10px] text-[#8C969E]">Runs once per click. The result is stored in the target field and stays editable unless that field is read-only.</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* Inspector panel for a Reference field whose source is "Table". */
+function TableRefEditor({ field, onUpdate }: {
+  field: TemplateField;
+  onUpdate: (patch: Partial<TemplateField>) => void;
+}) {
+  const env = useContext(BuilderEnv);
+  const owner = env.template;
+  const [typeFilter, setTypeFilter] = useState("");
+  const ref: TableRef = field.tableRef ?? { scope: "this_form", tableKey: "", mode: "embed", sync: "live" };
+  const patch = (p: Partial<TableRef>, extra: Partial<TemplateField> = {}) => onUpdate({ tableRef: { ...ref, ...p }, ...extra });
+
+  const sourceOwner = ref.scope === "other_form" ? (ref.templateId ? env.external[ref.templateId] : undefined) : owner ?? undefined;
+  const tables = tableFieldsOf(sourceOwner).filter((t) => !(sourceOwner === owner && t.id === field.id));
+  const probe: TemplateField = { ...field, tableRef: ref };
+  const resolved = owner ? resolveTableRef(probe, owner, env.external, env.loadingIds) : null;
+  const liveNow = owner ? resolveTableRef(probe, owner, env.external, env.loadingIds, { ignorePinned: true }) : null;
+
+  const others = env.summaries.filter((x) => x.id !== owner?.id);
+  const formTypes: string[] = Array.from(new Set(others.map((x) => x.workflow_type).filter((t): t is string => !!t)));
+  const cap = (x?: string) => (x ? x.charAt(0).toUpperCase() + x.slice(1) : "");
+  let shown = others.filter((x) => !typeFilter || x.workflow_type === typeFilter);
+  const picked = others.find((x) => x.id === ref.templateId);
+  if (picked && !shown.some((x) => x.id === picked.id)) shown = [picked, ...shown];
+
+  const warnings = owner && resolved && ref.mode === "embed"
+    ? missingCalcKeys(resolved.columns, formScopeKeys(materializeTableRefs(owner, env.external, env.loadingIds).sections))
+    : [];
+
+  const takeSnapshot = () => liveNow && liveNow.status === "ok"
+    ? { columns: liveNow.columns, takenAt: new Date().toISOString(), minRows: liveNow.minRows }
+    : ref.snapshot;
+
+  return (
+    <div className="space-y-4 border border-[#C8CDD2] bg-white p-3">
+      <InspectorRow label="Table lives in">
+        <div className="flex border border-[#C8CDD2]">
+          <button type="button" className={segCls(ref.scope === "this_form")}
+            onClick={() => patch({ scope: "this_form", templateId: undefined, templateName: undefined, tableKey: "", tableLabel: undefined, displayColumn: undefined, snapshot: undefined })}>
+            This form
+          </button>
+          <button type="button" disabled={!env.canLinkExternal} title={env.canLinkExternal ? undefined : "Host app hasn't provided externalTemplates"}
+            className={cn(segCls(ref.scope === "other_form"), "disabled:cursor-not-allowed disabled:opacity-40")}
+            onClick={() => patch({ scope: "other_form", tableKey: "", tableLabel: undefined, displayColumn: undefined, snapshot: undefined })}>
+            Another form
+          </button>
+        </div>
+      </InspectorRow>
+
+      {ref.scope === "other_form" && (
+        <>
+          {formTypes.length > 1 && (
+            <InspectorRow label="Form type">
+              <CustomListbox
+                value={typeFilter}
+                onChange={(val) => setTypeFilter(val)}
+                options={[{ value: "", label: "All form types" }, ...formTypes.map((t) => ({ value: t, label: cap(t) }))]}
+                className={inputCls} buttonClassName="w-full" ariaLabel="Form type filter"
+              />
+            </InspectorRow>
+          )}
+          <InspectorRow label="Form">
+            <CustomListbox
+              value={ref.templateId ?? ""}
+              onChange={(val) => {
+                const t = others.find((x) => x.id === val);
+                patch({ templateId: val || undefined, templateName: t?.name, tableKey: "", tableLabel: undefined, displayColumn: undefined, snapshot: undefined });
+              }}
+              options={[
+                { value: "", label: env.summariesLoading ? "Loading forms…" : "Select a form…" },
+                ...shown.map((x) => ({ value: x.id, label: `${x.name}${x.workflow_type ? ` · ${cap(x.workflow_type)}` : ""}` })),
+              ]}
+              className={inputCls} buttonClassName="w-full" ariaLabel="Source form"
+            />
+          </InspectorRow>
+        </>
+      )}
+
+      {(ref.scope === "this_form" || ref.templateId) && (
+        <InspectorRow label="Table" hint={tables.length === 0 && sourceOwner ? "That form has no tables." : undefined}>
+          <CustomListbox
+            value={ref.tableKey}
+            onChange={(val) => {
+              const t = tables.find((x) => x.key === val);
+              patch({ tableKey: val, tableLabel: t?.label, displayColumn: undefined, snapshot: undefined });
+            }}
+            options={[
+              { value: "", label: ref.scope === "other_form" && !sourceOwner ? "Loading…" : "Select a table…" },
+              ...tables.map((t) => ({ value: t.key, label: `${t.label} (${t.key})` })),
+            ]}
+            className={inputCls} buttonClassName="w-full" ariaLabel="Source table"
+          />
+        </InspectorRow>
+      )}
+
+      {ref.tableKey && (
+        <InspectorRow label="Use it as">
+          <div className="flex border border-[#C8CDD2]">
+            <button type="button" className={segCls(ref.mode === "embed")} onClick={() => patch({ mode: "embed", sync: ref.sync ?? "live" }, { colSpan: 12 })}>Table (same columns)</button>
+            <button type="button" className={segCls(ref.mode === "row_picker")} onClick={() => patch({ mode: "row_picker" }, { colSpan: 6 })}>Pick a row</button>
+          </div>
+        </InspectorRow>
+      )}
+
+      {ref.tableKey && ref.mode === "embed" && (
+        <InspectorRow label="Keep layout" hint={ref.sync === "pinned"
+          ? `Frozen${ref.snapshot ? ` since ${new Date(ref.snapshot.takenAt).toLocaleDateString()}` : ""}. Changes to the source won't reach this form until you re-sync.`
+          : "Follows the source — edits to it appear here the next time this template is opened or saved."}>
+          <div className="space-y-2">
+            <div className="flex border border-[#C8CDD2]">
+              <button type="button" className={segCls(ref.sync !== "pinned")} onClick={() => patch({ sync: "live" })}>Live</button>
+              <button type="button" className={segCls(ref.sync === "pinned")} onClick={() => patch({ sync: "pinned", snapshot: takeSnapshot() })}>Pinned</button>
+            </div>
+            {ref.sync === "pinned" && (
+              <button type="button" onClick={() => patch({ snapshot: takeSnapshot() })}
+                className="inline-flex items-center gap-1.5 border border-[#287EAD]/40 bg-[#EEF6FB] px-2 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white">
+                <RefreshCw className="h-3 w-3" /> Re-sync from source now
+              </button>
+            )}
+          </div>
+        </InspectorRow>
+      )}
+
+      {ref.tableKey && ref.mode === "row_picker" && (
+        <InspectorRow label="Show column" hint="The column whose value labels each row in the dropdown.">
+          <CustomListbox
+            value={ref.displayColumn ?? ""}
+            onChange={(val) => patch({ displayColumn: val || undefined })}
+            options={[{ value: "", label: "Select a column…" }, ...(resolved?.columns ?? []).map((c) => ({ value: c.key, label: c.label }))]}
+            className={inputCls} buttonClassName="w-full" ariaLabel="Display column"
+          />
+        </InspectorRow>
+      )}
+
+      {resolved && resolved.status !== "ok" && ref.tableKey && (
+        <p className="flex items-start gap-1.5 border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" /> {tableRefStatusText(resolved.status)}
+        </p>
+      )}
+
+      {resolved && resolved.columns.length > 0 && ref.mode === "embed" && (
+        <div className="space-y-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Columns ({resolved.columns.length}) — edited in the source table</span>
+          <div className="flex flex-wrap gap-1">
+            {resolved.columns.map((c) => (
+              <span key={c.id} className="border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 text-[10px] text-[#3E4851]">{c.label}</span>
+            ))}
+          </div>
+          <p className="text-[10px] text-[#8C969E]">Rows entered here belong to this document. SunSystems account/journal settings are not copied over.</p>
+        </div>
+      )}
+
+      {warnings.length > 0 && (
+        <div className="space-y-1 border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
+          <p className="flex items-center gap-1.5 font-semibold"><AlertTriangle className="h-3 w-3 shrink-0" /> Formulas that need fields this form doesn't have</p>
+          {warnings.map((w) => (
+            <p key={w.column}><span className="font-semibold">{w.column}</span> uses <span className="font-mono">{w.keys.join(", ")}</span> — these resolve to 0 here. Add fields with those IDs.</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Ten dropdowns that bind each analysis-panel slot to a ledger dimension. */
+function PanelSlotsEditor({ slots, onChange }: { slots?: string[]; onChange: (slots: string[]) => void }) {
+  const current = Array.isArray(slots) && slots.length === 10 ? slots : ANALYSIS_PANEL_SLOTS;
+  return (
+    <div className="grid grid-cols-2 gap-1.5">
+      {current.map((dimId, i) => (
+        <div key={i} className="flex items-center gap-1.5">
+          <span className="w-3 shrink-0 text-right text-[10px] font-semibold text-[#5E6870]">{i + 1}</span>
+          <CustomListbox
+            value={dimId}
+            onChange={(val) => onChange(current.map((d, j) => (j === i ? val : d)))}
+            options={ANALYSIS_DIMENSIONS.map((d) => ({ value: d.id, label: `${d.name} (${d.id})` }))}
+            className={inputCls}
+            buttonClassName="w-full"
+            ariaLabel={`Panel slot ${i + 1}`}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   field: TemplateField;
   onUpdate: (patch: Partial<TemplateField>) => void;
   allFields: TemplateField[];
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
   const [tab, setTab] = useState<"field" | "advanced">("field");
+  const referenceGroups = useRbacGroups();
   const isTable = field.type === "table";
+  const isButton = field.type === "button";
   const isLayout = field.type === "divider" || field.type === "heading";
   const isNumeric = field.type === "number" || field.type === "currency";
   const isText = field.type === "text" || field.type === "textarea" || field.type === "email" || field.type === "phone";
@@ -3406,7 +4921,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   useEffect(() => { setAutoKey(looksAutoGenerated(field.key)); }, [field.id]);
 
   const keyDuplicate = allFields.filter((f) => f.id !== field.id && f.key === field.key).length > 0;
-  const siblings = allFields.filter((f) => f.id !== field.id && f.key);
+  const siblings = allFields.filter((f) => f.id !== field.id && f.key && f.type !== "button");
   // Fields whose selected value can drive a currency field's symbol — dropdowns
   // (and plain text) that hold a currency code.
   const currencySourceSiblings = siblings.filter((s) => ["select", "radio", "text"].includes(s.type));
@@ -3452,7 +4967,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           </InspectorRow>
           {!["heading", "divider", "checkbox", "boolean", "table", "file", "image", "signature",
             "rating", "auto_number", "calc_number", "calc_currency", "calc_text", "calc_date",
-            "calc_boolean", "multi_file", "info", "spacer"].includes(field.type) && (
+            "calc_boolean", "multi_file", "info", "spacer", "sunsystems_account", "external", "budget"].includes(field.type) && (
               <InspectorRow label="Placeholder">
                 <input className={inputCls} value={field.placeholder ?? ""} onChange={(e) => onUpdate({ placeholder: e.target.value })} />
               </InspectorRow>
@@ -3471,20 +4986,144 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               <div className="flex justify-between text-[10px] text-[#5E6870]"><span>1</span><span>6</span><span>12</span></div>
             </InspectorRow>
           )}
-          {!isLayout && !isTable && !isCalculated && (
+          {!isLayout && !isTable && !isCalculated && !isButton && (
             <div className="flex items-center gap-6">
               <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
                 <input type="checkbox" checked={!!field.required} onChange={(e) => onUpdate({ required: e.target.checked })}
                   className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
                 Required
               </label>
+              {field.type === "sunsystems_account" && (
+                <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
+                  <input type="checkbox" checked={field.multi ?? true} onChange={(e) => onUpdate({ multi: e.target.checked })}
+                    className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
+                  Allow multiple suppliers
+                </label>
+              )}
               {/* Read-only moved to the Editability control (Advanced tab). */}
             </div>
           )}
+          {field.type === "external" && (
+            <>
+              <InspectorRow label="Source">
+                <CustomListbox
+                  value={field.external?.source ?? EXTERNAL_SOURCES[0]?.value ?? "items"}
+                  onChange={(val) => onUpdate({ external: { ...(field.external ?? {}), source: val } })}
+                  options={EXTERNAL_SOURCES.map((s) => ({ value: s.value, label: s.label }))}
+                  className={inputCls}
+                  buttonClassName="w-full"
+                  ariaLabel="External source"
+                />
+              </InspectorRow>
+              {(field.external?.source ?? "items") === "analysis_codes" ? (
+                <>
+                  <InspectorRow label="Layout">
+                    <div className="flex border border-[#C8CDD2]">
+                      <button type="button" className={segCls((field.external?.mode ?? "panel") !== "single")}
+                        onClick={() => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), mode: "panel" } })}>
+                        All ten (panel)
+                      </button>
+                      <button type="button" className={segCls(field.external?.mode === "single")}
+                        onClick={() => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), mode: "single", dimension: field.external?.dimension ?? "04" } })}>
+                        Single dimension
+                      </button>
+                    </div>
+                  </InspectorRow>
+                  {field.external?.mode === "single" ? (
+                    <InspectorRow label="Analysis dimension" hint="Render codes for just this dimension.">
+                      <CustomListbox
+                        value={field.external?.dimension ?? "04"}
+                        onChange={(val) => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), dimension: val } })}
+                        options={ANALYSIS_DIMENSIONS.map((d) => ({ value: d.id, label: `${d.name} (${d.id})` }))}
+                        className={inputCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Analysis dimension"
+                      />
+                    </InspectorRow>
+                  ) : (
+                    <InspectorRow label="Panel dimensions" hint="Which ledger dimension each of the ten slots uses.">
+                      <PanelSlotsEditor
+                        slots={field.external?.slots}
+                        onChange={(slots) => onUpdate({ external: { ...(field.external ?? { source: "analysis_codes" }), slots } })}
+                      />
+                    </InspectorRow>
+                  )}
+                </>
+              ) : (
+                <>
+                  <InspectorRow label="Multiple values">
+                    <input type="checkbox" checked={field.external?.multi ?? false}
+                      onChange={(e) => onUpdate({ external: { ...(field.external ?? { source: "items" }), multi: e.target.checked } })}
+                      className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
+                  </InspectorRow>
+                  {field.external?.source === "items" && (() => {
+                    const targets = allFields.filter((f) => f.id !== field.id && f.key && f.type !== "button");
+                    if (targets.length === 0) return null;
+                    return (
+                      <InspectorRow label="Auto-fill unit into" hint="When an item is picked, write its BaseItemUnit into this field.">
+                        <CustomListbox
+                          value={field.external?.fillField ?? ""}
+                          onChange={(val) => onUpdate({ external: { ...(field.external ?? { source: "items" }), fillField: val || undefined } })}
+                          options={[{ value: "", label: "— none —" }, ...targets.map((f) => ({ value: f.key, label: f.label || f.key }))]}
+                          className={inputCls}
+                          buttonClassName="w-full"
+                          ariaLabel="Auto-fill unit target"
+                        />
+                      </InspectorRow>
+                    );
+                  })()}
+                </>
+              )}
+            </>
+          )}
+          {isButton && (
+            <ButtonEditor field={field} onUpdate={onUpdate} allFields={allFields} />
+          )}
           {isTable && (
-            <InspectorRow label="Minimum rows shown">
-              <input type="number" min={1} max={20} value={field.minRows ?? 2}
-                onChange={(e) => onUpdate({ minRows: Number(e.target.value) })} className={inputCls} />
+            <>
+              <InspectorRow label="Table purpose" hint="Identifies the table in the requisition and retirement lifecycle.">
+                <CustomListbox
+                  value={field.workflowRole ?? ""}
+                  onChange={(value) => onUpdate({ workflowRole: (value || undefined) as TemplateField["workflowRole"] })}
+                  options={[
+                    { value: "", label: "General table" },
+                    { value: "requisition_lines", label: "Requisition lines" },
+                    { value: "rfq_required_lines", label: "General / Imprest lines" },
+                    { value: "retirement_expenses", label: "Retirement expenses" },
+                  ]}
+                  className={inputCls}
+                  buttonClassName="w-full"
+                  ariaLabel="Table purpose"
+                />
+              </InspectorRow>
+              {field.workflowRole === "rfq_required_lines" && (
+                <ImprestRequestConfigEditor
+                  field={field}
+                  siblingColumns={field.columns ?? []}
+                  onChange={(imprestRequest) => onUpdate({
+                    sunsystems: { ...(field.sunsystems ?? {}), imprestRequest },
+                  })}
+                />
+              )}
+              <InspectorRow label="Minimum rows shown">
+                <input type="number" min={1} max={20} value={field.minRows ?? 2}
+                  onChange={(e) => onUpdate({ minRows: Number(e.target.value) })} className={inputCls} />
+              </InspectorRow>
+            </>
+          )}
+          {field.type === "multi_file" && (
+            <InspectorRow label="Attachment purpose" hint="Use this field for supplier quotations and invoices received during RFQ.">
+              <CustomListbox
+                value={field.workflowRole === "rfq_supplier_attachments" ? field.workflowRole : ""}
+                onChange={(value) => onUpdate({ workflowRole: (value || undefined) as TemplateField["workflowRole"] })}
+                options={[
+                  { value: "", label: "General attachments" },
+                  { value: "rfq_supplier_attachments", label: "RFQ supplier responses" },
+                ]}
+                className={inputCls}
+                buttonClassName="w-full"
+                ariaLabel="Attachment purpose"
+              />
             </InspectorRow>
           )}
           {hasOptions && (
@@ -3500,6 +5139,64 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               <input type="number" min={2} max={10} value={field.max ?? 5}
                 onChange={(e) => onUpdate({ max: Math.max(2, Math.min(10, Number(e.target.value))) })} className={inputCls} />
             </InspectorRow>
+          )}
+          {field.type === "budget" && (
+            <>
+              {(() => {
+                // Collect all numeric fields: top-level fields + table columns
+                const tableColumns = allFields
+                  .filter(f => f.type === "table" && f.columns)
+                  .flatMap(f => f.columns?.map((col: TableColumn) => ({
+                    key: col.key,
+                    label: col.label,
+                    type: col.type,
+                  })) || []);
+                
+                const allNumericFields = [
+                  ...allFields.filter(f => f.key && (f.type === "number" || f.type === "currency" || CALCULATED_TYPES.has(f.type)))
+                    .map(f => ({ key: f.key, label: f.label || f.key })),
+                  ...tableColumns.filter(c => c.key && (c.type === "number" || c.type === "currency"))
+                    .map(c => ({ key: c.key, label: c.label || c.key })),
+                ];
+
+                return (
+                  <>
+                    <InspectorRow label="Budget amount field" hint="Which field holds the budget amount (fallback to default value if blank)">
+                      <CustomListbox
+                        value={field.sunsystems?.budgetAmountField ?? ""}
+                        onChange={(val) => onUpdate({ sunsystems: { ...(field.sunsystems ?? {}), budgetAmountField: val } })}
+                        options={[
+                          { value: "", label: "— use default value —" },
+                          ...allNumericFields.map(f => ({ value: f.key, label: f.label })),
+                        ]}
+                        className={inputCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Budget amount field"
+                      />
+                    </InspectorRow>
+                    <InspectorRow label="Default budget amount" hint="Fallback budget when budget field is blank or not set">
+                      <input className={inputCls} value={field.defaultValue ?? ""} onChange={(e) => onUpdate({ defaultValue: e.target.value })} placeholder="e.g. 100000" />
+                    </InspectorRow>
+                    <InspectorRow label="Amount field to monitor" hint="Which field's value to compare against the budget">
+                      <CustomListbox
+                        value={field.sunsystems?.monitoredAmountField ?? ""}
+                        onChange={(val) => onUpdate({ sunsystems: { ...(field.sunsystems ?? {}), monitoredAmountField: val } })}
+                        options={[
+                          { value: "", label: "— choose a field —" },
+                          ...allNumericFields.map(f => ({ value: f.key, label: f.label })),
+                        ]}
+                        className={inputCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Amount field to monitor"
+                      />
+                    </InspectorRow>
+                    <InspectorRow label="Account code" hint="The SunSystems account code for this budget">
+                      <input className={cn(inputCls, "font-mono")} value={field.sunsystems?.account ?? ""} onChange={(e) => onUpdate({ sunsystems: { ...(field.sunsystems ?? {}), account: e.target.value } })} placeholder="e.g. 37400" />
+                    </InspectorRow>
+                  </>
+                );
+              })()}
+            </>
           )}
           {isNumeric && (
             <NumberFormatEditor
@@ -3525,22 +5222,50 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           )}
           {(field.type === "reference" || field.type === "user") && (
             <InspectorRow label="Reference source">
-              <select className={inputCls} value={field.referenceSource ?? (field.type === "user" ? "users" : "documents")} onChange={(e) => onUpdate({ referenceSource: e.target.value })}>
-                {REFERENCE_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
+              <CustomListbox
+                value={field.referenceSource ?? (field.type === "user" ? "users" : "documents")}
+                onChange={(val) => onUpdate(
+                  val === "table"
+                    ? { referenceSource: val, referenceGroupId: undefined, tableRef: field.tableRef ?? { scope: "this_form", tableKey: "", mode: "embed", sync: "live" } }
+                    : { referenceSource: val, ...(val === "users" ? {} : { referenceGroupId: undefined }) },
+                )}
+                options={(field.type === "reference" ? FIELD_REFERENCE_SOURCE_OPTIONS : REFERENCE_SOURCE_OPTIONS).map((o) => ({ value: o.value, label: o.label }))}
+                className={inputCls}
+                buttonClassName="w-full"
+                ariaLabel="Reference source"
+              />
             </InspectorRow>
           )}
+          {(field.type === "reference" || field.type === "user") &&
+            (field.referenceSource ?? (field.type === "user" ? "users" : "documents")) === "users" && (
+              <InspectorRow label="Limit users to group" hint="Only active members of this group can be selected.">
+                <CustomListbox
+                  value={field.referenceGroupId ?? ""}
+                  onChange={(val) => onUpdate({ referenceGroupId: val || undefined })}
+                  options={[{ value: "", label: "All users" }, ...referenceGroups.map((group) => ({ value: group.id, label: group.name }))]}
+                  className={inputCls}
+                  buttonClassName="w-full"
+                  ariaLabel="Limit user choices to group"
+                />
+              </InspectorRow>
+            )}
+          {isTableRefField(field) && <TableRefEditor field={field} onUpdate={onUpdate} />}
           {FORMULA_FIELD_TYPES.has(field.type) && (
             <InspectorRow label="Auto-fill" hint="Fill this field automatically — the user won't type it.">
-              <select className={inputCls} value={field.formula ?? ""} onChange={(e) => onUpdate({ formula: e.target.value || undefined })}>
-                {FORMULA_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
+              <CustomListbox
+                value={field.formula ?? ""}
+                onChange={(val) => onUpdate({ formula: val || undefined })}
+                options={FORMULA_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+                className={inputCls}
+                buttonClassName="w-full"
+                ariaLabel="Auto-fill formula"
+              />
             </InspectorRow>
           )}
           {isCalculated && (
             <CalcFormulaEditor field={field} siblings={siblings} onUpdate={onUpdate} />
           )}
-          {!isLayout && (
+          {!isLayout && !isButton && (
             <FinanceBindingFields field={field} onUpdate={onUpdate} />
           )}
         </>
@@ -3548,12 +5273,16 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
 
       {tab === "advanced" && (
         <>
-          <InspectorRow label="Default value">
-            <input className={inputCls} value={field.defaultValue ?? ""} onChange={(e) => onUpdate({ defaultValue: e.target.value })} />
-          </InspectorRow>
-          <InspectorRow label="Regular expression" hint="Validation pattern, e.g. ^[A-Z0-9-]+$">
-            <input className={cn(inputCls, "font-mono")} value={field.regex ?? ""} onChange={(e) => onUpdate({ regex: e.target.value })} />
-          </InspectorRow>
+          {!isButton && (
+            <>
+              <InspectorRow label="Default value">
+                <input className={inputCls} value={field.defaultValue ?? ""} onChange={(e) => onUpdate({ defaultValue: e.target.value })} />
+              </InspectorRow>
+              <InspectorRow label="Regular expression" hint="Validation pattern, e.g. ^[A-Z0-9-]+$">
+                <input className={cn(inputCls, "font-mono")} value={field.regex ?? ""} onChange={(e) => onUpdate({ regex: e.target.value })} />
+              </InspectorRow>
+            </>
+          )}
           {isNumeric && (
             <div className="grid grid-cols-2 gap-3">
               <InspectorRow label="Min"><input type="number" className={inputCls} value={field.min ?? ""} onChange={(e) => onUpdate({ min: e.target.value === "" ? undefined : Number(e.target.value) })} /></InspectorRow>
@@ -3603,7 +5332,7 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
   section: TemplateSection;
   onUpdate: (patch: Partial<TemplateSection>) => void;
   allFields: TemplateField[];
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
   // A section rule can be driven by any field on the form (sections have no
   // siblings of their own), excluding fields that live in this same section —
@@ -3611,16 +5340,6 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
   const ownFieldIds = new Set(section.fields.map((f) => f.id));
   const sources = conditionSourcesFrom(allFields.filter((f) => f.key && !ownFieldIds.has(f.id)));
 
-  // RBAC groups for the "visible only to groups"mode.
-  const { data: groups = [] } = useQuery({
-    queryKey: ["groups", "list"],
-    queryFn: async () => {
-      const res = await groupsAPI.list();
-      const rows = (res.data?.results ?? res.data ?? []) as Array<{ id: string; name: string }>;
-      return rows.map((g) => ({ id: String(g.id), name: String(g.name) }));
-    },
-    staleTime: 60_000,
-  });
   return (
     <div className="space-y-4">
       <InspectorRow label="Section title">
@@ -3631,12 +5350,35 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
           onChange={(e) => onUpdate({ description: e.target.value })}
           className={inputCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
       </InspectorRow>
+      <div className="space-y-2.5 border border-[#C8CDD2] bg-white p-3">
+        <label className="flex cursor-pointer items-start gap-2.5 text-sm text-[#1F2933]">
+          <input type="checkbox" checked={!!section.onDemand}
+            onChange={(e) => onUpdate({ onDemand: e.target.checked, ...(e.target.checked ? {} : { removable: false }) })}
+            className="mt-0.5 h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
+          <span>
+            <span className="font-semibold">Add on demand</span>
+            <span className="block text-xs text-[#5E6870]">Not part of the form until a Button adds it — at the end of the form or wherever that button says.</span>
+          </span>
+        </label>
+        {section.onDemand && (
+          <label className="flex cursor-pointer items-center gap-2.5 pl-6 text-sm text-[#1F2933]">
+            <input type="checkbox" checked={!!section.removable} onChange={(e) => onUpdate({ removable: e.target.checked })}
+              className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
+            Let people remove it again
+          </label>
+        )}
+        {section.onDemand && !allFields.some((f) => f.type === "button" && f.button?.action === "add_block" && f.button.targetSectionId === section.id) && (
+          <p className="flex items-start gap-1.5 border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
+            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+            No button adds this section yet, so it will never appear. Drop a Button (Actions group) and point it here.
+          </p>
+        )}
+      </div>
       <VisibilityEditor
         value={section}
         sources={sources}
         onChange={onUpdate}
         subject="section"
-        groupOptions={groups}
         processSteps={processSteps}
       />
       <EditabilityEditor
@@ -3650,19 +5392,21 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
   );
 }
 
-function Inspector({ sections, selectedId, onUpdateField, onUpdateSection, onCollapse, processSteps }: {
+function Inspector({ sections, calcSections, selectedId, onUpdateField, onUpdateSection, onCollapse, processSteps }: {
   sections: TemplateSection[]; selectedId: string | null;
+  /* Same sections with linked tables resolved — what formulas/conditions can reference. */
+  calcSections?: TemplateSection[];
   onUpdateField: (sectionId: string, fieldId: string, patch: Partial<TemplateField>) => void;
   onUpdateSection: (sectionId: string, patch: Partial<TemplateSection>) => void;
   onCollapse: () => void;
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
   let target:
     | { kind: "field"; field: TemplateField; sectionId: string }
     | { kind: "section"; section: TemplateSection }
     | null = null;
 
-  const allFields: TemplateField[] = sections.flatMap((s) => s.fields);
+  const allFields: TemplateField[] = (calcSections ?? sections).flatMap((s) => s.fields);
 
   for (const s of sections) {
     if (s.id === selectedId) { target = { kind: "section", section: s }; break; }
@@ -3775,6 +5519,20 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
           <Link2 className="h-3 w-3 flex-shrink-0" />
         </div>
       );
+    case "external":
+      return (
+        <div className={cn(base, "flex items-center justify-between gap-1 text-muted-foreground")}>
+          <span className="truncate">Select {externalSourceLabel(col.external?.source, false)}…</span>
+          <Package className="h-3 w-3 flex-shrink-0" />
+        </div>
+      );
+    case "sunsystems_account":
+      return (
+        <div className={cn(base, "flex items-center justify-between gap-1 text-muted-foreground")}>
+          <span className="truncate">Select supplier from SunSystems…</span>
+          <Building2 className="h-3 w-3 flex-shrink-0" />
+        </div>
+      );
     case "file":
       return <input type="file" disabled={ro} className="text-xs" />;
     case "image":
@@ -3802,7 +5560,7 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
   }
 }
 
-function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddRow, onRemoveRow, values, allFields, previewStep }: {
+function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddRow, onRemoveRow, values, allFields, previewStep, previewGroups }: {
   field: TemplateField;
   readOnly?: boolean;
   rows: Record<string, string>[];
@@ -3812,6 +5570,7 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
   values: Record<string, unknown>;
   allFields: TemplateField[];
   previewStep: string;
+  previewGroups?: string[];
 }) {
   // Column rules use the same hidden/visibleWhen/readonly/editableWhen shape
   // as fields and sections, but they are resolved with the row's own cell
@@ -3821,8 +5580,8 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
   // row, so a cell can be locked on one row and editable on the next.
   const cols = (field.columns ?? []).filter((c) =>
     rows.length === 0
-      ? evalVisible(c, values, allFields, previewStep)
-      : rows.some((r) => evalVisible(c, rowScopedValues(values, r), allFields, previewStep)),
+      ? evalVisible(c, values, allFields, previewStep, previewGroups)
+      : rows.some((r) => evalVisible(c, rowScopedValues(values, r), allFields, previewStep, previewGroups)),
   );
 
 
@@ -3852,8 +5611,8 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
                 {cols.map((col) => {
                   const rowValues = rowScopedValues(values, row);
                   const colDisabled = readOnly
-                    || !evalVisible(col, rowValues, allFields, previewStep)
-                    || !evalEditable(col, rowValues, allFields, previewStep);
+                    || !evalVisible(col, rowValues, allFields, previewStep, previewGroups)
+                    || !evalEditable(col, rowValues, allFields, previewStep, previewGroups);
 
                   return (
                     <td key={col.id} className="px-3 py-2.5 border-r border-slate-300 last:border-0">
@@ -3885,19 +5644,45 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
 /* Evaluate one condition. In the builder preview there is no live document, so
  * the process step is treated as "draft" (the implicit start state). Field
  * values here are keyed by field id (react-hook-form register key). */
-function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, allFields: TemplateField[], processStep: string): boolean {
+function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, allFields: TemplateField[], processStep: string, userGroups?: string[]): boolean {
+  /* Group membership. `userGroups` = the viewer's group ids/names. With no
+   * viewer context (undefined) or no group picked, the condition doesn't restrict. */
+  if (c.source === "user_group") {
+    const wanted = c.groups ?? [];
+    if (wanted.length === 0 || userGroups === undefined) return true;
+    const mine = new Set(userGroups.map((g) => g.trim().toLowerCase()));
+    const member = wanted.some((g) => mine.has(g.id.toLowerCase()) || mine.has(g.name.trim().toLowerCase()));
+    return c.operator === "not_in_list" ? !member : member;
+  }
+  const target = (c.value ?? "").trim();
+  const targetLower = target.toLowerCase();
   let sv: string;
   if (c.source === "process_step") {
     sv = processStep;
+    const actual = sv.trim().toLowerCase();
+    const expected = targetLower;
+    const downstreamRequisitionApproved = new Set([
+      "request_approved", "lpo_pending", "lpo_approved", "retirement_pending",
+      "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved",
+    ]);
+    const downstreamLpoApproved = new Set([
+      "lpo_approved", "retirement_pending", "retirement_returned",
+      "retirement_rejected", "retirement_approved", "fully_approved",
+    ]);
+    const stepMatches = actual === expected
+      || (expected === "requisition_approved" && downstreamRequisitionApproved.has(actual))
+      || (expected === "lpo_approved" && downstreamLpoApproved.has(actual))
+      || (expected === "approved" && downstreamRequisitionApproved.has(actual))
+      || (expected === "retirement_approved" && actual === "fully_approved");
+    if (c.operator === "equals") return stepMatches;
+    if (c.operator === "not_equals") return !stepMatches;
   } else {
     const sib = allFields.find((f) => f.key === c.fieldKey);
     if (!sib) return true;
     const v = values[sib.id];
     sv = v == null ? "" : String(v);
   }
-  const target = (c.value ?? "").trim();
   const lower = sv.trim().toLowerCase();
-  const targetLower = target.toLowerCase();
   const num = parseFloat(sv);
   /* Dates compare correctly as ISO strings, so fall back to a string compare
    * whenever either side isn't numeric. */
@@ -3905,7 +5690,8 @@ function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, 
     const b = parseFloat(rhs);
     if (Number.isFinite(num) && Number.isFinite(b) && `${num}` === sv.trim()) return num - b;
     if (Number.isFinite(num) && Number.isFinite(b) && !/[^0-9.\-+eE]/.test(sv.trim())) return num - b;
-    return sv.trim().localeCompare(rhs);
+    const x = sv.trim(), y = rhs.trim();
+    return x > y ? 1 : x < y ? -1 : 0; // code-point order, same as the live form and server
   };
   const listValues = () => target.split(",").map((v) => v.trim().toLowerCase()).filter(Boolean);
   const rangeBounds = () => {
@@ -3946,29 +5732,29 @@ function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, 
 /* Evaluate a (possibly nested) rule group. Plain conditions and nested
  * groups are combined with the SAME combinator, so a group reads exactly
  * like its summary string. An empty group is "no restriction"= true. */
-function evalRuleGroup(group: RuleGroup | null | undefined, values: Record<string, unknown>, allFields: TemplateField[], processStep: string): boolean {
+function evalRuleGroup(group: RuleGroup | null | undefined, values: Record<string, unknown>, allFields: TemplateField[], processStep: string, userGroups?: string[]): boolean {
   if (!group) return true;
   const nested = (group.groups ?? []).filter(ruleGroupHasConditions);
   if (group.conditions.length === 0 && nested.length === 0) return true;
   const results = [
-    ...group.conditions.map((c) => evalCondition(c, values, allFields, processStep)),
-    ...nested.map((g) => evalRuleGroup(g, values, allFields, processStep)),
+    ...group.conditions.map((c) => evalCondition(c, values, allFields, processStep, userGroups)),
+    ...nested.map((g) => evalRuleGroup(g, values, allFields, processStep, userGroups)),
   ];
   return group.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
 }
 
 /* Visibility for a field OR a section (both carry `hidden` + `visibleWhen`).
  * An empty/absent rule group means no restriction (visible). */
-function evalVisible(item: VisibilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft"): boolean {
+function evalVisible(item: VisibilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft", userGroups?: string[]): boolean {
   if (item.hidden) return false;
-  return evalRuleGroup(item.visibleWhen, values, allFields, processStep);
+  return evalRuleGroup(item.visibleWhen, values, allFields, processStep, userGroups);
 }
 
 /* Editability mirror (both carry `readonly` + `editableWhen`). Absent group =
  * editable. The builder Preview evaluates at the "draft"process step. */
-function evalEditable(item: EditabilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft"): boolean {
+function evalEditable(item: EditabilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft", userGroups?: string[]): boolean {
   if (item.readonly) return false;
-  return evalRuleGroup(item.editableWhen, values, allFields, processStep);
+  return evalRuleGroup(item.editableWhen, values, allFields, processStep, userGroups);
 }
 
 /* ── Calculated fields ────────────────────────────────────────────────────
@@ -4078,6 +5864,12 @@ function addMonthsSerial(serial: CalcValue, months: CalcValue): number {
 /** Whole weekdays (Mon–Fri) between two day serials, inclusive of the start
  *  and exclusive of the end — the usual "working days"count. Bounded so a
  *  nonsense pair of dates can never spin. */
+/** Normalise a date-unit argument: "days"/"day"/"d" -> "d", "months"/"m" -> "m", "years"/"y" -> "y". */
+function dateUnit(u: CalcValue | undefined): "d" | "m" | "y" {
+  const c = calcText(u).trim().toLowerCase().charAt(0);
+  return c === "y" ? "y" : c === "m" ? "m" : "d";
+}
+
 function networkDays(a: CalcValue, b: CalcValue): number {
   let start = Math.round(toNumber(a));
   let end = Math.round(toNumber(b));
@@ -4105,7 +5897,7 @@ const CALC_FUNCS: Record<string, (...args: CalcValue[]) => CalcValue> = {
   CEILING: (a) => Math.ceil(toNumber(a)),
   FLOOR: (a) => Math.floor(toNumber(a)),
   INT: (a) => Math.trunc(toNumber(a)),
-  TRUNC: (a) => Math.trunc(toNumber(a)),
+  TRUNC: (a, n = 0) => { const f = Math.pow(10, Math.trunc(toNumber(n))); return Math.trunc(toNumber(a) * f) / f; },
   ABS: (a) => Math.abs(toNumber(a)),
   SIGN: (a) => Math.sign(toNumber(a)),
   SQRT: (a) => { const n = toNumber(a); return n < 0 ? 0 : Math.sqrt(n); },
@@ -4115,11 +5907,15 @@ const CALC_FUNCS: Record<string, (...args: CalcValue[]) => CalcValue> = {
   MAX: (...a) => (a.length ? Math.max(...a.map(toNumber)) : 0),
   AVERAGE: (...a) => (a.length ? a.reduce<number>((s, x) => s + toNumber(x), 0) / a.length : 0),
   SUMARGS: (...a) => a.reduce<number>((s, x) => s + toNumber(x), 0),
+  /** SUMALL(…) — the name the formula reference documents; same as SUMARGS. */
+  SUMALL: (...a) => a.reduce<number>((s, x) => s + toNumber(x), 0),
   CLAMP: (v, lo, hi) => Math.min(Math.max(toNumber(v), toNumber(lo)), toNumber(hi)),
   /** PERCENT(part, whole) → part as a percentage of whole (0 when whole is 0). */
   PERCENT: (part, whole) => { const w = toNumber(whole); return w === 0 ? 0 : (toNumber(part) / w) * 100; },
   /** VAT-style helpers: APPLYRATE(1000, 16) = 160, GROSS(1000, 16) = 1160. */
   APPLYRATE: (amount, ratePct) => (toNumber(amount) * toNumber(ratePct)) / 100,
+  /** PCT(n, percent) — percent% of n. Same as APPLYRATE, the name the formula reference documents. */
+  PCT: (n, pct) => (toNumber(n) * toNumber(pct)) / 100,
   GROSS: (amount, ratePct) => toNumber(amount) * (1 + toNumber(ratePct) / 100),
   NET: (gross, ratePct) => toNumber(gross) / (1 + toNumber(ratePct) / 100),
 
@@ -4185,6 +5981,13 @@ const CALC_FUNCS: Record<string, (...args: CalcValue[]) => CalcValue> = {
   DAYS: (end, start) => Math.round(toNumber(end) - toNumber(start)),
   NETWORKDAYS: (start, end) => networkDays(start, end),
   ADDDAYS: (s, n) => Math.round(toNumber(s)) + Math.trunc(toNumber(n)),
+  /** DATEADD(date, n, "days"|"months"|"years") — the form the formula reference documents. */
+  DATEADD: (s, n, unit = "d") => {
+    const u = dateUnit(unit);
+    if (u === "y") return addMonthsSerial(s, toNumber(n) * 12);
+    if (u === "m") return addMonthsSerial(s, n);
+    return Math.round(toNumber(s)) + Math.trunc(toNumber(n));
+  },
   ADDMONTHS: (s, n) => addMonthsSerial(s, n),
   ADDYEARS: (s, n) => addMonthsSerial(s, toNumber(n) * 12),
   /** Last day of the month `n` months from the given date. */
@@ -4195,7 +5998,7 @@ const CALC_FUNCS: Record<string, (...args: CalcValue[]) => CalcValue> = {
   /** DATEDIF(start, end, "d"|"m"|"y") — whole units between two dates. */
   DATEDIF: (start, end, unit = "d") => {
     const a = serialToDate(start), b = serialToDate(end);
-    const u = calcText(unit).toLowerCase();
+    const u = dateUnit(unit);
     if (u === "y") {
       let years = b.getUTCFullYear() - a.getUTCFullYear();
       if (b.getUTCMonth() < a.getUTCMonth() || (b.getUTCMonth() === a.getUTCMonth() && b.getUTCDate() < a.getUTCDate())) years -= 1;
@@ -4337,7 +6140,7 @@ class CalcParser {
       // > < >= <= compare numerically for numbers, lexically when BOTH sides
       // are text (so "Approved">"Draft"is meaningful for sorted status codes).
       if (typeof left === "string" && typeof right === "string") {
-        const c = left.localeCompare(right);
+        const c = left < right ? -1 : left > right ? 1 : 0; // code-point order, same as the server
         if (op.v === ">") return c > 0 ? 1 : 0;
         if (op.v === "<") return c < 0 ? 1 : 0;
         if (op.v === ">=") return c >= 0 ? 1 : 0;
@@ -4529,7 +6332,13 @@ function buildCalcScope(
   const scope: Record<string, CalcValue> = registry ? firstRowScopeEntries(registry) : {};
   for (const f of allFields) {
     if (!f.key) continue;
-    scope[f.key] = coerceScopeValue(f.type, values[f.id]);
+    const value = values[f.id];
+    // The designer preview may not have a live value yet. Match form defaults
+    // so formulas can use configured numeric defaults from the first render.
+    scope[f.key] = coerceScopeValue(
+      f.type,
+      value === undefined || value === null || value === "" ? f.defaultValue : value,
+    );
   }
   return scope;
 }
@@ -4590,15 +6399,17 @@ export interface TableCalcRegistryEntry {
 }
 
 /** Build the { bareColKey / "table.col": value } fallback entries derived
- *  from each table's FIRST row — see buildCalcScope's docstring. Bare keys
+ *  from each table's first populated cell — see buildCalcScope's docstring. Bare keys
  *  follow "first table wins"when more than one table has a same-named
  *  column; dotted keys are always unambiguous. */
 function firstRowScopeEntries(registry: Record<string, TableCalcRegistryEntry>): Record<string, CalcValue> {
   const scope: Record<string, CalcValue> = {};
   for (const [tableKey, entry] of Object.entries(registry)) {
-    const firstRow = entry.rows[0] ?? {};
     for (const [colKey, colType] of Object.entries(entry.colTypeByKey)) {
-      const value = coerceScopeValue(colType, firstRow[colKey]);
+      // A plain column reference means the first populated cell. This lets a
+      // top-level calculated field follow a selection made on any table row.
+      const raw = entry.rows.find((row) => row[colKey] !== undefined && row[colKey] !== null && row[colKey] !== "")?.[colKey];
+      const value = coerceScopeValue(colType, raw);
       if (!(colKey in scope)) scope[colKey] = value; // first table wins
       scope[`${tableKey}.${colKey}`] = value;
     }
@@ -4676,7 +6487,7 @@ function matchesCriteria(raw: string | undefined, criteria: string): boolean {
     if (op === "<") return a < b;
     return a <= b;
   }
-  const cmp = cell.localeCompare(rhs);
+  const cmp = cell < rhs ? -1 : cell > rhs ? 1 : 0; // code-point order, same as the server
   if (op === ">") return cmp > 0;
   if (op === ">=") return cmp >= 0;
   if (op === "<") return cmp < 0;
@@ -4842,7 +6653,7 @@ function formatCalcResult(fieldType: string | undefined, result: CalcValue): Cal
   return result;
 }
 
-function PreviewField({ field, register, errors, values, allFields, editable = true, tableRows, onUpdateTableCell, onAddTableRow, onRemoveTableRow, previewStep = "draft" }: {
+function PreviewField({ field, register, errors, values, allFields, editable = true, tableRows, onUpdateTableCell, onAddTableRow, onRemoveTableRow, previewStep = "draft", previewGroups, onButtonClick, buttonDone = false }: {
   field: TemplateField;
   register: UseFormRegister<Record<string, unknown>>;
   errors: FieldErrors<Record<string, unknown>>;
@@ -4854,10 +6665,28 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
   onAddTableRow?: (tableKey: string) => void;
   onRemoveTableRow?: (tableKey: string, rowIdx: number) => void;
   previewStep?: string;
+  previewGroups?: string[];
+  onButtonClick?: (field: TemplateField) => void;
+  buttonDone?: boolean;
 }) {
   if (field.hidden) return null;
   // Read-only when always-read-only or not editable at this (draft) step.
   const dis = Boolean(field.readonly) || !editable;
+  if (field.type === "button") {
+    const v = field.button?.variant ?? "primary";
+    return (
+      <button type="button" disabled={dis || buttonDone} onClick={() => onButtonClick?.(field)}
+        className={cn(
+          "inline-flex h-10 items-center gap-2 px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60",
+          v === "primary" ? "bg-[#287EAD] text-white hover:bg-[#1E6F99]"
+            : v === "secondary" ? "bg-slate-200 text-slate-800 hover:bg-slate-300"
+              : "border border-[#287EAD] bg-white text-[#287EAD] hover:bg-[#EEF6FB]",
+        )}>
+        {buttonDone ? <CheckCircle2 className="h-4 w-4" /> : field.button?.action === "calculate" ? <Calculator className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+        {buttonDone ? `${field.label} — added` : (field.label || "Button")}
+      </button>
+    );
+  }
   if (field.type === "table") {
     return (
       <PreviewTableField
@@ -4869,7 +6698,7 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
         onRemoveRow={(rowIdx) => onRemoveTableRow?.(field.key, rowIdx)}
         values={values}
         allFields={allFields}
-        previewStep={previewStep}
+        previewStep={previewStep} previewGroups={previewGroups}
       />
     );
   }
@@ -4982,7 +6811,31 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
       control = <input type="time" {...reg} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
       break;
     case "reference":
-    case "user":
+    case "user": {
+      const tr = field.type === "reference" && isTableRefField(field) ? field.tableRef : null;
+      if (tr && tr.mode === "row_picker") {
+        if (tr.scope === "this_form") {
+          // Live rows of the sibling table, labelled by the chosen column.
+          const opts = (tableRows?.[tr.tableKey] ?? [])
+            .map((r, i) => ({ i, label: String(r[tr.displayColumn ?? ""] ?? "") }))
+            .filter((o) => o.label.trim() !== "");
+          control = (
+            <select {...reg} disabled={dis} defaultValue="" className={previewInputCls}>
+              <option value="">{opts.length ? "Select a row…" : "No rows yet — fill the source table first"}</option>
+              {opts.map((o) => <option key={o.i} value={String(o.i)}>{`${o.i + 1}. ${o.label}`}</option>)}
+            </select>
+          );
+        } else {
+          // Rows of another form's table come from real documents at runtime.
+          control = (
+            <div className={cn(previewInputCls, "flex items-center justify-between gap-2 text-[#5E6870]")}>
+              <span className="truncate">Pick a row from {tr.templateName ?? "another form"} › {tr.tableLabel ?? tr.tableKey}…</span>
+              <Link2 className="h-3.5 w-3.5 flex-shrink-0" />
+            </div>
+          );
+        }
+        break;
+      }
       control = (
         <div className={cn(previewInputCls, "flex items-center justify-between gap-2 text-[#5E6870]")}>
           <span className="truncate">Pick {field.referenceSource ?? (field.type === "user" ? "user" : "record")}…</span>
@@ -4990,6 +6843,7 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
         </div>
       );
       break;
+    }
     case "file":
     case "image":
       control = (
@@ -5076,6 +6930,28 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
           className="block w-full text-sm text-slate-500 file:mr-3 file:rounded-none file:border-0 file:bg-[#287EAD] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#1E6F99]" />
       );
       break;
+    case "sunsystems_account":
+      control = (
+        <div className={cn(previewInputCls, "flex items-center justify-between gap-2 text-[#5E6870]")}>
+          <span className="truncate">Select supplier from SunSystems…</span>
+          <Building2 className="h-3.5 w-3.5 flex-shrink-0" />
+        </div>
+      );
+      break;
+    case "external":
+      control = (
+        <div className={cn(previewInputCls, "flex items-center justify-between gap-2 text-[#5E6870]")}>
+          <span className="truncate">
+            {field.external?.source === "analysis_codes" && field.external?.mode !== "single"
+              ? "10 analysis code slots…"
+              : field.external?.source === "analysis_codes"
+                ? `Select ${analysisDimensionName(field.external?.dimension)} code…`
+                : `Select ${externalSourceLabel(field.external?.source)} from SunSystems…`}
+          </span>
+          <Package className="h-3.5 w-3.5 flex-shrink-0" />
+        </div>
+      );
+      break;
     case "calc_text":
       control = <input type="text" {...reg} disabled className={cn(previewInputCls, "bg-slate-50 font-semibold text-slate-700")} />;
       break;
@@ -5095,13 +6971,47 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
 
 function Preview({ sections, templateName, processSteps }: {
   sections: TemplateSection[]; templateName: string;
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
-  const { register, handleSubmit, reset, watch, setValue, formState: { errors } } = useForm<Record<string, unknown>>();
+  const { register, handleSubmit, reset, watch, setValue, unregister, formState: { errors } } = useForm<Record<string, unknown>>();
   const [submitted, setSubmitted] = useState<Record<string, unknown> | null>(null);
   // Simulate the document being at a given workflow step, so process-step
   // visibility/editability rules can be exercised without a live document.
   const [previewStep, setPreviewStep] = useState("draft");
+  // Simulate the viewer's RBAC group membership, so "user group" rules can be exercised.
+  const rbacGroups = useRbacGroups();
+  const [previewGroupIds, setPreviewGroupIds] = useState<string[]>([]);
+  const previewGroups = rbacGroups.filter((g) => previewGroupIds.includes(g.id)).flatMap((g) => [g.id, g.name]);
+
+  // Group picker popover — a proper bordered control; closes on Escape or an
+  // outside click (a native <details> would stay open on Escape).
+  const [groupMenuOpen, setGroupMenuOpen] = useState(false);
+  const groupMenuRef = useRef<HTMLDivElement | null>(null);
+  const selectedGroupNames = rbacGroups.filter((g) => previewGroupIds.includes(g.id)).map((g) => g.name);
+  const groupSummary = selectedGroupNames.length === 0
+    ? "All groups"
+    : selectedGroupNames.length <= 2
+      ? selectedGroupNames.join(", ")
+      : `${selectedGroupNames.length} groups selected`;
+  useEffect(() => {
+    if (!groupMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); setGroupMenuOpen(false); }
+    };
+    const onDocClick = (e: MouseEvent) => {
+      if (!(e.target instanceof Node)) return;
+      if (groupMenuRef.current?.contains(e.target)) return;
+      setGroupMenuOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDocClick);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDocClick);
+    };
+  }, [groupMenuOpen]);
+  // On-demand sections a Button has added so far, in click order.
+  const [spawned, setSpawned] = useState<SpawnRecord[]>([]);
   const values = watch();
   const allFields = sections.flatMap((s) => s.fields);
   const tableFields = allFields.filter((f) => f.type === "table" && f.key);
@@ -5242,6 +7152,45 @@ function Preview({ sections, templateName, processSteps }: {
     }));
 
 
+  const freshRows = (f: TemplateField) => Array.from({ length: f.minRows ?? 2 }, () => {
+    const r: Record<string, string> = {};
+    (f.columns ?? []).forEach((c) => { if (c.defaultValue) r[c.key] = c.defaultValue; });
+    return r;
+  });
+
+  /* Button click. "add_block" appends the target on-demand section (at the end
+   * of the form, below the button's own section, or after a chosen one);
+   * "calculate" evaluates the formula once and writes it to the target field. */
+  const runButton = (btn: TemplateField, hostSectionId: string) => {
+    const b = btn.button;
+    if (!b) return;
+    if (b.action === "add_block") {
+      if (!b.targetSectionId || spawned.some((r) => r.sectionId === b.targetSectionId)) return;
+      const anchorId = b.placement === "below_button" ? hostSectionId : b.placement === "after_section" ? (b.anchorSectionId ?? "") : "";
+      setSpawned((prev) => [...prev, { sectionId: b.targetSectionId!, anchorId }]);
+      return;
+    }
+    const target = allFields.find((f) => f.key === b.targetKey);
+    if (!target || !b.calc?.expression) return;
+    const registry = buildTableCalcRegistry(tableFields, tableRows);
+    const scope = buildCalcScope(allFields, values, registry);
+    let result = evaluateCalcExpression(resolveRowAggregates(b.calc.expression, null, null, registry), scope);
+    if (typeof result === "number" && typeof b.calc.decimals === "number") result = Number(result.toFixed(b.calc.decimals));
+    setValue(target.id, result, { shouldDirty: true });
+  };
+
+  const removeSpawned = (sec: TemplateSection) => {
+    setSpawned((prev) => prev.filter((r) => r.sectionId !== sec.id));
+    sec.fields.forEach((f) => unregister(f.id));
+    setTableRows((prev) => {
+      const next = { ...prev };
+      sec.fields.filter((f) => f.type === "table").forEach((f) => { next[f.key] = freshRows(f); });
+      return next;
+    });
+  };
+
+  const ordered = orderSections(sections, spawned);
+
   if (submitted) {
     return (
       <div className="mx-auto max-w-4xl p-8">
@@ -5256,7 +7205,7 @@ function Preview({ sections, templateName, processSteps }: {
           <pre className="overflow-auto bg-slate-900 p-5 text-xs text-emerald-400 font-mono leading-relaxed">
             {JSON.stringify(submitted, null, 2)}
           </pre>
-          <button type="button" onClick={() => { setSubmitted(null); reset(); }}
+          <button type="button" onClick={() => { setSubmitted(null); setSpawned([]); reset(); }}
             className="mt-5 inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
             <RotateCcw className="h-4 w-4" /> Test again
           </button>
@@ -5273,17 +7222,67 @@ function Preview({ sections, templateName, processSteps }: {
             <h1 className="text-2xl font-bold text-slate-900">{templateName}</h1>
             <p className="mt-1 text-sm text-slate-500">Fill out the form below to preview how end users will experience this template.</p>
           </div>
-          <label className="flex flex-shrink-0 flex-col gap-1 text-right">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Preview as step</span>
-            <select value={previewStep} onChange={(e) => setPreviewStep(e.target.value)}
-              className="h-9 min-w-[180px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] outline-none focus:border-[#287EAD]">
-              {stepOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </label>
+          <div className="flex flex-shrink-0 items-start gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Preview as step</span>
+              <CustomListbox
+                value={previewStep}
+                onChange={(val) => setPreviewStep(val)}
+                options={processStepOptions(stepOptions)}
+                className="min-w-[180px]"
+                buttonClassName="w-full h-9 rounded-md border border-[#C8CDD2] bg-white px-3 text-sm font-medium text-[#1F2933] shadow-sm transition-colors hover:border-[#287EAD] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#287EAD]/30"
+                ariaLabel="Preview as step"
+              />
+            </label>
+
+            <div ref={groupMenuRef} className="relative flex flex-col gap-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Preview as group</span>
+              <button
+                type="button"
+                onClick={() => setGroupMenuOpen((v) => !v)}
+                aria-haspopup="true"
+                aria-expanded={groupMenuOpen}
+                className={cn(
+                  "inline-flex h-9 min-w-[200px] items-center justify-between gap-2 rounded-md border bg-white px-3 text-sm font-medium text-[#1F2933] shadow-sm transition-colors",
+                  groupMenuOpen
+                    ? "border-[#287EAD] ring-2 ring-[#287EAD]/30"
+                    : "border-[#C8CDD2] hover:border-[#287EAD]",
+                )}
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <Layers className="h-4 w-4 shrink-0 text-[#287EAD]" />
+                  <span className="truncate">{groupSummary}</span>
+                </span>
+                <ChevronDown className={cn("h-4 w-4 shrink-0 opacity-60 transition-transform", groupMenuOpen && "rotate-180")} />
+              </button>
+              {groupMenuOpen && (
+                <div className="absolute right-0 top-full z-20 mt-1 max-h-56 min-w-[240px] overflow-y-auto rounded-md border border-[#C8CDD2] bg-white py-1 shadow-lg">
+                  <div className="flex items-center justify-between border-b border-slate-100 px-3 py-1.5">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Viewer groups</span>
+                    {previewGroupIds.length > 0 && (
+                      <button type="button" onClick={() => setPreviewGroupIds([])}
+                        className="text-[10px] font-semibold text-[#287EAD] hover:underline">
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  {rbacGroups.length === 0 && <p className="px-3 py-2 text-xs text-slate-500">No groups defined.</p>}
+                  {rbacGroups.map((g) => (
+                    <label key={g.id} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-[#EEF6FB]">
+                      <input type="checkbox" className="h-4 w-4 accent-[#287EAD]" checked={previewGroupIds.includes(g.id)}
+                        onChange={() => setPreviewGroupIds((p) => p.includes(g.id) ? p.filter((x) => x !== g.id) : [...p, g.id])} />
+                      <span className="truncate text-[#1F2933]">{g.name}</span>
+                    </label>
+                  ))}
+                  <p className="border-t border-slate-100 px-3 py-1.5 text-[10px] text-slate-400">Press Esc to close</p>
+                </div>
+              )}
+            </div>
+          </div>
         </header>
-        {sections.map((s) => {
-          if (!evalVisible(s, values, allFields, previewStep)) return null;
-          const sectionEditable = evalEditable(s, values, allFields, previewStep);
+        {ordered.map((s) => {
+          if (!evalVisible(s, values, allFields, previewStep, previewGroups)) return null;
+          const sectionEditable = evalEditable(s, values, allFields, previewStep, previewGroups);
           return (
             <section key={s.id} className="border border-slate-300 bg-white p-6 shadow-sm">
               <div className="mb-5 pb-4 border-b border-slate-200">
@@ -5292,19 +7291,27 @@ function Preview({ sections, templateName, processSteps }: {
                   {!sectionEditable && (
                     <span className="inline-flex items-center gap-1 bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">read-only</span>
                   )}
+                  {s.onDemand && s.removable && (
+                    <button type="button" onClick={() => removeSpawned(s)}
+                      className="ml-auto inline-flex items-center gap-1 text-xs font-semibold text-slate-500 hover:text-red-600">
+                      <Trash2 className="h-3.5 w-3.5" /> Remove
+                    </button>
+                  )}
                 </h2>
                 {s.description && <p className="mt-0.5 text-sm text-slate-500">{s.description}</p>}
               </div>
               <div className="grid grid-cols-12 gap-4">
                 {s.fields.map((f) => {
-                  if (!evalVisible(f, values, allFields, previewStep)) return null;
+                  if (!evalVisible(f, values, allFields, previewStep, previewGroups)) return null;
                   return (
                     <div key={f.id} className="min-w-0" style={{ gridColumn: `span ${f.colSpan ?? 12} / span ${f.colSpan ?? 12}` }}>
                       <PreviewField field={f} register={register} errors={errors} values={values} allFields={allFields}
-                        editable={sectionEditable && evalEditable(f, values, allFields, previewStep)}
+                        editable={sectionEditable && evalEditable(f, values, allFields, previewStep, previewGroups)}
                         tableRows={tableRows} onUpdateTableCell={updateTableCell}
                         onAddTableRow={addTableRow} onRemoveTableRow={removeTableRow}
-                        previewStep={previewStep} />
+                        previewStep={previewStep} previewGroups={previewGroups}
+                        onButtonClick={(btn) => runButton(btn, s.id)}
+                        buttonDone={f.button?.action === "add_block" && spawned.some((r) => r.sectionId === f.button?.targetSectionId)} />
                     </div>
                   );
                 })}
@@ -5313,7 +7320,7 @@ function Preview({ sections, templateName, processSteps }: {
           );
         })}
         <div className="flex items-center justify-end gap-3 pt-2">
-          <button type="button" onClick={() => reset()}
+          <button type="button" onClick={() => { reset(); setSpawned([]); }}
             className="inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
             <RotateCcw className="h-4 w-4" /> Reset
           </button>
@@ -5335,7 +7342,7 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
   template: Template;
   onCommit: (patch: Partial<Template>) => void;
   documentTypes: Array<{ id: string; name: string; code: string }>;
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
   const [tagInput, setTagInput] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -5355,86 +7362,243 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
     "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
     "placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
 
+  const [settingsPane, setSettingsPane] = useState<"procurement" | "finance">("procurement");
+
   return (
-    <div className="mx-auto max-w-4xl space-y-5 p-8">
-      <div className="border border-[#C8CDD2] bg-white shadow-sm">
-        <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-          <h2 className="text-sm font-bold text-[#1F2933]">Template metadata</h2>
-          <p className="text-xs text-[#5E6870] mt-0.5">Used for search, organisation, and document filing.</p>
-        </div>
-        <div className="space-y-4 p-5">
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Name</label>
-            <input value={template.name} onChange={(e) => onCommit({ name: e.target.value })} className={iCls} />
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Description</label>
-            <textarea value={template.description ?? ""} rows={3}
-              onChange={(e) => onCommit({ description: e.target.value })}
-              className={iCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document type <span className="text-red-400 normal-case font-normal">*</span></label>
-            <div className="flex gap-2">
-              <select value={template.document_type_id ?? ""} onChange={(e) => onCommit({ document_type_id: e.target.value })}
-                className={cn(iCls, "flex-1")}>
-                <option value="">Select document type</option>
-                {documentTypes.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}
-              </select>
-              <button type="button" onClick={() => setShowCreate(true)} title="Create new document type"
-                className="h-9 px-3 border border-[#AEB5BB] bg-white text-[#5E6870] hover:text-[#287EAD] hover:border-[#287EAD]/60 hover:bg-[#EEF6FB] transition-all flex items-center gap-1.5 text-xs font-semibold whitespace-nowrap">
-                <Plus className="h-3.5 w-3.5" /> New type
-              </button>
+    <div className="mx-auto max-w-6xl p-6">
+      <div className="grid grid-cols-[1fr_1.6fr] gap-5 items-start">
+
+        {/* ── LEFT COLUMN: metadata + stats ── */}
+        <div className="space-y-4">
+          <div className="border border-[#C8CDD2] bg-white shadow-sm">
+            <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+              <h2 className="text-sm font-bold text-[#1F2933]">Template metadata</h2>
+              <p className="text-xs text-[#5E6870] mt-0.5">Search, organisation, and document filing.</p>
             </div>
-            {showCreate && (
-              <CreateDocTypeQuickModal
-                onClose={() => setShowCreate(false)}
-                onCreated={(type) => { onCommit({ document_type_id: type.id }); setShowCreate(false); }}
-              />
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Tags</label>
-            <div className="flex gap-2">
-              <input value={tagInput} onChange={(e) => setTagInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addTag())}
-                placeholder="Add tag and press Enter"
-                className={cn(iCls, "flex-1")} />
-              <button onClick={addTag} className="h-9 px-3 bg-[#287EAD] text-white text-sm font-semibold hover:bg-[#1E6F99]">
-                <Plus className="h-4 w-4" />
-              </button>
-            </div>
-            {(template.tags ?? []).length > 0 && (
-              <div className="flex flex-wrap gap-2 mt-2">
-                {(template.tags ?? []).map((tag) => (
-                  <span key={tag} className="flex items-center gap-1.5 px-2.5 py-1 bg-[#EEF6FB] text-[#287EAD] text-xs font-semibold border border-[#287EAD]/20">
-                    <Tag className="h-2.5 w-2.5" />{tag}
-                    <button onClick={() => removeTag(tag)} className="text-[#287EAD]/60 hover:text-[#287EAD] ml-0.5"><Minus className="h-2.5 w-2.5" /></button>
-                  </span>
-                ))}
+            <div className="space-y-4 p-5">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Name</label>
+                <input value={template.name} onChange={(e) => onCommit({ name: e.target.value })} className={iCls} />
               </div>
-            )}
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Description</label>
+                <textarea value={template.description ?? ""} rows={3}
+                  onChange={(e) => onCommit({ description: e.target.value })}
+                  className={iCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document type <span className="text-red-400 normal-case font-normal">*</span></label>
+                <div className="flex gap-2">
+                  <CustomListbox
+                    value={template.document_type_id ?? ""}
+                    onChange={(val) => onCommit({ document_type_id: val })}
+                    options={[{ value: "", label: "Select document type" }, ...documentTypes.map((type) => ({ value: type.id, label: type.name }))]}
+                    className={cn(iCls, "flex-1")}
+                    buttonClassName="w-full"
+                    ariaLabel="Document type"
+                  />
+                  <button type="button" onClick={() => setShowCreate(true)} title="Create new document type"
+                    className="h-9 px-3 border border-[#AEB5BB] bg-white text-[#5E6870] hover:text-[#287EAD] hover:border-[#287EAD]/60 hover:bg-[#EEF6FB] transition-all flex items-center gap-1.5 text-xs font-semibold whitespace-nowrap">
+                    <Plus className="h-3.5 w-3.5" /> New type
+                  </button>
+                </div>
+                {showCreate && (
+                  <CreateDocTypeQuickModal
+                    onClose={() => setShowCreate(false)}
+                    onCreated={(type) => { onCommit({ document_type_id: type.id }); setShowCreate(false); }}
+                  />
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Workflow type</label>
+                <CustomListbox
+                  value={template.workflow_type ?? "requisition"}
+                  onChange={(val) => onCommit({ workflow_type: val as "imprest" | "requisition" })}
+                  options={[
+                    { value: "imprest", label: "Imprest (Request → Retirement)" },
+                    { value: "requisition", label: "Requisition → RFQ → LPO" },
+                  ]}
+                  className={iCls}
+                  buttonClassName="w-full"
+                  ariaLabel="Workflow type"
+                />
+                <p className="text-[10px] text-[#8C969E] mt-1">
+                  Determines which workflow stages and process steps are available for visibility conditions.
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Tags</label>
+                <div className="flex gap-2">
+                  <input value={tagInput} onChange={(e) => setTagInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addTag())}
+                    placeholder="Add tag and press Enter"
+                    className={cn(iCls, "flex-1")} />
+                  <button onClick={addTag} className="h-9 px-3 bg-[#287EAD] text-white text-sm font-semibold hover:bg-[#1E6F99]">
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </div>
+                {(template.tags ?? []).length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {(template.tags ?? []).map((tag) => (
+                      <span key={tag} className="flex items-center gap-1.5 px-2.5 py-1 bg-[#EEF6FB] text-[#287EAD] text-xs font-semibold border border-[#287EAD]/20">
+                        <Tag className="h-2.5 w-2.5" />{tag}
+                        <button onClick={() => removeTag(tag)} className="text-[#287EAD]/60 hover:text-[#287EAD] ml-0.5"><Minus className="h-2.5 w-2.5" /></button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Stats strip */}
+          <div className="border border-[#C8CDD2] bg-white shadow-sm">
+            <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+              <h2 className="text-sm font-bold text-[#1F2933]">Template summary</h2>
+            </div>
+            <div className="grid grid-cols-3 divide-x divide-[#C8CDD2]">
+              {[
+                { label: "Sections", value: template.sections.length, isText: false },
+                { label: "Fields",   value: fieldCount,                isText: false },
+                { label: "Doc type", value: documentTypes.find((type) => type.id === template.document_type_id)?.code ?? "—", isText: true },
+              ].map((s) => (
+                <div key={s.label} className="overflow-hidden px-3 py-4 text-center">
+                  <div className={s.isText
+                    ? "truncate text-xs font-bold text-[#287EAD] uppercase tracking-wide"
+                    : "text-2xl font-bold text-[#287EAD]"
+                  } title={String(s.value)}>{s.value}</div>
+                  <div className="text-xs text-[#5E6870] mt-0.5 font-medium">{s.label}</div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
-      </div>
-      <div className="border border-[#C8CDD2] bg-white shadow-sm">
-        <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-          <h2 className="text-sm font-bold text-[#1F2933]">Template summary</h2>
-        </div>
-        <div className="grid grid-cols-3 divide-x divide-[#C8CDD2]">
-          {[
-            { label: "Sections", value: template.sections.length },
-            { label: "Fields", value: fieldCount },
-            { label: "Document type", value: documentTypes.find((type) => type.id === template.document_type_id)?.code ?? "—" },
-          ].map((s) => (
-            <div key={s.label} className="px-5 py-4 text-center">
-              <div className="text-2xl font-bold text-[#287EAD]">{s.value}</div>
-              <div className="text-xs text-[#5E6870] mt-0.5 font-medium">{s.label}</div>
+
+        {/* ── RIGHT COLUMN: sub-tabbed config panels ── */}
+        <div className="border border-[#C8CDD2] bg-white shadow-sm">
+          {/* sub-tab bar */}
+          <div className="flex border-b border-[#C8CDD2] bg-[#F3F5F6]">
+            {(["procurement", "finance"] as const).map((pane) => (
+              <button
+                key={pane}
+                type="button"
+                onClick={() => setSettingsPane(pane)}
+                className={cn(
+                  "px-5 py-3 text-xs font-semibold capitalize border-b-2 transition-colors",
+                  settingsPane === pane
+                    ? "border-[#287EAD] text-[#287EAD] bg-white"
+                    : "border-transparent text-[#5E6870] hover:text-[#1F2933] hover:bg-[#EAEDF0]",
+                )}
+              >
+                {pane === "procurement" ? "Procurement" : "Finance / SunSystems"}
+              </button>
+            ))}
+          </div>
+
+          {/* Procurement pane */}
+          {settingsPane === "procurement" && (
+            <div className="space-y-5 p-5">
+              {template.workflow_type === "requisition" ? (
+                <>
+                  <div className="space-y-4">
+                    <div>
+                      <p className="text-sm font-semibold text-[#1F2933]">Requisition type &amp; procurement stages</p>
+                      <p className="text-xs text-[#5E6870] mt-0.5">Choose whether requisitions go through supplier quotations before LPO approval.</p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Requisition type</label>
+                      <CustomListbox
+                        value={template.requisition_category ?? "standard"}
+                        onChange={(value) => onCommit({ requisition_category: value as "standard" | "travel" })}
+                        options={[
+                          { value: "standard", label: "Standard requisition" },
+                          { value: "travel",   label: "Travel requisition" },
+                        ]}
+                        className={iCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Requisition type"
+                      />
+                      <p className="text-[10px] text-[#8C969E]">This type is set on the template; requesters do not choose it in the form.</p>
+                    </div>
+                    <label className="flex cursor-pointer items-start gap-3 text-sm text-[#1F2933]">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(template.skip_rfq)}
+                        onChange={(event) => onCommit({ skip_rfq: event.target.checked })}
+                        className="mt-0.5 h-4 w-4 accent-[#287EAD]"
+                      />
+                      <span>
+                        <span className="block font-semibold">Skip RFQ stage</span>
+                        <span className="mt-0.5 block text-xs text-[#5E6870]">
+                          Enable for direct requisitions such as Travel. Leave off when Finance must request and compare supplier quotations.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className="border-t border-[#EEF0F2] pt-5 space-y-4">
+                    <div>
+                      <p className="text-sm font-semibold text-[#1F2933]">Travel retirement</p>
+                      <p className="mt-0.5 text-xs text-[#5E6870]">After LPO approval, open a retirement stage and enforce the travel policy deadline.</p>
+                    </div>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-[#1F2933]">
+                      <input type="checkbox" checked={Boolean(template.travel_retirement?.enabled)}
+                        onChange={(e) => onCommit({ travel_retirement: {
+                          ...(template.travel_retirement ?? {}), enabled: e.target.checked,
+                        } })}
+                        className="h-4 w-4 accent-[#287EAD]" />
+                      Enable travel retirement after LPO approval
+                    </label>
+                    {template.travel_retirement?.enabled && (
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Travel return date field</label>
+                          <CustomListbox
+                            value={template.travel_retirement.returnDateField ?? ""}
+                            onChange={(val) => onCommit({ travel_retirement: { ...template.travel_retirement, returnDateField: val } })}
+                            options={[
+                              { value: "", label: "Select a date field" },
+                              ...template.sections.flatMap((section) => section.fields ?? [])
+                                .filter((field) => field.key && (field.type === "date" || field.type === "datetime"))
+                                .map((field) => ({ value: field.key, label: `${field.label || field.key} (${field.key})` })),
+                            ]}
+                            className={iCls}
+                            buttonClassName="w-full"
+                            ariaLabel="Travel return date field"
+                          />
+                          <p className="text-[10px] text-[#8C969E]">The deadline is calculated from this field's date.</p>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Days after return</label>
+                          <input type="number" min={0} step={1} className={iCls}
+                            value={template.travel_retirement.deadlineDays ?? 7}
+                            onChange={(e) => onCommit({ travel_retirement: {
+                              ...template.travel_retirement,
+                              deadlineDays: Math.max(0, Math.floor(Number(e.target.value) || 0)),
+                            } })} />
+                          <p className="text-[10px] text-[#8C969E]">An overdue, unsubmitted retirement blocks the traveller from submitting another travel requisition.</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-12 text-center text-sm text-[#8C969E] gap-2">
+                  <Settings className="h-8 w-8 text-[#C8CDD2]" />
+                  <p className="font-medium text-[#5E6870]">No procurement settings</p>
+                  <p className="text-xs max-w-xs">Switch the workflow type to <strong>Requisition</strong> in the metadata panel to configure procurement stages.</p>
+                </div>
+              )}
             </div>
-          ))}
+          )}
+
+          {/* Finance pane — delegates to FinanceSettingsCard */}
+          {settingsPane === "finance" && (
+            <FinanceSettingsCard template={template} onCommit={onCommit} iCls={iCls} processSteps={processSteps} embedded />
+          )}
         </div>
+
       </div>
-      <FinanceSettingsCard template={template} onCommit={onCommit} iCls={iCls} processSteps={processSteps} />
     </div>
   );
 }
@@ -5443,11 +7607,12 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
  * analysis) are set visually in the field inspector; this card holds the
  * connection-level constants (business unit, journal type, …) and the on/off
  * toggles, and previews what the bindings will compile into. */
-function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
+function FinanceSettingsCard({ template, onCommit, iCls, processSteps, embedded = false }: {
   template: Template;
   onCommit: (patch: Partial<Template>) => void;
   iCls: string;
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
+  embedded?: boolean;
 }) {
   const ss = template.sunsystems ?? {};
   const ui: SunSystemsUi = ss.ui ?? {};
@@ -5467,7 +7632,26 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
   const journalFieldLines = fields.filter((f) => f.type !== "table" && isJournalLineSource(f)).length;
   const journalTableLines = fields.filter((f) => f.type === "table" && isJournalLineSource(f)).length;
   const postingKind = ui.postingKind ?? "journal";
+  const legacyPostingMode = ui.ledgerJournalEnabled === undefined && ui.purchaseOrderEnabled === undefined;
+  const ledgerJournalEnabled = legacyPostingMode
+    ? Boolean(ui.journalEnabled && postingKind === "journal")
+    : Boolean(ui.ledgerJournalEnabled);
+  const purchaseOrderEnabled = legacyPostingMode
+    ? Boolean(ui.journalEnabled && postingKind === "purchase_order")
+    : Boolean(ui.purchaseOrderEnabled);
   const purchaseAmountLabel = roleLabel("journal_amount");
+  const poNumberLabel = roleLabel("po_number");
+  const poSupplierLabel = roleLabel("supplier_code");
+  const poLineTables = fields.filter(
+    (f) => f.type === "table" && f.workflowRole !== "retirement_expenses" && f.workflowRole !== "rfq_required_lines" && (f.columns ?? []).some((c) =>
+      ["line_amount", "item_code", "quantity", "unit_price"].includes(c.sunsystems?.role ?? "")),
+  );
+  const analysisPanelField = fields.find(
+    (f) => f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode !== "single",
+  );
+  const analysisSlots = Array.isArray(analysisPanelField?.external?.slots) && analysisPanelField!.external!.slots!.length === 10
+    ? analysisPanelField!.external!.slots!
+    : ANALYSIS_PANEL_SLOTS;
   const stageOptions = processSteps.some((s) => s.value === "approved")
     ? processSteps
     : [...processSteps, { value: "approved", label: "Approved" }];
@@ -5509,11 +7693,13 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
   );
 
   return (
-    <div className="border border-[#C8CDD2] bg-white shadow-sm">
-      <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-        <h2 className="text-sm font-bold text-[#1F2933]">Infor SunSystems</h2>
-        <p className="text-xs text-[#5E6870] mt-0.5">Budget checks while filling, and journal posting on approval. Bind individual fields in the field inspector.</p>
-      </div>
+    <div className={embedded ? "" : "border border-[#C8CDD2] bg-white shadow-sm"}>
+      {!embedded && (
+        <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+          <h2 className="text-sm font-bold text-[#1F2933]">Infor SunSystems</h2>
+          <p className="text-xs text-[#5E6870] mt-0.5">Budget checks while filling, and journal posting on approval. Bind individual fields in the field inspector.</p>
+        </div>
+      )}
       <div className="space-y-5 p-5">
         {/* Budget check */}
         <div className="flex items-center justify-between">
@@ -5531,30 +7717,54 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
             </div>
             <div className="space-y-1.5">
               <span className={label}>When over budget at submit</span>
-              <select className={iCls} value={ui.budgetMode ?? "warn"} onChange={(e) => setUi({ budgetMode: e.target.value as "warn" | "block" })}>
-                <option value="warn">Warn only</option>
-                <option value="block">Block submission</option>
-              </select>
+              <CustomListbox
+                value={ui.budgetMode ?? "warn"}
+                onChange={(val) => setUi({ budgetMode: val as "warn" | "block" })}
+                options={[
+                  { value: "warn", label: "Warn only" },
+                  { value: "block", label: "Block submission" },
+                ]}
+                className={iCls}
+                buttonClassName="w-full"
+                ariaLabel="Budget mode"
+              />
             </div>
           </div>
         )}
 
-        {/* Journal posting */}
+        {/* Posting profiles are independently enabled so an LPO can be
+            generated from requisition lines while a retirement journal is
+            configured separately. */}
         <div className="flex items-center justify-between border-t border-[#EEF0F2] pt-4">
           <div>
             <p className="text-sm font-semibold text-[#1F2933]">Journal posting</p>
-            <p className="text-xs text-[#5E6870]">Post a ledger journal to SunSystems on final approval.</p>
+            <p className="text-xs text-[#5E6870]">Configure a ledger journal profile for the workflow.</p>
           </div>
-          <Toggle on={!!ui.journalEnabled} onClick={() => setUi({ journalEnabled: !ui.journalEnabled })} />
+          <Toggle on={ledgerJournalEnabled} onClick={() => setUi({ ledgerJournalEnabled: !ledgerJournalEnabled })} />
         </div>
-        {ui.journalEnabled && (
+        <div className="flex items-center justify-between border-t border-[#EEF0F2] pt-4">
+          <div>
+            <p className="text-sm font-semibold text-[#1F2933]">Purchase order / LPO</p>
+            <p className="text-xs text-[#5E6870]">Build the LPO from requisition table lines.</p>
+          </div>
+          <Toggle on={purchaseOrderEnabled} onClick={() => setUi({ purchaseOrderEnabled: !purchaseOrderEnabled })} />
+        </div>
+        {(ledgerJournalEnabled || purchaseOrderEnabled) && (
           <div className="space-y-3 border-l-2 border-[#287EAD]/30 pl-4">
             <div className="space-y-1.5">
-              <span className={label}>Posting type</span>
-              <select className={iCls} value={postingKind} onChange={(e) => setUi({ postingKind: e.target.value as "journal" | "purchase_order" })}>
-                <option value="journal">Ledger journal</option>
-                <option value="purchase_order">Purchase order / LPO</option>
-              </select>
+              <span className={label}>Profile to configure</span>
+              <CustomListbox
+                value={postingKind}
+                onChange={(val) => setUi({ postingKind: val as "journal" | "purchase_order" })}
+                options={[
+                  { value: "journal", label: "Ledger journal" },
+                  { value: "purchase_order", label: "Purchase order / LPO" },
+                ]}
+                className={iCls}
+                buttonClassName="w-full"
+                ariaLabel="Posting type"
+              />
+              <p className="text-[10px] text-[#8C969E]">The two profiles are saved separately. Select one here to edit its connection defaults and view its field bindings.</p>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5"><span className={label}>Business unit</span>
@@ -5572,10 +7782,15 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 <>
                   <div className="space-y-1.5"><span className={label}>Supplier code</span>
                     <input className={cn(iCls, "font-mono")} value={ui.supplierCode ?? "81105"} onChange={(e) => setUi({ supplierCode: e.target.value })} placeholder="81105" /></div>
-                  <div className="space-y-1.5"><span className={label}>Transaction type</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.purchaseTransactionType ?? "ASSETS"} onChange={(e) => setUi({ purchaseTransactionType: e.target.value })} placeholder="ASSETS" /></div>
+                  <div className="space-y-1.5"><span className={label}>Purchase transaction type</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.purchaseTransactionType ?? ""} onChange={(e) => setUi({ purchaseTransactionType: e.target.value })} placeholder="SunSystems purchase type / definition code" />
+                    <p className="text-[10px] text-[#8C969E]">Your SunSystems response says a reference definition is required. Product Group is a line value; this is the header purchase type.</p></div>
                   <div className="space-y-1.5"><span className={label}>Invoice address</span>
                     <input className={cn(iCls, "font-mono")} value={ui.invoiceAddressCode ?? "0000000000"} onChange={(e) => setUi({ invoiceAddressCode: e.target.value })} placeholder="0000000000" /></div>
+                  <div className="space-y-1.5"><span className={label}>PO number (fixed)</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.poNumberConst ?? ""} onChange={(e) => setUi({ poNumberConst: e.target.value })} placeholder="auto: generated LPO no." /></div>
+                  <div className="space-y-1.5"><span className={label}>Comment</span>
+                    <input className={iCls} value={ui.poComment ?? ""} onChange={(e) => setUi({ poComment: e.target.value })} placeholder="e.g. Purchase of Cabinets" /></div>
                   <div className="space-y-1.5"><span className={label}>Item code</span>
                     <input className={cn(iCls, "font-mono")} value={ui.itemCode ?? "ITM29"} onChange={(e) => setUi({ itemCode: e.target.value })} placeholder="ITM29" /></div>
                   <div className="space-y-1.5"><span className={label}>Account code</span>
@@ -5588,10 +7803,6 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                     <input className={cn(iCls, "font-mono")} value={ui.quantity ?? ""} onChange={(e) => setUi({ quantity: e.target.value })} placeholder="1 (default)" /></div>
                   <div className="space-y-1.5"><span className={label}>Unit price</span>
                     <input className={cn(iCls, "font-mono")} value={ui.unitPrice ?? ""} onChange={(e) => setUi({ unitPrice: e.target.value })} placeholder="= total amount (default)" /></div>
-                  <div className="space-y-1.5"><span className={label}>VLAB base # (qty label)</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.vlabBase ?? ""} onChange={(e) => setUi({ vlabBase: e.target.value })} placeholder="1 (default)" /></div>
-                  <div className="space-y-1.5"><span className={label}>VLAB trans # (amount label)</span>
-                    <input className={cn(iCls, "font-mono")} value={ui.vlabTrans ?? ""} onChange={(e) => setUi({ vlabTrans: e.target.value })} placeholder="2 (default)" /></div>
                 </>
               )}
             </div>
@@ -5602,6 +7813,34 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
               <div><span className={label}>Description</span><div className="mt-1 text-[#1F2933]">{roleLabel("description")}</div></div>
               {postingKind === "purchase_order" && <div><span className={label}>Amount</span><div className="mt-1 text-[#1F2933]">{purchaseAmountLabel}</div></div>}
             </div>
+            {postingKind === "purchase_order" && (
+              <div className="space-y-2 border border-[#E1E5E8] bg-[#F8FAFB] p-3 text-xs">
+                <div>
+                  <span className={label}>PO lines</span>
+                  <div className="mt-1 text-[#1F2933]">
+                    {poLineTables.length
+                      ? poLineTables.map((t) => t.label || t.key).join(", ")
+                      : <span className="text-amber-600">No line table — tag a table column as Line amount / Quantity / Unit price.</span>}
+                  </div>
+                </div>
+                <div>
+                  <span className={label}>Supplier source</span>
+                  <div className="mt-1 text-[#1F2933]">{poSupplierLabel !== "—" ? poSupplierLabel : (ui.supplierCode || "81105 (constant)")}</div>
+                </div>
+                <div>
+                  <span className={label}>PO number source</span>
+                  <div className="mt-1 text-[#1F2933]">{poNumberLabel !== "—" ? poNumberLabel : (ui.poNumberConst || "generated LPO number")}</div>
+                </div>
+                <div>
+                  <span className={label}>Analysis 1–10</span>
+                  <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[#1F2933]">
+                    {analysisSlots.map((dim, idx) => (
+                      <div key={`${dim}-${idx}`}>{idx + 1}. {analysisDimensionName(dim)} <span className="font-mono text-[10px] text-[#5E6870]">{dim}</span></div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
             {postingKind === "journal" && (
               <>
                 <div className="space-y-2">
@@ -5637,13 +7876,14 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                           </div>
                           <div className="space-y-1">
                             <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Post when workflow status becomes</span>
-                            <select
-                              className={iCls}
+                            <CustomListbox
                               value={stage.postOn ?? "approved"}
-                              onChange={(e) => updateStage(index, { postOn: e.target.value })}
-                            >
-                              {stageOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-                            </select>
+                              onChange={(val) => updateStage(index, { postOn: val })}
+                              options={stageOptions.map((s) => ({ value: s.value, label: s.label }))}
+                              className={iCls}
+                              buttonClassName="w-full"
+                              ariaLabel="Post when workflow status becomes"
+                            />
                           </div>
                           <button
                             type="button"
@@ -5704,12 +7944,12 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 </>
               ) : (
                 <>
-                  LPO amount binding: <b className="text-[#1F2933]">{purchaseAmountLabel}</b>.
-                  {purchaseAmountLabel === "—" && <span className="text-amber-600"> Bind one amount field as Journal line amount.</span>}
+                  LPO lines from tables: <b className="text-[#1F2933]">{poLineTables.length}</b> table block{poLineTables.length !== 1 ? "s" : ""}.
+                  {poLineTables.length === 0 && <span className="text-amber-600"> Tag a table column as Line amount, or Quantity + Unit price.</span>}
                 </>
               )}
             </div>
-            {(postingKind === "purchase_order" ? purchaseAmountLabel !== "—" : journalFieldLines + journalTableLines > 0) && (
+            {(postingKind === "purchase_order" ? poLineTables.length > 0 : journalFieldLines + journalTableLines > 0) && (
               <button
                 type="button"
                 onClick={() => setShowXml(true)}
@@ -5746,6 +7986,9 @@ export interface TemplateBuilderV2Props {
   onCancel: () => void;
   isSaving?: boolean;
   documentTypes?: Array<{ id: string; name: string; code: string }>;
+  /* Lets table references point at OTHER forms. Omit it and "Another form"
+   * is disabled in the reference editor (this-form references still work). */
+  externalTemplates?: ExternalTemplateSource;
 }
 
 /* Propagate a field/column KEY rename to every place in the template that
@@ -5790,8 +8033,13 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
     editableWhen: renameGroup(c.editableWhen),
     calc: renameCalc(c.calc),
     currencyFromColumn: c.currencyFromColumn === oldKey ? newKey : c.currencyFromColumn,
-    sunsystems: c.sunsystems?.retirement?.issuedAmountField === oldKey
-      ? { ...c.sunsystems, retirement: { ...c.sunsystems.retirement, issuedAmountField: newKey } }
+    sunsystems: c.sunsystems
+      ? {
+        ...c.sunsystems,
+        ...(c.sunsystems.retirement?.issuedAmountField === oldKey
+          ? { retirement: { ...c.sunsystems.retirement, issuedAmountField: newKey } }
+          : {}),
+      }
       : c.sunsystems,
   });
   const renameField = (f: TemplateField): TemplateField => ({
@@ -5800,7 +8048,24 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
     editableWhen: renameGroup(f.editableWhen),
     calc: renameCalc(f.calc),
     currencyFromField: f.currencyFromField === oldKey ? newKey : f.currencyFromField,
+    sunsystems: f.sunsystems && (f.sunsystems.budgetAmountField === oldKey || f.sunsystems.monitoredAmountField === oldKey)
+      ? {
+        ...f.sunsystems,
+        budgetAmountField: f.sunsystems.budgetAmountField === oldKey ? newKey : f.sunsystems.budgetAmountField,
+        monitoredAmountField: f.sunsystems.monitoredAmountField === oldKey ? newKey : f.sunsystems.monitoredAmountField,
+      }
+      : f.sunsystems,
     columns: f.columns ? f.columns.map(renameColumn) : f.columns,
+    button: f.button
+      ? { ...f.button, targetKey: f.button.targetKey === oldKey ? newKey : f.button.targetKey, calc: renameCalc(f.button.calc) }
+      : f.button,
+    tableRef: f.tableRef && f.tableRef.scope === "this_form"
+      ? {
+        ...f.tableRef,
+        tableKey: f.tableRef.tableKey === oldKey ? newKey : f.tableRef.tableKey,
+        displayColumn: f.tableRef.displayColumn === oldKey ? newKey : f.tableRef.displayColumn,
+      }
+      : f.tableRef,
   });
 
   return {
@@ -5814,7 +8079,8 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
   };
 }
 
-export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving, documentTypes = [] }: TemplateBuilderV2Props) {
+export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving, documentTypes = [], externalTemplates }: TemplateBuilderV2Props) {
+  const normalizedDocumentTypes = normalizeListResponse<NonNullable<TemplateBuilderV2Props["documentTypes"]>[number]>(documentTypes);
   // History + cursor live in ONE state so they can never desync. (A previous
   // split — setHistory using a stale `cursor` from a drag listener's closure
   // while setCursor incremented functionally — let `cursor` outrun the stack
@@ -5845,13 +8111,76 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
   // Workflow process steps for this template's document type — drives the
   // "process step"visibility conditions in the inspector.
   const { data: processSteps = [] } = useQuery({
-    queryKey: ["workflow-process-steps", template?.document_type_id ?? ""],
+    queryKey: ["workflow-process-steps", template?.document_type_id ?? "", template?.workflow_type ?? "requisition"],
     queryFn: async () => {
-      const { data } = await workflowAPI.processSteps(template?.document_type_id);
-      return (data ?? []) as { value: string; label: string }[];
+      const { data } = await workflowAPI.processSteps(template?.document_type_id, template?.workflow_type ?? "requisition");
+      return (data ?? []) as ProcessStepOption[];
     },
     staleTime: 60_000,
   });
+
+  /* ── Cross-form table references ─────────────────────────────────────────
+   * Load the picker list, then every form this template links to (and, one
+   * level further, the forms THOSE link to — so chained references resolve).
+   * Everything downstream reads the result through BuilderEnv or `linked`. */
+  const { data: summaries = [], isLoading: summariesLoading } = useQuery({
+    queryKey: ["tb-external-templates"],
+    queryFn: async () => (externalTemplates ? await externalTemplates.list() : []),
+    enabled: !!externalTemplates,
+    staleTime: 60_000,
+  });
+  const collectExternalIds = (secs: TemplateSection[]) => {
+    const ids = new Set<string>();
+    for (const sec of secs) for (const f of sec.fields ?? []) {
+      if (isTableRefField(f) && f.tableRef?.scope === "other_form" && f.tableRef.templateId) ids.add(f.tableRef.templateId);
+    }
+    return [...ids].sort();
+  };
+  const ids1 = useMemo(() => collectExternalIds(template.sections), [template]);
+  const q1 = useQueries({
+    queries: ids1.map((id) => ({
+      queryKey: ["tb-external-template", id],
+      queryFn: async () => normalizeTemplate(await externalTemplates!.get(id)),
+      enabled: !!externalTemplates,
+      staleTime: 60_000,
+    })),
+  });
+  const ext1 = useMemo<Record<string, Template | undefined>>(() => {
+    const m: Record<string, Template | undefined> = {};
+    ids1.forEach((id, i) => { m[id] = q1[i]?.data as Template | undefined; });
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ids1.join(","), q1.map((r) => r.dataUpdatedAt).join(",")]);
+  const ids2 = useMemo<string[]>(
+    () => [...new Set(Object.values(ext1).flatMap((t) => (t ? collectExternalIds(t.sections) : [])))].filter((id) => !ids1.includes(id)).sort(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ext1],
+  );
+  const q2 = useQueries({
+    queries: ids2.map((id) => ({
+      queryKey: ["tb-external-template", id],
+      queryFn: async () => normalizeTemplate(await externalTemplates!.get(id)),
+      enabled: !!externalTemplates,
+      staleTime: 60_000,
+    })),
+  });
+  const external = useMemo<Record<string, Template | undefined>>(() => {
+    const m: Record<string, Template | undefined> = { ...ext1 };
+    ids2.forEach((id, i) => { m[id] = q2[i]?.data as Template | undefined; });
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ext1, ids2.join(","), q2.map((r) => r.dataUpdatedAt).join(",")]);
+  const loadingIds = useMemo(
+    () => new Set<string>([...ids1.filter((_, i) => q1[i]?.isLoading), ...ids2.filter((_, i) => q2[i]?.isLoading)]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ids1.join(","), ids2.join(","), q1.map((r) => r.status).join(","), q2.map((r) => r.status).join(",")],
+  );
+  const builderEnv = useMemo<BuilderEnvValue>(() => ({
+    template, summaries, summariesLoading, external, loadingIds, canLinkExternal: !!externalTemplates,
+  }), [template, summaries, summariesLoading, external, loadingIds, externalTemplates]);
+  /* Embedded table references resolved into plain tables — what the Preview
+   * renders and what formulas can see. The raw template stays untouched. */
+  const linked = useMemo(() => materializeTableRefs(template, external, loadingIds), [template, external, loadingIds]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -6113,6 +8442,45 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
         return;
       }
     }
+    // Buttons, on-demand sections and table references: catch the
+    // half-configured states that would otherwise fail silently at runtime.
+    for (const sec of template.sections) {
+      for (const f of sec.fields) {
+        if (f.type === "button") {
+          const b = f.button;
+          if (!b) { toast.error(`Button "${f.label}" isn't configured.`); return; }
+          if (b.action === "add_block") {
+            const target = template.sections.find((x) => x.id === b.targetSectionId);
+            if (!target) { toast.error(`Button "${f.label}" has no section to add.`); return; }
+            if (!target.onDemand) { toast.error(`Button "${f.label}" adds "${target.title}", which isn't marked "Add on demand".`); return; }
+            if (target.id === sec.id) { toast.error(`Button "${f.label}" sits inside the section it adds, so nobody could ever click it.`); return; }
+            if (b.placement === "after_section" && !template.sections.some((x) => x.id === b.anchorSectionId && !x.onDemand)) {
+              toast.error(`Button "${f.label}" is set to add after a section, but none is selected.`); return;
+            }
+          } else {
+            if (!b.targetKey || !allFields.some((x) => x.key === b.targetKey)) { toast.error(`Button "${f.label}" has no target field to calculate into.`); return; }
+            if (!b.calc?.expression?.trim()) { toast.error(`Button "${f.label}" has no formula.`); return; }
+          }
+        }
+        if (isTableRefField(f)) {
+          const r = f.tableRef;
+          if (!r || !r.tableKey) { toast.error(`"${f.label}" references a table, but none is selected.`); return; }
+          if (r.mode === "row_picker" && !r.displayColumn) { toast.error(`"${f.label}": choose which column labels the rows.`); return; }
+          if (r.mode === "embed") {
+            const res = linked.resolved[f.id];
+            if (res?.status === "loading") { toast.error(`"${f.label}": the linked form is still loading — try again in a moment.`); return; }
+            if (res?.status === "cycle") { toast.error(`"${f.label}" is a circular table reference.`); return; }
+            if (!res || res.columns.length === 0) { toast.error(`"${f.label}": the linked table couldn't be found or has no columns.`); return; }
+            if (res.status === "stale") toast.warning(`"${f.label}": the source form is unavailable, so the last saved layout was kept.`);
+          }
+        }
+      }
+    }
+    for (const sec of template.sections) {
+      if (sec.onDemand && !allFields.some((f) => f.type === "button" && f.button?.action === "add_block" && f.button.targetSectionId === sec.id)) {
+        toast.warning(`Section "${sec.title}" is "Add on demand" but no button adds it — it will never appear.`);
+      }
+    }
     // Retirement is easy to half-configure (enable it, build out the
     // scenarios, then forget to actually pick the issued-amount field). That
     // doesn't fail the build server-side — it just silently treats issued as
@@ -6132,7 +8500,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
       setTab("settings");
       return;
     }
-    onSave(outputTemplate(template, Boolean(initial?.id)), false);
+    onSave(outputTemplate(template, Boolean(initial?.id), linked.resolved), false);
   };
 
   /* AutoSave: debounce on commit when enabled (skip initial mount). */
@@ -6147,7 +8515,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
       if (!template.document_type_id) return; // silent skip until configured
       const keys = template.sections.flatMap((s) => s.fields).map((f) => f.key);
       if (keys.length !== new Set(keys).size) return;
-      onSave(outputTemplate(template, Boolean(initial?.id)), true);
+      onSave(outputTemplate(template, Boolean(initial?.id), linked.resolved), true);
       setLastAutoSavedAt(Date.now());
     }, 1200);
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
@@ -6159,10 +8527,11 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
     const sec = template.sections.find((s) => s.id === configuringColumn.sectionId);
     const fld = sec?.fields.find((f) => f.id === configuringColumn.fieldId);
     const col = fld?.columns?.find((c) => c.id === configuringColumn.colId);
-    return col ? { ...configuringColumn, column: col, columns: fld?.columns ?? [] } : null;
+    return col ? { ...configuringColumn, column: col, columns: fld?.columns ?? [], tableField: fld } : null;
   }, [configuringColumn, template]);
 
   return (
+    <BuilderEnv.Provider value={builderEnv}>
     <div
       className={cn(
         "fixed inset-0 z-50 flex h-screen w-full flex-col overflow-hidden transition-all duration-200",
@@ -6300,6 +8669,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
               <div className={cn("shrink-0 overflow-hidden transition-all duration-200", inspectorOpen ? "w-[400px]" : "w-0")}>
                 <Inspector
                   sections={template.sections}
+                  calcSections={linked.sections}
                   selectedId={selectedId}
                   onUpdateField={updateField}
                   onUpdateSection={updateSection}
@@ -6311,12 +8681,12 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
           )}
           {tab === "preview" && (
             <main key="preview" className="flex-1 overflow-y-auto bg-slate-100 animate-in fade-in duration-150">
-              <Preview sections={template.sections} templateName={template.name} processSteps={processSteps} />
+              <Preview sections={linked.sections} templateName={template.name} processSteps={processSteps} />
             </main>
           )}
           {tab === "settings" && (
             <main key="settings" className="flex-1 overflow-y-auto bg-slate-100 animate-in fade-in duration-150">
-              <SettingsTab template={template} documentTypes={documentTypes}
+              <SettingsTab template={template} documentTypes={normalizedDocumentTypes}
                 processSteps={processSteps}
                 onCommit={(patch) => commit({ ...template, ...patch })} />
             </main>
@@ -6328,7 +8698,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
         }}>
           {dragType ? (
             <div className="flex items-center gap-2 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white shadow-xl">
-              {(() => { const Icon = ICONS[dragType]; return <Icon className="h-4 w-4" />; })()}
+              {(() => { const Icon = ICONS[dragType] ?? Type; return <Icon className="h-4 w-4" />; })()}
               {FIELD_META[dragType].label}
             </div>
           ) : null}
@@ -6340,6 +8710,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
         <ColumnConfigModal
           column={configCol.column}
           siblingColumns={configCol.columns}
+          tableField={configCol.tableField}
           formFields={template.sections.flatMap((s) => s.fields).filter((f) => f.key && f.type !== "table")}
           processSteps={processSteps}
           onClose={() => setConfiguringColumn(null)}
@@ -6374,5 +8745,6 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
       />
 
     </div>
+    </BuilderEnv.Provider>
   );
 }

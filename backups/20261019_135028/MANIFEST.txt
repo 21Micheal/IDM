@@ -1,0 +1,24 @@
+created_utc : 2026-10-19T10:50:32Z
+host        : mouse
+project_dir : /home/michael/Projects/IDM
+compose     : docker-compose.procurement.yml docker-compose.procurement.postgres.yml
+volumes     : idm_media_files
+
+Contents:
+  database.dump      : 6.8M
+  media_files.tar.gz : 21M
+
+Restore:
+  # 1. bring up postgres
+  docker compose -f docker-compose.procurement.yml -f docker-compose.procurement.postgres.yml up -d postgres
+
+  # 2. restore the dump
+  cat database.dump | docker compose exec -T postgres \
+    pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists
+
+  # 3. (optional) restore media files to the volume
+  docker run --rm -v idm_media_files:/dest -v .:/backup alpine \
+    tar -xzf /backup/media_files.tar.gz -C /dest
+
+  # 4. restart the full stack
+  docker compose -f docker-compose.procurement.yml -f docker-compose.procurement.postgres.yml up -d

@@ -17,12 +17,12 @@
  * turns out to matter for forms too, say so and it can be ported over.
  */
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState, useMemo } from "react";
 import { extractApiError } from "@/lib/apiError";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useNavigate, useLocation, useSearchParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
-import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import TemplateForm, { hasVisibleEditableSection, hasVisibleRetirementEditSection, requiredFieldLabels } from "@/components/templates/TemplateForm";
 import BudgetBanner from "@/components/templates/BudgetBanner";
 import JournalPostingCard from "@/components/templates/JournalPostingCard";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
@@ -35,34 +35,33 @@ import { format } from "date-fns";
 import {
   ArrowLeft, Send, Loader2, Edit2, Info, FileCode, Eye, EyeOff, Check, X, Save,
   MessageSquare, Download, AlertTriangle, ShieldCheck, PanelRightOpen, PanelRightClose,
-  TrendingUp, TrendingDown, CheckCircle2,
+  TrendingUp, TrendingDown, CheckCircle2, Printer,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
 import { cn } from "@/lib/utils";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import SignaturePlacementModal, {
+  FormTargetField,
+  SignaturePlacementResult,
+} from "@/components/signatures/SignaturePlacementModal";
+import InvoiceAttachmentsPanel from "@/components/templates/InvoiceAttachmentsPanel";
+import LpoPdfPreview from "@/components/documents/LpoPdfPreview";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 const AUDIT_PAGE_SIZE = 5;
 
-function formHasConditionalEditability(sections?: unknown[]): boolean {
-  const list = Array.isArray(sections) ? sections : [];
-  return list.some((section: any) => {
-    if (section?.editableWhen) return true;
-    return Array.isArray(section?.fields) && section.fields.some((field: any) => Boolean(field?.editableWhen));
-  });
-}
-
 function isApprovalLockedStatus(status?: string): boolean {
-  return ["pending_approval", "request_pending", "retirement_pending", "on_hold"].includes(status || "");
+  return ["pending_approval", "request_pending", "retirement_pending", "requisition_pending", "rfq_pending", "lpo_pending", "on_hold"].includes(status || "");
 }
 
 function isWorkflowActiveOrCompleted(status?: string): boolean {
-  return isApprovalLockedStatus(status) || ["approved", "request_approved", "fully_approved"].includes(status || "");
+  return isApprovalLockedStatus(status) || ["approved", "request_approved", "requisition_approved", "rfq_approved", "lpo_approved", "retirement_approved", "fully_approved"].includes(status || "");
 }
 
 function isFinalFormProcessStep(step?: string): boolean {
-  return ["fully_approved", "retirement_rejected"].includes(step || "");
+  return ["retirement_approved", "fully_approved", "retirement_rejected", "requisition_rejected", "rfq_rejected", "lpo_rejected"].includes(step || "");
 }
 
 function formatBytes(b: number) {
@@ -87,7 +86,7 @@ function getCommandStatusLabel(status: string) {
 
 function getCommandStatusClass(status: string) {
   const key = status?.toLowerCase?.().replace(/\s+/g, "_") ?? "";
-  if (["approved", "active", "enabled", "completed", "request_approved", "fully_approved"].includes(key)) {
+  if (["approved", "active", "enabled", "completed", "request_approved", "requisition_approved", "rfq_approved", "fully_approved"].includes(key)) {
     return "border-emerald-200 bg-emerald-50 text-emerald-800";
   }
   if (["pending_review", "pending_approval", "on_hold", "returned", "request_pending", "retirement_pending"].includes(key)) {
@@ -119,6 +118,7 @@ type TabId = "workflow" | "details" | "history" | "comments" | "audit";
 export default function FormDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const qc = useQueryClient();
   const user = useAuthStore((s) => s.user);
 
@@ -130,7 +130,21 @@ export default function FormDetailPage() {
   const [showJournalXml, setShowJournalXml] = useState(false);
   const [comment, setComment] = useState("");
   const [auditPage, setAuditPage] = useState(1);
-  const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
+  const navigationState = location.state as {
+    workflowActionCompleted?: boolean;
+    awaitLpo?: boolean;
+  } | null;
+  const [workflowActionCompleted, setWorkflowActionCompleted] = useState(
+    Boolean(navigationState?.workflowActionCompleted && !navigationState?.awaitLpo),
+  );
+  const [awaitingLpo, setAwaitingLpo] = useState(
+    Boolean(navigationState?.awaitLpo),
+  );
+  const [isSigningOpen, setIsSigningOpen] = useState(false);
+  const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  const taskPanelRef = useRef<HTMLDivElement>(null);
+
   // Required fields that failed the last save/submit attempt. Kept in state
   // (not just a toast) so a long list stays on screen while it's being fixed.
   const [missingFields, setMissingFields] = useState<string[]>([]);
@@ -151,25 +165,65 @@ export default function FormDetailPage() {
     queryFn: () => documentsAPI.get(id!).then((r) => r.data),
     enabled: !!id,
     ...QUERY_SHORT_STALE,
-    refetchInterval: 8_000,
+    refetchInterval: awaitingLpo ? 1_000 : 8_000,
   });
 
   const formData = (doc?.metadata as Record<string, any> | undefined)?.form as
-    | { sections?: unknown[]; values?: Record<string, unknown> }
+    | {
+        sections?: unknown[];
+        values?: Record<string, unknown>;
+        lpo_document_id?: string;
+        lpo_reference?: string;
+        lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string }>;
+      }
     | undefined;
+  const generatedLpos = formData?.lpo_documents?.length
+    ? formData.lpo_documents
+    : formData?.lpo_document_id
+      ? [{ id: formData.lpo_document_id, reference: formData.lpo_reference }]
+      : [];
+  const [selectedLpoId, setSelectedLpoId] = useState<string | null>(
+    (location.state as { selectedLpoId?: string } | null)?.selectedLpoId ?? null,
+  );
+  const selectedLpo = generatedLpos.find((lpo) => lpo.id === selectedLpoId) || generatedLpos[0];
+  const generatedLpoId = selectedLpo?.id;
+  const generatedLpoReference = selectedLpo?.reference || formData?.lpo_reference;
+  const lpoSetKey = generatedLpos.map((lpo) => lpo.id).join(",");
+  const [lpoModalOpen, setLpoModalOpen] = useState(false);
+  const [lpoMinimized, setLpoMinimized] = useState(false);
+
+  useEffect(() => {
+    if (!generatedLpos.length) return;
+    setAwaitingLpo(false);
+    if (!generatedLpos.some((lpo) => lpo.id === selectedLpoId)) setSelectedLpoId(generatedLpos[0].id);
+    setLpoModalOpen(true);
+    setLpoMinimized(false);
+    setWorkflowActionCompleted(false);
+  }, [lpoSetKey]);
+
+  const lpoPdfQuery = useQuery({
+    queryKey: ["lpo-pdf", generatedLpoId],
+    queryFn: () => documentsAPI.previewUrl(generatedLpoId!).then((r) => r.data),
+    enabled: Boolean(generatedLpoId),
+    refetchInterval: (query) => query.state.data?.viewer === "processing" ? 1_500 : false,
+  });
+  const lpoDocumentQuery = useQuery({
+    queryKey: ["generated-lpo-document", generatedLpoId],
+    queryFn: () => documentsAPI.get(generatedLpoId!).then((r) => r.data),
+    enabled: Boolean(generatedLpoId),
+  });
+  const lpoPdfUrl = lpoPdfQuery.data?.viewer === "pdfjs" ? lpoPdfQuery.data.url : null;
 
   useEffect(() => {
     if (!doc) return;
-    const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
     const hasAdminAccess = Boolean(user?.has_admin_access);
     const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
-    const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
     const formProcessStep = doc.builder_process_step || doc.status;
-    const isRequestApproved = formProcessStep === "request_approved" || (!doc.builder_process_step && doc.status === "approved");
-    const canEditForm = canEdit
-      && !isApprovalLockedStatus(formProcessStep)
-      && !isFinalFormProcessStep(formProcessStep)
-      && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
+    const viewer = {
+      groupNames: user?.group_names ?? [],
+      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      canEditConditionalSections: canEdit,
+    };
 
     // Always sync form values from the server to get attachment descriptors
     // This ensures images show correctly after submission (storage_path instead of filename)
@@ -177,15 +231,22 @@ export default function FormDetailPage() {
       setFormValues({ ...(formData?.values ?? {}) });
     }
 
-    // Auto-enter edit mode when form has conditional editability and user is at a stage
-    // where conditional editing should be allowed (request_approved for retirement, etc.)
-    if (!formEditing && hasConditionalEditability && (isRequestApproved || canEditForm)) {
+    // Post-approval edits are driven by the form's visible/editable rules for
+    // this viewer. The page-level Edit form action is only for drafts.
+    const hasConfiguredEditableSection = hasVisibleEditableSection(
+      formData?.sections ?? [],
+      formData?.values ?? {},
+      formProcessStep,
+      viewer,
+    );
+    const isEditableApprovalStep = ["request_approved", "requisition_approved", "rfq_approved", "lpo_approved", "retirement_approved"].includes(formProcessStep);
+    if (!formEditing && canEdit && isEditableApprovalStep && !isFinalFormProcessStep(formProcessStep) && hasConfiguredEditableSection) {
       setFormValues({ ...(formData?.values ?? {}) });
       formDirtyRef.current = false;
       setFormEditing(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc, user]);
+  }, [doc, user, formData?.sections, formData?.values]);
 
   const { data: myTasks } = useQuery({
     queryKey: ["workflow", "my-tasks"],
@@ -194,6 +255,31 @@ export default function FormDetailPage() {
     ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
+
+  // When the page is opened via an email notification link (?task=<id>),
+  // scroll the action panel into view once the approver's task has loaded.
+  useEffect(() => {
+    if (!searchParams.get("task") || !activeTask) return;
+    const el = taskPanelRef.current;
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "end" });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTask]);
+
+  // Approval tasks can arrive after the document query. Enter edit mode when
+  // the reviewer's active task resolves; TemplateForm still enforces each
+  // section/field's own visibility and editability rules.
+  useEffect(() => {
+    if (!doc || formEditing || activeTask?.status !== "in_progress") return;
+    if (isFinalFormProcessStep(doc.builder_process_step || doc.status)) return;
+    const permissions = doc.permissions ?? [];
+    const hasEditPermission = Boolean(user?.has_admin_access)
+      || permissions.includes("edit")
+      || permissions.includes("approve");
+    if (!hasEditPermission) return;
+    setFormValues({ ...(formData?.values ?? {}) });
+    formDirtyRef.current = false;
+    setFormEditing(true);
+  }, [doc, activeTask, formEditing, formData?.values, user?.has_admin_access]);
 
   const { data: workflowData, isLoading: workflowDataLoading } = useQuery({
     queryKey: ["form-workflow", id],
@@ -204,6 +290,26 @@ export default function FormDetailPage() {
   });
   const workflowStepsCount = workflowData?.steps?.length ?? 0;
 
+  // Inspect template schema for signature and date fields
+  const detectedFormFields: FormTargetField[] = useMemo(() => {
+    const list: FormTargetField[] = [];
+    const secList = (formData?.sections ?? []) as Array<{ fields?: Array<Record<string, any>> }>;
+    for (const s of secList) {
+      for (const f of s.fields ?? []) {
+        const k = f.key ?? f.id;
+        const label = f.label || k;
+        if (/signature|sign|sig/i.test(k) || f.type === "signature") {
+          list.push({ key: k, label: `${label} (Signature)`, kind: "signature" });
+        } else if (/date/i.test(k) || f.type === "date") {
+          list.push({ key: k, label: `${label} (Date)`, kind: "date" });
+        } else if (/signer|signed_by|authorizer|requester/i.test(k)) {
+          list.push({ key: k, label: `${label} (Name)`, kind: "text" });
+        }
+      }
+    }
+    return list;
+  }, [formData?.sections]);
+
   const { data: auditLogs } = useQuery({
     queryKey: ["form-audit", id, auditPage],
     queryFn: () => documentsAPI.auditTrail(id!, { page: auditPage, page_size: AUDIT_PAGE_SIZE }).then((r) => r.data),
@@ -212,25 +318,26 @@ export default function FormDetailPage() {
   });
 
   const submitMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (workflowStage?: "requisition" | "rfq" | "lpo" | "retirement") => {
       if (formEditing && formDirtyRef.current) {
-        const shouldSave = window.confirm("You have unsaved changes in the form. Save them before submitting?");
-        if (shouldSave) {
-          const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
-            groupNames: user?.group_names ?? [],
-            isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
-            canEditConditionalSections: canEditConditionalSections(),
-          }, formProcessStep());
-          if (missing.length) {
-            setMissingFields(missing);
-            toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
-            throw new Error("Form validation failed");
-          }
-          setMissingFields([]);
-          await updateFormMutation.mutateAsync();
+        // Never advance a workflow with values that exist only in this tab.
+        // Previously declining the optional save prompt still submitted the
+        // workflow, so the next approver saw the last persisted (often blank)
+        // retirement table.
+        const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
+          groupNames: user?.group_names ?? [],
+          isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+          canEditConditionalSections: canEditConditionalSections(),
+        }, formProcessStep());
+        if (missing.length) {
+          setMissingFields(missing);
+          toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
+          throw new Error("Form validation failed");
         }
+        setMissingFields([]);
+        await updateFormMutation.mutateAsync();
       }
-      return documentsAPI.submit(id!);
+      return documentsAPI.submit(id!, workflowStage ? { workflow_stage: workflowStage } : undefined);
     },
     onSuccess: () => {
       toast.success("Submitted for approval");
@@ -295,8 +402,8 @@ export default function FormDetailPage() {
             <p className="mt-2 text-sm text-[#5E6870]">This form is no longer available.</p>
           </div>
         </div>
-        <Link to="/forms" className="mt-6 inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#246d9c]">
-          <ArrowLeft className="h-4 w-4" /> Back to Forms
+        <Link to="/list" className="mt-6 inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#246d9c]">
+          <ArrowLeft className="h-4 w-4" /> Back to Requisitions
         </Link>
       </div>
     );
@@ -315,8 +422,8 @@ export default function FormDetailPage() {
           </div>
         </div>
         <div className="mt-6 flex gap-3">
-          <Link to="/forms" className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
-            Back to Forms
+          <Link to="/list" className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
+            Back to Requisitions
           </Link>
           <Link to={`/documents/${id}`} className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#246d9c]">
             Open in Documents
@@ -329,42 +436,205 @@ export default function FormDetailPage() {
   const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
   const hasAdminAccess = Boolean(user?.has_admin_access);
   const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
+  const canDownload = hasAdminAccess || (doc.permissions ?? []).includes("download");
+  const canDownloadLpo = hasAdminAccess || (lpoDocumentQuery.data?.permissions ?? []).includes("download");
   const canComment = hasAdminAccess || (doc.permissions ?? []).includes("comment");
   const canApprove = hasAdminAccess || (doc.permissions ?? []).includes("approve");
-  const hasConditionalEditability = formHasConditionalEditability(formData.sections);
+  const hasActiveApprovalTask = Boolean(activeTask && activeTask.status === "in_progress");
 
   function formProcessStep() {
     return doc.builder_process_step || doc.status;
   }
   function canEditConditionalSections() {
-    return hasAdminAccess || isOwnerOrSubmitter;
+    return hasAdminAccess || isOwnerOrSubmitter || hasActiveApprovalTask;
   }
 
   const step = formProcessStep();
-  const isRequestApproved = step === "request_approved" || (!doc.builder_process_step && doc.status === "approved");
-  const canEditForm = canEdit
-    && !isApprovalLockedStatus(step)
-    && !isFinalFormProcessStep(step)
-    && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && canEditConditionalSections()));
+  const completedStages = doc.metadata?.form?.completed_workflow_stages;
+  const requisitionApproved = Array.isArray(completedStages) && completedStages.includes("requisition");
+  const lpoApproved = Array.isArray(completedStages) && completedStages.includes("lpo");
+  const canEditRetirementSection = canEdit
+    && requisitionApproved
+    && lpoApproved
+    && step === "lpo_approved"
+    && hasVisibleRetirementEditSection(formData.sections ?? [], formData.values ?? {}, step, {
+      groupNames: user?.group_names ?? [],
+      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+    });
+  const retirementOnlyEdit = canEditRetirementSection && isApprovalLockedStatus(step) && !hasActiveApprovalTask;
+  const retirementSectionReadOnly = !lpoApproved;
+  const canEditForm = doc.status === "draft" && canEdit;
 
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
+  const purchaseOrderEnabled = Boolean(doc.metadata?.sunsystems?.purchase_order?.enabled)
+    || String(doc.metadata?.sunsystems?.journal?.component ?? "").toLowerCase() === "purchaseorder";
+  const sunSystemsPostingEnabled = journalEnabled || purchaseOrderEnabled;
   const journalStages = doc.metadata?.sunsystems?.journal?.stages as Array<{ stage: number; enabled?: boolean }> | undefined;
   const availableStages = journalStages?.filter((s) => s.enabled !== false).map((s) => s.stage).sort((a, b) => a - b) || [1];
 
   const isRetirementPhase = doc.builder_workflow_phase === "retirement";
+  const isRetirementSubmitted = isRetirementPhase && step === "retirement_pending";
+  const isLpoWorkflowStep = ["lpo_pending", "lpo_approved", "retirement_pending", "retirement_approved", "fully_approved"].includes(step);
+  const canPreviewSunSystemsPayload = journalEnabled || (purchaseOrderEnabled && isLpoWorkflowStep);
+  const payloadInitialStage = isRetirementSubmitted ? 2 : (purchaseOrderEnabled && isLpoWorkflowStep ? 1000 : 1);
   const isRetirementFinalized = isRetirementPhase && isFinalFormProcessStep(step);
-  const canSubmitRequest = ["draft", "returned"].includes(doc.status) && (!isRetirementPhase || doc.status === "returned") && (canApprove || isOwnerOrSubmitter);
+  const canSubmitRequest = ["draft", "returned"].includes(doc.status)
+    && (!isRetirementPhase || doc.status === "returned")
+    && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
   // Only allow retirement submission if template has multiple stages configured (Stage 2 exists)
-  const hasRetirementStage = availableStages.includes(2);
-  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage && (canApprove || isOwnerOrSubmitter);
-  const canSubmit = canSubmitRequest || canSubmitRetirement;
-  const submitLabel = canSubmitRetirement ? "Submit retirement" : doc.status === "returned" ? "Resubmit" : "Start workflow";
+  const hasRetirementStage = availableStages.includes(2)
+    || Boolean(doc.metadata?.form?.travel_retirement?.enabled);
+  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage
+    && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
+  const canInitiateRetirement = canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit");
+  const showRetirementSubmit = Boolean(doc.metadata?.form?.travel_retirement?.enabled)
+    && requisitionApproved
+    && canInitiateRetirement
+    && hasVisibleRetirementEditSection(formData.sections ?? [], formData.values ?? {}, step, {
+      groupNames: user?.group_names ?? [],
+      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+    });
+  // Server-computed, travel-aware: requisition -> (rfq | lpo for Travel) -> lpo.
+  const procurementNextStage = doc.builder_next_stage ?? null;
+  const canSubmitProcurementStage = Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
+  const canSubmit = canSubmitRequest || canSubmitProcurementStage;
+  const submitLabel = canSubmitProcurementStage
+    ? `Submit ${procurementNextStage!.toUpperCase()}`
+    : doc.status === "returned"
+      ? "Resubmit"
+      : "Submit for approval";
 
   const startFormEdit = () => {
+    if (doc.status !== "draft" || !canEdit) return;
     setFormValues({ ...(formData.values ?? {}) });
     formDirtyRef.current = false;
     setFormEditing(true);
+  };
+  const retryLpoPreview = async () => {
+    await lpoPdfQuery.refetch();
+  };
+  const handlePrintRequisition = async () => {
+    if (!canDownload) return;
+    try {
+      await documentsAPI.filePrintEvent(doc.id);
+      const source = document.getElementById("requisition-printable");
+      if (!source) throw new Error("Printable requisition is not available.");
+
+      document.getElementById("requisition-print-root")?.remove();
+      const printRoot = document.createElement("main");
+      printRoot.id = "requisition-print-root";
+      printRoot.setAttribute("aria-label", "Requisition print preview");
+      const heading = document.createElement("header");
+      heading.className = "requisition-print-heading";
+      const title = document.createElement("h1");
+      title.textContent = doc.title || "Requisition";
+      const reference = document.createElement("p");
+      reference.textContent = doc.reference_number || "";
+      heading.append(title, reference);
+      printRoot.appendChild(heading);
+
+      const formCopy = source.cloneNode(true) as HTMLElement;
+      formCopy.removeAttribute("id");
+      formCopy.querySelector(".requisition-print-heading")?.remove();
+      const originalInputs = source.querySelectorAll<HTMLInputElement>("input");
+      const copiedInputs = formCopy.querySelectorAll<HTMLInputElement>("input");
+      originalInputs.forEach((input, index) => {
+        const copy = copiedInputs[index];
+        if (!copy) return;
+        copy.value = input.value;
+        copy.checked = input.checked;
+      });
+      const originalTextareas = source.querySelectorAll<HTMLTextAreaElement>("textarea");
+      const copiedTextareas = formCopy.querySelectorAll<HTMLTextAreaElement>("textarea");
+      originalTextareas.forEach((field, index) => {
+        if (copiedTextareas[index]) copiedTextareas[index].value = field.value;
+      });
+      const originalSelects = source.querySelectorAll<HTMLSelectElement>("select");
+      const copiedSelects = formCopy.querySelectorAll<HTMLSelectElement>("select");
+      originalSelects.forEach((field, index) => {
+        const copy = copiedSelects[index];
+        if (!copy) return;
+        Array.from(copy.options).forEach((option, optionIndex) => {
+          option.selected = field.options[optionIndex]?.selected ?? false;
+        });
+      });
+      formCopy.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
+        const type = input.type.toLowerCase();
+        if (type === "hidden" || type === "file") {
+          input.remove();
+          return;
+        }
+        if (type === "radio" && !input.checked) {
+          input.remove();
+          return;
+        }
+        const value = type === "checkbox"
+          ? (input.checked ? "Yes" : "No")
+          : type === "radio"
+            ? "✓"
+            : type === "date" && input.value
+              ? (() => {
+                  const [year, month, day] = input.value.split("-");
+                  return `${day}/${month}/${year}`;
+                })()
+              : input.value.trim();
+        const text = document.createElement("span");
+        text.className = "requisition-print-value";
+        text.textContent = value || "—";
+        input.replaceWith(text);
+      });
+      formCopy.querySelectorAll<HTMLTextAreaElement>("textarea").forEach((field) => {
+        const text = document.createElement("span");
+        text.className = "requisition-print-value";
+        text.textContent = field.value.trim() || "—";
+        field.replaceWith(text);
+      });
+      formCopy.querySelectorAll<HTMLSelectElement>("select").forEach((field) => {
+        const text = document.createElement("span");
+        text.className = "requisition-print-value";
+        const selected = Array.from(field.selectedOptions).map((option) => option.label).filter(Boolean).join(", ");
+        text.textContent = !selected || /^select\b/i.test(selected) ? "—" : selected;
+        field.replaceWith(text);
+      });
+      formCopy.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="listbox"], button[data-external-select-trigger]').forEach((button) => {
+        const label = button.textContent?.trim() ?? "";
+        const text = document.createElement("span");
+        text.className = "requisition-print-value";
+        text.textContent = /^select\b/i.test(label) ? "—" : label || "—";
+        button.replaceWith(text);
+      });
+      formCopy.querySelectorAll("button").forEach((button) => button.remove());
+      printRoot.appendChild(formCopy);
+      document.body.appendChild(printRoot);
+
+      document.body.classList.add("requisition-print-enabled");
+      const cleanup = () => {
+        document.body.classList.remove("requisition-print-enabled");
+        printRoot.remove();
+      };
+      window.addEventListener("afterprint", cleanup, { once: true });
+      window.print();
+      window.setTimeout(cleanup, 60_000);
+    } catch {
+      toast.error("Download permission is required to print this requisition.");
+    }
+  };
+  const handleDownloadLpo = async () => {
+    if (!generatedLpoId || !canDownloadLpo) return;
+    try {
+      const response = await documentsAPI.downloadAsPdf(generatedLpoId);
+      const blobUrl = URL.createObjectURL(new Blob([response.data], { type: "application/pdf" }));
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = `Purchase_Order_${generatedLpoReference || "LPO"}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1_000);
+    } catch {
+      toast.error("Could not download the LPO. Check your Download permission and retry.");
+    }
   };
   const saveForm = () => {
     const missing = requiredFieldLabels(formData.sections ?? [], formValues, {
@@ -379,6 +649,11 @@ export default function FormDetailPage() {
     }
     setMissingFields([]);
     updateFormMutation.mutate();
+  };
+  const savePendingFormEditsBeforeApproval = async () => {
+    if (formEditing && formDirtyRef.current) {
+      await updateFormMutation.mutateAsync();
+    }
   };
 
   // Leaving edit mode throws away unsaved work — always confirm first.
@@ -400,26 +675,39 @@ export default function FormDetailPage() {
   ];
 
   return (
-    <div className="flex flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
-      <WorkspaceCommandBar
-        actions={
-          canSubmit ? (
-            <button
-              onClick={() => submitMutation.mutate()}
-              disabled={submitMutation.isPending}
-              className="flex h-9 items-center gap-1.5 border border-white/20 bg-white/10 px-3 text-xs font-semibold text-white hover:bg-white/20 disabled:opacity-50"
-            >
-              {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-              {submitLabel}
-            </button>
-          ) : undefined
-        }
-      >
+    <div className="flex min-h-0 flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
+      <style>{`@page { size: A4 landscape; margin: 0; }
+      @media print {
+        body * { visibility: hidden !important; }
+        body:not(.requisition-print-enabled) * { display: none !important; }
+        body.requisition-print-enabled > #root { display: none !important; }
+        body.requisition-print-enabled #requisition-print-root,
+        body.requisition-print-enabled #requisition-print-root * { visibility: visible !important; }
+        body.requisition-print-enabled #requisition-print-root { display: block !important; position: static !important; width: 100% !important; padding: 12mm !important; color: #1f2933 !important; background: white !important; font-family: Arial, sans-serif !important; }
+        #requisition-print-root * { color: #1f2933 !important; }
+        #requisition-print-root .requisition-print-heading { display: block !important; margin-bottom: 8mm; border-bottom: 2px solid #287ead; padding-bottom: 4mm; }
+        #requisition-print-root .requisition-print-heading h1 { margin: 0; font-size: 20pt; }
+        #requisition-print-root .requisition-print-heading p { margin: 2mm 0 0; color: #52606a; font-size: 10pt; }
+        #requisition-print-root .overflow-hidden, #requisition-print-root .overflow-x-auto, #requisition-print-root .overflow-auto { overflow: visible !important; }
+        #requisition-print-root .min-w-full { min-width: 0 !important; width: 100% !important; }
+        #requisition-print-root table { width: 100% !important; table-layout: fixed !important; border-collapse: collapse !important; }
+        #requisition-print-root th, #requisition-print-root td { width: auto !important; min-width: 0 !important; padding: 5pt 4pt !important; border: 1px solid #aeb5bb !important; white-space: normal !important; overflow-wrap: anywhere !important; font-size: 8pt !important; }
+        #requisition-print-root th { background: #eef3f7 !important; color: #263746 !important; }
+        #requisition-print-root tr { break-inside: avoid; }
+        #requisition-print-root thead { display: table-header-group; }
+        #requisition-print-root h3, #requisition-print-root h4 { break-after: avoid; }
+        #requisition-print-root input, #requisition-print-root textarea, #requisition-print-root select { display: none !important; }
+        #requisition-print-root button, #requisition-print-root [role="button"] { display: none !important; }
+        #requisition-print-root .requisition-print-value { display: block !important; min-height: 1em; color: #1f2933 !important; font-size: 9pt !important; font-weight: 400 !important; opacity: 1 !important; }
+        #requisition-print-root .grid { gap: 4mm !important; }
+        #requisition-print-root .shadow-sm { box-shadow: none !important; }
+      }`}</style>
+      <WorkspaceCommandBar>
         <button
-          onClick={() => navigate("/forms")}
+          onClick={() => navigate("/list")}
           className="flex h-8 items-center gap-1 border border-white/20 bg-white/10 px-3 text-xs text-white/85 hover:text-white"
         >
-          <ArrowLeft className="h-3.5 w-3.5" /> Forms
+          <ArrowLeft className="h-3.5 w-3.5" /> Requisitions
         </button>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -455,7 +743,6 @@ export default function FormDetailPage() {
 
       <div className={cn(
         "scrollbar-minimal relative grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 lg:grid-cols-12",
-        activeTask && "pb-24",
         detailsOpen ? "pr-8" : "pr-12",
       )}>
 
@@ -481,17 +768,71 @@ export default function FormDetailPage() {
               <div className="flex items-center gap-2 min-w-0">
                 <p className="text-sm font-bold text-[#1F2933]">Form</p>
                 <span className="text-xs text-[#5E6870]">
-                  {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
+                  {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
                 </span>
               </div>
               <div className="flex items-center gap-2 flex-wrap justify-end">
-                {journalEnabled && (
+                {canSubmit && (
+                  <button
+                    type="button"
+                    onClick={() => submitMutation.mutate(procurementNextStage ?? undefined)}
+                    disabled={submitMutation.isPending}
+                    className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+                  >
+                    {submitMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    <Send className="h-3.5 w-3.5" /> {submitLabel}
+                  </button>
+                )}
+                {showRetirementSubmit && (
+                  <button
+                    type="button"
+                    onClick={() => submitMutation.mutate("retirement")}
+                    disabled={submitMutation.isPending || !canSubmitRetirement}
+                    title={canSubmitRetirement ? "Submit this form to the configured Retirement workflow case" : "Available after LPO approval and on or after the configured travel return date"}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50",
+                      canSubmitRetirement ? "bg-[#287EAD] text-white hover:bg-[#1E6F99]" : "border border-[#AEB5BB] bg-[#F5F7F8] text-[#5E6870]",
+                    )}
+                  >
+                    {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                    Submit retirement
+                  </button>
+                )}
+                {canPreviewSunSystemsPayload && (
                   <button type="button" onClick={() => setShowJournalXml((s) => !s)}
                     className={cn(
                       "inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]",
                       showJournalXml && "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/50",
                     )}>
-                    <FileCode className="h-3.5 w-3.5" /> Journal XML
+                    <FileCode className="h-3.5 w-3.5" /> {isRetirementSubmitted ? "Retirement XML" : purchaseOrderEnabled && isLpoWorkflowStep ? "LPO XML" : "Journal XML"}
+                  </button>
+                )}
+                {canDownload && (
+                  <button type="button" onClick={() => void handlePrintRequisition()}
+                    className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
+                    <Printer className="h-3.5 w-3.5" /> Print requisition
+                  </button>
+                )}
+                {generatedLpos.length > 1 && (
+                  <CustomListbox
+                    value={generatedLpoId ?? ""}
+                    onChange={(val) => setSelectedLpoId(val)}
+                    options={generatedLpos.map((lpo, index) => ({
+                      value: lpo.id,
+                      label: `${lpo.table_label || `LPO ${index + 1}`} · ${lpo.reference || index + 1}`,
+                    }))}
+                    buttonClassName="max-w-44 border border-[#C8CDD1] bg-white px-2 py-1.5 text-xs text-[#1F2933] text-left hover:border-[#287EAD] transition-colors"
+                    ariaLabel="Select LPO"
+                  />
+                )}
+                {generatedLpoId && canDownloadLpo && (
+                  <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99]">
+                    <Download className="h-3.5 w-3.5" /> Download LPO
+                  </button>
+                )}
+                {generatedLpoId && (
+                  <button type="button" onClick={() => { setLpoMinimized(false); setLpoModalOpen(true); }} className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
+                    <Eye className="h-3.5 w-3.5" /> Open LPO
                   </button>
                 )}
                 {!formEditing && canEditForm && (
@@ -533,9 +874,20 @@ export default function FormDetailPage() {
                   </ul>
                 </div>
               )}
-              {budgetEnabled && formEditing && (
-                <BudgetBanner values={formValues} documentId={doc.id} sections={formData.sections ?? []} enabled />
-              )}
+              {budgetEnabled && formEditing && (() => {
+                const budgetMeta = doc.metadata?.sunsystems?.budget ?? {};
+                const amountField = budgetMeta.amount_field as string | undefined;
+                const amount = amountField ? (formValues[amountField] ?? doc.amount ?? 0) : (doc.amount ?? 0);
+                return (
+                  <BudgetBanner
+                    amount={amount as number | string}
+                    budget={budgetMeta.limit ?? budgetMeta.budget ?? null}
+                    currency={budgetMeta.currency ?? doc.currency ?? undefined}
+                    accountCode={budgetMeta.account_code ?? undefined}
+                  />
+                );
+              })()}
+              <div id="requisition-printable" className="bg-white">
               <TemplateForm
                 sections={formData.sections ?? []}
                 values={formEditing ? formValues : (formData.values ?? {})}
@@ -544,7 +896,14 @@ export default function FormDetailPage() {
                 documentId={doc.id}
                 documentStatus={step}
                 canEditConditionalSections={canEditConditionalSections()}
-              />
+                retirementOnlyEdit={retirementOnlyEdit}
+                retirementSectionReadOnly={retirementSectionReadOnly}
+                onLaunchSignatureModal={(fieldKey?: string) => {
+                  setTargetSignatureField(fieldKey ?? null);
+                  setIsSigningOpen(true);
+                }}
+                />
+              </div>
             </div>
           </div>
 
@@ -554,18 +913,89 @@ export default function FormDetailPage() {
               values={formEditing ? formValues : undefined}
               title={doc.title}
               availableStages={availableStages}
+              initialStage={payloadInitialStage}
               onClose={() => setShowJournalXml(false)}
             />
           )}
 
-          {(isWorkflowActiveOrCompleted(step) || journalEnabled) && (
-            <div className={cn("grid gap-3", isWorkflowActiveOrCompleted(step) && journalEnabled ? "lg:grid-cols-2" : "")}>
+          {/* Signature Modal */}
+          {isSigningOpen && (
+            <SignaturePlacementModal
+              mode="form"
+              formFields={detectedFormFields}
+              targetFieldKey={targetSignatureField}
+              confirmLabel="Apply to Form"
+              onCancel={() => {
+                setIsSigningOpen(false);
+                setTargetSignatureField(null);
+              }}
+              onConfirm={(result) => {
+                // Use the formFieldValues from the modal result if available
+                const fieldValues = result.formFieldValues || {};
+                const updates: Record<string, unknown> = {};
+                
+                // Apply form field values from modal
+                Object.entries(fieldValues).forEach(([key, value]) => {
+                  updates[key] = value;
+                });
+                
+                // Also process items for signature styling
+                result.items.forEach((item) => {
+                  if (item.kind === "signature" && item.image_data) {
+                    updates[item.field_key || ""] = item.image_data;
+                    // Store styling metadata
+                    updates[`${item.field_key || ""}_style`] = {
+                      color: item.color,
+                      fontSize: item.font_percent ? `${item.font_percent * 10}px` : '16px',
+                      fontFamily: item.font_family || 'helvetica',
+                      bold: item.bold,
+                      italic: item.italic,
+                    };
+                  } else if (item.kind === "date" && item.date_iso) {
+                    updates[item.field_key || ""] = item.date_iso;
+                    updates[`${item.field_key || ""}_date`] = item.date_iso;
+                  } else if (item.kind === "text" && item.text) {
+                    updates[item.field_key || ""] = item.text;
+                    updates[`${item.field_key || ""}_name`] = item.text;
+                  }
+                });
+                
+                setFormValues((prev) => ({ ...prev, ...updates }));
+                formDirtyRef.current = true;
+                setIsSigningOpen(false);
+                setTargetSignatureField(null);
+              }}
+              onApplyToForm={(fields) => {
+                setFormValues((prev) => ({ ...prev, ...fields }));
+                formDirtyRef.current = true;
+              }}
+            />
+          )}
+
+          {/* ── Supplier Invoices & Quotations panel (RFQ stage) ── */}
+          {String((formData as any)?.workflow_phase || "").toLowerCase() === "rfq" && (
+            <InvoiceAttachmentsPanel
+              documentId={doc.id}
+              values={formData?.values ?? {}}
+              onBeforeSend={async () => {
+                if (!formDirtyRef.current) return;
+                const { jsonValues, attachments } = collectFormAttachments(formValues);
+                await documentsAPI.updateForm(doc.id, jsonValues, attachments);
+                formDirtyRef.current = false;
+                qc.invalidateQueries({ queryKey: ["form", id] });
+              }}
+              onUpdated={() => qc.invalidateQueries({ queryKey: ["form", id] })}
+            />
+          )}
+
+          {(isWorkflowActiveOrCompleted(step) || sunSystemsPostingEnabled) && (
+            <div className={cn("grid gap-3", isWorkflowActiveOrCompleted(step) && sunSystemsPostingEnabled ? "lg:grid-cols-2" : "")}>
               {isWorkflowActiveOrCompleted(step) && (
                 <ApprovalStagesTable steps={workflowData?.steps ?? []} isLoading={workflowDataLoading} phase={doc.builder_workflow_phase} />
               )}
               <JournalPostingCard
                 documentId={doc.id}
-                expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(step)}
+                expectPosting={sunSystemsPostingEnabled && ["request_approved", "fully_approved"].includes(step)}
                 watchKey={`${step}:${doc.updated_at}`}
                 availableStages={availableStages}
               />
@@ -573,6 +1003,7 @@ export default function FormDetailPage() {
           )}
 
         </div>
+
 
         {/* Side column — tabs (only shown when detailsOpen is true) */}
         {detailsOpen && (
@@ -690,19 +1121,105 @@ export default function FormDetailPage() {
       </div>
 
       {activeTask && (
-        <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-[#C8CDD2] bg-white/95 backdrop-blur-sm">
+        <div ref={taskPanelRef} className="z-10 shrink-0 border-t border-[#C8CDD2] bg-white">
           <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
             <WorkflowActionPanel
               task={activeTask}
               documentId={id!}
               variant="bar"
-              onCompleted={() => setWorkflowActionCompleted(true)}
+              onBeforeApprove={savePendingFormEditsBeforeApproval}
+              onCompleted={() => {
+                setWorkflowActionCompleted(false);
+                const phase = String((formData as any)?.workflow_phase ?? doc?.builder_workflow_phase ?? "").toLowerCase();
+                const lpoApprovalSteps = (workflowData?.steps ?? []).filter((step) =>
+                  step.kind === "task"
+                    && /^approver-\d+$/.test(step.id)
+                    && (!step.phase || step.phase === "lpo"),
+                );
+                const activeOrder = activeTask?.step?.order ?? 0;
+                const laterLpoStepExists = lpoApprovalSteps.some((step) =>
+                  Number(step.id.slice("approver-".length)) > activeOrder,
+                );
+                const isLastLpoApprover = phase === "lpo"
+                  && activeOrder > 0
+                  && lpoApprovalSteps.some((step) => step.id === `approver-${activeOrder}`)
+                  && !laterLpoStepExists;
+                const isLpoGenerationApprover = Boolean((activeTask?.step as any)?.post_lpo_after_approval);
+
+                if (!isLpoGenerationApprover && !isLastLpoApprover) {
+                  setAwaitingLpo(false);
+                  setWorkflowActionCompleted(true);
+                  return;
+                }
+                if (generatedLpos.length) {
+                  setSelectedLpoId(generatedLpos[0].id);
+                  setLpoModalOpen(true);
+                  setLpoMinimized(false);
+                  return;
+                }
+                setAwaitingLpo(true);
+                void qc.invalidateQueries({ queryKey: ["form", id] });
+              }}
             />
           </Suspense>
         </div>
       )}
 
-      {workflowActionCompleted && !activeTask && (
+      {generatedLpoId && lpoModalOpen && !lpoMinimized && (
+        <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/50 p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={`LPO ${generatedLpoReference || "document"}`}>
+          <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden border border-[#AEB5BB] bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
+              <div className="min-w-0">
+                <h2 className="truncate text-sm font-bold text-[#1F2933]">Purchase Order {generatedLpoReference || ""}</h2>
+                <p className="text-xs text-[#5E6870]">Generated LPO document</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {canDownloadLpo && (
+                  <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99]">
+                    <Download className="h-3.5 w-3.5" /> Download PDF
+                  </button>
+                )}
+                <button type="button" aria-label="Minimize LPO" onClick={() => setLpoMinimized(true)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><PanelRightClose className="h-4 w-4" /></button>
+                <button type="button" aria-label="Close LPO" onClick={() => setLpoModalOpen(false)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><X className="h-4 w-4" /></button>
+              </div>
+            </div>
+            <div className="min-h-[50vh] flex-1 bg-[#E9EEF1]">
+              {lpoPdfUrl ? (
+                <LpoPdfPreview
+                  url={lpoPdfUrl}
+                  title={`Purchase Order ${generatedLpoReference || "LPO"}`}
+                  canPrint={canDownloadLpo}
+                  onPrint={() => documentsAPI.filePrintEvent(generatedLpoId!).then(() => undefined)}
+                />
+              ) : lpoPdfQuery.isError || lpoPdfQuery.data?.preview_status === "failed" ? (
+                <div className="flex h-[50vh] flex-col items-center justify-center gap-2 px-6 text-center text-sm text-[#5E6870]">
+                  <p>{lpoPdfQuery.data?.preview_error || "Could not load the LPO PDF. Retry, or reload the page to try again."}</p>
+                  <button type="button" onClick={retryLpoPreview} className="border border-[#AEB5BB] bg-white px-3 py-2 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">Retry preview</button>
+                </div>
+              ) : (
+                <div className="flex h-[50vh] flex-col items-center justify-center gap-3 px-6 text-center text-sm text-[#46545E]">
+                  <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
+                  <p>Loading the LPO PDF.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {awaitingLpo && !generatedLpos.length && (
+        <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
+          <div className="flex w-full max-w-sm items-center gap-3 border border-[#C8CDD2] bg-white px-6 py-5 shadow-2xl">
+            <Loader2 className="h-5 w-5 shrink-0 animate-spin text-[#287EAD]" />
+            <div>
+              <p className="text-sm font-bold text-[#1F2933]">Approval complete</p>
+              <p className="mt-1 text-xs text-[#5E6870]">Preparing the generated LPO…</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {workflowActionCompleted && !awaitingLpo && !activeTask && !generatedLpos.length && (
         <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
           <div
             role="alertdialog"
@@ -721,7 +1238,7 @@ export default function FormDetailPage() {
             <div className="flex justify-center pb-5">
               <button
                 type="button"
-                onClick={() => navigate(-1)}
+                onClick={() => navigate("/list", { replace: true })}
                 className="inline-flex items-center bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors"
               >
                 OK

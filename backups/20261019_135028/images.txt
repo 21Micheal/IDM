@@ -1,0 +1,10 @@
+CONTAINER             REPOSITORY                                      TAG                 PLATFORM            IMAGE ID            SIZE                CREATED
+idm-backend-1         idm-backend                                     latest              linux/amd64         ca8b18ad63e8        2.65GB              13 days ago
+idm-celery_beat-1     idm-celery_beat                                 latest              linux/amd64         25b78e021996        2.65GB              2 weeks ago
+idm-celery_worker-1   idm-celery_worker                               latest              linux/amd64         4d36f1947e01        2.65GB              2 weeks ago
+idm-db-1              mysql                                           8.0                 linux/amd64         6cd09145362d        799MB               5 months ago
+idm-elasticsearch-1   docker.elastic.co/elasticsearch/elasticsearch   8.12.0              linux/amd64         014ecd90309d        1.36GB              2 years ago
+idm-frontend-1        idm-frontend                                    latest              linux/amd64         82fcf17aa432        1.18GB              2 weeks ago
+idm-nginx-1           nginx                                           alpine              linux/amd64         7bc5ba2f958a        62.8MB              2 months ago
+idm-postgres-1        postgres                                        16-alpine           linux/amd64         81bd698b4594        294MB               4 weeks ago
+idm-redis-1           redis                                           7-alpine            linux/amd64         5509c0097c60        39.1MB              2 months ago

@@ -7,7 +7,7 @@
  *  - Conditional visibility via visibleWhen rules
  *  - All field types: text, textarea, number, currency, date, datetime, time,
  *    email, phone, select, multi_select, radio, boolean, file, image, signature,
- *    reference, user, heading, divider, table
+ *    reference, user, heading, divider, table, budget
  *  - Table columns fully typed (currency symbol, select options, boolean, etc.)
  *  - Same public API as v1 — callers (UploadPage, DocumentDetailPage) need zero changes
  */
@@ -15,10 +15,12 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useForm, Controller } from "react-hook-form";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload } from "lucide-react";
+import { AlertCircle, Calculator, CheckCircle2, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload, Building2, PenTool, User, CalendarClock } from "lucide-react";
 import type { ReactNode } from "react";
 import { documentsAPI } from "@/services/api";
+import BudgetBanner from "./BudgetBanner";
 import { toast } from "@/components/ui/vault-toast";
+import CustomListbox from "@/components/ui/CustomListbox";
 import {
   resolveSource,
   isReferenceValue,
@@ -29,14 +31,26 @@ import { resolveFormula, evaluateFormula, formulaLabel } from "@/components/temp
 import { currencySymbolFor } from "@/lib/currencies";
 import { useAuthStore } from "@/store/authStore";
 import { Sparkles } from "lucide-react";
-import { buildCalcScope, evaluateCalcExpression, evaluateTableColumnFormulas, type CalcValue } from "@/lib/calculations";
+import { buildCalcScope, evaluateCalcExpression, evaluateTableColumnFormulas, resolveRowAggregates, formatCalcResult, type CalcValue } from "@/lib/calculations";
+import {
+  activeSections,
+  addedSectionIds,
+  materializeSections,
+  withSectionAdded,
+  withSectionRemoved,
+  type AnyTableRef,
+} from "@/lib/formBlocks";
+import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
+import ExternalSelect from "@/components/ui/ExternalSelect";
+import { ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
+import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOperators";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type ColType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
-  | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "url" | "percentage" | "multi_select" | "image";
+  | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
+  | "url" | "percentage" | "rating" | "multi_select" | "image" | "external" | "sunsystems_account";
 
 type Column = {
   id?: string; key?: string; label?: string; required?: boolean;
@@ -46,39 +60,60 @@ type Column = {
   decimals?: number; thousandsSeparator?: boolean;
   min?: number; max?: number;
   tooltip?: string; additionalText?: string; readonly?: boolean; hidden?: boolean;
-  defaultValue?: string; referenceSource?: string;
+  defaultValue?: string; referenceSource?: string; referenceGroupId?: string;
   visibleWhen?: VisibleWhen | null;
   editableWhen?: VisibleWhen | null;
   calc?: { expression?: string };
+  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string } | null;
 };
 
 type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
 
 type VisibilityCondition = {
-  source?: "field" | "process_step";
+  source?: "field" | "process_step" | "user_group";
   fieldKey?: string;
   operator: ConditionOperator;
   value?: string;
+  /** For source "user_group": the RBAC groups the condition tests. The client
+   * only has group names, so name matching is used (mirrors the builder). */
+  groups?: SectionGroupRef[];
 };
 
 // A rule group (AND/OR + conditions), or a legacy single-rule shape (fieldKey at
 // top level) still found in older saved templates / document snapshots.
 type VisibleWhen =
-  | { combinator?: "and" | "or"; conditions?: VisibilityCondition[] }
+  | { combinator?: "and" | "or"; conditions?: VisibilityCondition[]; groups?: VisibleWhen[] }
   | { fieldKey: string; operator: ConditionOperator; value?: string };
+
+/* A "button" field's behaviour. Buttons hold no value; they either reveal an
+ * on-demand SECTION via "add_block", or evaluate a formula once and write the
+ * result into "targetKey" via "calculate". Mirrors the builder's ButtonConfig. */
+export interface ButtonConfig {
+  action: "add_block" | "calculate";
+  variant?: "primary" | "secondary" | "outline";
+  /* add_block */
+  targetSectionId?: string;
+  placement?: "end_of_form" | "below_button" | "after_section";
+  anchorSectionId?: string;
+  /* calculate */
+  targetKey?: string;
+  calc?: { expression?: string; decimals?: number } | null;
+}
 
 type Field = {
   id?: string; key?: string; type?: string; label?: string;
   placeholder?: string; help_text?: string; helpText?: string;
   required?: boolean; colSpan?: number; width?: number;
+  workflowRole?: string;
   options?: string[]; columns?: Column[]; minRows?: number;
-  currencySymbol?: string; currencyFromField?: string; referenceSource?: string; tooltip?: string; regex?: string;
+  currencySymbol?: string; currencyFromField?: string; referenceSource?: string; referenceGroupId?: string; tooltip?: string; regex?: string;
   min?: number; max?: number; minLength?: number; maxLength?: number;
   /* Number/currency display config — a "number" field with `currency` type (or
    * a linked currency dropdown) is money; both share decimals/grouping. */
   decimals?: number; thousandsSeparator?: boolean;
   defaultValue?: string; readonly?: boolean; hidden?: boolean;
   formula?: string;
+  multi?: boolean;
   // Calculated value (see calc_number/calc_currency/calc_text/calc_date types)
   // — auto-derived from a formula over sibling field keys, same grammar as a
   // table column's `calc`. Recomputed live below (client preview) and
@@ -86,6 +121,18 @@ type Field = {
   calc?: { expression?: string; decimals?: number } | null;
   visibleWhen?: VisibleWhen | null;
   editableWhen?: VisibleWhen | null;
+  /* Button behaviour (type === "button"). Mirrors the builder's ButtonConfig. */
+  button?: ButtonConfig | null;
+  /* Table reference (type === "reference" && referenceSource === "table"). */
+  tableRef?: AnyTableRef | null;
+  /* External (SunSystems-backed) lookup — mirrors the builder's ExternalConfig. */
+  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string } | null;
+  sunsystems?: {
+    budgetAmountField?: string;
+    monitoredAmountField?: string;
+    account?: string;
+    [k: string]: unknown;
+  } | null;
 };
 
 // Field types whose value is derived from `field.calc.expression` rather than
@@ -95,7 +142,7 @@ const CALCULATED_FIELD_TYPES = new Set(["calc_number", "calc_currency", "calc_te
 /* Presentation-only field types — they never hold a value, are never required
  * and never appear in the submitted payload. Mirrors the builder's
  * PRESENTATION_TYPES. */
-const PRESENTATION_TYPES = new Set(["heading", "divider", "info", "spacer"]);
+const PRESENTATION_TYPES = new Set(["heading", "divider", "info", "spacer", "budget", "button"]);
 
 /* Filled by the server on create (reference number), never typed. */
 const SERVER_FILLED_TYPES = new Set(["auto_number"]);
@@ -169,23 +216,82 @@ type Section = {
   hidden?: boolean; visibleWhen?: VisibleWhen | null;
   visibleToGroups?: SectionGroupRef[];
   readonly?: boolean; editableWhen?: VisibleWhen | null;
+  /* "Add on demand": absent from the form until a Button (action "add_block")
+   * adds it. `removable` lets the person take it back out again. Mirrors the
+   * builder's TemplateSection. */
+  onDemand?: boolean; removable?: boolean;
 };
 
 /** The person filling/viewing the form, used to evaluate role-restricted
- * sections. The auth payload carries group *names* + admin flags. */
-export type FormViewer = { groupNames?: string[]; isAdmin?: boolean; canEditConditionalSections?: boolean };
+ * sections. Visibility group rules apply to admins too; edit permission is
+ * evaluated separately. */
+export type FormViewer = { groupNames?: string[]; groupIds?: string[]; isAdmin?: boolean; canEditConditionalSections?: boolean };
 
 /** A section restricted to RBAC groups is visible only to members of those
- * groups (matched by name — the client only has names) and to admins. An empty
+ * groups (matched by id or name). An empty
  * / absent list means everyone. When the viewer is unknown we don't hide — the
  * server stays authoritative. */
 function sectionVisibleToViewer(section: Section, viewer?: FormViewer): boolean {
   const groups = section.visibleToGroups ?? [];
   if (groups.length === 0) return true;
   if (!viewer) return true;
-  if (viewer.isAdmin) return true;
-  const names = new Set(viewer.groupNames ?? []);
-  return groups.some((g) => Boolean(g.name) && names.has(g.name as string));
+  const names = new Set((viewer.groupNames ?? []).map((name) => name.trim().toLowerCase()));
+  const ids = new Set((viewer.groupIds ?? []).map((id) => String(id).trim().toLowerCase()));
+  return groups.some((g) =>
+    (Boolean(g.id) && ids.has(String(g.id).trim().toLowerCase()))
+    || (Boolean(g.name) && names.has(String(g.name).trim().toLowerCase()))
+  );
+}
+
+function isRetirementExpenseSection(section: Section): boolean {
+  return (section.fields ?? []).some((field) => field.workflowRole === "retirement_expenses");
+}
+
+/** Whether this viewer has at least one visible section and field editable by the form rules. */
+export function hasVisibleEditableSection(
+  sections: unknown[],
+  values: TemplateFormValues,
+  processStep: string,
+  viewer?: FormViewer,
+): boolean {
+  const list = activeSections(materializeSections((Array.isArray(sections) ? sections : []) as Section[]), values);
+  const allFields = list.flatMap((section) => section.fields ?? []);
+  return list.some((section) =>
+    !section.hidden
+    && !section.readonly
+    && sectionVisibleToViewer(section, viewer)
+    && evalVisible(section, values, allFields, processStep, null, viewer)
+    && evalEditableForViewer(section, values, allFields, processStep, viewer)
+    && (section.fields ?? []).some((field) =>
+      Boolean(field.key)
+      && !field.hidden
+      && !field.readonly
+      && evalVisible(field, values, allFields, processStep, null, viewer)
+      && evalEditableForViewer(field, values, allFields, processStep, viewer)
+    )
+  );
+}
+
+/** Whether this viewer can see an editable retirement expense section. */
+export function hasVisibleRetirementEditSection(
+  sections: unknown[],
+  values: TemplateFormValues,
+  processStep: string,
+  viewer?: FormViewer,
+): boolean {
+  const list = activeSections(materializeSections((Array.isArray(sections) ? sections : []) as Section[]), values);
+  const allFields = list.flatMap((section) => section.fields ?? []);
+  return list.some((section) =>
+    isRetirementExpenseSection(section)
+    && evalVisible(section, values, allFields, processStep, null, viewer)
+    && sectionVisibleToViewer(section, viewer)
+    && evalEditableForViewer(section, values, allFields, processStep, viewer)
+    && (section.fields ?? []).some((field) =>
+      field.key
+      && evalVisible(field, values, allFields, processStep, null, viewer)
+      && evalEditableForViewer(field, values, allFields, processStep, viewer)
+    )
+  );
 }
 
 export type TemplateFormValues = Record<string, unknown>;
@@ -217,8 +323,9 @@ function formatFileSize(size?: number) {
  * documents, document types). Stores `{ id, label, source }`. In read-only mode
  * it renders the stored label (documents link to the target).
  */
-function ReferencePicker({ source, value, onChange, disabled, compact }: {
+function ReferencePicker({ source, referenceGroupId, value, onChange, disabled, compact }: {
   source?: string;
+  referenceGroupId?: string;
   value: unknown;
   onChange: (v: ReferenceValue | undefined) => void;
   disabled?: boolean;
@@ -269,8 +376,8 @@ function ReferencePicker({ source, value, onChange, disabled, compact }: {
   }, [open]);
 
   const { data: options = [], isFetching } = useQuery({
-    queryKey: ["reference-source", resolved?.key, resolved?.serverSearch ? debounced : ""],
-    queryFn: () => resolved!.fetch(debounced),
+    queryKey: ["reference-source", resolved?.key, referenceGroupId ?? "", resolved?.serverSearch ? debounced : ""],
+    queryFn: () => resolved!.fetch(debounced, referenceGroupId),
     enabled: open && Boolean(resolved),
     staleTime: 30_000,
   });
@@ -368,31 +475,94 @@ function ReferencePicker({ source, value, onChange, disabled, compact }: {
 
 // ── Conditional visibility ────────────────────────────────────────────────────
 
-// Normalize a stored `visibleWhen` (legacy single rule or a group) into a group.
-function ruleConditions(vw?: VisibleWhen | null): { combinator: "and" | "or"; conditions: VisibilityCondition[] } | null {
+// Normalize a stored `visibleWhen` (legacy single rule or a group, with optional
+// nested `groups`) into one shape. Mirrors _normalize_group in conditions.py.
+type NormalizedRule = { combinator: "and" | "or"; conditions: VisibilityCondition[]; groups: NormalizedRule[] };
+
+function normalizeRule(vw?: VisibleWhen | null): NormalizedRule | null {
   if (!vw || typeof vw !== "object") return null;
   const obj = vw as Record<string, unknown>;
   if (Array.isArray(obj.conditions)) {
-    return { combinator: obj.combinator === "or" ? "or" : "and", conditions: obj.conditions as VisibilityCondition[] };
+    const nested = Array.isArray(obj.groups) ? (obj.groups as VisibleWhen[]) : [];
+    return {
+      combinator: obj.combinator === "or" ? "or" : "and",
+      conditions: obj.conditions as VisibilityCondition[],
+      groups: nested.map((g) => normalizeRule(g)).filter((g): g is NormalizedRule => g !== null),
+    };
   }
   if (typeof obj.fieldKey === "string") {
-    return { combinator: "and", conditions: [{ source: "field", fieldKey: obj.fieldKey as string, operator: obj.operator as ConditionOperator, value: obj.value as string | undefined }] };
+    return {
+      combinator: "and",
+      conditions: [{ source: "field", fieldKey: obj.fieldKey as string, operator: obj.operator as ConditionOperator, value: obj.value as string | undefined }],
+      groups: [],
+    };
   }
   return null;
 }
 
-function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFields: Field[], processStep: string, rowScope?: Record<string, unknown> | null): boolean {
+function ruleHasContent(g: NormalizedRule | null): boolean {
+  return Boolean(g) && (g!.conditions.length > 0 || g!.groups.some(ruleHasContent));
+}
+
+/** Evaluate a rule group; nested groups combine with the group's own combinator.
+ *  An empty/absent group is "no restriction" (true). */
+function evalRule(
+  vw: VisibleWhen | null | undefined,
+  values: TemplateFormValues,
+  allFields: Field[],
+  processStep: string,
+  rowScope?: Record<string, unknown> | null,
+  viewer?: FormViewer,
+): boolean {
+  const walk = (g: NormalizedRule): boolean => {
+    const nested = g.groups.filter(ruleHasContent);
+    if (g.conditions.length === 0 && nested.length === 0) return true;
+    const results = [
+      ...g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope, viewer)),
+      ...nested.map(walk),
+    ];
+    return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+  };
+  const g = normalizeRule(vw);
+  return g ? walk(g) : true;
+}
+
+function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFields: Field[], processStep: string, rowScope?: Record<string, unknown> | null, viewer?: FormViewer): boolean {
+  // RBAC group membership. The condition stores groups as [{id, name}]; the
+  // client only has group names, so matching is by name (and id, if present).
+  // No viewer context or an unknown operator never restricts.
+  if (c.source === "user_group") {
+    if (c.operator !== "in_list" && c.operator !== "not_in_list") return true;
+    if (!viewer) return true;
+    const wanted = c.groups ?? [];
+    if (wanted.length === 0) return true;
+    const mine = new Set([
+      ...(viewer.groupNames ?? []).map((g) => g.trim().toLowerCase()),
+      ...(viewer.groupIds ?? []).map((g) => String(g).trim().toLowerCase()),
+    ]);
+    const member = wanted.some((g) => {
+      const id = g?.id != null ? String(g.id).trim().toLowerCase() : "";
+      const name = (g?.name ?? "").trim().toLowerCase();
+      return (id !== "" && mine.has(id)) || (name !== "" && mine.has(name));
+    });
+    return c.operator === "in_list" ? member : !member;
+  }
   const stepMatches = (actual: string, expected: string) => {
     const a = (actual || "").trim().toLowerCase();
     const e = (expected || "").trim().toLowerCase();
     if (a === e) return true;
-    const aliases: Record<string, string[]> = {
-      approved: ["approved", "request_approved", "fully_approved"],
-      pending_approval: ["pending_approval", "request_pending", "retirement_pending"],
-      returned: ["returned", "retirement_returned"],
-      rejected: ["rejected", "retirement_rejected"],
-    };
-    return aliases[e]?.includes(a) ?? false;
+    const downstreamRequisitionApproved = new Set([
+      "request_approved", "lpo_pending", "lpo_approved", "retirement_pending",
+      "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved",
+    ]);
+    const downstreamLpoApproved = new Set([
+      "lpo_approved", "retirement_pending", "retirement_returned",
+      "retirement_rejected", "retirement_approved", "fully_approved",
+    ]);
+    return (e === "requisition_approved" && downstreamRequisitionApproved.has(a))
+      || (e === "lpo_approved" && downstreamLpoApproved.has(a))
+      || (e === "approved" && downstreamRequisitionApproved.has(a))
+      || (e === "retirement_approved" && a === "fully_approved");
   };
   if (c.source === "process_step") {
     const sv = processStep;
@@ -401,7 +571,7 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
       case "not_equals":   return !stepMatches(sv, c.value ?? "");
       case "is_empty":     return sv.trim() === "";
       case "is_not_empty": return sv.trim() !== "";
-      default:             return true;
+      default:             return isKnownOperator(c.operator) ? matchOperator(c.operator, sv, c.value) : true;
     }
   }
 
@@ -413,24 +583,15 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
   const svs = conditionSourceValues(c.fieldKey ?? "", values, allFields, rowScope);
   if (svs === null) return true; // unknown source — never hide/lock on it
 
-  const match = (sv: string): boolean => {
-    switch (c.operator) {
-      case "equals":       return sv === (c.value ?? "");
-      case "not_equals":   return sv !== (c.value ?? "");
-      case "is_empty":     return sv.trim() === "";
-      case "is_not_empty": return sv.trim() !== "";
-      default:             return true;
-    }
-  };
+  if (!isKnownOperator(c.operator)) return true; // unknown operator — never hide/lock on it
+  const match = (sv: string): boolean => matchOperator(c.operator, sv, c.value);
 
   if (svs.length === 0) {
     // No rows at all — treat as a single empty value.
     return match("");
   }
-  // Positive operators: satisfied when ANY row matches. Negative operators
-  // ("not equals" / "is empty"): every row must satisfy them.
-  const negative = c.operator === "not_equals" || c.operator === "is_empty";
-  return negative ? svs.every(match) : svs.some(match);
+  // Positive operators match ANY row; negative operators must hold for EVERY row.
+  return isNegativeOperator(c.operator) ? svs.every(match) : svs.some(match);
 }
 
 /** Resolve the value(s) a condition points at. `null` = unknown source. */
@@ -458,6 +619,9 @@ function conditionSourceValues(
   return [str(values[sib.key ?? ""])];
 }
 
+/* Section ordering / on-demand + linked-table helpers live in
+ * "@/lib/formBlocks" so the client and the Django engine share one contract. */
+
 // Works for a field OR a section — both carry `hidden` + `visibleWhen`. An
 // empty/absent rule group means no restriction (visible). `processStep` is the
 // document's current workflow status ("draft" while a new form is being filled).
@@ -467,12 +631,10 @@ function evalVisible(
   allFields: Field[],
   processStep = "draft",
   rowScope?: Record<string, unknown> | null,
+  viewer?: FormViewer,
 ): boolean {
   if (item.hidden) return false;
-  const g = ruleConditions(item.visibleWhen);
-  if (!g || g.conditions.length === 0) return true;
-  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope));
-  return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+  return evalRule(item.visibleWhen, values, allFields, processStep, rowScope, viewer);
 }
 
 // Editability mirror: a field/section is editable unless always read-only
@@ -484,17 +646,14 @@ export function evalEditable(
   allFields: Field[],
   processStep = "draft",
   rowScope?: Record<string, unknown> | null,
+  viewer?: FormViewer,
 ): boolean {
   if (item.readonly) return false;
-  const g = ruleConditions(item.editableWhen);
-  if (!g || g.conditions.length === 0) return true;
-  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope));
-  return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+  return evalRule(item.editableWhen, values, allFields, processStep, rowScope, viewer);
 }
 
 function hasEditableRule(item: { editableWhen?: VisibleWhen | null }): boolean {
-  const g = ruleConditions(item.editableWhen);
-  return Boolean(g && g.conditions.length > 0);
+  return ruleHasContent(normalizeRule(item.editableWhen));
 }
 
 function conditionalEditBlockedForViewer(item: { editableWhen?: VisibleWhen | null }, viewer?: FormViewer): boolean {
@@ -516,7 +675,7 @@ function evalEditableForViewer(
   if (conditionalEditBlockedForViewer(item, viewer)) {
     return false;
   }
-  return evalEditable(item, values, allFields, processStep);
+  return evalEditable(item, values, allFields, processStep, null, viewer);
 }
 
 // ── Table column cell ─────────────────────────────────────────────────────────
@@ -598,8 +757,9 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }:
   );
 }
 
-function TableColInput({ col, value, onChange, readOnly, documentId, attachmentKey, row }: {
+function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentId, attachmentKey, row }: {
   col: Column; value: unknown; onChange: (v: unknown) => void; readOnly?: boolean;
+  onChangeCell?: (key: string, value: unknown) => void;
   documentId?: string; attachmentKey?: string; row?: Record<string, unknown>;
 }) {
   const base = "w-full bg-transparent py-0.5 text-sm outline-none text-foreground placeholder:text-muted-foreground/50";
@@ -647,13 +807,52 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
   const sval = typeof value === "string" ? value : value == null ? "" : String(value);
 
   switch (type) {
-    case "select":
+    case "sunsystems_account": {
+      const selected = Array.isArray(value) ? value.join(", ") : sval;
+      if (dis) return <span className="py-0.5 text-sm text-foreground">{selected || <span className="italic text-muted-foreground">—</span>}</span>;
       return (
-        <select value={sval} onChange={(e) => onChange(e.target.value)} disabled={dis} className={base}>
-          <option value="">—</option>
-          {(col.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
-        </select>
+        <AccountMultiSelect
+          value={selected}
+          onChange={(next) => onChange(Array.isArray(next) ? next[0] ?? "" : next)}
+          multi={false}
+          placeholder="Select supplier…"
+          className="w-full"
+        />
       );
+    }
+    case "select":
+    case "radio":
+      const selectOptions = [
+        { value: "", label: "—" },
+        ...(col.options ?? []).map((o) => ({ value: o, label: o })),
+      ];
+      return (
+        <CustomListbox
+          value={sval}
+          onChange={onChange}
+          options={selectOptions}
+          className={base}
+          buttonClassName="w-full"
+          ariaLabel="Select option"
+          disabled={dis}
+        />
+      );
+    case "rating": {
+      const maxStars = Math.max(1, Math.min(10, col.max ?? 5));
+      const current = Number(sval) || 0;
+      return (
+        <div className="flex items-center gap-0.5" aria-label={`Rating ${current} of ${maxStars}`}>
+          {Array.from({ length: maxStars }, (_, index) => index + 1).map((rating) => (
+            <button key={rating} type="button" disabled={dis} aria-label={`${rating} of ${maxStars}`}
+              aria-pressed={rating === current}
+              onClick={() => onChange(rating === current ? "0" : String(rating))}
+              className={`rounded p-0.5 ${dis ? "cursor-default" : "hover:scale-110"}`}>
+              <Star className={`h-4 w-4 ${rating <= current ? "fill-amber-400 text-amber-400" : "text-muted-foreground/40"}`} />
+            </button>
+          ))}
+        </div>
+      );
+    }
     case "boolean":
       return <input type="checkbox" checked={sval === "true"} disabled={dis} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-primary" />;
     case "textarea":
@@ -727,10 +926,31 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
       return (
         <ReferencePicker
           source={col.referenceSource ?? (type === "user" ? "users" : "documents")}
+          referenceGroupId={col.referenceGroupId}
           value={value}
           onChange={onChange}
           disabled={dis}
           compact
+        />
+      );
+    case "external":
+      return (
+        <ExternalSelect
+          source={col.external?.source ?? "items"}
+          dimension={col.external?.dimension}
+          value={sval}
+          onChange={onChange}
+          onSelectRecord={(rec) => {
+            // Items: mirror the picked item's BaseItemUnit into a sibling cell.
+            const unit = rec.data?.unit;
+            if (col.external?.fillColumn && unit !== undefined) {
+              onChangeCell?.(col.external.fillColumn, unit);
+            }
+          }}
+          multi={false}
+          compact
+          disabled={dis}
+          className="w-full"
         />
       );
     default:
@@ -740,7 +960,7 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
 
 // ── Table field ───────────────────────────────────────────────────────────────
 
-function TableField({ field, value, onChange, readOnly, tableKey, documentId, allValues, processStep, allFields }: {
+function TableField({ field, value, onChange, readOnly, tableKey, documentId, allValues, processStep, allFields, viewer }: {
   field: Field;
   value: Record<string, unknown>[];
   onChange: (rows: Record<string, unknown>[]) => void;
@@ -750,6 +970,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   allValues: TemplateFormValues;
   processStep?: string;
   allFields: Field[];
+  viewer?: FormViewer;
 }) {
   // ALL columns — used by the calc engine. Hidden helper columns must still
   // participate in formula evaluation even though they are not rendered.
@@ -763,9 +984,9 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   // (nothing to show anywhere); otherwise it stays and individual cells that
   // fail the rule render as "—".
   const colVisibleInRow = (c: Column, row?: Record<string, unknown> | null) =>
-    evalVisible({ hidden: c.hidden, visibleWhen: c.visibleWhen }, allValues, allFields, step, row ?? null);
+    evalVisible({ hidden: c.hidden, visibleWhen: c.visibleWhen }, allValues, allFields, step, row ?? null, viewer);
   const colEditableInRow = (c: Column, row?: Record<string, unknown> | null) =>
-    evalEditable({ readonly: c.readonly, editableWhen: c.editableWhen }, allValues, allFields, step, row ?? null);
+    evalEditable({ readonly: c.readonly, editableWhen: c.editableWhen }, allValues, allFields, step, row ?? null, viewer);
 
   const emptyRow = (): Record<string, unknown> => {
     const r: Record<string, unknown> = {};
@@ -778,6 +999,11 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
       ? value
       : Array.from({ length: field.minRows ?? 1 }, emptyRow)
   );
+  // Mirror of `rows` for synchronous multi-cell edits (e.g. picking an item
+  // writes both the item cell and the auto-filled UOM cell in one event; the
+  // second write must build on the first, before React re-renders).
+  const rowsRef = useRef<Record<string, unknown>[]>(rows);
+  useEffect(() => { rowsRef.current = rows; }, [rows]);
 
   // ── Sync rows from parent prop ─────────────────────────────────────────────
   // The parent passes the saved/live table rows via `value`. Because useState
@@ -868,7 +1094,8 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
 
   // ── Row mutation helpers ───────────────────────────────────────────────────
   const update = (ri: number, key: string, val: unknown) => {
-    const next = rows.map((r, i) => i === ri ? { ...r, [key]: val } : r);
+    const next = rowsRef.current.map((r, i) => i === ri ? { ...r, [key]: val } : r);
+    rowsRef.current = next;
     setRows(next);
     // computedRows effect will fire and call onChange with the merged result.
     // For non-calc tables (no calc columns), call onChange directly now.
@@ -949,6 +1176,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                               value={row[key] ?? ""}
                               row={row}
                               onChange={(v) => update(ri, key, v)}
+                              onChangeCell={(cellKey, cellVal) => update(ri, cellKey, cellVal)}
                               readOnly={cellLocked}
                               documentId={documentId}
                               attachmentKey={`${tableKey}~${ri}~${key}`}
@@ -1204,110 +1432,71 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
 
 // ── Signature pad field ────────────────────────────────────────────────────────
 
-function SignatureField({ fieldKey, disabled, value, onChangeCb }: {
+function SignatureField({ fieldKey, disabled, value, onChangeCb, onLaunchSignatureModal, allValues }: {
   fieldKey: string;
   disabled?: boolean;
   value?: unknown;
   onChangeCb: (key: string, val: unknown) => void;
+  onLaunchSignatureModal?: (fieldKey?: string) => void;
+  allValues?: TemplateFormValues;
 }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const loadedRef = useRef<string | null>(null);
-  const [drawing, setDrawing] = useState(false);
-  const [signed, setSigned] = useState(false);
-
-  // Render an existing signature (stored as a PNG data URL) onto the canvas —
-  // so it shows in read-only/approval view and when re-editing the form.
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    const v = typeof value === "string" ? value : "";
-    if (v.startsWith("data:image") && loadedRef.current !== v) {
-      loadedRef.current = v;
-      const img = new Image();
-      img.onload = () => {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        setSigned(true);
-      };
-      img.src = v;
-    }
-  }, [value]);
-
-  const getPos = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    const rect = canvasRef.current!.getBoundingClientRect();
-    if ("touches" in e) {
-      return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
-    }
-    return { x: (e as React.MouseEvent).clientX - rect.left, y: (e as React.MouseEvent).clientY - rect.top };
-  };
-
-  const startDraw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    if (disabled) return;
-    const ctx = canvasRef.current!.getContext("2d")!;
-    const { x, y } = getPos(e);
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    setDrawing(true);
-  };
-
-  const draw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    if (!drawing || disabled) return;
-    e.preventDefault();
-    const ctx = canvasRef.current!.getContext("2d")!;
-    ctx.lineWidth = 1.8;
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "#0f172a";
-    const { x, y } = getPos(e);
-    ctx.lineTo(x, y);
-    ctx.stroke();
-    setSigned(true);
-  };
-
-  const endDraw = () => {
-    if (!drawing) return;
-    setDrawing(false);
-    const dataUrl = canvasRef.current!.toDataURL("image/png");
-    loadedRef.current = dataUrl; // our own stroke — don't reload it as an image
-    onChangeCb(fieldKey, dataUrl);
-  };
-
-  const clear = () => {
-    const canvas = canvasRef.current!;
-    canvas.getContext("2d")!.clearRect(0, 0, canvas.width, canvas.height);
-    loadedRef.current = null;
-    setSigned(false);
-    onChangeCb(fieldKey, undefined);
+  const hasSignature = typeof value === "string" && value.startsWith("data:image");
+  
+  // Look for associated date and name fields
+  const dateValue = allValues?.[`${fieldKey}_date`] as string | undefined;
+  const nameValue = allValues?.[`${fieldKey}_name`] as string | undefined;
+  
+  // Check for styling metadata
+  const signatureStyle = allValues?.[`${fieldKey}_style`] as { color?: string; fontSize?: string; fontFamily?: string } | undefined;
+  
+  const inlineStyle = {
+    color: signatureStyle?.color || '#1F2933',
+    fontSize: signatureStyle?.fontSize || '16px',
+    fontFamily: signatureStyle?.fontFamily || 'inherit',
+    fontWeight: '600' as const,
   };
 
   return (
-    <div className="relative">
-      <canvas
-        ref={canvasRef}
-        width={600}
-        height={120}
-        className={`w-full rounded-lg border-2 ${signed ? "border-primary/40" : "border-dashed border-border"}
-          bg-white touch-none ${disabled ? "opacity-50" : "cursor-crosshair"}`}
-        style={{ height: 120 }}
-        onMouseDown={startDraw}
-        onMouseMove={draw}
-        onMouseUp={endDraw}
-        onMouseLeave={endDraw}
-        onTouchStart={startDraw}
-        onTouchMove={draw}
-        onTouchEnd={endDraw}
-      />
-      {!signed && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-          <Pencil className="h-3.5 w-3.5" /> Sign here
+    <div className="min-w-0 space-y-3">
+      {/* Signature button */}
+      <button
+        type="button"
+        onClick={() => onLaunchSignatureModal?.(fieldKey)}
+        disabled={disabled}
+        className="w-full border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-4 py-5 text-center transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50 disabled:pointer-events-none"
+      >
+        {hasSignature ? (
+          <div className="space-y-2">
+            <img 
+              src={value as string} 
+              alt="Signature" 
+              className="mx-auto max-h-44 w-auto max-w-full object-contain"
+            />
+            <p className="text-xs text-[#5E6870]">Click to change signature</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <PenTool className="mx-auto h-8 w-8 text-[#5E6870]" />
+            <p className="text-sm font-medium text-[#1F2933]">Click to add signature</p>
+            <p className="text-xs text-[#5E6870]">Use your saved signature or draw a new one</p>
+          </div>
+        )}
+      </button>
+      
+      {/* Date field */}
+      {dateValue && (
+        <div className="flex items-center gap-2 text-sm" style={inlineStyle}>
+          <CalendarClock className="h-4 w-4 text-[#5E6870]" />
+          <span>{dateValue}</span>
         </div>
       )}
-      {signed && !disabled && (
-        <button type="button" onClick={clear}
-          className="absolute right-2 top-2 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]
-            font-semibold text-muted-foreground hover:text-red-500 hover:bg-red-50 transition-colors">
-          <X className="h-3 w-3" /> Clear
-        </button>
+      
+      {/* Name field */}
+      {nameValue && (
+        <div className="flex items-center gap-2 text-sm" style={inlineStyle}>
+          <User className="h-4 w-4 text-[#5E6870]" />
+          <span>{nameValue}</span>
+        </div>
       )}
     </div>
   );
@@ -1388,7 +1577,119 @@ function labelForAuto(label: string, field: Field) {
   );
 }
 
-function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields }: {
+function parseAmount(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : parseFloat(String(v).replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Resolve a numeric source key: a top-level field, or a table column
+ * ("table.col" or bare "col"), in which case it sums that column across rows. */
+function resolveNumericSource(
+  key: string | undefined,
+  values: TemplateFormValues,
+  allFields: Field[],
+): number | null {
+  if (!key) return null;
+  if (allFields.some((f) => f.key === key && f.type !== "table")) return parseAmount(values[key]);
+
+  const [maybeTable, maybeCol] = key.includes(".") ? key.split(".") : [undefined, undefined];
+  const colKey = maybeCol ?? key;
+  const table = allFields.find(
+    (f) => f.type === "table" && f.key && (!maybeTable || f.key === maybeTable) &&
+    (f.columns ?? []).some((c) => c.key === colKey),
+  );
+  if (!table?.key) return null;
+  const rows = Array.isArray(values[table.key]) ? (values[table.key] as Record<string, unknown>[]) : [];
+  return rows.reduce((sum, r) => sum + (parseAmount(r?.[colKey]) ?? 0), 0);
+}
+
+/** "Pick a row" linked table: choose one row from a table in THIS form,
+ * labelled by ``tableRef.displayColumn``, and store the label text as a plain
+ * string. Another form's rows need a permissions-aware endpoint that isn't
+ * shipped yet, so that case renders as unavailable. */
+function TableRowPicker({ field, value, disabled, onChange, allValues, allFields }: {
+  field: Field;
+  value: unknown;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  allValues: TemplateFormValues;
+  allFields: Field[];
+}) {
+  const ref = field.tableRef;
+  const tableKey = ref?.tableKey ?? "";
+  const displayColumn = ref?.displayColumn ?? "";
+  const table = allFields.find((f) => f.key === tableKey && f.type === "table");
+  const rows = Array.isArray(allValues[tableKey]) ? (allValues[tableKey] as Record<string, unknown>[]) : [];
+  const labels = rows
+    .map((row) => (row && typeof row === "object" ? String(row[displayColumn] ?? "").trim() : ""))
+    .filter((label) => label !== "");
+  if (ref?.scope !== "this_form" || !table || !displayColumn) {
+    return (
+      <select disabled className={inp} value="">
+        <option value="">
+          {ref?.scope === "other_form" ? "Unavailable for other forms" : "No source table"}
+        </option>
+      </select>
+    );
+  }
+  return (
+    <select value={String(value ?? "")} disabled={disabled} className={inp}
+      onChange={(e) => onChange(e.target.value)}>
+      <option value="">— select a row —</option>
+      {labels.map((label, i) => <option key={`${label}-${i}`} value={label}>{label}</option>)}
+    </select>
+  );
+}
+
+/* The ten SunSystems analysis slots (Project, Cost Centre, …). Each slot holds
+ * one analysis code; the value is stored as { "1": code, "2": code, … } so an
+ * empty panel is `{}` (and therefore falsy to the required-field checks). */
+function AnalysisPanelInput({ value, onChange, disabled, slots }: {
+  value: unknown; onChange: (v: Record<string, string>) => void; disabled?: boolean; slots?: string[];
+}) {
+  const current = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, string>)
+    : {};
+  const dimensionSlots = Array.isArray(slots) && slots.length === 10 ? slots : ANALYSIS_PANEL_SLOTS;
+  return (
+    <div className="grid gap-2 border border-border bg-card p-3 sm:grid-cols-2">
+      {dimensionSlots.map((dimensionId, idx) => {
+        const slot = String(idx + 1);
+        const slotValue = current[slot] ?? "";
+        return (
+          <div key={slot} className="flex items-start gap-2">
+            <span className="mt-4 w-4 shrink-0 text-right text-xs text-muted-foreground">{idx + 1}</span>
+            <div className="min-w-0 flex-1">
+              <div className="mb-1 break-words text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {analysisDimensionName(dimensionId)}
+              </div>
+              <ExternalSelect
+                source="analysis_codes"
+                dimension={dimensionId}
+                multi={false}
+                compact
+                disabled={disabled}
+                value={slotValue}
+                placeholder="Select code…"
+                showSelectedName
+                onChange={(v) => {
+                  const next = { ...current };
+                  const code = Array.isArray(v) ? (v[0] ?? "") : v;
+                  if (code) next[slot] = code;
+                  else delete next[slot];
+                  onChange(next);
+                }}
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields, onLaunchSignatureModal, onButtonClick, buttonDone = false, viewer }: {
   field: Field;
   control: any;
   errors: Record<string, any>;
@@ -1400,6 +1701,10 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   editable?: boolean;
   processStep?: string;
   allFields: Field[];
+  onLaunchSignatureModal?: (fieldKey?: string) => void;
+  onButtonClick?: (field: Field) => void;
+  buttonDone?: boolean;
+  viewer?: FormViewer;
 }) {
   const key  = field.key ?? field.id ?? "";
   const type = field.type ?? "text";
@@ -1412,6 +1717,27 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
   if (field.hidden) return null;
 
+  // Action button — reveals an on-demand section or runs a one-shot calculation.
+  if (type === "button") {
+    // Buttons are an editing affordance only; a read-only document hides them.
+    if (readOnly) return null;
+    const variant = field.button?.variant ?? "primary";
+    return (
+      <div className="min-w-0" style={style}>
+        <button type="button" disabled={dis || buttonDone} onClick={() => onButtonClick?.(field)}
+          className={
+            "inline-flex h-10 items-center gap-2 px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 "
+            + (variant === "primary" ? "bg-[#287EAD] text-white hover:bg-[#1E6F99]"
+              : variant === "secondary" ? "bg-[#E5E8EB] text-[#1F2933] hover:bg-[#D5D9DC]"
+                : "border border-[#287EAD] bg-white text-[#287EAD] hover:bg-[#EEF6FB]")
+          }>
+          {buttonDone ? <CheckCircle2 className="h-4 w-4" /> : field.button?.action === "calculate" ? <Calculator className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+          {buttonDone ? `${label} — added` : (label || "Button")}
+        </button>
+      </div>
+    );
+  }
+
   // Layout-only elements
   if (type === "heading") return (
     <div className="min-w-0" style={{ gridColumn: "span 12 / span 12" }}>
@@ -1419,6 +1745,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     </div>
   );
   if (type === "divider") return <div className="min-w-0" style={{ gridColumn: "span 12 / span 12" }}><hr style={{ borderColor: "#E5E8EB" }} /></div>;
+  if (type === "spacer") return <div className="min-w-0" style={{ gridColumn: `span ${span} / span ${span}` }}><div className="h-8" /></div>;
 
   // Read-only guidance note — never submitted.
   if (type === "info") return (
@@ -1429,9 +1756,6 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       </div>
     </div>
   );
-
-  // Empty gap used to align fields on a row.
-  if (type === "spacer") return <div aria-hidden className="min-w-0" style={style} />;
 
   // Table handled separately (needs full width + local state)
   if (type === "table") return (
@@ -1445,6 +1769,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       allValues={allValues}
       processStep={processStep}
       allFields={allFields}
+      viewer={viewer}
     />
   );
 
@@ -1525,8 +1850,19 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
   // Validation rules
   const rules: Record<string, any> = {};
-  if (field.required && !readOnly && type !== "boolean" && type !== "checkbox")
+  const isAnalysisPanel =
+    (type === "external" && field.external?.source === "analysis_codes" && field.external?.mode !== "single") ||
+    type === "analysis_panel";
+  if (field.required && !readOnly && type !== "boolean" && type !== "checkbox" && !isAnalysisPanel)
     rules.required = `${label} is required`;
+  if (isAnalysisPanel && field.required && !readOnly) {
+    rules.validate = (v: unknown) => {
+      const filled =
+        v && typeof v === "object" && !Array.isArray(v) &&
+        Object.values(v as Record<string, unknown>).some((x) => x);
+      return filled || `${label} is required`;
+    };
+  }
   if (field.regex)
     rules.pattern = { value: new RegExp(field.regex), message: "Invalid format" };
   if (field.minLength !== undefined)
@@ -1574,6 +1910,38 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   );
 
   // Static / non-interactive types
+  if (type === "budget") {
+    const ss = field.sunsystems ?? {};
+    // Budget: chosen field/column → else the default value → else "not configured"
+    const budget =
+      resolveNumericSource(ss.budgetAmountField, allValues, allFields) ??
+      parseAmount(field.defaultValue);
+    const requested = resolveNumericSource(ss.monitoredAmountField, allValues, allFields) ?? 0;
+    const budgetNum = budget ?? 0;
+    const currency = field.currencySymbol?.trim() ?? "";
+    const formattedAmount = budgetNum.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    const formattedBudget = currency ? `${currency} ${formattedAmount}` : formattedAmount;
+
+    return (
+      <div className="min-w-0" style={style}>
+        {labelEl}
+        <div className="flex items-start gap-3">
+          <div className={`${inp} flex-1 bg-[#F6F7F8] text-[#8C969E]`}>
+            {formattedBudget}
+          </div>
+          {budget && requested > budgetNum && (
+            <BudgetBanner
+              amount={requested}
+              budget={budget}
+              currency={currency}
+              accountCode={ss.account as string | undefined}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (type === "signature") {
     return (
       <div className="min-w-0" style={style}>
@@ -1583,6 +1951,8 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
           disabled={dis}
           value={allValues[key]}
           onChangeCb={onChangeCb}
+          onLaunchSignatureModal={onLaunchSignatureModal}
+          allValues={allValues}
         />
       </div>
     );
@@ -1633,13 +2003,21 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       break;
 
     case "select":
+      const fieldSelectOptions = [
+        { value: "", label: field.placeholder ?? "Select an option…" },
+        ...(field.options ?? []).map((o) => ({ value: o, label: o })),
+      ];
       control_el = (
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
-          <select {...f} value={String(f.value ?? "")} disabled={dis} className={inp}
-            onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }}>
-            <option value="">{field.placeholder ?? "Select an option…"}</option>
-            {(field.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
-          </select>
+          <CustomListbox
+            value={String(f.value ?? "")}
+            onChange={(val) => { f.onChange(val); onChangeCb(key, val); }}
+            options={fieldSelectOptions}
+            className={inp}
+            buttonClassName="w-full"
+            ariaLabel={`Select ${field.label}`}
+            disabled={dis}
+          />
         )} />
       );
       break;
@@ -1783,13 +2161,75 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
     case "reference":
     case "user":
+      if (type === "reference" && field.referenceSource === "table") {
+        control_el = (
+          <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
+            <TableRowPicker
+              field={field}
+              value={f.value}
+              disabled={dis}
+              allValues={allValues}
+              allFields={allFields}
+              onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+            />
+          )} />
+        );
+        break;
+      }
       control_el = (
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
           <ReferencePicker
             source={field.referenceSource ?? (type === "user" ? "users" : "documents")}
+            referenceGroupId={field.referenceGroupId}
             value={f.value}
             disabled={dis}
             onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+          />
+        )} />
+      );
+      break;
+
+    case "sunsystems_account":
+      control_el = (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
+          <AccountMultiSelect
+            value={f.value}
+            onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+            multi={field.multi ?? true}
+          />
+        )} />
+      );
+      break;
+
+    case "external":
+      // Analysis Codes is a composite: the ten ledger slots, not one lookup.
+      // Other sources are a plain lookup (single or multi).
+      control_el = isAnalysisPanel ? (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
+          <AnalysisPanelInput
+            value={f.value}
+            disabled={dis}
+            slots={field.external?.slots}
+            onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+          />
+        )} />
+      ) : (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
+          <ExternalSelect
+            source={field.external?.source ?? "items"}
+            dimension={field.external?.dimension}
+            value={(f.value as string | string[]) ?? (field.external?.multi ? [] : "")}
+            onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+            onSelectRecord={(rec) => {
+              // Items: mirror the picked item's BaseItemUnit into a sibling field.
+              const unit = rec.data?.unit;
+              if (field.external?.fillField && unit !== undefined) {
+                onChangeCb(field.external.fillField, unit);
+              }
+            }}
+            multi={field.external?.multi ?? false}
+            disabled={dis}
+            showSelectedName={!(field.external?.multi ?? false)}
           />
         )} />
       );
@@ -1829,7 +2269,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections }: {
+function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections, retirementOnlyEdit = false, retirementSectionReadOnly = false, onLaunchSignatureModal }: {
   sections: unknown[];
   values: TemplateFormValues;
   onChange: (key: string, value: unknown) => void;
@@ -1839,15 +2279,26 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // conditions. Absent (a brand-new form) is treated as "draft".
   documentStatus?: string;
   canEditConditionalSections?: boolean;
+  retirementOnlyEdit?: boolean;
+  retirementSectionReadOnly?: boolean;
+  onLaunchSignatureModal?: (fieldKey?: string) => void;
 }) {
-  const list = (Array.isArray(sections) ? sections : []) as Section[];
-  const allFields = list.flatMap((s) => s.fields ?? []);
+  const rawSections = (Array.isArray(sections) ? sections : []) as Section[];
+  // Materialise linked tables (embed -> table) and keep only the ACTIVE
+  // sections: normal ones plus the on-demand ones in `__sections_added`. Every
+  // downstream computation (allFields, calc, conditions, required) sees only
+  // sections that are actually part of the form.
+  const addedIds = addedSectionIds(values);
+  const active = activeSections(materializeSections(rawSections), values);
+  const allFields = active.flatMap((s) => s.fields ?? []);
 
-  // Derive a stable key from section IDs so we can detect template changes
-  const sectionsKey = list.map((s) => s.id ?? "").join("|");
+  // Derive a stable key from the RAW section IDs so we can detect template
+  // changes. Deriving it from the rendered list would reset the form whenever a
+  // button adds/removes a block.
+  const sectionsKey = rawSections.map((s) => s.id ?? "").join("|");
   const prevKeyRef = useRef(sectionsKey);
 
-  const { control, formState: { errors }, reset, watch } = useForm<TemplateFormValues>({
+  const { control, formState: { errors }, reset, watch, setValue, getValues, unregister } = useForm<TemplateFormValues>({
     defaultValues: values,
     mode: "onBlur",
   });
@@ -1859,6 +2310,18 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
       reset({});
     }
   }, [sectionsKey]);
+
+  // Controllers read React Hook Form state, so mirror values set externally
+  // (for example supplier prefill and template defaults) into that state.
+  useEffect(() => {
+    const current = getValues();
+    for (const [key, value] of Object.entries(values)) {
+      if (key.startsWith("__") || value instanceof File) continue;
+      if (JSON.stringify(current[key]) !== JSON.stringify(value)) {
+        setValue(key, value, { shouldDirty: false, shouldValidate: false });
+      }
+    }
+  }, [values, sectionsKey]);
 
   const currentUser = useAuthStore((s) => s.user);
 
@@ -1882,12 +2345,10 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // calc_text/calc_date) whenever any value changes — client preview only,
   // mirroring the builder's own Preview and the server's authoritative
   // compute_calculated_values. Resolves in template order so a later formula
-  // can reference an earlier calculated field's result. Skipped for an
-  // existing document the same way the auto-fill formula effect above is:
-  // the server already froze these at generation time, so client recompute
-  // here would just be superseded noise against a document's saved values.
+  // can reference an earlier calculated field's result, including on an
+  // existing document while it is being edited.
   useEffect(() => {
-    if (readOnly || documentId) return;
+    if (readOnly) return;
     // Build table registry so top-level formulas can reference table columns
     const tableRegistry: Record<string, { rows: Record<string, unknown>[]; colTypeByKey: Record<string, string | undefined> }> = {};
     for (const f of allFields) {
@@ -1901,18 +2362,62 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
     for (const f of allFields) {
       const k = f.key ?? f.id ?? "";
       if (!k || !f.calc?.expression) continue;
-      let result = evaluateCalcExpression(f.calc.expression, scope);
+      const expr = resolveRowAggregates(f.calc.expression, [], {}, tableRegistry);
+      let result = evaluateCalcExpression(expr, scope);
       if (typeof result === "number" && typeof f.calc.decimals === "number") {
         result = Number(result.toFixed(f.calc.decimals));
       }
+      result = formatCalcResult(f.type, result);
       scope[k] = result; // let a later formula see this one's result
-      if (values[k] !== result) onChange(k, result);
+      if (String(values[k] ?? "") !== String(result)) onChange(k, result);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sectionsKey, JSON.stringify(values), readOnly, documentId]);
 
+  /* Button click: reveal the target on-demand section at the chosen spot, or
+   * evaluate a formula once and write it into the target field. */
+  const runButton = (btn: Field) => {
+    const b = btn.button;
+    if (!b) return;
+    if (b.action === "add_block") {
+      if (!b.targetSectionId || addedIds.includes(b.targetSectionId)) return;
+      onChange("__sections_added", withSectionAdded(values, b.targetSectionId));
+      return;
+    }
+    const target = allFields.find((f) => f.key === b.targetKey);
+    if (!target || !b.calc?.expression) return;
+    const tableRegistry: Record<string, { rows: Record<string, unknown>[]; colTypeByKey: Record<string, string | undefined> }> = {};
+    for (const f of allFields) {
+      if (f.type !== "table" || !f.key) continue;
+      const rows = Array.isArray(values[f.key]) ? (values[f.key] as Record<string, unknown>[]) : [];
+      const typeByKey: Record<string, string | undefined> = {};
+      (f.columns ?? []).forEach((c) => { if (c.key) typeByKey[c.key] = c.type; });
+      tableRegistry[f.key] = { rows, colTypeByKey: typeByKey };
+    }
+    const scope = buildCalcScope(allFields, values, tableRegistry);
+    const expr = resolveRowAggregates(b.calc.expression, [], {}, tableRegistry);
+    let result = evaluateCalcExpression(expr, scope);
+    if (typeof result === "number" && typeof b.calc.decimals === "number") {
+      result = Number(result.toFixed(b.calc.decimals));
+    }
+    result = formatCalcResult(target.type, result);
+    const k = target.key ?? target.id ?? "";
+    if (k) onChange(k, result);
+  };
+
+  const removeSpawned = (section: Section) => {
+    if (section.id) onChange("__sections_added", withSectionRemoved(values, section.id));
+    for (const f of section.fields ?? []) {
+      const k = f.key ?? f.id ?? "";
+      if (!k) continue;
+      unregister(k);
+      onChange(k, f.type === "table" ? [] : undefined);
+    }
+  };
+
+  const ordered = active;
+
   // Keep a live snapshot of form values for conditional visibility
-  const liveValues = { ...values, ...(watch() as TemplateFormValues), __document_id: documentId };
+  const liveValues = { ...(watch() as TemplateFormValues), ...values, __document_id: documentId };
 
   // Viewer context for role-restricted sections.
   const viewer: FormViewer = {
@@ -1924,7 +2429,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // Current process step for "process step" visibility conditions.
   const processStep = documentStatus || "draft";
 
-  if (list.length === 0) {
+  if (rawSections.length === 0) {
     return <p className="text-sm text-muted-foreground">This form has no fields.</p>;
   }
 
@@ -1933,7 +2438,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // attachment download buttons (the approver needs to open attachments).
   return (
     <div className="space-y-6">
-      {list.map((section, si) => {
+      {ordered.map((section, si) => {
         // Hidden / conditionally-hidden / role-restricted sections drop out
         // entirely. Whether the viewer is ALLOWED TO EDIT a conditionally-
         // editable section/field is a different axis — handled below via
@@ -1941,13 +2446,15 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
         // controls to read-only. It must never also hide the section, or an
         // approver reviewing the document loses visibility into content
         // they're specifically there to review.
-        if (!evalVisible(section, liveValues as TemplateFormValues, allFields, processStep)) return null;
+        if (!evalVisible(section, liveValues as TemplateFormValues, allFields, processStep, null, viewer)) return null;
         if (!sectionVisibleToViewer(section, viewer)) return null;
         const visibleFields = (section.fields ?? []).filter((f) =>
-          evalVisible(f, liveValues as TemplateFormValues, allFields, processStep)
+          evalVisible(f, liveValues as TemplateFormValues, allFields, processStep, null, viewer)
         );
         // Editability cascades: a read-only/locked section locks all its fields.
-        const sectionEditable = evalEditableForViewer(section, liveValues as TemplateFormValues, allFields, processStep, viewer);
+        const sectionEditable = evalEditableForViewer(section, liveValues as TemplateFormValues, allFields, processStep, viewer)
+          && (!retirementOnlyEdit || isRetirementExpenseSection(section))
+          && (!retirementSectionReadOnly || !isRetirementExpenseSection(section));
         const sectionLocked = !readOnly && !sectionEditable;
         return (
           <div key={section.id ?? si} className="overflow-hidden" style={{ border: "1px solid #C8CDD2", backgroundColor: "#FFFFFF" }}>
@@ -1959,6 +2466,12 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: "#F0F2F4", color: "#5E6870" }}>
                     <Lock className="h-2.5 w-2.5" /> Read-only at this step
                   </span>
+                )}
+                {section.onDemand && section.removable && (
+                  <button type="button" onClick={() => removeSpawned(section)}
+                    className="ml-auto inline-flex items-center gap-1 text-xs font-semibold hover:text-red-600" style={{ color: "#5E6870" }}>
+                    <Trash2 className="h-3.5 w-3.5" /> Remove
+                  </button>
                 )}
               </h3>
               {section.description && (
@@ -1979,6 +2492,10 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
                   allValues={liveValues as TemplateFormValues}
                   processStep={processStep}
                   allFields={allFields}
+                  onLaunchSignatureModal={onLaunchSignatureModal}
+                  onButtonClick={runButton}
+                  buttonDone={f.button?.action === "add_block" && addedIds.includes(f.button?.targetSectionId ?? "")}
+                  viewer={viewer}
                 />
               ))}
               {visibleFields.length === 0 && (
@@ -2003,14 +2520,17 @@ export function requiredFieldLabels(
   viewer?: FormViewer,
   processStep = "draft",
 ): string[] {
-  const list = (Array.isArray(sections) ? sections : []) as Section[];
+  const rawList = (Array.isArray(sections) ? sections : []) as Section[];
+  // Validate only the sections that are part of the form (normal + added
+  // on-demand), mirroring the renderer and the server.
+  const list = activeSections(materializeSections(rawList), values);
   const allFields = list.flatMap((s) => s.fields ?? []);
   const missing: string[] = [];
   for (const s of list) {
     // Don't require fields the user never sees because their section is hidden
     // (always-hidden, a conditional rule that isn't met, or a role restriction
     // the viewer isn't a member of).
-    if (!evalVisible(s, values, allFields, processStep)) continue;
+    if (!evalVisible(s, values, allFields, processStep, null, viewer)) continue;
     if (!sectionVisibleToViewer(s, viewer)) continue;
     if (conditionalEditBlockedForViewer(s, viewer)) continue;
     // A read-only/locked section's fields can't be filled at this step.
@@ -2024,7 +2544,7 @@ export function requiredFieldLabels(
       // Formula fields auto-fill (and the server finalizes them); never block on them.
       if (resolveFormula(f.formula)) continue;
       // Don't require a field the user can't see (hidden / conditionally hidden).
-      if (f.hidden || !evalVisible(f, values, allFields, processStep)) continue;
+      if (f.hidden || !evalVisible(f, values, allFields, processStep, null, viewer)) continue;
       if (conditionalEditBlockedForViewer(f, viewer)) continue;
       // Don't require a field the user can't edit at this step (read-only / locked).
       if (!sectionEditable || !evalEditableForViewer(f, values, allFields, processStep, viewer)) continue;
@@ -2048,10 +2568,10 @@ export function requiredFieldLabels(
           // actually shown and editable.
           const missingInAnyRow =
             rows.length === 0
-              ? evalVisible(col, values, allFields, processStep, null) && evalEditable(col, values, allFields, processStep, null)
+              ? evalVisible(col, values, allFields, processStep, null, viewer) && evalEditable(col, values, allFields, processStep, null, viewer)
               : rows.some((row) => {
-                  if (!evalVisible(col, values, allFields, processStep, row)) return false;
-                  if (!evalEditable(col, values, allFields, processStep, row)) return false;
+                  if (!evalVisible(col, values, allFields, processStep, row, viewer)) return false;
+                  if (!evalEditable(col, values, allFields, processStep, row, viewer)) return false;
                   const v = row?.[colKey];
                   return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
                 });
@@ -2068,7 +2588,10 @@ export function requiredFieldLabels(
           v === undefined || v === null ||
           (typeof v === "string" && v.trim() === "") ||
           (typeof v === "boolean" && !v) ||
-          (Array.isArray(v) && v.length === 0);
+          (Array.isArray(v) && v.length === 0) ||
+          (((type === "external" && f.external?.source === "analysis_codes") || type === "analysis_panel") &&
+            typeof v === "object" && !Array.isArray(v) &&
+            !Object.values(v as Record<string, unknown>).some((x) => x));
         if (empty) { missing.push(f.label ?? key); continue; }
       }
       // Regex validation

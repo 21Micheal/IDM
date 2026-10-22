@@ -98,8 +98,9 @@ export interface Document {
   edit_locked_by_name?: string | null;
   edit_locked_at?: string | null;
   is_edit_locked?: boolean;
-  builder_workflow_phase?: "request" | "retirement" | null;
+  builder_workflow_phase?: "request" | "retirement" | "requisition" | "rfq" | "lpo" | "payment_run" | null;
   builder_process_step?: string | null;
+  builder_next_stage?: "rfq" | "lpo" | null;
   can_submit_retirement?: boolean;
   relationship_count?: number;
   relationship_suggestion_count?: number;
@@ -221,6 +222,7 @@ export interface WorkflowTask {
     allow_approve?: boolean;
     allow_reject?: boolean;
     allow_return?: boolean;
+    allow_return_submitter?: boolean;
   };
   workflow_instance?: {
     document?: {

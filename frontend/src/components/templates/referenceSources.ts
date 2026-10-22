@@ -23,7 +23,7 @@ type Source = {
   key: string;
   /** Whether the backend list endpoint honours a `search` query param. */
   serverSearch: boolean;
-  fetch: (search: string) => Promise<ReferenceOption[]>;
+  fetch: (search: string, groupId?: string) => Promise<ReferenceOption[]>;
 };
 
 function unwrap(res: { data: unknown }): Record<string, unknown>[] {
@@ -40,14 +40,23 @@ const SOURCES: Record<string, Source> = {
   users: {
     key: "users",
     serverSearch: true,
-    fetch: async (search) =>
-      unwrap(await usersAPI.list({ search, page_size: 20 })).map((u) => ({
+    fetch: async (search, groupId) => {
+      if (groupId) {
+        const memberships = unwrap(await groupsAPI.members(groupId, { active_only: true }));
+        const query = search.toLowerCase();
+        return memberships.map((membership) => membership.user as Record<string, unknown>)
+          .filter((u) => u && u.id)
+          .map((u) => ({
+            id: str(u.id),
+            label: str(u.full_name) || `${str(u.first_name)} ${str(u.last_name)}`.trim() || str(u.email),
+          }))
+          .filter((u) => !query || u.label.toLowerCase().includes(query));
+      }
+      return unwrap(await usersAPI.list({ search, page_size: 20 })).map((u) => ({
         id: str(u.id),
-        label:
-          str(u.full_name) ||
-          `${str(u.first_name)} ${str(u.last_name)}`.trim() ||
-          str(u.email),
-      })),
+        label: str(u.full_name) || `${str(u.first_name)} ${str(u.last_name)}`.trim() || str(u.email),
+      }));
+    },
   },
   groups: {
     key: "groups",

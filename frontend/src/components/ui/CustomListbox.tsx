@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 interface Option {
   value: string;
   label: React.ReactNode;
+  disabled?: boolean;
 }
 
 interface Props {
@@ -144,9 +145,12 @@ export default function CustomListbox({
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       if (open && activeIndex != null) {
-        onChange(options[activeIndex].value);
-        setOpen(false);
-        buttonRef.current?.focus();
+        const opt = options[activeIndex];
+        if (opt && !opt.disabled) {
+          onChange(opt.value);
+          setOpen(false);
+          buttonRef.current?.focus();
+        }
       } else {
         setOpen(true);
       }
@@ -200,6 +204,7 @@ export default function CustomListbox({
           {options.map((opt, idx) => {
             const selected = opt.value === value;
             const active = idx === activeIndex;
+            const isDisabled = Boolean(opt.disabled);
             // stronger contrast for selected state, and explicit text colors for all states
             const baseText = "text-[#1F2933]";
             const selectedClasses = "bg-[#1E6F99] text-white";
@@ -211,13 +216,15 @@ export default function CustomListbox({
                 key={String(opt.value) + idx}
                 role="option"
                 aria-selected={selected}
+                aria-disabled={isDisabled}
                 onClick={() => {
+                  if (isDisabled) return;
                   onChange(opt.value);
                   setOpen(false);
                   buttonRef.current?.focus();
                 }}
-                onMouseEnter={() => setActiveIndex(idx)}
-                className={`cursor-pointer px-3 py-2 text-sm leading-snug ${optionClassName} ${selected ? selectedClasses : active ? activeClasses : defaultClasses}`}
+                onMouseEnter={() => !isDisabled && setActiveIndex(idx)}
+                className={`px-3 py-2 text-sm leading-snug ${optionClassName} ${isDisabled ? "cursor-not-allowed text-[#AEB5BB] opacity-70" : "cursor-pointer"} ${!isDisabled && selected ? selectedClasses : !isDisabled && active ? activeClasses : !isDisabled ? defaultClasses : ""}`}
               >
                 <span className="block break-words">{opt.label}</span>
               </li>

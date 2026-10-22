@@ -2,26 +2,30 @@ import {
   useState, useCallback, useRef, useMemo, useEffect,
 } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { workflowAPI, documentTypesAPI, groupsAPI, normalizeListResponse } from "@/services/api";
+import { workflowAPI, documentTypesAPI, groupsAPI, templatesAPI, normalizeListResponse } from "@/services/api";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import {
   Plus, Trash2, Save, GitBranch, Loader2, X,
   Settings2, AlertCircle,
-  Clock, CheckCircle2,
+  CheckCircle2,
   Search, MoreVertical,
   FolderTree, LayoutTemplate, Check,
   User, UsersRound, Users,
-  Edit3, Play, Flag,
-  ZoomIn, ZoomOut, Maximize2, Move,
-  FileSignature, Copy,
+  Edit3, FileSignature, Copy,
   Bell, Mail,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
 import CustomListbox from "@/components/ui/CustomListbox";
+import BranchedWorkflowEditor from "@/components/workflow/BranchedWorkflowEditor";
+import {
+  type Block, type StepData, type WorkflowDefinition, type WorkflowField,
+  SYSTEM_FIELDS, definitionFromSteps, fieldMap, flattenSteps, mapSteps,
+  migrateLegacyRules, validateDefinition,
+} from "@/lib/workflowGraph";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-type AssigneeType = "group_any" | "group_all" | "group_specific";
+type AssigneeType = "group_any" | "group_all" | "group_specific" | "form_user";
 type StepType = "approval" | "notification";
 type WorkflowTargetType = "document" | "payment_run";
 type WorkflowRouteKind = "document" | "form" | "payment_run";
@@ -32,6 +36,7 @@ interface WorkflowStep {
   name: string;
   status_label: string;
   step_type: StepType;
+  post_lpo_after_approval?: boolean;
   // Approval-step fields
   assignee_type: AssigneeType;
   assignee_group: string | null;
@@ -39,11 +44,15 @@ interface WorkflowStep {
   assignee_user: string | null;
   assignee_user_name?: string;
   assignee_user_auto?: boolean;
+  assignee_user_field?: string;
   sla_hours: number;
   allow_resubmit: boolean;
   allow_approve: boolean;
   allow_reject: boolean;
+  /** Approver may send the document back to the PREVIOUS approval on the path it took. */
   allow_return: boolean;
+  /** Approver may send the document back to the SUBMITTER (to edit and resubmit). */
+  allow_return_submitter: boolean;
   requires_signature: boolean;
   instructions: string;
   // Custom approver email (approval steps)
@@ -52,9 +61,22 @@ interface WorkflowStep {
   // Notification-step fields
   notify_user?: string | null;
   notify_user_name?: string;
+  /** Single address — kept for back-compat; UI now uses notify_emails[] */
   notify_email?: string;
+  /** Multiple recipient email addresses (RFQ supplier emails, etc.) */
+  notify_emails?: string[];
   notification_subject?: string;
   notification_message?: string;
+  /** When true the backend embeds a form table in the email body */
+  notify_include_items_table?: boolean;
+  /** Form table field key to render as the items/quotation table */
+  notify_table_field?: string | null;
+  /** Selected columns to expose in the supplier notification table */
+  notify_table_columns?: string[] | null;
+  /** Recipient type: "user" | "email" | "supplier" */
+  notify_recipient_type?: "user" | "email" | "supplier";
+  /** Form field key containing supplier codes (when notify_recipient_type is "supplier") */
+  notify_supplier_field?: string | null;
 }
 
 interface WorkflowTemplate {
@@ -69,6 +91,8 @@ interface WorkflowTemplate {
   notify_uploader_on_approval?: boolean;
   email_templates?: EmailTemplates;
   steps: WorkflowStep[];
+  /** v2 branched definition. When present the engine follows it and `steps` is only a flat mirror. */
+  definition?: WorkflowDefinition | null;
   step_count: number;
   created_by?: { id: string; full_name: string; email: string };
   created_at?: string;
@@ -238,9 +262,12 @@ interface WorkflowRule {
   is_active: boolean;
 }
 
-type WorkflowPhase = "request" | "retirement" | "payment_run";
+type WorkflowPhase = "requisition" | "rfq" | "lpo" | "request" | "retirement" | "payment_run";
 
 const WORKFLOW_PHASES: { value: WorkflowPhase; label: string }[] = [
+  { value: "requisition", label: "Requisition" },
+  { value: "rfq", label: "RFQ" },
+  { value: "lpo", label: "LPO" },
   { value: "request", label: "Request" },
   { value: "retirement", label: "Retirement" },
   { value: "payment_run", label: "Payment run" },
@@ -259,6 +286,8 @@ interface GroupMembershipApiItem {
   full_name?: string;
   email?: string;
   job_description?: string;
+  is_active?: boolean;
+  expires_at?: string | null;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -268,6 +297,7 @@ const ASSIGNEE_MODES: { value: AssigneeType; label: string; description: string;
   { value: "group_any", label: "Any member", description: "Single approver from group", Icon: Users },
   { value: "group_all", label: "All members", description: "Consensus required", Icon: UsersRound },
   { value: "group_specific", label: "Specific member", description: "Designated approver or a chosen member", Icon: User },
+  { value: "form_user", label: "Selected form user", description: "The person selected by the requisitioner", Icon: User },
 ];
 
 const GROUP_COLORS = [
@@ -309,7 +339,7 @@ function normalizeAssigneeType(value: unknown): AssigneeType {
   if (typeof value === "string" && value in LEGACY_ASSIGNEE_TYPE_MAP) {
     return LEGACY_ASSIGNEE_TYPE_MAP[value];
   }
-  if (value === "group_any" || value === "group_all" || value === "group_specific") {
+  if (value === "group_any" || value === "group_all" || value === "group_specific" || value === "form_user") {
     return value;
   }
   return "group_any";
@@ -323,11 +353,14 @@ function normalizeStep(step: WorkflowStep): WorkflowStep {
   return {
     ...step,
     step_type: normalizeStepType((step as any).step_type),
+    post_lpo_after_approval: Boolean((step as any).post_lpo_after_approval),
     assignee_type: normalizeAssigneeType(step.assignee_type),
     assignee_group: isUuidLike(step.assignee_group) ? step.assignee_group : null,
     assignee_user: isUuidLike(step.assignee_user) ? step.assignee_user : null,
     notify_user: isUuidLike(step.notify_user) ? step.notify_user : (step.notify_user ?? null),
     requires_signature: Boolean(step.requires_signature),
+    // Templates saved before this option existed keep their behaviour: no return-to-submitter.
+    allow_return_submitter: Boolean((step as any).allow_return_submitter),
     approver_email_subject: step.approver_email_subject ?? "",
     approver_email_body: step.approver_email_body ?? "",
   };
@@ -375,6 +408,9 @@ function normalizeTemplate(template: WorkflowTemplate): WorkflowTemplate {
     notify_uploader_on_approval: template.notify_uploader_on_approval ?? true,
     email_templates: normalizeEmailTemplates(template.email_templates),
     steps: (template.steps ?? []).map(normalizeStep),
+    definition: template.definition?.blocks
+      ? { ...template.definition, blocks: mapSteps(template.definition.blocks, (s) => normalizeStep(s as WorkflowStep) as StepData) }
+      : null,
   };
 }
 
@@ -422,6 +458,11 @@ function isFormDocumentType(type: Partial<DocumentType> | null | undefined): boo
   );
 }
 
+function isRequisitionDocumentType(type: Pick<DocumentType, "name" | "code" | "description"> | null | undefined) {
+  if (!type) return false;
+  return /requisition/i.test([type.name, type.code, type.description].filter(Boolean).join(" "));
+}
+
 function formatMoney(value: number, currency: string) {
   return `${currency} ${value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
@@ -438,8 +479,9 @@ function blankStep(): WorkflowStep {
   return {
     order: 0, name: "", status_label: "Pending Approval",
     step_type: "approval",
-    assignee_type: "group_any", assignee_group: null, assignee_user: null,
-    sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true,
+    post_lpo_after_approval: false,
+    assignee_type: "group_any", assignee_group: null, assignee_user: null, assignee_user_field: "",
+    sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, allow_return_submitter: true,
     requires_signature: false, instructions: "",
     approver_email_subject: "", approver_email_body: "",
   };
@@ -449,16 +491,23 @@ function blankNotificationStep(): WorkflowStep {
   return {
     order: 0, name: "Send Notification", status_label: "Notification Sent",
     step_type: "notification",
+    post_lpo_after_approval: false,
     assignee_type: "group_any", assignee_group: null, assignee_user: null,
     sla_hours: 1,
-    allow_resubmit: false, allow_approve: false, allow_reject: false, allow_return: false,
+    allow_resubmit: false, allow_approve: false, allow_reject: false, allow_return: false, allow_return_submitter: false,
     requires_signature: false,
     instructions: "",
     approver_email_subject: "", approver_email_body: "",
     notify_user: null,
     notify_email: "",
+    notify_emails: [],
     notification_subject: "Workflow update",
     notification_message: "Hello,\n\nThis is an automated notification regarding the document workflow.\n\nThank you.",
+    notify_include_items_table: false,
+    notify_table_field: null,
+    notify_table_columns: null,
+    notify_recipient_type: "email",
+    notify_supplier_field: null,
   };
 }
 
@@ -477,6 +526,7 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
     rest.allow_approve      = false;
     rest.allow_reject       = false;
     rest.allow_return       = false;
+    rest.allow_return_submitter = false;
     rest.allow_resubmit     = false;
     rest.requires_signature = false;
     rest.assignee_user_auto = false;
@@ -484,14 +534,22 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
     rest.assignee_user      = null;
     rest.approver_email_subject = "";
     rest.approver_email_body    = "";
+    // Keep recipient type and supplier field for notification steps
+    rest.notify_recipient_type = rest.notify_recipient_type ?? "email";
     return rest;
   }
 
   // Approval step: clear notification fields
-  rest.notify_user            = null;
-  rest.notify_email           = "";
-  rest.notification_subject   = "";
-  rest.notification_message   = "";
+  rest.notify_user                  = null;
+  rest.notify_email                 = "";
+  rest.notify_emails                = [];
+  rest.notification_subject         = "";
+  rest.notification_message         = "";
+  rest.notify_include_items_table   = false;
+  rest.notify_table_field           = null;
+  rest.notify_table_columns         = null;
+  rest.notify_recipient_type        = undefined;
+  rest.notify_supplier_field        = null;
 
   if (rest.assignee_type !== "group_specific") {
     rest.assignee_user      = null;
@@ -500,6 +558,91 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
     rest.assignee_user_auto = Boolean(rest.assignee_user_auto);
   }
   return rest;
+}
+
+// ── Branching support: field catalog + per-step validation ───────────────────
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Adapter: turns a document type's form definition into condition fields.
+ * ASSUMPTION: form fields live under one of the metadata paths below and look like
+ * { id|name|key, label|title, type, options }. Adjust here if your schema differs —
+ * nothing else depends on it.
+ */
+function extractFormFields(
+  docType: Partial<DocumentType> | null | undefined,
+  templates: Array<Record<string, any>> = [],
+): WorkflowField[] {
+  const m = (docType?.metadata ?? {}) as Record<string, any>;
+  const raw: any[] = m.form?.fields
+    ?? m.form_template?.fields
+    ?? m.form?.schema?.fields
+    ?? m.form?.sections?.flatMap((section: any) => section?.fields ?? [])
+    ?? m.sections?.flatMap((section: any) => section?.fields ?? [])
+    ?? m.fields
+    ?? [];
+  const templateFields = templates.flatMap((template) =>
+    (Array.isArray(template?.sections) ? template.sections : [])
+      .flatMap((section: any) => Array.isArray(section?.fields) ? section.fields : [])
+  );
+  const allFields = [...(Array.isArray(raw) ? raw : []), ...templateFields];
+  const toType = (t: string, source?: string): WorkflowField["type"] => {
+    const x = (t || "").toLowerCase();
+    if (x === "user" || (x === "reference" && ["users", "user"].includes(String(source ?? "").toLowerCase()))) return "user";
+    if (["currency", "money", "amount"].includes(x)) return "money";
+    if (["number", "integer", "decimal", "float"].includes(x)) return "number";
+    if (["select", "dropdown", "radio", "choice"].includes(x)) return "select";
+    if (["multiselect", "multi_select", "checkbox_group", "tags"].includes(x)) return "multiselect";
+    if (["checkbox", "boolean", "switch", "toggle"].includes(x)) return "boolean";
+    if (["date", "datetime"].includes(x)) return "date";
+    return "text";
+  };
+  const out: WorkflowField[] = [];
+  const seen = new Set<string>();
+  for (const f of allFields) {
+    const key = String(f?.key ?? f?.name ?? f?.id ?? "");
+    const id = String(f?.id ?? key);
+    if (!id || seen.has(key || id)) continue;
+    seen.add(key || id);
+    const referenceSource = f?.referenceSource ?? f?.reference_source ?? (String(f?.type).toLowerCase() === "user" ? "users" : undefined);
+    const opts = Array.isArray(f?.options)
+      ? f.options.map((o: any) => (typeof o === "string" ? { value: o, label: o } : { value: String(o.value ?? o.id ?? o.label), label: String(o.label ?? o.value) }))
+      : undefined;
+    out.push({ id, key, label: String(f?.label ?? f?.title ?? id), type: toType(String(f?.type ?? ""), referenceSource), options: opts, source: "form" });
+  }
+  return out;
+}
+
+function buildFieldCatalog(docType: Partial<DocumentType> | null | undefined, target: WorkflowTargetType): WorkflowField[] {
+  const system = SYSTEM_FIELDS.filter((f) => (target === "payment_run" ? true : !f.id.startsWith("payment_run.")))
+    .filter((f) => (target === "payment_run" ? f.id !== "amount" : true));
+  return [...extractFormFields(docType), ...system];
+}
+
+/** Same rules the old save loop enforced, expressed per step so validateDefinition can reuse them. */
+function validateStepData(raw: StepData): string | null {
+  const s = raw as WorkflowStep;
+  if (!s.name?.trim()) return "Every step needs a name.";
+  if (s.step_type === "notification") {
+    const emails = s.notify_emails?.filter((e) => e.trim()) ?? [];
+    const single = s.notify_email?.trim();
+    const recipientType = s.notify_recipient_type ?? "email";
+    if (recipientType === "user" && !s.notify_user) return `"${s.name}" needs a selected user.`;
+    if (recipientType === "email" && !s.notify_user && emails.length === 0 && !single) return `"${s.name}" needs at least one recipient (user or email).`;
+    if (recipientType === "supplier" && !s.notify_supplier_field) return `"${s.name}" needs a supplier field selected.`;
+    const bad = emails.find((e) => !EMAIL_RE.test(e.trim()));
+    if (bad) return `"${s.name}" has an invalid email address: ${bad}`;
+    if (single && !EMAIL_RE.test(single)) return `"${s.name}" has an invalid email address.`;
+    if (!s.notification_subject?.trim()) return `"${s.name}" needs an email subject.`;
+    if (!s.notification_message?.trim()) return `"${s.name}" needs an email message.`;
+    return null;
+  }
+  if (!s.assignee_group) return `"${s.name}" needs a group.`;
+  if (s.assignee_type === "group_specific" && !s.assignee_user) return `"${s.name}" needs a specific group member.`;
+  if (s.assignee_type === "form_user" && !s.assignee_user_field) return `"${s.name}" needs a user field selected.`;
+  if (!s.allow_approve && !s.allow_reject && !s.allow_return && !s.allow_return_submitter) return `"${s.name}" must have at least one approver action enabled.`;
+  if (s.requires_signature && !s.allow_approve) return `"${s.name}" requires approval before it can require a signature.`;
+  return null;
 }
 
 function formatApiError(value: unknown): string | null {
@@ -546,25 +689,35 @@ type RuleFormValues = {
   label: string;
 };
 
-function RuleFormFields({ values, routeKind, onChange }: {
+function RuleFormFields({ values, routeKind, isRequisitionWorkflow, disabledPhases = [], onChange }: {
   values: RuleFormValues;
   routeKind: WorkflowRouteKind;
+  isRequisitionWorkflow: boolean;
+  /* Procurement stages that cannot be configured yet (the preceding stage has
+   * no routing rule). RFQ needs Requisition; LPO needs RFQ (or Requisition for
+   * Travel requisitions configured to skip RFQ when General/Imprest lines are unused). */
+  disabledPhases?: WorkflowPhase[];
   onChange: (patch: Partial<RuleFormValues>) => void;
 }) {
   const phaseOptions = WORKFLOW_PHASES
     .filter((phase) => {
+      if (isRequisitionWorkflow) return ["requisition", "rfq", "lpo", "retirement"].includes(phase.value);
       if (routeKind === "payment_run") return phase.value === "payment_run";
-      if (routeKind === "form") return phase.value !== "payment_run";
+      if (routeKind === "form") return ["request", "retirement"].includes(phase.value);
       return phase.value === "request";
     })
-    .map((phase) => ({ value: phase.value, label: phase.label }));
-  const showPhase = routeKind !== "document";
+    .map((phase) => ({
+      value: phase.value,
+      label: phase.label,
+      disabled: disabledPhases.includes(phase.value) && phase.value !== values.phase,
+    }));
+  const showPhase = routeKind !== "document" || isRequisitionWorkflow;
 
   return (
     <div className="grid grid-cols-2 gap-3">
       {showPhase && (
         <div className="col-span-2">
-          <Label>Workflow phase</Label>
+          <Label>{isRequisitionWorkflow ? "Procurement stage" : "Workflow phase"}</Label>
           <CustomListbox
             value={values.phase}
             onChange={(v) => onChange({ phase: v as WorkflowPhase })}
@@ -575,8 +728,17 @@ function RuleFormFields({ values, routeKind, onChange }: {
           <p className="text-[11px] text-muted-foreground mt-1">
             {routeKind === "payment_run"
               ? "Payment run routing starts after selected lines have been marked in SunSystems."
-              : "Builder forms use Request for the first approval cycle and Retirement after the first SunSystems posting is complete."}
+              : isRequisitionWorkflow
+                ? "Each stage has its own amount thresholds and approval chain. RFQ starts after Requisition approval; LPO starts after RFQ approval."
+                : "Each phase has its own amount thresholds and approval chain for routing documents through the workflow."}
           </p>
+          {isRequisitionWorkflow && disabledPhases.length > 0 && (
+            <p className="text-[11px] text-amber-600 mt-1">
+              Configure the earlier procurement stage first — a later stage cannot start until the
+              preceding one is approved. (Travel requisitions can skip RFQ when the General/Imprest table is unused, so LPO is also unlocked once
+              Requisition is configured.)
+            </p>
+          )}
         </div>
       )}
       <div>
@@ -636,6 +798,7 @@ function StepEditPanel({
   index,
   total,
   groups,
+  docType,
   onChange,
   onClose,
   onDelete,
@@ -645,6 +808,7 @@ function StepEditPanel({
   index: number;
   total: number;
   groups: Group[];
+  docType: DocumentType | null;
   onChange: (patch: Partial<WorkflowStep>) => void;
   onClose: () => void;
   onDelete: () => void;
@@ -653,13 +817,30 @@ function StepEditPanel({
   const selectedGroup = groups.find((group) => group.id === step.assignee_group);
   const isHodGroupSelected = isHodGroupName(selectedGroup?.name ?? step.assignee_group_name);
   const needsGroupMember = step.assignee_type === "group_specific" && !isHodGroupSelected;
+  const needsFormUser = step.assignee_type === "form_user";
+  const { data: formTemplates = [], isLoading: formTemplatesLoading } = useQuery<Array<Record<string, any>>>({
+    queryKey: ["workflow-form-templates", docType?.id],
+    queryFn: async () => {
+      if (!docType?.id) return [];
+      const response = await templatesAPI.list({ document_type: docType.id, type: "built" });
+      const raw = response.data?.results ?? response.data ?? [];
+      return Array.isArray(raw) ? raw.filter((template) => !template?.kind || template.kind === "form") : [];
+    },
+    enabled: Boolean(docType?.id),
+    staleTime: 5 * 60_000,
+  });
+  const formUserFields = extractFormFields(docType, formTemplates).filter((field) => field.type === "user");
 
   const { data: groupMembers = [], isLoading: membersLoading } = useQuery<AppUser[]>({
     queryKey: ["group-members", step.assignee_group],
     queryFn: async () => {
       const r = await groupsAPI.members(step.assignee_group!);
       const raw: GroupMembershipApiItem[] = r.data?.results ?? r.data ?? [];
-      return raw.map((item) => item?.user ?? item).filter((u): u is AppUser => Boolean(u?.id && u?.email));
+      const now = Date.now();
+      return raw
+        .filter((item) => item?.is_active !== false && (!item?.expires_at || new Date(item.expires_at).getTime() > now))
+        .map((item) => item?.user ?? item)
+        .filter((u): u is AppUser => Boolean(u?.id && u?.email));
     },
     enabled: !!step.assignee_group,
   });
@@ -783,6 +964,22 @@ function StepEditPanel({
 
         {/* ── Approval step fields ────────────────────────────────────────── */}
         {step.step_type === "approval" && (<>
+          <button
+            type="button"
+            onClick={() => onChange({ post_lpo_after_approval: !step.post_lpo_after_approval })}
+            className={clsx(
+              "w-full flex items-start gap-3 p-4 rounded-xl border text-left transition-colors",
+              step.post_lpo_after_approval ? "border-primary/40 bg-primary/5 text-primary" : "border-border bg-muted/30 text-foreground hover:bg-muted/60"
+            )}
+          >
+            <span className={clsx("mt-0.5 w-4 h-4 rounded border flex items-center justify-center", step.post_lpo_after_approval ? "bg-primary border-primary text-white" : "border-muted-foreground/50")}>
+              {step.post_lpo_after_approval ? <Check className="w-3 h-3" /> : null}
+            </span>
+            <span>
+              <span className="block text-xs font-semibold">Generate LPOs after this approval</span>
+              <span className="block text-[11px] mt-1 opacity-80">Post the purchase orders and create their documents before the next approval step.</span>
+            </span>
+          </button>
           <div className="grid grid-cols-1 gap-4 p-4 rounded-lg bg-muted/40 border border-border">
             <div>
               <Label required>Approver group</Label>
@@ -818,6 +1015,7 @@ function StepEditPanel({
                     assignee_user: next === "group_specific" ? step.assignee_user : null,
                     assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
                     assignee_user_auto: next === "group_specific" ? step.assignee_user_auto : undefined,
+                    assignee_user_field: next === "form_user" ? (step.assignee_user_field ?? "") : "",
                   });
                 }}
                 options={ASSIGNEE_MODES.map((m) => ({ value: m.value, label: `${m.label} — ${m.description}` }))}
@@ -830,6 +1028,29 @@ function StepEditPanel({
                 </p>
               )}
             </div>
+
+            {needsFormUser && (
+              <div>
+                <Label required>Form field containing the approver</Label>
+                <CustomListbox
+                  value={step.assignee_user_field ?? ""}
+                  onChange={(value) => onChange({ assignee_user_field: value })}
+                  options={[
+                    { value: "", label: formTemplatesLoading ? "Loading form fields…" : formUserFields.length ? "Select a user field" : "No user fields found" },
+                    ...formUserFields.map((field) => ({ value: field.key ?? field.id, label: field.label })),
+                  ]}
+                  buttonClassName={inp}
+                  ariaLabel="Selected approver form field"
+                />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  {formTemplatesLoading
+                    ? "Loading user fields from this document type’s form templates."
+                    : formUserFields.length
+                      ? "The selected person must be an active member of the approver group above."
+                      : "No user picker fields were found in this document type’s built form templates. Add a User picker field to the form and save it first."}
+                </p>
+              </div>
+            )}
 
             {needsGroupMember && (
               <div>
@@ -952,11 +1173,30 @@ function StepEditPanel({
                     : "bg-muted/30 border-border text-muted-foreground"
                 )}
               >
-                <span className="text-xs font-semibold">Allow Return to Previous</span>
+                <span className="text-xs font-semibold">Allow Return to Previous Step</span>
                 <div className={clsx("w-8 h-4 rounded-full relative transition-colors", step.allow_return ? "bg-accent" : "bg-muted-foreground/30")}>
                   <div className={clsx("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform", step.allow_return ? "translate-x-4" : "translate-x-0.5")} />
                 </div>
               </button>
+              <button
+                type="button"
+                onClick={() => onChange({ allow_return_submitter: !step.allow_return_submitter })}
+                className={clsx(
+                  "w-full flex items-center justify-between px-4 py-2.5 rounded-xl border transition-all",
+                  step.allow_return_submitter
+                    ? "bg-accent/5 border-accent/30 text-accent shadow-sm"
+                    : "bg-muted/30 border-border text-muted-foreground"
+                )}
+              >
+                <span className="text-xs font-semibold">Allow Return to Submitter</span>
+                <div className={clsx("w-8 h-4 rounded-full relative transition-colors", step.allow_return_submitter ? "bg-accent" : "bg-muted-foreground/30")}>
+                  <div className={clsx("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform", step.allow_return_submitter ? "translate-x-4" : "translate-x-0.5")} />
+                </div>
+              </button>
+              <p className="text-[11px] text-muted-foreground px-1">
+                <b>Reject</b> always ends the workflow as Rejected. <b>Return</b> pauses approval so someone can rework:
+                previous step or submitter. After resubmit, the workflow resumes at <b>this</b> step — it does not restart from the beginning.
+              </p>
             </div>
           </div>
 
@@ -1047,6 +1287,7 @@ function StepEditPanel({
           <NotificationStepFields
             step={step}
             groups={groups}
+            docType={docType}
             onChange={onChange}
           />
         )}
@@ -1059,15 +1300,43 @@ function StepEditPanel({
 function NotificationStepFields({
   step,
   groups,
+  docType,
   onChange,
 }: {
   step: WorkflowStep;
   groups: Group[];
+  docType: DocumentType | null;
   onChange: (patch: Partial<WorkflowStep>) => void;
 }) {
-  const [recipientMode, setRecipientMode] = useState<"user" | "email">(
-    step.notify_user ? "user" : (step.notify_email ? "email" : "user")
+  const [recipientMode, setRecipientMode] = useState<"user" | "email" | "supplier">(
+    (step.notify_recipient_type as any) || (step.notify_user ? "user" : "email")
   );
+  // Tag-style multi-email input state
+  const [emailDraft, setEmailDraft] = useState("");
+  const emailDraftRef = useRef<HTMLInputElement>(null);
+
+  const emails: string[] = step.notify_emails?.length
+    ? step.notify_emails
+    : step.notify_email?.trim()
+    ? [step.notify_email.trim()]
+    : [];
+
+  const addEmail = (raw: string) => {
+    const val = raw.trim().toLowerCase();
+    if (!val) return;
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!EMAIL_RE.test(val)) {
+      return; // silently ignore bad emails (border turns red via CSS)
+    }
+    if (emails.includes(val)) { setEmailDraft(""); return; }
+    onChange({ notify_emails: [...emails, val], notify_email: val, notify_user: null, notify_user_name: undefined });
+    setEmailDraft("");
+  };
+
+  const removeEmail = (addr: string) => {
+    const next = emails.filter((e) => e !== addr);
+    onChange({ notify_emails: next, notify_email: next[0] ?? "", notify_user: null });
+  };
 
   const { data: allMembers = [] } = useQuery<AppUser[]>({
     queryKey: ["notif-group-members", step.assignee_group],
@@ -1080,6 +1349,139 @@ function NotificationStepFields({
     enabled: !!step.assignee_group,
   });
 
+  // Form fields for supplier recipients, email placeholders, and items tables.
+  const { data: formCatalog, isLoading: formCatalogLoading } = useQuery({
+    queryKey: ["form-notification-catalog", docType?.id],
+    queryFn: async () => {
+      const empty = {
+        supplierFields: [] as { key: string; label: string }[],
+        scalarFields: [] as { key: string; label: string; type: string }[],
+        tableFields: [] as { key: string; label: string; columns: { key: string; label: string }[] }[],
+      };
+      if (!docType?.id) return empty;
+      const res = await templatesAPI.list({ document_type: docType.id, type: "built" });
+      const raw = res.data?.results ?? res.data ?? [];
+      const templates = Array.isArray(raw) ? raw : [];
+      const supplierFields: { key: string; label: string }[] = [];
+      const scalarFields: { key: string; label: string; type: string }[] = [];
+      const tableFields: { key: string; label: string; columns: { key: string; label: string }[] }[] = [];
+      const seen = new Set<string>();
+      const skipTypes = new Set(["button", "signature", "file", "multi_file", "budget"]);
+      for (const tmpl of templates) {
+        if (tmpl?.kind && tmpl.kind !== "form") continue;
+        for (const section of tmpl?.sections ?? []) {
+          for (const f of section?.fields ?? []) {
+            const key = String(f?.key || f?.id || "").trim();
+            if (!key || seen.has(key)) continue;
+            const type = String(f?.type || "text");
+            const label = String(f?.label || f?.key || f?.id || key);
+            if (type === "sunsystems_account") {
+              seen.add(key);
+              supplierFields.push({ key, label });
+              scalarFields.push({ key, label, type });
+              continue;
+            }
+            if (type === "table") {
+              seen.add(key);
+              const sourceColumns = (f.columns ?? [])
+                .filter((c: any) => c?.key || c?.id)
+                .filter((c: any) => !["file", "multi_file", "button", "signature"].includes(String(c?.type || "")))
+              for (const column of sourceColumns) {
+                if (column?.type === "sunsystems_account" || column?.sunsystems?.role === "supplier_code") {
+                  const columnKey = String(column.key || column.id);
+                  supplierFields.push({
+                    key: `${key}.${columnKey}`,
+                    label: `${label} — ${String(column.label || columnKey)}`,
+                  });
+                }
+              }
+              const columns = sourceColumns
+                .map((c: any) => ({ key: String(c.key || c.id), label: String(c.label || c.key || c.id) }));
+              tableFields.push({ key, label, columns });
+              continue;
+            }
+            if (skipTypes.has(type)) continue;
+            seen.add(key);
+            scalarFields.push({ key, label, type });
+          }
+        }
+      }
+      return { supplierFields, scalarFields, tableFields };
+    },
+    enabled: !!docType?.id,
+    staleTime: 5 * 60_000,
+  });
+
+  const supplierFields = formCatalog?.supplierFields ?? [];
+  const supplierFieldsLoading = formCatalogLoading;
+  const scalarFields = formCatalog?.scalarFields ?? [];
+  const tableFields = formCatalog?.tableFields ?? [];
+  const messageBodyRef = useRef<HTMLTextAreaElement>(null);
+
+  const systemPlaceholders = useMemo(
+    () => [
+      { key: "document_title", label: "Document title" },
+      { key: "document_ref", label: "Reference" },
+      { key: "uploader_name", label: "Submitter" },
+      { key: "step_name", label: "Step name" },
+      { key: "today", label: "Today's date" },
+      { key: "items_table", label: "Items table" },
+    ],
+    [],
+  );
+
+  const insertPlaceholder = (token: string) => {
+    const snippet = `{${token}}`;
+    const el = messageBodyRef.current;
+    const current = step.notification_message ?? "";
+    if (!el) {
+      onChange({ notification_message: `${current}${current.endsWith("\n") || !current ? "" : " "}${snippet}` });
+      return;
+    }
+    const start = el.selectionStart ?? current.length;
+    const end = el.selectionEnd ?? current.length;
+    const next = current.slice(0, start) + snippet + current.slice(end);
+    onChange({ notification_message: next });
+    requestAnimationFrame(() => {
+      el.focus();
+      const pos = start + snippet.length;
+      el.setSelectionRange(pos, pos);
+    });
+  };
+
+  // When there is exactly one supplier field, pre-select it for the user.
+  useEffect(() => {
+    if (recipientMode !== "supplier") return;
+    if (step.notify_supplier_field) return;
+    if (supplierFields.length === 1) {
+      onChange({
+        notify_recipient_type: "supplier",
+        notify_supplier_field: supplierFields[0].key,
+      });
+    }
+  }, [recipientMode, supplierFields, step.notify_supplier_field, onChange]);
+
+  // Pre-select the only table when the items-table toggle is on.
+  useEffect(() => {
+    if (!step.notify_include_items_table) return;
+    if (step.notify_table_field) return;
+    if (tableFields.length === 1) {
+      onChange({ notify_table_field: tableFields[0].key });
+    }
+  }, [step.notify_include_items_table, step.notify_table_field, tableFields, onChange]);
+
+  const handleRecipientModeChange = (mode: "user" | "email" | "supplier") => {
+    setRecipientMode(mode);
+    onChange({
+      notify_recipient_type: mode,
+      notify_user: null,
+      notify_user_name: undefined,
+      notify_email: "",
+      notify_emails: [],
+      notify_supplier_field: mode === "supplier" ? (step.notify_supplier_field ?? null) : null,
+    });
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex items-start gap-3 p-3 rounded-lg bg-sky-50 border border-sky-200">
@@ -1089,12 +1491,13 @@ function NotificationStepFields({
         </p>
       </div>
 
+      {/* Recipient mode toggle */}
       <div>
-        <Label required>Recipient</Label>
+        <Label required>Recipient(s)</Label>
         <div className="flex bg-muted rounded-lg p-1 mb-2">
           <button
             type="button"
-            onClick={() => setRecipientMode("user")}
+            onClick={() => handleRecipientModeChange("user")}
             className={clsx(
               "flex-1 px-2 py-1.5 text-xs font-medium rounded-md transition-all",
               recipientMode === "user" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"
@@ -1104,22 +1507,32 @@ function NotificationStepFields({
           </button>
           <button
             type="button"
-            onClick={() => setRecipientMode("email")}
+            onClick={() => handleRecipientModeChange("email")}
             className={clsx(
               "flex-1 px-2 py-1.5 text-xs font-medium rounded-md transition-all",
               recipientMode === "email" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"
             )}
           >
-            Custom email
+            Email address(es)
+          </button>
+          <button
+            type="button"
+            onClick={() => handleRecipientModeChange("supplier")}
+            className={clsx(
+              "flex-1 px-2 py-1.5 text-xs font-medium rounded-md transition-all",
+              recipientMode === "supplier" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"
+            )}
+          >
+            Form suppliers
           </button>
         </div>
 
         {recipientMode === "user" ? (
           <div className="space-y-2">
-            <select
+            <CustomListbox
               value={step.assignee_group ?? ""}
-              onChange={e => {
-                const id = e.target.value || null;
+              onChange={(v) => {
+                const id = v || null;
                 const g = groups.find(x => x.id === id);
                 onChange({
                   assignee_group: id,
@@ -1127,525 +1540,302 @@ function NotificationStepFields({
                   notify_user: null,
                   notify_user_name: undefined,
                   notify_email: "",
+                  notify_emails: [],
                 });
               }}
+              options={[{ value: "", label: "Select group" }, ...groups.map(g => ({ value: g.id, label: g.name }))]}
               className={inp}
-            >
-              <option value="">Select group</option>
-              {groups.map(g => (
-                <option key={g.id} value={g.id}>{g.name}</option>
-              ))}
-            </select>
-            <select
+              buttonClassName="w-full"
+              ariaLabel="Notification group"
+            />
+            <CustomListbox
               value={step.notify_user ?? ""}
-              onChange={e => {
-                const id = e.target.value || null;
+              onChange={(v) => {
+                const id = v || null;
                 const u = allMembers.find(x => x.id === id);
-                onChange({ notify_user: id, notify_user_name: u?.full_name, notify_email: "" });
+                onChange({ notify_user: id, notify_user_name: u?.full_name, notify_email: "", notify_emails: [] });
               }}
-              disabled={!step.assignee_group}
+              options={[{ value: "", label: !step.assignee_group ? "Pick a group first" : "Select member" }, ...allMembers.map(u => ({ value: u.id, label: `${u.full_name} (${u.email})` }))]}
               className={inp}
-            >
-              <option value="">{!step.assignee_group ? "Pick a group first" : "Select member"}</option>
-              {allMembers.map(u => (
-                <option key={u.id} value={u.id}>{u.full_name} ({u.email})</option>
-              ))}
-            </select>
+              buttonClassName="w-full"
+              ariaLabel="Notification user"
+              disabled={!step.assignee_group}
+            />
+          </div>
+        ) : recipientMode === "supplier" ? (
+          <div className="space-y-2">
+            {!docType?.id ? (
+              <p className="text-xs text-muted-foreground p-3 bg-muted/50 rounded-lg">
+                Assign this workflow to a document type first, then pick the form&apos;s Supplier field.
+              </p>
+            ) : supplierFieldsLoading ? (
+              <p className="text-xs text-muted-foreground p-3 bg-muted/50 rounded-lg flex items-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Looking up supplier fields…
+              </p>
+            ) : supplierFields.length === 0 ? (
+              <p className="text-xs text-muted-foreground p-3 bg-muted/50 rounded-lg">
+                This form has no supplier fields. Add a <span className="font-semibold">Supplier</span> field
+                (SunSystems account) in the Template Builder to use this option.
+              </p>
+            ) : (
+              <>
+                <CustomListbox
+                  value={step.notify_supplier_field ?? ""}
+                  onChange={(v) => onChange({ notify_supplier_field: v || null, notify_recipient_type: "supplier" })}
+                  options={[{ value: "", label: "Select supplier field" }, ...supplierFields.map((f) => ({ value: f.key, label: f.label }))]}
+                  className={inp}
+                  buttonClassName="w-full"
+                  ariaLabel="Supplier field"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Use the form&apos;s <strong>Send RFQ</strong> action to email selected suppliers. Replies to the configured
+                  invoice mailbox are matched back to this requisition; the notification step will not advance the RFQ stage.
+                </p>
+              </>
+            )}
           </div>
         ) : (
-          <input
-            type="email"
-            value={step.notify_email ?? ""}
-            onChange={e => onChange({ notify_email: e.target.value, notify_user: null, notify_user_name: undefined })}
-            className={inp}
-            placeholder="name@example.com"
-          />
+          /* ── Multi-email tag input ── */
+          <div>
+            {/* Existing email tags */}
+            {emails.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {emails.map((addr) => (
+                  <span
+                    key={addr}
+                    className="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-2.5 py-0.5 text-[11px] font-medium text-sky-800"
+                  >
+                    {addr}
+                    <button
+                      type="button"
+                      onClick={() => removeEmail(addr)}
+                      className="ml-0.5 rounded-full text-sky-500 hover:text-sky-800 transition-colors"
+                      aria-label={`Remove ${addr}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {/* New email entry */}
+            <div className="flex gap-2">
+              <input
+                ref={emailDraftRef}
+                type="email"
+                value={emailDraft}
+                onChange={(e) => setEmailDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === "," || e.key === " ") {
+                    e.preventDefault();
+                    addEmail(emailDraft);
+                  } else if (e.key === "Backspace" && !emailDraft && emails.length > 0) {
+                    removeEmail(emails[emails.length - 1]);
+                  }
+                }}
+                className={clsx(inp, "flex-1")}
+                placeholder="name@supplier.com — press Enter or comma to add"
+              />
+              <button
+                type="button"
+                onClick={() => addEmail(emailDraft)}
+                disabled={!emailDraft.trim()}
+                className="rounded border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-40 transition-colors"
+              >
+                Add
+              </button>
+            </div>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Add one or more recipient emails. Press Enter, comma, or click Add after each address.
+            </p>
+          </div>
         )}
       </div>
 
+      {/* Subject */}
       <div>
         <Label required>Email subject</Label>
         <input
           value={step.notification_subject ?? ""}
           onChange={e => onChange({ notification_subject: e.target.value })}
           className={inp}
-          placeholder="e.g. Document approved — action complete"
+          placeholder="e.g. RFQ — Quotation request for {document_ref}"
         />
       </div>
 
+      {/* Message body + variable chips */}
       <div>
         <Label required>Email message</Label>
         <textarea
+          ref={messageBodyRef}
           value={step.notification_message ?? ""}
           onChange={e => onChange({ notification_message: e.target.value })}
-          rows={8}
+          rows={9}
           className={clsx(inp, "resize-none font-mono text-xs leading-relaxed")}
-          placeholder={"Hello,\n\nYour document has progressed..."}
+          placeholder={"Hello,\n\nPlease send your quotation on or before {due_date_copy}.\n\nDetails:\n{items_table}\n\nThank you."}
         />
-        <p className="text-[11px] text-muted-foreground mt-1">
-          Plain text. The recipient will receive this message by email when this step is reached.
-        </p>
+        <div className="mt-2 space-y-1.5">
+          <p className="text-[11px] text-muted-foreground">
+            Click a variable to insert it at the cursor. Values are filled from the submitted form when the email sends.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {systemPlaceholders.map((p) => (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => insertPlaceholder(p.key)}
+                className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-800 hover:bg-sky-100"
+                title={`Insert {${p.key}}`}
+              >
+                {p.label}
+              </button>
+            ))}
+            {scalarFields.slice(0, 16).map((f) => (
+              <button
+                key={f.key}
+                type="button"
+                onClick={() => insertPlaceholder(f.key)}
+                className="rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-muted"
+                title={`Insert {${f.key}}`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          {!docType?.id && (
+            <p className="text-[11px] text-amber-700">Assign a document type to load form field variables.</p>
+          )}
+        </div>
+      </div>
+
+      {/* Items table toggle */}
+      <div className="rounded-lg border border-border p-3 space-y-2">
+        <label className="flex cursor-pointer items-start gap-3">
+          <div className="relative mt-0.5 flex-shrink-0">
+            <input
+              type="checkbox"
+              checked={Boolean(step.notify_include_items_table)}
+              onChange={(e) => onChange({
+                notify_include_items_table: e.target.checked,
+                notify_table_field: e.target.checked ? (step.notify_table_field ?? tableFields[0]?.key ?? null) : null,
+              })}
+              className="sr-only"
+            />
+            <div className={clsx(
+              "h-4 w-4 rounded border-2 transition-colors flex items-center justify-center",
+              step.notify_include_items_table
+                ? "border-primary bg-primary"
+                : "border-muted-foreground bg-background"
+            )}>
+              {step.notify_include_items_table && (
+                <svg className="h-2.5 w-2.5 text-primary-foreground" viewBox="0 0 12 12" fill="none">
+                  <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </div>
+          </div>
+          <div>
+            <p className="text-xs font-medium text-foreground">Include form table in email</p>
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Embeds a structured HTML table from the form (quotation / line items). Use{" "}
+              <code className="text-[10px] bg-muted px-1 rounded">{"{items_table}"}</code> in the message
+              to place it, or leave it out and the table is appended at the end.
+            </p>
+          </div>
+        </label>
+
+        {step.notify_include_items_table && (
+          <div className="ml-7 space-y-2">
+            {formCatalogLoading ? (
+              <p className="text-xs text-muted-foreground flex items-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading form tables…
+              </p>
+            ) : tableFields.length === 0 ? (
+              <p className="text-xs text-muted-foreground p-2 bg-muted/50 rounded-lg">
+                This form has no table fields. Add a table (items / quotation lines) in the Template Builder.
+              </p>
+            ) : (
+              <>
+                <CustomListbox
+                  value={step.notify_table_field ?? ""}
+                  onChange={(v) => {
+                    const selectedTable = tableFields.find((table) => table.key === v);
+                    onChange({
+                      notify_table_field: v || null,
+                      notify_table_columns: selectedTable?.columns.map((column) => column.key) ?? [],
+                    });
+                  }}
+                  options={[
+                    { value: "", label: "Select table field" },
+                    ...tableFields.map((t) => ({ value: t.key, label: t.label })),
+                  ]}
+                  className={inp}
+                  buttonClassName="w-full"
+                  ariaLabel="Form table field"
+                />
+                {(() => {
+                  const selected = tableFields.find((t) => t.key === step.notify_table_field) ?? tableFields[0];
+                  if (!selected) return null;
+                  const cols = selected.columns.length ? selected.columns : [{ key: "col", label: "…" }];
+                  const selectedColumns = step.notify_table_columns ?? selected.columns.map((column) => column.key);
+                  return (
+                    <div className="rounded border border-dashed border-sky-300 bg-sky-50 px-3 py-2 space-y-2">
+                      <p className="text-[11px] text-sky-800 font-medium">
+                        Choose the columns suppliers should receive from “{selected.label}”:
+                      </p>
+                      <div className="grid gap-1 sm:grid-cols-2">
+                        {selected.columns.map((column) => (
+                          <label key={column.key} className="flex items-center gap-2 text-xs text-sky-900">
+                            <input
+                              type="checkbox"
+                              checked={selectedColumns.includes(column.key)}
+                              onChange={(event) => {
+                                const next = event.target.checked
+                                  ? [...selectedColumns, column.key]
+                                  : selectedColumns.filter((key) => key !== column.key);
+                                onChange({ notify_table_columns: next });
+                              }}
+                              className="h-3.5 w-3.5 accent-[#287EAD]"
+                            />
+                            {column.label}
+                          </label>
+                        ))}
+                      </div>
+                      <div className="mt-1.5 overflow-x-auto rounded border border-sky-200 text-[10px]">
+                        <div
+                          className="grid bg-sky-100 font-semibold text-sky-700"
+                          style={{ gridTemplateColumns: `repeat(${Math.max(1, selected.columns.filter((column) => selectedColumns.includes(column.key)).length)}, minmax(4rem, 1fr))` }}
+                        >
+                          {cols.filter((column) => selectedColumns.includes(column.key)).map((c, i, visibleColumns) => (
+                            <div key={c.key} className={clsx("px-2 py-1", i < visibleColumns.length - 1 && "border-r border-sky-200")}>
+                              {c.label}
+                            </div>
+                          ))}
+                        </div>
+                        <div
+                          className="grid text-sky-600"
+                          style={{ gridTemplateColumns: `repeat(${Math.max(1, selected.columns.filter((column) => selectedColumns.includes(column.key)).length)}, minmax(4rem, 1fr))` }}
+                        >
+                          {cols.filter((column) => selectedColumns.includes(column.key)).map((c, i, visibleColumns) => (
+                            <div key={c.key} className={clsx("border-t border-sky-200 px-2 py-1 italic", i < visibleColumns.length - 1 && "border-r border-sky-200")}>
+                              from form…
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 // ── Flowchart Editor (pan / zoom / drag) ─────────────────────────────────────
-interface NodePos { x: number; y: number; }
-
-const NODE_W = 260;
-const NODE_H = 138;
-const ANCHOR_W = 180;
-const ANCHOR_H = 64;
-
-function defaultPositions(stepCount: number): NodePos[] {
-  const positions: NodePos[] = [];
-  for (let i = 0; i < stepCount; i++) {
-    positions.push({ x: 0, y: (i + 1) * (NODE_H + 80) });
-  }
-  return positions;
-}
-
-function FlowchartEditor({
-  steps,
-  groups: _groups,
-  selectedIndex,
-  onSelectIndex,
-  onStepsChange: _onStepsChange,
-  onAddStep,
-}: {
-  steps: WorkflowStep[];
-  groups: Group[];
-  selectedIndex: number | null;
-  onSelectIndex: (i: number | null) => void;
-  onStepsChange: (steps: WorkflowStep[]) => void;
-  onAddStep: (kind: StepType) => void;
-}) {
-  const [showAddMenu, setShowAddMenu] = useState(false);
-  const wrapperRef = useRef<HTMLDivElement>(null);
-
-  const [transform, setTransform] = useState({ x: 80, y: 40, k: 1 });
-  const [positions, setPositions] = useState<NodePos[]>(() => defaultPositions(steps.length));
-
-  useEffect(() => {
-    setPositions(prev => {
-      if (prev.length === steps.length) return prev;
-      if (steps.length > prev.length) {
-        const next = [...prev];
-        for (let i = prev.length; i < steps.length; i++) {
-          const last = next[next.length - 1];
-          next.push(last
-            ? { x: last.x, y: last.y + NODE_H + 80 }
-            : { x: 0, y: NODE_H + 80 });
-        }
-        return next;
-      }
-      return prev.slice(0, steps.length);
-    });
-  }, [steps.length]);
-
-  const dragRef = useRef<{ kind: "node" | "pan" | null; index?: number; startX: number; startY: number; orig: NodePos | { x: number; y: number } }>({
-    kind: null, startX: 0, startY: 0, orig: { x: 0, y: 0 },
-  });
-
-  const onPointerDownNode = (i: number, e: React.PointerEvent) => {
-    e.stopPropagation();
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-    dragRef.current = {
-      kind: "node", index: i,
-      startX: e.clientX, startY: e.clientY,
-      orig: { ...positions[i] },
-    };
-  };
-
-  const onPointerDownCanvas = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    onSelectIndex(null);
-    dragRef.current = {
-      kind: "pan",
-      startX: e.clientX, startY: e.clientY,
-      orig: { x: transform.x, y: transform.y },
-    };
-  };
-
-  const onPointerMove = (e: React.PointerEvent) => {
-    const d = dragRef.current;
-    if (!d.kind) return;
-    const dx = e.clientX - d.startX;
-    const dy = e.clientY - d.startY;
-    if (d.kind === "node" && d.index !== undefined) {
-      const next = [...positions];
-      next[d.index] = {
-        x: (d.orig as NodePos).x + dx / transform.k,
-        y: (d.orig as NodePos).y + dy / transform.k,
-      };
-      setPositions(next);
-    } else if (d.kind === "pan") {
-      setTransform(t => ({ ...t, x: (d.orig as NodePos).x + dx, y: (d.orig as NodePos).y + dy }));
-    }
-  };
-
-  const onPointerUp = () => {
-    dragRef.current = { kind: null, startX: 0, startY: 0, orig: { x: 0, y: 0 } };
-  };
-
-  const onWheel = (e: React.WheelEvent) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
-    const rect = wrapperRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const delta = -e.deltaY * 0.0015;
-    setTransform(t => {
-      const newK = Math.min(2, Math.max(0.4, t.k * (1 + delta)));
-      const ratio = newK / t.k;
-      return { k: newK, x: mx - (mx - t.x) * ratio, y: my - (my - t.y) * ratio };
-    });
-  };
-
-  const zoomBy = (factor: number) => {
-    setTransform(t => ({ ...t, k: Math.min(2, Math.max(0.4, t.k * factor)) }));
-  };
-
-  const fitView = () => {
-    if (!wrapperRef.current || steps.length === 0) {
-      setTransform({ x: 80, y: 40, k: 1 });
-      return;
-    }
-    const rect = wrapperRef.current.getBoundingClientRect();
-    const validNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
-    if (validNodes.length === 0) return;
-    const xs = validNodes.map(p => p.x);
-    const ys = validNodes.map(p => p.y);
-    const minX = Math.min(0, ...xs) - NODE_W / 2 - 40;
-    const maxX = Math.max(0, ...xs) + NODE_W / 2 + 40;
-    const minY = -ANCHOR_H - 40;
-    const maxY = Math.max(...ys, 0) + NODE_H + ANCHOR_H + 40;
-    const w = maxX - minX;
-    const h = maxY - minY;
-    const k = Math.min(rect.width / w, rect.height / h, 1.2);
-    setTransform({
-      x: rect.width / 2 - ((minX + maxX) / 2) * k,
-      y: rect.height / 2 - ((minY + maxY) / 2) * k,
-      k,
-    });
-  };
-
-  const connections = useMemo(() => {
-    const lines: { id: string; d: string }[] = [];
-    const startCenter = { x: 0, y: 0 };
-    const startBottom = { x: startCenter.x, y: startCenter.y + ANCHOR_H / 2 };
-    const stepTop    = (p: NodePos) => ({ x: p?.x ?? 0, y: (p?.y ?? 0) - NODE_H / 2 });
-    const stepBottom = (p: NodePos) => ({ x: p?.x ?? 0, y: (p?.y ?? 0) + NODE_H / 2 });
-
-    if (steps.length > 0) {
-      const p0 = positions[0];
-      if (p0) lines.push({ id: "start", d: bezierPath(startBottom, stepTop(p0)) });
-      for (let i = 0; i < steps.length - 1; i++) {
-        const pA = positions[i]; const pB = positions[i + 1];
-        if (pA && pB) lines.push({ id: `s-${i}`, d: bezierPath(stepBottom(pA), stepTop(pB)) });
-      }
-      const last = positions[steps.length - 1];
-      if (last) {
-        const currentValidY = positions.slice(0, steps.length).reduce((m, p) => (p ? Math.max(m, p.y) : m), 0);
-        const endTop = { x: last.x, y: currentValidY + NODE_H + 80 };
-        lines.push({ id: "end", d: bezierPath(stepBottom(last), { x: endTop.x, y: endTop.y - ANCHOR_H / 2 }) });
-      }
-    }
-    return lines;
-  }, [positions, steps.length]);
-
-  const bounds = useMemo(() => {
-    const validNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
-    const xs = validNodes.map(p => p.x);
-    const minX = Math.min(-ANCHOR_W, ...xs.map(x => x - NODE_W / 2)) - 200;
-    const maxX = Math.max(ANCHOR_W, ...xs.map(x => x + NODE_W / 2)) + 200;
-    const minY = -ANCHOR_H - 200;
-    const lastY_bound = validNodes.reduce((m, p) => Math.max(m, p.y), 0);
-    const maxY = lastY_bound + NODE_H + ANCHOR_H + 200;
-    return { minX, maxX, minY, maxY, w: maxX - minX, h: maxY - minY };
-  }, [positions, steps.length]);
-
-  const currentValidNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
-  const lastY = currentValidNodes.reduce((m, p) => Math.max(m, p.y), 0);
-  const lastNodeMain = steps.length > 0 ? positions[steps.length - 1] : null;
-  const endX = lastNodeMain ? lastNodeMain.x : 0;
-  const endY = lastNodeMain ? lastY + NODE_H + 80 : NODE_H + 80;
-
-  return (
-    <div className="relative flex-1 overflow-hidden bg-muted/30 rounded-xl border border-border">
-      {/* Toolbar */}
-      <div className="absolute top-3 right-3 z-10 flex items-center gap-1 bg-card border border-border rounded-lg shadow-sm p-1">
-        <button onClick={() => zoomBy(1.2)} title="Zoom in" className="p-1.5 rounded hover:bg-muted">
-          <ZoomIn className="w-4 h-4 text-muted-foreground" />
-        </button>
-        <button onClick={() => zoomBy(0.83)} title="Zoom out" className="p-1.5 rounded hover:bg-muted">
-          <ZoomOut className="w-4 h-4 text-muted-foreground" />
-        </button>
-        <span className="px-2 text-xs text-muted-foreground tabular-nums w-12 text-center">
-          {Math.round(transform.k * 100)}%
-        </span>
-        <button onClick={fitView} title="Fit to view" className="p-1.5 rounded hover:bg-muted">
-          <Maximize2 className="w-4 h-4 text-muted-foreground" />
-        </button>
-      </div>
-
-      <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-card border border-border rounded-lg shadow-sm px-3 py-1.5">
-        <Move className="w-3.5 h-3.5 text-muted-foreground" />
-        <span className="text-[11px] text-muted-foreground">Drag canvas to pan · Drag nodes to rearrange · ⌘/Ctrl + scroll to zoom</span>
-      </div>
-
-      <div
-        ref={wrapperRef}
-        className="absolute inset-0 cursor-grab active:cursor-grabbing select-none"
-        style={{
-          backgroundImage: "radial-gradient(hsl(var(--border)) 1px, transparent 1px)",
-          backgroundSize: `${24 * transform.k}px ${24 * transform.k}px`,
-          backgroundPosition: `${transform.x}px ${transform.y}px`,
-        }}
-        onPointerDown={onPointerDownCanvas}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerLeave={onPointerUp}
-        onWheel={onWheel}
-      >
-        <div
-          className="absolute top-0 left-0"
-          style={{
-            transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.k})`,
-            transformOrigin: "0 0",
-          }}
-        >
-          {/* SVG connection lines */}
-          <svg
-            style={{
-              position: "absolute",
-              left: bounds.minX, top: bounds.minY,
-              width: bounds.w, height: bounds.h,
-              pointerEvents: "none", overflow: "visible",
-            }}
-          >
-            <defs>
-              <marker id="wf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                <path d="M0,0 L10,5 L0,10 z" fill="hsl(var(--muted-foreground))" />
-              </marker>
-            </defs>
-            <g transform={`translate(${-bounds.minX} ${-bounds.minY})`}>
-              {connections.map(c => (
-                <path key={c.id} d={c.d} fill="none"
-                  stroke="hsl(var(--muted-foreground))" strokeWidth={1.8}
-                  strokeOpacity={0.7} markerEnd="url(#wf-arrow)" />
-              ))}
-            </g>
-          </svg>
-
-          {/* Start anchor */}
-          <div className="absolute" style={{ left: -ANCHOR_W / 2, top: -ANCHOR_H / 2, width: ANCHOR_W, height: ANCHOR_H }}>
-            <div className="w-full h-full bg-card border-2 border-teal/50 rounded-2xl flex items-center gap-2 px-4 shadow-sm">
-              <div className="w-8 h-8 rounded-lg bg-teal/15 flex items-center justify-center">
-                <Play className="w-4 h-4 text-teal" />
-              </div>
-              <div>
-                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Start</p>
-                <p className="text-xs font-semibold text-foreground">Submitted</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Step nodes */}
-          {steps.map((step, i) => {
-            const pos = positions[i] ?? { x: 0, y: (i + 1) * (NODE_H + 80) };
-            const color = getGroupColor(step.assignee_group);
-            const mode = ASSIGNEE_MODES.find(m => m.value === step.assignee_type);
-            const isSelected = selectedIndex === i;
-            const ModeIcon = mode?.Icon ?? Users;
-            const isNotification = step.step_type === "notification";
-            return (
-              <div
-                key={step.id || `n-${i}`}
-                className={clsx("absolute group", isSelected && "z-20")}
-                style={{ left: pos.x - NODE_W / 2, top: pos.y - NODE_H / 2, width: NODE_W, height: NODE_H }}
-                onPointerDown={(e) => onPointerDownNode(i, e)}
-                onClick={(e) => { e.stopPropagation(); onSelectIndex(i); }}
-              >
-                <div className={clsx(
-                  "w-full h-full rounded-2xl bg-card border-2 p-3 cursor-grab active:cursor-grabbing transition-all",
-                  isNotification && "border-dashed",
-                  isSelected
-                    ? (isNotification ? "border-sky-500 shadow-elegant ring-4 ring-sky-200" : "border-accent shadow-elegant ring-4 ring-accent/15")
-                    : "border-border shadow-sm hover:shadow-md hover:border-foreground/20"
-                )}>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <div
-                        className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-bold"
-                        style={{ backgroundColor: isNotification ? "#0ea5e9" : color }}
-                      >
-                        {isNotification ? <Bell className="w-3.5 h-3.5" /> : i + 1}
-                      </div>
-                      <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-                        {isNotification ? "Notify" : "Step"} {i + 1}
-                      </span>
-                    </div>
-                    <Edit3 className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100" />
-                  </div>
-
-                  <p className={clsx(
-                    "text-sm font-semibold truncate mb-2",
-                    step.name ? "text-foreground" : "text-muted-foreground italic"
-                  )}>
-                    {step.name || "Click to configure"}
-                  </p>
-
-                  {isNotification ? (
-                    <>
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <div className="w-5 h-5 rounded flex items-center justify-center bg-sky-100">
-                          <Mail className="w-3 h-3 text-sky-600" />
-                        </div>
-                        <p className="text-[11px] text-muted-foreground truncate flex-1">
-                          {step.notify_user_name || step.notify_email || "No recipient"}
-                        </p>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] text-sky-700 bg-sky-100 px-1.5 py-0.5 rounded font-medium">Email only</span>
-                        <span className="text-[10px] text-muted-foreground truncate ml-2">
-                          {step.notification_subject || "No subject"}
-                        </span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <div className="w-5 h-5 rounded flex items-center justify-center" style={{ backgroundColor: `${color}22` }}>
-                          <ModeIcon className="w-3 h-3" style={{ color }} />
-                        </div>
-                        <p className="text-[11px] text-muted-foreground truncate flex-1">
-                          {step.assignee_group_name || "No group"}
-                          {step.assignee_type === "group_specific" && step.assignee_user_auto
-                            ? " · Designated approver"
-                            : step.assignee_user_name ? ` · ${step.assignee_user_name}` : ""}
-                        </p>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-1">
-                          <Clock className="w-3 h-3 text-muted-foreground" />
-                          <span className="text-[10px] text-muted-foreground">
-                            {step.sla_hours < 24 ? `${step.sla_hours}h` : `${Math.floor(step.sla_hours / 24)}d`}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          {step.allow_approve && <span className="w-1.5 h-1.5 rounded-full bg-teal" title="Approve" />}
-                          {step.allow_reject  && <span className="w-1.5 h-1.5 rounded-full bg-destructive" title="Reject" />}
-                          {step.allow_return  && <span className="w-1.5 h-1.5 rounded-full bg-accent" title="Return" />}
-                          {(step.approver_email_subject || step.approver_email_body) && (
-                            <span title="Custom email configured" className="inline-flex">
-                              <Mail className="w-3 h-3 text-primary/60" />
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-
-          {/* End anchor */}
-          <div className="absolute" style={{ left: endX - ANCHOR_W / 2, top: endY - ANCHOR_H / 2, width: ANCHOR_W, height: ANCHOR_H }}>
-            <div className="w-full h-full bg-card border-2 border-primary/40 rounded-2xl flex items-center gap-2 px-4 shadow-sm">
-              <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-                <Flag className="w-4 h-4 text-primary" />
-              </div>
-              <div>
-                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">End</p>
-                <p className="text-xs font-semibold text-foreground">Approved</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Add-step floating picker */}
-          <div className="absolute" style={{ left: endX + ANCHOR_W / 2 + 20, top: endY - 18 }}>
-            <div className="relative">
-              <button
-                onClick={(e) => { e.stopPropagation(); setShowAddMenu(v => !v); }}
-                className="flex items-center gap-2 px-3 py-2 bg-card border-2 border-dashed border-border rounded-xl text-xs font-medium text-muted-foreground hover:border-accent hover:text-accent hover:bg-accent/10 transition-all shadow-sm"
-              >
-                <Plus className="w-3.5 h-3.5" /> Add step
-              </button>
-              {showAddMenu && (
-                <div
-                  className="absolute left-0 top-full mt-2 w-56 bg-card border border-border rounded-xl shadow-elegant overflow-hidden z-30"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <button
-                    onClick={() => { onAddStep("approval"); setShowAddMenu(false); }}
-                    className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-muted/60 transition-colors"
-                  >
-                    <div className="w-7 h-7 rounded-md bg-accent/15 text-accent flex items-center justify-center flex-shrink-0">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                    </div>
-                    <div>
-                      <p className="text-xs font-semibold text-foreground">Approval step</p>
-                      <p className="text-[11px] text-muted-foreground">Requires approver action</p>
-                    </div>
-                  </button>
-                  <button
-                    onClick={() => { onAddStep("notification"); setShowAddMenu(false); }}
-                    className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-muted/60 transition-colors border-t border-border"
-                  >
-                    <div className="w-7 h-7 rounded-md bg-sky-100 text-sky-600 flex items-center justify-center flex-shrink-0">
-                      <Bell className="w-3.5 h-3.5" />
-                    </div>
-                    <div>
-                      <p className="text-xs font-semibold text-foreground">Notification step</p>
-                      <p className="text-[11px] text-muted-foreground">Sends a custom email, auto-advances</p>
-                    </div>
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Empty state */}
-          {steps.length === 0 && (
-            <div className="absolute" style={{ left: -140, top: NODE_H }}>
-              <div className="flex flex-col gap-2 p-4 bg-card border-2 border-dashed border-border rounded-2xl shadow-sm">
-                <p className="text-xs font-semibold text-foreground text-center mb-1">Add your first step</p>
-                <button
-                  onClick={(e) => { e.stopPropagation(); onAddStep("approval"); }}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg border border-border hover:border-accent hover:bg-accent/5 text-xs font-medium text-foreground transition-all"
-                >
-                  <CheckCircle2 className="w-3.5 h-3.5 text-accent" /> Approval step
-                </button>
-                <button
-                  onClick={(e) => { e.stopPropagation(); onAddStep("notification"); }}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg border border-border hover:border-sky-400 hover:bg-sky-50 text-xs font-medium text-foreground transition-all"
-                >
-                  <Bell className="w-3.5 h-3.5 text-sky-600" /> Notification step
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function bezierPath(a: { x: number; y: number }, b: { x: number; y: number }) {
-  const dy = b.y - a.y;
-  const dx = b.x - a.x;
-  if (Math.abs(dy) >= Math.abs(dx)) {
-    const cy = Math.max(40, Math.abs(dy) * 0.4);
-    return `M ${a.x} ${a.y} C ${a.x} ${a.y + cy}, ${b.x} ${b.y - cy}, ${b.x} ${b.y}`;
-  }
-  const cx = Math.max(40, Math.abs(dx) * 0.4);
-  return `M ${a.x} ${a.y} C ${a.x + cx} ${a.y}, ${b.x - cx} ${b.y}, ${b.x} ${b.y}`;
-}
-
 // ── Routing Rules Panel ───────────────────────────────────────────────────────
 // ── Template email settings ───────────────────────────────────────────────────
 function TemplateEmailsPanel({
@@ -1788,7 +1978,12 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
   const [showAdd, setShowAdd] = useState(false);
   const isPaymentRun = template.target_type === "payment_run";
   const isFormWorkflow = routeKind === "form";
-  const defaultPhase: WorkflowPhase = isPaymentRun ? "payment_run" : "request";
+  const isRequisitionWorkflow = isRequisitionDocumentType({
+    name: template.document_type_name ?? "",
+    code: "",
+    description: "",
+  });
+  const defaultPhase: WorkflowPhase = isPaymentRun ? "payment_run" : isRequisitionWorkflow ? "requisition" : "request";
   const blankRuleForm: RuleFormValues = {
     phase: defaultPhase,
     amount_min: "0",
@@ -1809,7 +2004,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
   const createRule = useMutation({
     mutationFn: () => workflowAPI.createRule({
       ...form, template: templateId,
-      phase: routeKind === "document" ? "request" : form.phase,
+      phase: routeKind === "document" && !isRequisitionWorkflow ? "request" : form.phase,
       amount_min: form.amount_min || "0",
       amount_max: form.amount_max || null,
     }),
@@ -1851,7 +2046,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
     mutationFn: () => workflowAPI.updateRule(editingId as string, {
       amount_min: editForm.amount_min || "0",
       amount_max: editForm.amount_max || null,
-      phase: routeKind === "document" ? "request" : editForm.phase,
+      phase: routeKind === "document" && !isRequisitionWorkflow ? "request" : editForm.phase,
       currency: editForm.currency, label: editForm.label,
     }),
     onSuccess: () => {
@@ -1873,6 +2068,19 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
     [rules]
   );
 
+  // Stage-aware gating: a later procurement stage may only be configured once
+  // its predecessor has a routing rule. LPO is additionally unlocked by a
+  // Requisition rule because Travel requisitions may skip RFQ.
+  const configuredPhases = new Set(
+    (rules ?? []).map((r) => (r.phase || defaultPhase).trim().toLowerCase()),
+  );
+  const disabledPhases: WorkflowPhase[] = isRequisitionWorkflow
+    ? (["rfq", "lpo"] as WorkflowPhase[]).filter((phase) => {
+        if (phase === "rfq") return !configuredPhases.has("requisition");
+        return !(configuredPhases.has("rfq") || configuredPhases.has("requisition"));
+      })
+    : [];
+
   const openAddRule = () => {
     const existingCurrency = rules?.[0]?.currency;
     if (existingCurrency) setForm(f => ({ ...f, currency: existingCurrency }));
@@ -1885,7 +2093,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
         <div className="flex-1">
           <h3 className="font-semibold text-foreground text-base flex items-center gap-2">
             <Settings2 className="w-4 h-4 text-muted-foreground" />
-            {routeKind === "document" ? "Amount routing rules" : "Phase and amount routing rules"}
+            {isRequisitionWorkflow ? "Procurement approval routing" : routeKind === "document" ? "Amount routing rules" : "Phase and amount routing rules"}
           </h3>
           <p className="text-xs text-muted-foreground mt-1">
             Rules for this template are automatically scoped to{" "}
@@ -1914,7 +2122,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
             <h4 className="text-sm font-semibold text-foreground">New routing rule</h4>
             <button onClick={() => setShowAdd(false)} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4 text-muted-foreground" /></button>
           </div>
-          <RuleFormFields values={form} routeKind={routeKind} onChange={(p) => setForm(f => ({ ...f, ...p }))} />
+          <RuleFormFields values={form} routeKind={routeKind} isRequisitionWorkflow={isRequisitionWorkflow} disabledPhases={disabledPhases} onChange={(p) => setForm(f => ({ ...f, ...p }))} />
           <div className="flex gap-2 pt-2">
             <button onClick={() => createRule.mutate()} disabled={createRule.isPending} className="btn-primary text-xs">
               {createRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Create rule
@@ -1948,7 +2156,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
                     <h4 className="text-sm font-semibold text-foreground">Edit routing rule</h4>
                     <button onClick={() => setEditingId(null)} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4 text-muted-foreground" /></button>
                   </div>
-                  <RuleFormFields values={editForm} routeKind={routeKind} onChange={(p) => setEditForm(f => ({ ...f, ...p }))} />
+                  <RuleFormFields values={editForm} routeKind={routeKind} isRequisitionWorkflow={isRequisitionWorkflow} disabledPhases={disabledPhases} onChange={(p) => setEditForm(f => ({ ...f, ...p }))} />
                   <div className="flex gap-2 pt-2">
                     <button onClick={() => updateRule.mutate()} disabled={updateRule.isPending} className="btn-primary text-xs">
                       {updateRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Save changes
@@ -1965,7 +2173,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="text-sm font-semibold text-foreground">{formatRuleRange(rule)}</p>
-                      {(isPaymentRun || isFormWorkflow) && (
+                      {(isPaymentRun || isFormWorkflow || isRequisitionWorkflow) && (
                         <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
                           {workflowPhaseLabel(rule.phase)}
                         </span>
@@ -2008,7 +2216,7 @@ function TemplateEditor({
   template: WorkflowTemplate | null;
   docType?: DocumentType | null;
   initialTargetType?: WorkflowTargetType;
-  onSaved: (t: WorkflowTemplate, isNew: boolean) => void;
+  onSaved: (t: WorkflowTemplate, isNew: boolean, meta?: { retiredSiblings?: boolean }) => void;
   onDuplicate?: () => void;
   onDelete?: () => void;
   allTemplates?: WorkflowTemplate[];
@@ -2017,20 +2225,25 @@ function TemplateEditor({
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [steps, setSteps] = useState<WorkflowStep[]>([]);
+  const [blocks, setBlocks] = useState<Block[]>([]);
   const [targetType, setTargetType] = useState<WorkflowTargetType>("document");
   const [notifyUploaderOnApproval, setNotifyUploaderOnApproval] = useState(true);
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplates>({});
   const [selectedDocumentTypeId, setSelectedDocumentTypeId] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(!template);
   const [activeTab, setActiveTab] = useState<"flow" | "rules" | "emails">("flow");
-  const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
+  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  /** After Import rules, the next save should deactivate the folded sibling templates. */
+  const [retireSiblingsOnSave, setRetireSiblingsOnSave] = useState(false);
 
   useEffect(() => {
     setName(template?.name ?? (docType ? `${docType.name} Workflow` : initialTargetType === "payment_run" ? "Payment Run Workflow" : "New Template"));
     setDescription(template?.description ?? "");
-    setSteps(
-      template?.steps?.slice().sort((a, b) => a.order - b.order).map((s) => ({ ...s })) ?? []
+    setBlocks(
+      template?.definition?.blocks?.length
+        ? template.definition.blocks
+        : definitionFromSteps(template?.steps ?? []).blocks
     );
     setTargetType(template?.target_type ?? initialTargetType);
     setNotifyUploaderOnApproval(template?.notify_uploader_on_approval ?? true);
@@ -2038,8 +2251,14 @@ function TemplateEditor({
     setSelectedDocumentTypeId((template?.target_type ?? initialTargetType) === "payment_run" ? null : (template?.document_type ?? docType?.id ?? null));
     setIsDirty(!template);
     setActiveTab("flow");
-    setSelectedStepIndex(null);
+    setSelectedBlockId(null);
+    setRetireSiblingsOnSave(false);
   }, [template?.id, docType?.id, initialTargetType]);
+
+  // The legacy "Routing rules" tab disappears once the template is saved as a branched workflow.
+  useEffect(() => {
+    if (template?.definition && activeTab === "rules") setActiveTab("flow");
+  }, [template?.definition, activeTab]);
 
   const { data: groups } = useQuery<Group[]>({
     queryKey: ["groups-all"],
@@ -2076,24 +2295,34 @@ function TemplateEditor({
       notify_uploader_on_approval: boolean;
       email_templates: EmailTemplates;
       steps: Partial<WorkflowStep>[];
+      definition: WorkflowDefinition;
+      retire_siblings?: boolean;
     }) =>
       template
         ? workflowAPI.updateTemplate(template.id, payload)
         : workflowAPI.createTemplate(payload),
-    onSuccess: async ({ data }) => {
+    onSuccess: async ({ data }, variables) => {
       const normalized = normalizeTemplate(data);
       setIsDirty(false);
+      setRetireSiblingsOnSave(false);
+      qc.setQueryData(["workflow-template", normalized.id], normalized);
       qc.invalidateQueries({ queryKey: ["workflow-templates"] });
       qc.invalidateQueries({ queryKey: ["document-types"] });
-      onSaved(normalized, !template);
+      qc.invalidateQueries({ queryKey: ["workflow-template", normalized.id] });
+      onSaved(normalized, !template, { retiredSiblings: Boolean(variables.retire_siblings) });
     },
     onError: (err: any) => {
       toast.error(formatApiError(err?.response?.data) || "Save failed");
     },
   });
 
-  const handleStepsChange = useCallback((newSteps: WorkflowStep[]) => {
-    setSteps(newSteps.map((s, i) => ({ ...s, order: i + 1 })));
+  const fieldCatalog = useMemo(
+    () => buildFieldCatalog(selectedDocumentType, targetType),
+    [selectedDocumentType, targetType],
+  );
+
+  const handleBlocksChange = useCallback((next: Block[]) => {
+    setBlocks(next);
     setIsDirty(true);
   }, []);
 
@@ -2103,12 +2332,9 @@ function TemplateEditor({
       toast.error("Choose the document type this template belongs to");
       return;
     }
-    if (steps.length === 0)         { toast.error("Add at least one step"); return; }
 
-    const hasApproval = steps.some(s => s.step_type !== "notification");
-    if (!hasApproval) { toast.error("Add at least one approval step"); return; }
-
-    const stepsForSave = steps.map((step) => {
+    // HOD group is always "any member" — enforced on every approval step, wherever it sits in the tree.
+    const blocksForSave = mapSteps(blocks, (step) => {
       if (step.step_type === "notification") return step;
       const group = (groups ?? []).find((item) => item.id === step.assignee_group);
       if (!isHodGroupName(group?.name ?? step.assignee_group_name)) return step;
@@ -2120,33 +2346,12 @@ function TemplateEditor({
       };
     });
 
-    for (const s of stepsForSave) {
-      if (!s.name.trim()) { toast.error(`Step ${s.order} needs a name`); return; }
-      if (s.step_type === "notification") {
-        if (!s.notify_user && !(s.notify_email && s.notify_email.trim())) {
-          toast.error(`"${s.name}" needs a recipient (user or email)`); return;
-        }
-        if (s.notify_email && s.notify_email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.notify_email.trim())) {
-          toast.error(`"${s.name}" has an invalid email address`); return;
-        }
-        if (!s.notification_subject || !s.notification_subject.trim()) {
-          toast.error(`"${s.name}" needs an email subject`); return;
-        }
-        if (!s.notification_message || !s.notification_message.trim()) {
-          toast.error(`"${s.name}" needs an email message`); return;
-        }
-        continue;
-      }
-      if (!s.assignee_group) { toast.error(`"${s.name}" needs a group`); return; }
-      if (s.assignee_type === "group_specific" && !s.assignee_user) {
-        toast.error(`"${s.name}" needs a specific group member`); return;
-      }
-      if (!s.allow_approve && !s.allow_reject && !s.allow_return) {
-        toast.error(`"${s.name}" must have at least one approver action enabled`); return;
-      }
-      if (s.requires_signature && !s.allow_approve) {
-        toast.error(`"${s.name}" requires approval before it can require a signature`); return;
-      }
+    const issues = validateDefinition(blocksForSave, fieldMap(fieldCatalog), validateStepData);
+    const firstError = issues.find((i) => i.severity === "error");
+    if (firstError) {
+      toast.error(firstError.message);
+      if (firstError.block_id) { setSelectedBlockId(firstError.block_id); setActiveTab("flow"); }
+      return;
     }
 
     saveMutation.mutate({
@@ -2157,46 +2362,53 @@ function TemplateEditor({
       is_active: template ? template.is_active : true,
       notify_uploader_on_approval: notifyUploaderOnApproval,
       email_templates: emailTemplatesToPayload(emailTemplates),
-      steps: stepsForSave.map(stepToPayload),
+      // Flat mirror in document order — keeps step_count / list views working. The engine follows `definition`.
+      steps: flattenSteps(blocksForSave).map((s) => stepToPayload(s as WorkflowStep)),
+      definition: {
+        version: 2,
+        blocks: mapSteps(blocksForSave, (s) => stepToPayload(s as WorkflowStep) as StepData),
+      },
+      ...(retireSiblingsOnSave ? { retire_siblings: true } : {}),
     });
   };
 
-  const handleAddStep = useCallback((kind: StepType = "approval") => {
-    const newStep = {
-      ...(kind === "notification" ? blankNotificationStep() : blankStep()),
-      order: steps.length + 1,
-    };
-    const next = [...steps, newStep];
-    setSteps(next);
-    setIsDirty(true);
-    setSelectedStepIndex(next.length - 1);
-  }, [steps]);
-
-  const handleInsertNotificationAfter = useCallback((index: number) => {
-    const newStep = { ...blankNotificationStep(), order: index + 2 };
-    const next = [
-      ...steps.slice(0, index + 1),
-      newStep,
-      ...steps.slice(index + 1),
-    ].map((s, i) => ({ ...s, order: i + 1 }));
-    setSteps(next);
-    setIsDirty(true);
-    setSelectedStepIndex(index + 1);
-  }, [steps]);
-
-  const handleDeleteStep = useCallback((index: number) => {
-    const next = steps.filter((_, i) => i !== index).map((s, i) => ({ ...s, order: i + 1 }));
-    setSteps(next);
-    setIsDirty(true);
-    setSelectedStepIndex(null);
-  }, [steps]);
-
-  const handlePatchStep = useCallback((index: number, patch: Partial<WorkflowStep>) => {
-    const next = [...steps];
-    next[index] = { ...next[index], ...patch };
-    setSteps(next);
-    setIsDirty(true);
-  }, [steps]);
+  /** One-off: fold this document type's existing templates + amount rules into a single branched workflow. */
+  const handleImportLegacy = async () => {
+    const siblings = (_allTemplates ?? []).filter((t) =>
+      t.is_active !== false && t.target_type === targetType &&
+      (targetType === "payment_run" ? !t.document_type : t.document_type === selectedDocumentTypeId));
+    if (siblings.length === 0) { toast.warning("No existing templates found for this document type"); return; }
+    const confirmMsg = siblings.length > 1
+      ? `Fold ${siblings.length} templates and their amount rules into this one branched workflow? On save, the other templates will be deactivated.`
+      : "Replace the current workflow with one built from the existing templates and routing rules?";
+    if (blocks.length > 0 && !window.confirm(confirmMsg)) return;
+    if (blocks.length === 0 && siblings.length > 1 && !window.confirm(confirmMsg)) return;
+    setImporting(true);
+    try {
+      const full = await Promise.all(siblings.map((t) => workflowAPI.getTemplate(t.id).then((r) => normalizeTemplate(r.data))));
+      const ruleLists = await Promise.all(full.map((t) =>
+        workflowAPI.listRules({ template: t.id }).then((r) => (r.data.results ?? r.data) as WorkflowRule[])));
+      const { definition, notes } = migrateLegacyRules(
+        full.map((t) => ({ id: t.id, name: t.name, steps: t.steps.map(({ id: _id, ...rest }) => rest as StepData) })),
+        ruleLists.flat(),
+        { maxInclusive: true },
+      );
+      setBlocks(definition.blocks);
+      setSelectedBlockId(null);
+      setIsDirty(true);
+      setRetireSiblingsOnSave(true);
+      setActiveTab("flow");
+      toast.success(
+        `Imported ${full.length} template${full.length > 1 ? "s" : ""} as one workflow — review it, then save` +
+        (full.length > 1 ? " (siblings will be retired)" : ""),
+      );
+      if (notes.length) toast.warning(notes.join(" "));
+    } catch (err: any) {
+      toast.error(formatApiError(err?.response?.data) || "Import failed");
+    } finally {
+      setImporting(false);
+    }
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -2253,16 +2465,14 @@ function TemplateEditor({
           <div className="mt-3 max-w-sm">
             <Label required>Document type</Label>
             {canEditDocumentType ? (
-              <select
+              <CustomListbox
                 value={selectedDocumentTypeId ?? ""}
-                onChange={(e) => { setSelectedDocumentTypeId(e.target.value || null); setIsDirty(true); }}
+                onChange={(v) => { setSelectedDocumentTypeId(v || null); setIsDirty(true); }}
+                options={[{ value: "", label: "Select document type" }, ...availableDocTypes.map((item) => ({ value: item.id, label: item.name }))]}
                 className={inp}
-              >
-                <option value="">Select document type</option>
-                {availableDocTypes.map((item) => (
-                  <option key={item.id} value={item.id}>{item.name}</option>
-                ))}
-              </select>
+                buttonClassName="w-full"
+                ariaLabel="Document type"
+              />
             ) : (
               <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-medium text-foreground">
                 {selectedDocumentTypeName ?? "No document type assigned"}
@@ -2283,15 +2493,26 @@ function TemplateEditor({
               className={clsx("px-3 py-1.5 text-xs font-medium rounded-md transition-all",
                 activeTab === "emails" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground")}
             >Emails</button>
-            {template && (
+            {template && !template.definition && (
               <button
                 onClick={() => setActiveTab("rules")}
                 className={clsx("px-3 py-1.5 text-xs font-medium rounded-md transition-all",
                   activeTab === "rules" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground")}
-              >Routing rules</button>
+              >Routing rules (legacy)</button>
             )}
           </div>
-          {isDirty && <span className="text-[11px] text-accent bg-accent/20 px-2 py-1 rounded-md">Unsaved</span>}
+          {isDirty && (
+            <span className="text-[11px] text-accent bg-accent/20 px-2 py-1 rounded-md">
+              Unsaved{retireSiblingsOnSave ? " · will retire siblings" : ""}
+            </span>
+          )}
+          {(template || docType) && (
+            <button onClick={handleImportLegacy} disabled={importing} className="btn-secondary text-sm"
+              title="Fold this document type's existing templates and amount rules into one branched workflow">
+              {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitBranch className="w-4 h-4" />}
+              Import rules
+            </button>
+          )}
           {template && onDuplicate && (
             <button onClick={onDuplicate} className="btn-secondary text-sm">
               <Copy className="w-4 h-4" /> Duplicate
@@ -2314,32 +2535,30 @@ function TemplateEditor({
 
       {/* Content */}
       {activeTab === "flow" ? (
-        <div className="flex-1 min-h-0 flex gap-4">
-          <FlowchartEditor
-            steps={steps}
-            groups={groups ?? []}
-            selectedIndex={selectedStepIndex}
-            onSelectIndex={setSelectedStepIndex}
-            onStepsChange={handleStepsChange}
-            onAddStep={handleAddStep}
-          />
-          {selectedStepIndex !== null && steps[selectedStepIndex] && (
+        <BranchedWorkflowEditor
+          blocks={blocks}
+          onChange={handleBlocksChange}
+          fields={fieldCatalog}
+          groups={(groups ?? []).map((g) => ({ id: g.id, name: g.name }))}
+          currencies={CURRENCIES}
+          selectedId={selectedBlockId}
+          onSelect={setSelectedBlockId}
+          makeApprovalStep={() => blankStep() as StepData}
+          makeNotificationStep={() => blankNotificationStep() as StepData}
+          validateStep={validateStepData}
+          renderStepPanel={({ block, index, total, onChange, onClose, onDelete }) => (
             <StepEditPanel
-              step={steps[selectedStepIndex]}
-              index={selectedStepIndex}
-              total={steps.length}
+              step={block.step as WorkflowStep}
+              index={index}
+              total={total}
               groups={groups ?? []}
-              onChange={(patch) => handlePatchStep(selectedStepIndex, patch)}
-              onClose={() => setSelectedStepIndex(null)}
-              onDelete={() => handleDeleteStep(selectedStepIndex)}
-              onInsertNotificationAfter={
-                steps[selectedStepIndex].step_type === "approval"
-                  ? () => handleInsertNotificationAfter(selectedStepIndex)
-                  : undefined
-              }
+              docType={selectedDocumentType}
+              onChange={onChange as (patch: Partial<WorkflowStep>) => void}
+              onClose={onClose}
+              onDelete={onDelete}
             />
           )}
-        </div>
+        />
       ) : activeTab === "emails" ? (
         <TemplateEmailsPanel
           notifyUploaderOnApproval={notifyUploaderOnApproval}
@@ -2386,6 +2605,10 @@ function DuplicateTemplateModal({
             target_type: "document",
             document_type: selectedDocTypeId, is_active: true,
             steps: (cloned.steps ?? []).map(stepToPayload),
+            // Preserve branching when the copy is moved to another document type.
+            ...(cloned.definition
+              ? { definition: { ...cloned.definition, blocks: mapSteps(cloned.definition.blocks, (st) => stepToPayload(st as WorkflowStep) as StepData) } }
+              : {}),
           });
           cloned = normalizeTemplate(patchRes.data as WorkflowTemplate);
         } catch {
@@ -2441,10 +2664,14 @@ function DuplicateTemplateModal({
           {!isPaymentRun && (
             <div>
               <Label required>Document type</Label>
-              <select value={selectedDocTypeId ?? ""} onChange={(e) => setSelectedDocTypeId(e.target.value || null)} className="input">
-                <option value="">Select document type</option>
-                {activeDocTypes.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
+              <CustomListbox
+                value={selectedDocTypeId ?? ""}
+                onChange={(v) => setSelectedDocTypeId(v || null)}
+                options={[{ value: "", label: "Select document type" }, ...activeDocTypes.map((d) => ({ value: d.id, label: d.name }))]}
+                className="input"
+                buttonClassName="w-full"
+                ariaLabel="Document type"
+              />
               <p className="text-[11px] text-muted-foreground mt-1">The duplicate can be assigned to a different document type.</p>
             </div>
           )}
@@ -2757,7 +2984,7 @@ export default function WorkflowBuilderPage() {
     setSidebarTab("templates");
   };
 
-  const handleSaved = (t: WorkflowTemplate, isNew: boolean) => {
+  const handleSaved = (t: WorkflowTemplate, isNew: boolean, meta?: { retiredSiblings?: boolean }) => {
     if (isNew && creatingForDocType) {
       documentTypesAPI.update(creatingForDocType.id, { workflow_template: t.id })
         .then(() => {
@@ -2781,7 +3008,11 @@ export default function WorkflowBuilderPage() {
       toast.success(`Template "${t.name}" created`);
     } else {
       if (selectedDocType) setSelectedDocType(prev => prev ? { ...prev, workflow_template: t.id } : null);
-      toast.success(`Template "${t.name}" saved`);
+      toast.success(
+        meta?.retiredSiblings
+          ? `Saved "${t.name}" — old amount-based templates for this form were retired`
+          : `Template "${t.name}" saved`,
+      );
     }
     qc.invalidateQueries({ queryKey: ["document-types"] });
     qc.invalidateQueries({ queryKey: ["workflow-templates"] });

@@ -13,7 +13,8 @@
  *  - Duplicate / delete
  */
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { useLocation } from "react-router-dom";
 import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -27,8 +28,11 @@ import { templatesAPI, documentTypesAPI, normalizeListResponse } from "@/service
 import type { DocumentType } from "@/types";
 import TemplateBuilderV2 from "@/pages/TemplateBuilderV2";
 import DocumentTemplateDesigner, {
-  type DocumentTemplate as DesignerTemplate,
-  type EditableDocumentTemplate,
+  createBlankTemplate,
+  importLegacyTemplate,
+  normalizeTemplate,
+  type DocumentTemplateV2 as DesignerTemplate,
+  type LegacyTemplate,
 } from "@/pages/TemplateDesigner";
 import TemplatePreview from "@/components/templates/TemplatePreview";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
@@ -84,7 +88,7 @@ export interface Template {
   type: "built" | "uploaded";
   /** Sub-kind for type="built": interactive form vs WYSIWYG document layout. */
   kind?: "form" | "document";
-  /** For kind="document": the designer block layout ({page,theme,header,footer,blocks}). */
+  /** For kind="document": the structured designer layout. */
   design?: Record<string, unknown>;
   category?: string;
   tags?: string[];
@@ -103,43 +107,74 @@ export interface Template {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Designer (document-kind) adapters — the WYSIWYG designer uses a flat shape
-// (page/theme/header/footer/blocks at top level); the backend nests those under
-// `design` and uses document_type / kind. These translate between the two.
+// The designer uses schema-v2 pages/rows/cells; the API stores its layout under
+// `design` and keeps the document type in the `document_type` relation.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function designerToBackend(dt: DesignerTemplate): Record<string, unknown> {
+  const categoryValue = (dt.category ?? "").trim().toLowerCase();
+  const allowedCategories = new Set(["finance", "hr", "procurement", "legal", "operations", "admin", "other"]);
+  const category = allowedCategories.has(categoryValue)
+    ? categoryValue
+    : /purchase|\blpo\b/i.test(dt.category ?? "") ? "procurement" : "other";
   return {
     id: dt.id,
     name: dt.name,
     description: dt.description ?? "",
     type: "built",
     kind: "document",
-    category: dt.category ?? "other",
+    category,
     tags: dt.tags ?? [],
-    document_type: dt.document_type_id,
-    design: { page: dt.page, theme: dt.theme, header: dt.header, footer: dt.footer, blocks: dt.blocks, references: dt.references ?? [] },
-    placeholders: dt.placeholders ?? [],
+    document_type: dt.documentTypeId,
+    design: {
+      schemaVersion: dt.schemaVersion,
+      page: dt.page,
+      theme: dt.theme,
+      header: dt.header,
+      footer: dt.footer,
+      watermark: dt.watermark,
+      pages: dt.pages,
+      requiredFields: dt.requiredFields,
+    },
+    placeholders: dt.requiredFields,
   };
 }
 
-function backendToDesigner(row: Template): EditableDocumentTemplate {
-  const design = (row.design ?? {}) as Partial<DesignerTemplate>;
-  return {
+function backendToDesigner(row: Template): DesignerTemplate {
+  const defaults = createBlankTemplate();
+  const rawDesign = row.design ?? {};
+  const design = rawDesign as Partial<DesignerTemplate>;
+  if (!Array.isArray(design.pages) && Array.isArray((rawDesign as Partial<LegacyTemplate>).blocks)) {
+    const migrated = importLegacyTemplate({
+      ...(rawDesign as Partial<LegacyTemplate>),
+      name: row.name,
+      description: row.description,
+    } as LegacyTemplate);
+    return {
+      ...migrated,
+      id: row.id,
+      documentTypeId: row.document_type_id || row.document_type,
+      category: row.category,
+      tags: row.tags,
+    };
+  }
+  return normalizeTemplate({
+    ...defaults,
     id: row.id,
     name: row.name,
     description: row.description,
+    schemaVersion: 2,
+    documentTypeId: row.document_type_id || row.document_type,
     category: row.category,
     tags: row.tags,
-    document_type_id: row.document_type_id || row.document_type,
-    page: design.page,
-    theme: design.theme,
-    header: design.header,
-    footer: design.footer,
-    blocks: design.blocks,
-    references: design.references,
-    placeholders: row.placeholders,
-  } as EditableDocumentTemplate;
+    page: design.page ?? defaults.page,
+    theme: design.theme ?? defaults.theme,
+    header: design.header ?? defaults.header,
+    footer: design.footer ?? defaults.footer,
+    watermark: design.watermark ?? defaults.watermark,
+    pages: design.pages ?? defaults.pages,
+    requiredFields: design.requiredFields ?? row.placeholders ?? defaults.requiredFields,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -591,9 +626,10 @@ function PreviewModal({ template, onClose }: {
 
 type PageMode = "list" | "builder" | "designer";
 
-export default function TemplatesPage() {
+export default function TemplatesPage({ initialMode }: { initialMode?: PageMode }) {
   const qc       = useQueryClient();
-  const [mode, setMode]               = useState<PageMode>("list");
+  const location = useLocation();
+  const [mode, setMode]               = useState<PageMode>(initialMode ?? "list");
   const [editTarget, setEditTarget]   = useState<Template | undefined>(undefined);
   const [previewTarget, setPreviewTarget]       = useState<Template | null>(null);
   const [editUploadTarget, setEditUploadTarget] = useState<Template | null>(null);
@@ -601,6 +637,18 @@ export default function TemplatesPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [typeFilter, setTypeFilter]   = useState<"all" | "built" | "uploaded">("all");
   const [docTypeFilter, setDocTypeFilter] = useState<string>("all");
+
+  // React Router can reuse this page component when moving from the template
+  // list to its new-document route. Re-sync route-driven mode after navigation
+  // instead of relying only on useState's first-render initializer.
+  useEffect(() => {
+    if (initialMode === "designer" || location.pathname.endsWith("/new-document")) {
+      setEditTarget(undefined);
+      setMode("designer");
+    } else if (location.pathname === "/admin/templates") {
+      setMode("list");
+    }
+  }, [initialMode, location.pathname]);
 
   // ── Data ────────────────────────────────────────────────────────────────
 
@@ -627,7 +675,7 @@ export default function TemplatesPage() {
     // template; the designer shape is translated to the backend's `design` form.
     mutationFn: (params: { template: Template | DesignerTemplate; stayOpen?: boolean }) => {
       const { template } = params;
-      const isDesigner = (template as { kind?: string }).kind === "document";
+      const isDesigner = "schemaVersion" in template;
       const payload = isDesigner
         ? designerToBackend(template as DesignerTemplate)
         : { ...template, document_type: (template as Template).document_type_id };
@@ -682,6 +730,27 @@ export default function TemplatesPage() {
     return counts;
   }, [templates]);
 
+  // ── Cross-form table references ─────────────────────────────────────────
+  // Lets the builder's "Table → Another form" picker read other saved form
+  // templates. Only interactive forms qualify (not Office uploads or
+  // WYSIWYG document layouts — neither has sections/tables to link to).
+  const externalTemplates = useMemo(() => ({
+    list: async () => {
+      const res = await templatesAPI.list();
+      const rows = normalizeListResponse<Template & { workflow_type?: string }>(res.data);
+      return rows
+        .filter((t) => t.type === "built" && t.kind !== "document" && !!t.id)
+        .map((t) => ({
+          id: String(t.id),
+          name: t.name,
+          workflow_type: t.workflow_type,
+          document_type_id: t.document_type_id || t.document_type,
+          document_type_name: t.document_type_name,
+        }));
+    },
+    get: async (id: string) => (await templatesAPI.get(id)).data,
+  }), []);
+
   // ── Builder mode ────────────────────────────────────────────────────────
 
   if (mode === "builder") {
@@ -689,6 +758,7 @@ export default function TemplatesPage() {
       <TemplateBuilderV2
         initial={editTarget}
         documentTypes={docTypes}
+        externalTemplates={externalTemplates}
         onSave={(tpl, stayOpen) => saveMutation.mutate({ template: tpl as unknown as Template, stayOpen })}
         onCancel={() => { setMode("list"); setEditTarget(undefined); }}
         isSaving={saveMutation.isPending}
@@ -702,12 +772,8 @@ export default function TemplatesPage() {
         initial={editTarget ? backendToDesigner(editTarget) : null}
         documentTypes={docTypes.map((t) => ({ id: t.id, name: t.name, code: t.code, metadata_fields: t.metadata_fields }))}
         onSave={async (tpl, stayOpen) => {
-          try {
-            const res = await saveMutation.mutateAsync({ template: tpl, stayOpen });
-            return (res?.data as { id?: string })?.id;
-          } catch {
-            return undefined; // error surfaced by the mutation's onError toast
-          }
+          const res = await saveMutation.mutateAsync({ template: tpl, stayOpen });
+          return (res?.data as { id?: string })?.id;
         }}
         onCancel={() => { setMode("list"); setEditTarget(undefined); }}
         isSaving={saveMutation.isPending}

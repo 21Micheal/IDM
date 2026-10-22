@@ -1,6 +1,15 @@
 import { normalizeListResponse, workflowAPI } from "@/services/api";
 import type { WorkflowStep } from "./workflow-visualizer";
 
+/** All phases the workflow engine can assign to a document instance. */
+export type WorkflowPhase =
+  | "request"
+  | "retirement"
+  | "requisition"
+  | "rfq"
+  | "lpo"
+  | "payment_run";
+
 export interface WorkflowNotificationContext {
   id: string;
   title: string;
@@ -64,6 +73,7 @@ type WorkflowTemplateStepRecord = {
   assignee_type?: string;
   assignee_group_name?: string | null;
   assignee_user_name?: string | null;
+  assignee_user_auto?: boolean;
   notify_user_name?: string | null;
   notify_email?: string;
   instructions?: string;
@@ -72,15 +82,88 @@ type WorkflowTemplateStepRecord = {
 type WorkflowTemplateRecord = {
   id: string;
   name: string;
+  definition?: unknown;
   steps?: WorkflowTemplateStepRecord[];
 };
+
+/** Display order for procurement and its retirement sub-process. */
+export const PROCUREMENT_PHASE_ORDER: WorkflowPhase[] = ["requisition", "rfq", "lpo", "retirement"];
+
+export const PHASE_LABELS: Record<string, string> = {
+  requisition: "Requisition",
+  rfq: "RFQ",
+  lpo: "LPO",
+  request: "Request",
+  retirement: "Retirement",
+  payment_run: "Payment Run",
+};
+
+type DefinitionBlock = {
+  kind?: string;
+  field_id?: string;
+  values?: string[];
+  label?: string;
+  blocks?: DefinitionBlock[];
+  cases?: Array<{ values?: string[]; label?: string; blocks?: DefinitionBlock[] }>;
+  default_blocks?: DefinitionBlock[];
+  branches?: Array<{ blocks?: DefinitionBlock[] }>;
+  else_blocks?: DefinitionBlock[];
+};
+
+/**
+ * Map each phase in a branched definition to the step orders that belong to it.
+ *
+ * The flat ``WorkflowStep`` mirror keeps every case's steps in document order
+ * (a switch on ``context.phase`` flattens to lpo, rfq, requisition — not the
+ * lifecycle order).  This walks the definition the same way the backend's
+ * ``flatten_steps`` does and tags each counted step with the phase of the case it
+ * came from, so the UI can show only the stages of the active phase.
+ *
+ * Returns ``null`` for legacy/linear templates where no phase split exists.
+ */
+export function phaseOrdersFromDefinition(definition: unknown): Record<string, number[]> | null {
+  if (!definition || typeof definition !== "object") return null;
+  const def = definition as { version?: number; blocks?: DefinitionBlock[] };
+  if (def.version !== 2 || !Array.isArray(def.blocks)) return null;
+  if (!def.blocks.some((b) => b?.kind === "switch" && b?.field_id === "context.phase")) {
+    return null;
+  }
+
+  const result: Record<string, number[]> = {};
+  let counter = 0;
+
+  const walk = (blocks: DefinitionBlock[] | undefined, phase: string | null) => {
+    for (const block of blocks ?? []) {
+      const kind = block?.kind;
+      if (kind === "approval" || kind === "notification") {
+        counter += 1;
+        if (phase) (result[phase] ??= []).push(counter);
+      } else if (kind === "switch") {
+        const isPhaseSwitch = block.field_id === "context.phase";
+        for (const caseBlock of block.cases ?? []) {
+          const casePhase = isPhaseSwitch
+            ? (String((caseBlock.values ?? [])[0] ?? caseBlock.label ?? "").trim().toLowerCase() || null)
+            : phase;
+          walk(caseBlock.blocks, casePhase);
+        }
+        walk(block.default_blocks, isPhaseSwitch ? null : phase);
+      } else if (kind === "if_else") {
+        for (const branch of block.branches ?? []) walk(branch.blocks, phase);
+        walk(block.else_blocks, phase);
+      }
+    }
+  };
+
+  walk(def.blocks, null);
+  return Object.keys(result).length ? result : null;
+}
 
 type WorkflowInstanceRecord = {
   id: string;
   status?: string;
   document?: string;
   template?: string;
-  phase?: "request" | "retirement" | string;
+  phase?: WorkflowPhase | string;
   started_at?: string;
   started_by?: {
     full_name?: string;
@@ -102,7 +185,7 @@ type TaskHistoryRecord = {
   created_at?: string;
 };
 
-export async function loadWorkflowData(documentId: string, workflowPhase?: "request" | "retirement" | null): Promise<{
+export async function loadWorkflowData(documentId: string, workflowPhase?: WorkflowPhase | null): Promise<{
   steps: WorkflowStep[];
   currentStep: number;
   isActive: boolean;
@@ -125,7 +208,7 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: "requ
   // Use the instance's own phase field as the authoritative source. This prevents
   // a stale or missing caller-supplied phase from causing the retirement instance's
   // completed steps to show "Approved" instead of "Fully approved" (or vice-versa).
-  const effectivePhase = (instance?.phase as "request" | "retirement" | undefined) ?? workflowPhase ?? null;
+  const effectivePhase = (instance?.phase as WorkflowPhase | undefined) ?? workflowPhase ?? null;
 
   const template = instance?.template
     ? await workflowAPI
@@ -169,7 +252,12 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: "requ
   }));
 
   const meta = getWorkflowMeta(orderedTasks, instance);
-  const steps = buildApproverWorkflow(tasksWithHistory, template?.steps ?? [], effectivePhase);
+  const steps = buildApproverWorkflow(
+    tasksWithHistory,
+    template?.steps ?? [],
+    effectivePhase,
+    template?.definition,
+  );
 
   // The workflow is still "live" (worth polling) while at least one stage is
   // running or yet to be reached, and it hasn't ended in a rejection.
@@ -193,7 +281,8 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: "requ
 function buildApproverWorkflow(
   tasksWithHistory: Array<{ task: WorkflowTaskRecord; history: TaskHistoryRecord[] }>,
   templateSteps: WorkflowTemplateStepRecord[] = [],
-  workflowPhase?: "request" | "retirement" | null,
+  workflowPhase?: WorkflowPhase | null,
+  templateDefinition?: unknown,
 ): WorkflowStep[] {
   const grouped = tasksWithHistory.reduce((map, item) => {
     const order = item.task.step?.order ?? map.size + 1;
@@ -202,7 +291,18 @@ function buildApproverWorkflow(
     return map;
   }, new Map<number, Array<{ task: WorkflowTaskRecord; history: TaskHistoryRecord[] }>>());
 
-  const sourceSteps = templateSteps.length > 0
+  // Phase split for branched templates: order -> phase.  Orphaned mirror rows
+  // (steps kept for FK history but no longer in the definition) have no phase
+  // and are dropped so they never appear in the table.
+  const phaseMap = phaseOrdersFromDefinition(templateDefinition);
+  const orderPhase = new Map<number, string>();
+  if (phaseMap) {
+    for (const [phaseName, orders] of Object.entries(phaseMap)) {
+      for (const order of orders) orderPhase.set(order, phaseName);
+    }
+  }
+
+  const sourceStepsRaw = templateSteps.length > 0
     ? [...templateSteps].sort((a, b) => a.order - b.order)
     : Array.from(grouped.keys())
         .sort((a, b) => a - b)
@@ -215,6 +315,9 @@ function buildApproverWorkflow(
           assignee_user_name: undefined,
           instructions: undefined,
         }));
+  const sourceSteps = phaseMap
+    ? sourceStepsRaw.filter((step) => orderPhase.has(step.order))
+    : sourceStepsRaw;
 
   // ── Pass 1: derive each step's raw status from its own tasks ────────────────
   // A step only has tasks once the engine has reached it, so a step with no
@@ -228,7 +331,12 @@ function buildApproverWorkflow(
     const latestAction = latestActionForHistory(allHistory);
     const statuses = items.map((item) => mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action));
     const rawStatus: WorkflowStep["status"] = items.length ? resolveStepStatus(statuses) : "pending";
-    const taskWithAssignee = items.find((item) => item.task.assigned_to) ?? items[0];
+    // Future tasks may already carry a provisional auto-selected approver.
+    // Show that assignee only after the step becomes active or has been acted
+    // on; before then, show the configured group instead of a stale person.
+    const taskWithAssignee = rawStatus === "pending"
+      ? undefined
+      : items.find((item) => item.task.assigned_to);
     const rawName = templateStep.name?.trim() || items[0]?.task.step?.name?.trim() || `${ordinal(index + 1)} Approver`;
     const name = isNotification ? (rawName || "Notification") : (rawName || `${ordinal(index + 1)} Approver`);
 
@@ -238,20 +346,20 @@ function buildApproverWorkflow(
       || items[0]?.task.step?.notify_email
       || "Recipient";
 
+    const configuredApprover = templateStep.assignee_user_auto
+      ? templateStep.assignee_group_name || formatAssigneeType(templateStep.assignee_type)
+      : templateStep.assignee_user_name
+        || templateStep.assignee_group_name
+        || formatAssigneeType(templateStep.assignee_type);
     const approver = isNotification
       ? recipientLabel
-      : (
-        formatPerson(taskWithAssignee?.task.assigned_to) ||
-        templateStep.assignee_user_name ||
-        templateStep.assignee_group_name ||
-        formatAssigneeType(templateStep.assignee_type) ||
-        "Unassigned"
-      );
+      : (formatPerson(taskWithAssignee?.task.assigned_to) || configuredApprover || "Unassigned");
 
     return {
       id: isNotification ? `notification-${stepOrder}` : `approver-${stepOrder}`,
       stepOrder,
       index,
+      phase: orderPhase.get(stepOrder),
       isNotification,
       name,
       approver,
@@ -267,10 +375,32 @@ function buildApproverWorkflow(
 
   // ── Pass 2: once a step is rejected the workflow stops; later steps that
   // never received a task are unreachable rather than merely "pending". ────────
+  // A phase that never produced a task (e.g. RFQ on a Travel requisition) is
+  // shown as skipped rather than an upcoming approval.
+  const phaseHasTasks = new Map<string, boolean>();
+  for (const item of tasksWithHistory) {
+    const phase = orderPhase.get(item.task.step?.order ?? -1);
+    if (phase) phaseHasTasks.set(phase, true);
+  }
+
+  const phaseIndex = (value?: string | null) =>
+    value ? PROCUREMENT_PHASE_ORDER.indexOf(value as WorkflowPhase) : -1;
+  const currentPhaseIndex = phaseIndex(workflowPhase);
+
   let terminated = false;
   const resolved = base.map((step) => {
     let status: WorkflowStep["status"] = step.rawStatus;
     if (terminated && !step.hasTasks) status = "skipped";
+    const stepPhaseIndex = phaseIndex(step.phase);
+    if (
+      step.phase
+      && stepPhaseIndex >= 0
+      && currentPhaseIndex >= 0
+      && stepPhaseIndex < currentPhaseIndex
+      && !phaseHasTasks.get(step.phase)
+    ) {
+      status = "skipped";
+    }
     if (status === "rejected") terminated = true;
     return { ...step, status };
   });
@@ -283,13 +413,16 @@ function buildApproverWorkflow(
       name: step.name,
       approver: step.approver,
       status: step.status,
+      phase: step.phase,
       statusDisplay: describeStatus({
         status: step.status,
         isNotification: step.isNotification,
         stepName: step.name,
         previousName: previous?.name,
         previousIsNotification: previous?.isNotification,
-        workflowPhase,
+        // Use the step's own phase so a completed Requisition step reads
+        // "Requisition Approved" even while the document is in the RFQ stage.
+        workflowPhase: (step.phase as WorkflowPhase | undefined) ?? workflowPhase,
       }),
       completedAt: step.completedAt,
       comment: step.comment,
@@ -386,23 +519,35 @@ function describeStatus({
   stepName?: string;
   previousName?: string;
   previousIsNotification?: boolean;
-  workflowPhase?: "request" | "retirement" | null;
+  workflowPhase?: WorkflowPhase | null;
 }): string {
+  // Human-readable labels per procurement/document phase
+  const phaseApprovedLabel: Record<string, string> = {
+    requisition: "Requisition Approved",
+    rfq: "RFQ Approved",
+    lpo: "LPO Approved",
+    retirement: "Fully Approved",
+    request: "Approved",
+  };
+  const phaseRejectedLabel: Record<string, string> = {
+    requisition: "Requisition Rejected",
+    rfq: "RFQ Rejected",
+    lpo: "LPO Rejected",
+    retirement: "Retirement Rejected",
+    request: "Rejected",
+  };
+  const approvedLabel = (workflowPhase && phaseApprovedLabel[workflowPhase]) ?? "Approved";
+  const rejectedLabel = (workflowPhase && phaseRejectedLabel[workflowPhase]) ?? "Rejected";
+
   switch (status) {
     case "completed":
-      if (workflowPhase === "retirement") {
-        return isNotification ? "Notification sent" : "Fully approved";
-      }
-      return isNotification ? "Notification sent" : "Approved";
+      return isNotification ? "Notification sent" : approvedLabel;
     case "in-progress":
       return isNotification ? "Sending notification" : (stepName ? `Pending \u2014 ${stripApproval(stepName)}` : "Pending review");
     case "on-hold":
       return "On hold";
     case "rejected":
-      if (workflowPhase === "retirement") {
-        return "Retirement rejected";
-      }
-      return "Rejected";
+      return rejectedLabel;
     case "returned":
       return "Returned for review";
     case "skipped":
@@ -410,7 +555,6 @@ function describeStatus({
     case "pending":
     default:
       if (!previousName) {
-        // Nothing precedes this step — the workflow just hasn't started here yet.
         return isNotification ? "Pending notification" : "Awaiting submission";
       }
       if (isNotification) {

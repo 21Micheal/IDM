@@ -53,6 +53,8 @@ export interface WorkflowStep {
   comment?: string;
   order: number;
   kind?: "task" | "gateway" | "start" | "end";
+  /** Procurement/document phase this step belongs to (requisition/rfq/lpo). */
+  phase?: string;
   branchLabel?: string;
   next?: string[];
   description?: string;

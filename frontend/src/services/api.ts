@@ -1,6 +1,5 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
-import { clearLocalOidcState } from "@/lib/oidcClient";
 import type {
   DocumentEditTokenResponse,
   DocumentPreviewResponse,
@@ -173,7 +172,6 @@ async function refreshAccessToken(): Promise<string> {
     refreshPromise = (async () => {
       const authState = useAuthStore.getState();
       if (authState.isSessionExpired()) {
-        clearLocalOidcState().catch(() => {});
         authState.logout();
         throw new Error("Session expired");
       }
@@ -244,7 +242,6 @@ api.interceptors.response.use(
     const isRefreshRequest = original.url?.includes("/token/refresh/");
     const hasAuthHeader = Boolean(original.headers?.Authorization);
     if (error.response?.status === 401 && (original._retry || isRefreshRequest) && hasAuthHeader) {
-      clearLocalOidcState().catch(() => {});
       useAuthStore.getState().logout();
       return Promise.reject(error);
     }
@@ -256,7 +253,6 @@ api.interceptors.response.use(
         original.headers.Authorization = `Bearer ${accessToken}`;
         return api(original);
       } catch {
-        clearLocalOidcState().catch(() => {});
         useAuthStore.getState().logout();
       }
     }
@@ -286,6 +282,17 @@ export const authAPI = {
 
   confirmPasswordReset: (data: { token: string; new_password: string }) =>
     api.post("/auth/password-reset/confirm/", data),
+};
+
+export const tenantAPI = {
+  getDeployment: () => api.get("/auth/deployment/"),
+  updateDeployment: (data: Partial<{
+    mode: string;
+    enabled_modules: string[];
+    product_name: string;
+    primary_color: string;
+    logo_url: string;
+  }>) => api.patch("/auth/deployment/", data),
 };
 
 export const documentsAPI = {
@@ -362,12 +369,17 @@ export const documentsAPI = {
     id: string,
     values: Record<string, unknown>,
     attachments: Array<{ field: string; file: File }> = [],
+    options: { rfqSupplierCode?: string } = {},
   ) => {
     if (attachments.length === 0) {
-      return api.post(`/documents/${id}/update_form/`, { values });
+      return api.post(`/documents/${id}/update_form/`, {
+        values,
+        ...(options.rfqSupplierCode ? { rfq_supplier_code: options.rfqSupplierCode } : {}),
+      });
     }
     const fd = new FormData();
     fd.append("values", JSON.stringify(values));
+    if (options.rfqSupplierCode) fd.append("rfq_supplier_code", options.rfqSupplierCode);
     for (const { field, file } of attachments) {
       fd.append(field, file, file.name);
     }
@@ -375,6 +387,9 @@ export const documentsAPI = {
       headers: { "Content-Type": undefined },
     });
   },
+
+  rfq: (id: string) => api.get(`/documents/${id}/rfq/`),
+  sendRfq: (id: string) => api.post(`/documents/${id}/rfq/`),
 
   downloadFormAttachment: (id: string, fieldKey: string) =>
     api.get(`/documents/${id}/form_attachment/${encodeURIComponent(fieldKey)}/`, {
@@ -387,7 +402,8 @@ export const documentsAPI = {
   restore: (id: string) => api.post(`/documents/${id}/restore/`),
   /** Permanently delete a document that is in Trash. */
   purge: (id: string) => api.post(`/documents/${id}/purge/`),
-  submit: (id: string) => api.post(`/documents/${id}/submit/`),
+  submit: (id: string, options?: { workflow_stage?: "requisition" | "rfq" | "lpo" }) =>
+    api.post(`/documents/${id}/submit/`, options),
   archive: (id: string) => api.post(`/documents/${id}/archive/`),
 
   uploadVersion: (
@@ -883,6 +899,7 @@ export type JournalPreviewResult = {
   credit_total?: string;
   balanced?: boolean;
   warnings?: string[];
+  payload_options?: Array<{ stage: number; label: string; component: string }>;
   error?: string | null;
 };
 
@@ -1037,11 +1054,55 @@ export type SunSystemsAccount = {
   account_code: string;
   account_type: string;
   description: string;
+  email?: string;
+  phone?: string;
+  address?: string;
 };
 
 export type AccountsResult = {
   ok: boolean;
   accounts: SunSystemsAccount[];
+  count: number;
+  error?: string;
+};
+
+export type SunSystemsItem = {
+  item_code: string;
+  description: string;
+  item_type?: string;
+  base_item_unit?: string;
+};
+
+export type ItemsResult = {
+  ok: boolean;
+  items: SunSystemsItem[];
+  count: number;
+  error?: string;
+};
+
+export type SunSystemsProductGroup = {
+  product_group: string;
+  description: string;
+  item_type?: string;
+  base_item_unit?: string;
+};
+
+export type ProductGroupsResult = {
+  ok: boolean;
+  product_groups: SunSystemsProductGroup[];
+  count: number;
+  error?: string;
+};
+
+export type SunSystemsAnalysisCode = {
+  analysis_code: string;
+  analysis_dimension_id: string;
+  name: string;
+};
+
+export type AnalysisCodesResult = {
+  ok: boolean;
+  analysis_codes: SunSystemsAnalysisCode[];
   count: number;
   error?: string;
 };
@@ -1063,6 +1124,12 @@ export const sunsystemsAPI = {
     api.post<PaymentRunProcessResult>(`/sunsystems/payment-runs/${paymentRunId}/process/`),
   getAccounts: (params?: { business_unit?: string; account_type?: string }) =>
     api.get<AccountsResult>("/sunsystems/accounts/", { params }),
+  getItems: (params?: { business_unit?: string }) =>
+    api.get<ItemsResult>("/sunsystems/items/", { params }),
+  getProductGroups: (params?: { business_unit?: string }) =>
+    api.get<ProductGroupsResult>("/sunsystems/product-groups/", { params }),
+  getAnalysisCodes: (params: { dimension: string; business_unit?: string }) =>
+    api.get<AnalysisCodesResult>("/sunsystems/analysis-codes/", { params }),
   getConnection: () =>
     api.get<SunSystemsConnectionResponse>("/sunsystems/connection/"),
   updateConnection: (conn: SunSystemsConnection) =>
@@ -1095,12 +1162,12 @@ export type JournalPostingRecord = {
   journal_number: string;
   message: string;
   error: string;
-  request_xml: string;
-  response_xml: string;
   posted_by_name: string | null;
   posted_at: string | null;
   created_at: string;
   updated_at: string;
+  request_xml?: string;
+  response_xml?: string;
 };
 
 
@@ -1281,9 +1348,12 @@ export const workflowAPI = {
   getTemplate: (id: string) => api.get(`/workflows/templates/${id}/`),
   // Process steps (statuses) a document of `documentTypeId` can be in — drives
   // "process step equals …" visibility conditions in the form builder.
-  processSteps: (documentTypeId?: string) =>
+  processSteps: (documentTypeId?: string, workflowType?: string) =>
     api.get("/workflows/templates/process-steps/", {
-      params: documentTypeId ? { document_type: documentTypeId } : {},
+      params: {
+        ...(documentTypeId ? { document_type: documentTypeId } : {}),
+        ...(workflowType ? { workflow_type: workflowType } : {}),
+      },
     }),
   createTemplate: (data: unknown) => api.post("/workflows/templates/", data),
   updateTemplate: (id: string, data: unknown) =>
@@ -1328,8 +1398,8 @@ export const workflowAPI = {
       : api.post(`/workflows/tasks/${id}/approve/`, { comment }),
   rejectTask: (id: string, comment: string) =>
     api.post(`/workflows/tasks/${id}/reject/`, { comment }),
-  returnForReview: (id: string, comment: string) =>
-    api.post(`/workflows/tasks/${id}/return_for_review/`, { comment }),
+  returnForReview: (id: string, comment: string, returnTo: "previous_step" | "uploader" | "same_step" = "uploader") =>
+    api.post(`/workflows/tasks/${id}/return_for_review/`, { comment, return_to: returnTo }),
   holdTask: (id: string, comment: string, holdHours: number) =>
     api.post(`/workflows/tasks/${id}/hold/`, {
       comment,
@@ -1508,7 +1578,9 @@ export const groupsAPI = {
     id: string,
     permissions: { document_type_id: string | null; stage: string; action: string }[]
   ) => api.post(`/groups/${id}/set_permissions/`, { permissions }),
-  members: (id: string) => api.get(`/groups/${id}/members/`),
+  setRequisitionTemplates: (id: string, templateIds: string[]) =>
+    api.post(`/groups/${id}/set_requisition_templates/`, { template_ids: templateIds }),
+  members: (id: string, params?: Record<string, unknown>) => api.get(`/groups/${id}/members/`, { params }),
   addMember: (id: string, userId: string, expiresAt?: string) =>
     api.post(`/groups/${id}/add_member/`, {
       user_id: userId,

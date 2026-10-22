@@ -31,7 +31,15 @@ interface WorkflowTask {
   id:             string;
   status:         string;
   status_display?: string;
-  step:           { name: string; order: number; instructions?: string; allow_approve?: boolean; allow_reject?: boolean; allow_return?: boolean };
+  step:           {
+    name: string;
+    order: number;
+    instructions?: string;
+    allow_approve?: boolean;
+    allow_reject?: boolean;
+    allow_return?: boolean;
+    allow_return_submitter?: boolean;
+  };
   requires_signature?: boolean;
   assigned_to?:   { id: string; full_name: string };
   due_at?:        string | null;
@@ -56,7 +64,8 @@ interface TaskAction {
 interface Props {
   task: WorkflowTask;
   documentId?: string;
-  onCompleted?: () => void;
+  onCompleted?: () => void | Promise<void>;
+  onBeforeApprove?: () => Promise<void>;
   variant?: "panel" | "bar";
 }
 
@@ -198,7 +207,7 @@ function TaskHistoryDrawer({ taskId, task, currentUserId: _currentUserId }: { ta
 }
 
 // ── Main panel ────────────────────────────────────────────────────────────────
-export default function WorkflowActionPanel({ task, documentId, onCompleted, variant = "panel" }: Props) {
+export default function WorkflowActionPanel({ task, documentId, onCompleted, onBeforeApprove, variant = "panel" }: Props) {
   const qc = useQueryClient();
   const currentUser = useAuthStore((s) => s.user);
   const hasDocument = Boolean(documentId);
@@ -215,6 +224,15 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
   const [optimisticAction, setOptimisticAction] = useState<WorkflowActionKind | null>(null);
   const [comment, setComment]   = useState("");
   const [holdHours, setHoldHours] = useState(24);
+  const [returnTo, setReturnTo] = useState<"previous_step" | "uploader">("uploader");
+
+  const canReturnPrevious = Boolean(task.step?.allow_return) && (task.step?.order ?? 1) > 1;
+  // Legacy steps only had allow_return; treat that as submitter return when the
+  // dedicated flag is absent.
+  const canReturnSubmitter = task.step?.allow_return_submitter !== undefined
+    ? Boolean(task.step.allow_return_submitter)
+    : task.step?.allow_return !== false;
+  const canReturn = canReturnPrevious || canReturnSubmitter;
 
   const removeTaskFromQueues = () => {
     qc.setQueriesData<WorkflowTask[]>({ queryKey: ["workflow", "my-tasks"] }, (prev) =>
@@ -291,12 +309,12 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
     patchDocumentStatus("pending_approval");
   };
 
-  const completeAction = () => {
+  const completeAction = async () => {
     setOptimisticAction(null);
     setActiveAction(null);
     setComment("");
     refetchWorkflowState();
-    if (onCompleted) onCompleted();
+    await onCompleted?.();
   };
 
   const failAction = (message: string) => {
@@ -306,9 +324,12 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
   };
 
   const approveMutation = useMutation({
-    mutationFn: (result?: SignaturePlacementResult) => workflowAPI.approveTask(task.id, comment, result ?? undefined),
+    mutationFn: async (result?: SignaturePlacementResult) => {
+      await onBeforeApprove?.();
+      return workflowAPI.approveTask(task.id, comment, result ?? undefined);
+    },
     onMutate: () => beginOptimisticAction("approve"),
-    onSuccess: () => { toast.success(`${capitalizedTargetLabel} approved`); completeAction(); },
+    onSuccess: async () => { toast.success(`${capitalizedTargetLabel} approved`); await completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Approval failed")),
   });
@@ -316,17 +337,17 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
   const rejectMutation = useMutation({
     mutationFn: () => workflowAPI.rejectTask(task.id, comment),
     onMutate: () => beginOptimisticAction("reject"),
-    onSuccess: () => { toast.success(`${capitalizedTargetLabel} rejected`); completeAction(); },
+    onSuccess: async () => { toast.success(`${capitalizedTargetLabel} rejected`); await completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Rejection failed")),
   });
 
   const returnMutation = useMutation({
-    mutationFn: () => workflowAPI.returnForReview(task.id, comment),
+    mutationFn: () => workflowAPI.returnForReview(task.id, comment, returnTo),
     onMutate: () => beginOptimisticAction("return"),
-    onSuccess: () => {
+    onSuccess: async () => {
       toast.success(`${capitalizedTargetLabel} sent back`);
-      completeAction();
+      await completeAction();
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Return failed")),
@@ -335,9 +356,9 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
   const holdMutation = useMutation({
     mutationFn: () => workflowAPI.holdTask(task.id, comment, holdHours),
     onMutate: () => beginOptimisticAction("hold"),
-    onSuccess: () => {
+    onSuccess: async () => {
       toast.success(`${capitalizedTargetLabel} placed on hold for ${holdHours}h`);
-      completeAction();
+      await completeAction();
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Hold failed")),
@@ -346,7 +367,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
   const releaseMutation = useMutation({
     mutationFn: () => workflowAPI.releaseHold(task.id),
     onMutate: () => beginOptimisticAction("release"),
-    onSuccess: () => { toast.success("Hold released"); completeAction(); },
+    onSuccess: async () => { toast.success("Hold released"); await completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Release failed")),
   });
@@ -359,7 +380,18 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
   const anyPending = approveMutation.isPending || rejectMutation.isPending ||
                      returnMutation.isPending  || holdMutation.isPending;
 
-  const resetForm = () => { setComment(""); setHoldHours(24); setActiveAction(null); setSignedResult(null); };
+  const openReturnForm = () => {
+    setReturnTo(canReturnSubmitter ? "uploader" : "previous_step");
+    setActiveAction("return");
+  };
+
+  const resetForm = () => {
+    setComment("");
+    setHoldHours(24);
+    setReturnTo("uploader");
+    setActiveAction(null);
+    setSignedResult(null);
+  };
 
   // Approval is the final confirm. If the step requires a signature it must be
   // captured first (via the explicit "Sign document" step), so it's applied
@@ -453,9 +485,9 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
             )}
             {isActive && (
               <>
-                {task.target_type !== "payment_run" && task.step?.allow_return !== false && (
+                {task.target_type !== "payment_run" && canReturn && (
                   <button
-                    onClick={() => setActiveAction("return")}
+                    onClick={openReturnForm}
                     className="inline-flex h-8 items-center gap-1.5 bg-white px-3 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8]"
                   >
                     <RotateCcw className="h-3.5 w-3.5" /> Send back
@@ -573,8 +605,45 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
               <div className="space-y-3">
                 <div>
                   <p className="text-sm font-bold text-[#1F2933]">Return for review</p>
-                  <p className="mt-0.5 text-xs text-[#5E6870]">The requester will see this note and can resubmit after rework.</p>
+                  <p className="mt-0.5 text-xs text-[#5E6870]">
+                    The workflow pauses here. After rework and resubmit, approval resumes at this step.
+                  </p>
                 </div>
+                {(canReturnPrevious || canReturnSubmitter) && (
+                  <div className="space-y-1.5">
+                    <label className="label text-xs">Send back to</label>
+                    <div className="flex flex-wrap gap-2">
+                      {canReturnSubmitter && (
+                        <button
+                          type="button"
+                          onClick={() => setReturnTo("uploader")}
+                          className={clsx(
+                            "border px-3 py-1.5 text-xs font-semibold",
+                            returnTo === "uploader"
+                              ? "border-accent bg-accent/10 text-accent"
+                              : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F5F7F8]",
+                          )}
+                        >
+                          Submitter
+                        </button>
+                      )}
+                      {canReturnPrevious && (
+                        <button
+                          type="button"
+                          onClick={() => setReturnTo("previous_step")}
+                          className={clsx(
+                            "border px-3 py-1.5 text-xs font-semibold",
+                            returnTo === "previous_step"
+                              ? "border-accent bg-accent/10 text-accent"
+                              : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F5F7F8]",
+                          )}
+                        >
+                          Previous step
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div>
                   <label className="label text-xs">What needs to be fixed? <span className="text-red-600">*</span></label>
                   <textarea
@@ -731,9 +800,9 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
       {/* Action buttons — inline compact row, UniPI style */}
       {isActive && !activeAction && (
         <div className="flex items-center gap-2 flex-wrap">
-                {task.target_type !== "payment_run" && task.step?.allow_return !== false && (
+          {task.target_type !== "payment_run" && canReturn && (
             <button
-              onClick={() => setActiveAction("return")}
+              onClick={openReturnForm}
               title="Return for review"
               className="inline-flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8] transition-colors"
             >
@@ -870,10 +939,44 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
           <div>
             <p className="text-sm font-medium text-foreground">Return for review</p>
             <p className="text-xs text-muted-foreground mt-0.5">
-              The document will be sent back for rework. The uploader will be notified by email.
-              If this is step 1, the workflow resets and they must resubmit from scratch.
+              The workflow pauses here. After rework and resubmit, approval resumes at this step — it does not restart from the beginning.
             </p>
           </div>
+          {(canReturnPrevious || canReturnSubmitter) && (
+            <div className="space-y-1.5">
+              <label className="label text-xs">Send back to</label>
+              <div className="flex flex-wrap gap-2">
+                {canReturnSubmitter && (
+                  <button
+                    type="button"
+                    onClick={() => setReturnTo("uploader")}
+                    className={clsx(
+                      "border px-3 py-1.5 text-xs font-semibold",
+                      returnTo === "uploader"
+                        ? "border-accent bg-accent/10 text-accent"
+                        : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F5F7F8]",
+                    )}
+                  >
+                    Submitter
+                  </button>
+                )}
+                {canReturnPrevious && (
+                  <button
+                    type="button"
+                    onClick={() => setReturnTo("previous_step")}
+                    className={clsx(
+                      "border px-3 py-1.5 text-xs font-semibold",
+                      returnTo === "previous_step"
+                        ? "border-accent bg-accent/10 text-accent"
+                        : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F5F7F8]",
+                    )}
+                  >
+                    Previous step
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           <div>
             <label className="label text-xs">What needs to be fixed? <span className="text-red-500">*</span></label>
             <textarea

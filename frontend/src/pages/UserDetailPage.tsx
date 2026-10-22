@@ -206,79 +206,57 @@ export default function UserDetailPage() {
   const initials = `${user.first_name?.[0] ?? ""}${user.last_name?.[0] ?? ""}`.toUpperCase();
 
   return (
-    <div className="admin-shell space-y-5">
+    <div className="admin-shell space-y-4">
       {/* Back nav */}
       <button
         type="button"
         onClick={() => navigate("/admin/users")}
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        className="inline-flex items-center gap-1.5 text-xs font-medium text-[#5E6870] hover:text-[#1F2933] transition-colors"
       >
         <ArrowLeft className="w-4 h-4" /> Back to users
       </button>
 
-      {/* Identity card — clean slate, no gradient */}
-      <div className="overflow-hidden border border-[#C8CDD2] bg-white">
-        <div className="p-6 sm:p-8">
-          <div className="flex flex-col sm:flex-row sm:items-start gap-6">
+      {/* Identity card */}
+      <div className="border border-[#C8CDD2] bg-white">
+        <div className="p-6">
+          <div className="flex flex-col sm:flex-row sm:items-start gap-5">
             {/* Avatar */}
-            <div className="h-20 w-20 sm:h-24 sm:w-24 rounded-2xl bg-muted flex items-center justify-center text-2xl font-bold text-muted-foreground flex-shrink-0">
-              {initials || <UserCircle className="w-10 h-10" />}
+            <div className="h-16 w-16 flex-shrink-0 bg-[#EEF6FB] border border-[#C8CDD2] flex items-center justify-center text-xl font-bold text-[#287EAD]">
+              {initials || <UserCircle className="w-8 h-8" />}
             </div>
 
             {/* Name + badges + contact */}
-            <div className="flex-1 min-w-0 space-y-3">
-              {/* Row 1: name + status badges */}
+            <div className="flex-1 min-w-0 space-y-2">
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-foreground">
-                  {user.full_name}
-                </h1>
-                <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium border ${
+                <h1 className="text-xl font-bold text-[#1F2933]">{user.full_name}</h1>
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold border ${
                   user.is_active
-                    ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
-                    : "bg-muted text-muted-foreground border-border"
+                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                    : "bg-[#F5F7F8] text-[#5E6870] border-[#C8CDD2]"
                 }`}>
-                  {user.is_active ? (
-                    <><CheckCircle2 className="w-3 h-3" /> Active</>
-                  ) : (
-                    <><CircleSlash className="w-3 h-3" /> Disabled</>
-                  )}
+                  {user.is_active ? <><CheckCircle2 className="w-3 h-3" /> Active</> : <><CircleSlash className="w-3 h-3" /> Disabled</>}
                 </span>
-                <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium border ${
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold border ${
                   user.mfa_enabled
-                    ? "bg-primary/10 text-primary border-primary/20"
-                    : "bg-amber-500/10 text-amber-600 border-amber-500/20"
+                    ? "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/30"
+                    : "bg-amber-50 text-amber-700 border-amber-200"
                 }`}>
-                  {user.mfa_enabled ? (
-                    <><ShieldCheck className="w-3 h-3" /> MFA on</>
-                  ) : (
-                    <><ShieldAlert className="w-3 h-3" /> MFA off</>
-                  )}
+                  {user.mfa_enabled ? <><ShieldCheck className="w-3 h-3" /> MFA on</> : <><ShieldAlert className="w-3 h-3" /> MFA off</>}
                 </span>
               </div>
 
-              {/* Row 2: email + department */}
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                <span className="inline-flex items-center gap-1.5">
-                  <Mail className="w-3.5 h-3.5 flex-shrink-0" />
-                  {user.email}
-                </span>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#5E6870]">
+                <span className="inline-flex items-center gap-1.5"><Mail className="w-3.5 h-3.5 flex-shrink-0" />{user.email}</span>
                 {user.department_name && (
-                  <span className="inline-flex items-center gap-1.5">
-                    <Building2 className="w-3.5 h-3.5 flex-shrink-0" />
-                    {user.department_name}
-                  </span>
+                  <span className="inline-flex items-center gap-1.5"><Building2 className="w-3.5 h-3.5 flex-shrink-0" />{user.department_name}</span>
                 )}
               </div>
 
-              {/* Row 3: groups — clean pills below, not overlapping */}
               {!!user.group_names?.length && (
                 <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                  <UsersIcon className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+                  <UsersIcon className="w-3.5 h-3.5 text-[#8C969E] flex-shrink-0" />
                   {user.group_names.map((g) => (
-                    <span
-                      key={g}
-                      className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-muted text-muted-foreground border border-border"
-                    >
+                    <span key={g} className="inline-flex items-center px-2 py-0.5 text-[11px] font-medium bg-[#F5F7F8] text-[#5E6870] border border-[#C8CDD2]">
                       {g}
                     </span>
                   ))}
@@ -288,85 +266,63 @@ export default function UserDetailPage() {
           </div>
 
           {/* Timestamps */}
-          <div className="mt-6 pt-5 border-t border-border grid sm:grid-cols-2 gap-3 text-sm">
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Calendar className="w-4 h-4 flex-shrink-0" />
-              Joined{" "}
-              <span className="text-foreground font-medium">
-                {format(new Date(user.created_at), "dd MMM yyyy")}
-              </span>
+          <div className="mt-5 pt-4 border-t border-[#E4E7EB] grid sm:grid-cols-2 gap-3 text-xs text-[#5E6870]">
+            <div className="flex items-center gap-2">
+              <Calendar className="w-3.5 h-3.5 flex-shrink-0" />
+              Joined <span className="text-[#1F2933] font-semibold">{format(new Date(user.created_at), "dd MMM yyyy")}</span>
             </div>
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Clock className="w-4 h-4 flex-shrink-0" />
-              Last login{" "}
-              <span className="text-foreground font-medium">
-                {user.last_login
-                  ? format(new Date(user.last_login), "dd MMM yyyy HH:mm")
-                  : "Never"}
+            <div className="flex items-center gap-2">
+              <Clock className="w-3.5 h-3.5 flex-shrink-0" />
+              Last login <span className="text-[#1F2933] font-semibold">
+                {user.last_login ? format(new Date(user.last_login), "dd MMM yyyy HH:mm") : "Never"}
               </span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Settings & Danger zone grid */}
-      <div className="grid lg:grid-cols-3 gap-6">
+      {/* Settings & Reassign grid */}
+      <div className="grid lg:grid-cols-3 gap-4">
         {/* User settings */}
-        <section className="lg:col-span-2 rounded-2xl border border-border bg-card shadow-sm">
-          <header className="px-6 py-4 border-b border-border">
-            <h2 className="font-semibold text-foreground">User settings</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Update profile details and account access.
-            </p>
+        <section className="lg:col-span-2 border border-[#C8CDD2] bg-white">
+          <header className="px-5 py-3.5 border-b border-[#C8CDD2] bg-[#F5F7F8]">
+            <h2 className="text-sm font-bold text-[#1F2933]">User settings</h2>
+            <p className="text-[11px] text-[#5E6870] mt-0.5">Update profile details and account access.</p>
           </header>
 
-          <div className="p-6 space-y-5">
+          <div className="p-5 space-y-4">
             <div className="grid sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-                  First name
-                </label>
+                <label className="block text-[11px] font-semibold text-[#5E6870] uppercase tracking-wider mb-1.5">First name</label>
                 <input
-                  className="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
+                  className="w-full h-9 border border-[#C8CDD2] bg-white px-3 text-sm text-[#1F2933] focus:outline-none focus:border-[#287EAD] transition-colors"
                   value={form.first_name}
-                  onChange={(e) =>
-                    setForm((s) => ({ ...s, first_name: e.target.value }))
-                  }
+                  onChange={(e) => setForm((s) => ({ ...s, first_name: e.target.value }))}
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-                  Last name
-                </label>
+                <label className="block text-[11px] font-semibold text-[#5E6870] uppercase tracking-wider mb-1.5">Last name</label>
                 <input
-                  className="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
+                  className="w-full h-9 border border-[#C8CDD2] bg-white px-3 text-sm text-[#1F2933] focus:outline-none focus:border-[#287EAD] transition-colors"
                   value={form.last_name}
-                  onChange={(e) =>
-                    setForm((s) => ({ ...s, last_name: e.target.value }))
-                  }
+                  onChange={(e) => setForm((s) => ({ ...s, last_name: e.target.value }))}
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-                Job description
-              </label>
+              <label className="block text-[11px] font-semibold text-[#5E6870] uppercase tracking-wider mb-1.5">Job description</label>
               <textarea
                 rows={3}
-                className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors resize-none"
+                className="w-full border border-[#C8CDD2] bg-white px-3 py-2 text-sm text-[#1F2933] focus:outline-none focus:border-[#287EAD] transition-colors resize-none"
                 value={form.job_description}
-                onChange={(e) =>
-                  setForm((s) => ({ ...s, job_description: e.target.value }))
-                }
+                onChange={(e) => setForm((s) => ({ ...s, job_description: e.target.value }))}
                 placeholder="Role responsibilities, scope, etc."
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-                Department
-              </label>
+              <label className="block text-[11px] font-semibold text-[#5E6870] uppercase tracking-wider mb-1.5">Department</label>
               <CustomListbox
                 value={form.department ?? ""}
                 onChange={(v) => setForm((s) => ({ ...s, department: v || "" }))}
@@ -374,66 +330,50 @@ export default function UserDetailPage() {
                   { value: "", label: "No department" },
                   ...departments.map((d) => ({ value: d.id, label: d.name })),
                 ]}
-                buttonClassName="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm text-left focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
+                buttonClassName="w-full h-9 border border-[#C8CDD2] bg-white px-3 text-sm text-[#1F2933] text-left focus:outline-none focus:border-[#287EAD] transition-colors"
                 ariaLabel="Department"
               />
               <div className="flex items-center gap-3 mt-3">
                 <input
                   type="checkbox"
-                  className="h-4 w-4 accent-primary"
+                  className="h-4 w-4 accent-[#287EAD]"
                   checked={form.is_active}
-                  onChange={(e) =>
-                    setForm((s) => ({ ...s, is_active: e.target.checked }))
-                  }
+                  onChange={(e) => setForm((s) => ({ ...s, is_active: e.target.checked }))}
                 />
                 <div>
-                  <p className="text-sm font-medium text-foreground">Account active</p>
-                  <p className="text-xs text-muted-foreground">
-                    When disabled, the user cannot sign in.
-                  </p>
+                  <p className="text-xs font-semibold text-[#1F2933]">Account active</p>
+                  <p className="text-[11px] text-[#5E6870]">When disabled, the user cannot sign in.</p>
                 </div>
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2 pt-2">
+            <div className="flex flex-wrap gap-2 pt-1">
               <button
                 onClick={() => updateMutation.mutate()}
                 disabled={updateMutation.isPending}
-                className="inline-flex items-center gap-2 h-10 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium shadow-sm hover:bg-primary/90 transition-colors disabled:opacity-70"
+                className="inline-flex items-center gap-1.5 h-9 px-4 bg-[#287EAD] text-white text-xs font-semibold hover:bg-[#206D99] transition-colors disabled:opacity-60"
               >
-                {updateMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Save className="w-4 h-4" />
-                )}
+                {updateMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                 Save changes
               </button>
               <button
                 onClick={() => resetPwMutation.mutate()}
                 disabled={resetPwMutation.isPending}
-                className="inline-flex items-center gap-2 h-10 px-4 rounded-lg border border-border bg-background text-sm font-medium hover:bg-muted transition-colors disabled:opacity-70"
+                className="inline-flex items-center gap-1.5 h-9 px-4 border border-[#C8CDD2] bg-white text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8] transition-colors disabled:opacity-60"
               >
-                {resetPwMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <KeyRound className="w-4 h-4" />
-                )}
+                {resetPwMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <KeyRound className="w-3.5 h-3.5" />}
                 Reset password
               </button>
               <button
                 onClick={() => toggleActiveMutation.mutate()}
                 disabled={toggleActiveMutation.isPending}
-                className={`inline-flex items-center gap-2 h-10 px-4 rounded-lg border text-sm font-medium transition-colors disabled:opacity-70 ${
+                className={`inline-flex items-center gap-1.5 h-9 px-4 border text-xs font-semibold transition-colors disabled:opacity-60 ${
                   user.is_active
-                    ? "border-destructive/30 bg-destructive/5 text-destructive hover:bg-destructive/10"
-                    : "border-emerald-500/30 bg-emerald-500/5 text-emerald-600 hover:bg-emerald-500/10"
+                    ? "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
+                    : "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                 }`}
               >
-                {toggleActiveMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Power className="w-4 h-4" />
-                )}
+                {toggleActiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Power className="w-3.5 h-3.5" />}
                 {user.is_active ? "Deactivate" : "Activate"}
               </button>
             </div>
@@ -441,17 +381,16 @@ export default function UserDetailPage() {
         </section>
 
         {/* Reassign tasks */}
-        <section className="rounded-2xl border border-border bg-card shadow-sm flex flex-col">
-          <header className="px-6 py-4 border-b border-border">
-            <h2 className="font-semibold text-foreground flex items-center gap-2">
-              <ArrowRightLeft className="w-4 h-4 text-muted-foreground" />
-              Reassign tasks
+        <section className="border border-[#C8CDD2] bg-white flex flex-col">
+          <header className="px-5 py-3.5 border-b border-[#C8CDD2] bg-[#F5F7F8]">
+            <h2 className="text-sm font-bold text-[#1F2933] flex items-center gap-2">
+              <ArrowRightLeft className="w-4 h-4 text-[#287EAD]" /> Reassign tasks
             </h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
+            <p className="text-[11px] text-[#5E6870] mt-0.5">
               Move all active workflow tasks and pending signature requests owned by this user to another active user.
             </p>
           </header>
-          <div className="p-6 space-y-3 flex-1 flex flex-col">
+          <div className="p-5 space-y-3 flex-1 flex flex-col">
             <CustomListbox
               value={reassignTo}
               onChange={setReassignTo}
@@ -459,41 +398,33 @@ export default function UserDetailPage() {
                 { value: "", label: "Select target user" },
                 ...reassignCandidates.map((c) => ({ value: c.id, label: `${c.full_name} (${c.email})` })),
               ]}
-              buttonClassName="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm text-left focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
+              buttonClassName="w-full h-9 border border-[#C8CDD2] bg-white px-3 text-sm text-[#1F2933] text-left focus:outline-none focus:border-[#287EAD] transition-colors"
               ariaLabel="Reassign user"
             />
             <button
               onClick={() => reassignMutation.mutate()}
               disabled={!reassignTo || reassignMutation.isPending}
-              className="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium shadow-sm hover:bg-primary/90 transition-colors disabled:opacity-50"
+              className="inline-flex items-center justify-center gap-1.5 h-9 px-4 bg-[#287EAD] text-white text-xs font-semibold hover:bg-[#206D99] transition-colors disabled:opacity-50"
             >
-              {reassignMutation.isPending ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <ArrowRightLeft className="w-4 h-4" />
-              )}
+              {reassignMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowRightLeft className="w-3.5 h-3.5" />}
               Reassign active tasks
             </button>
-            <p className="text-[11px] text-muted-foreground mt-auto pt-2">
-              This action is logged in the audit trail.
-            </p>
+            <p className="text-[11px] text-[#8C969E] mt-auto pt-2">This action is logged in the audit trail.</p>
           </div>
         </section>
       </div>
 
       {/* Delegations */}
-      <section className="rounded-2xl border border-border bg-card shadow-sm">
-        <header className="px-6 py-4 border-b border-border">
-          <h2 className="font-semibold text-foreground flex items-center gap-2">
-            <CalendarClock className="w-4 h-4 text-muted-foreground" />
-            Delegations
+      <section className="border border-[#C8CDD2] bg-white">
+        <header className="px-5 py-3.5 border-b border-[#C8CDD2] bg-[#F5F7F8]">
+          <h2 className="text-sm font-bold text-[#1F2933] flex items-center gap-2">
+            <CalendarClock className="w-4 h-4 text-[#287EAD]" /> Delegations
           </h2>
-          <p className="text-xs text-muted-foreground mt-1">
+          <p className="text-[11px] text-[#5E6870] mt-0.5">
             Schedule out-of-office task delegation on behalf of {user.full_name}.
           </p>
         </header>
-
-        <div className="p-6 space-y-6">
+        <div className="p-5 space-y-5">
           <DelegationScheduleForm
             delegatorId={id}
             delegatorName={user.full_name}
@@ -521,3 +452,4 @@ export default function UserDetailPage() {
     </div>
   );
 }
+

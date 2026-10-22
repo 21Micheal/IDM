@@ -285,10 +285,10 @@ export default function DocumentDetailPage() {
     refetchInterval: LOCK_STATUS_POLL_MS,
   });
 
-  // Redirect form documents to the dedicated Forms page
+  // Redirect form documents to the requisition form detail route.
   useEffect(() => {
     if (doc && (doc as any).metadata?.form?.sections) {
-      navigate(`/forms/${doc.id}`, { replace: true });
+      navigate(`/${doc.id}`, { replace: true });
     }
   }, [doc, navigate]);
 
@@ -738,6 +738,9 @@ export default function DocumentDetailPage() {
 
   const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
+  const purchaseOrderEnabled = Boolean((doc.metadata as any)?.sunsystems?.purchase_order?.enabled)
+    || String((doc.metadata as any)?.sunsystems?.journal?.component ?? "").toLowerCase() === "purchaseorder";
+  const sunSystemsPostingEnabled = journalEnabled || purchaseOrderEnabled;
   // Extract available journal stages for multi-stage posting
   const journalStages = (doc.metadata as any)?.sunsystems?.journal?.stages as Array<{ stage: number; enabled?: boolean }> | undefined;
   const availableStages = journalStages
@@ -1314,11 +1317,11 @@ export default function DocumentDetailPage() {
           )}
 
           {/* ── Journal status ── */}
-          {journalEnabled && (
+          {sunSystemsPostingEnabled && (
             <div className="space-y-3">
               <JournalPostingCard
                 documentId={doc.id}
-                expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(doc.status)}
+                expectPosting={sunSystemsPostingEnabled && ["request_approved", "fully_approved"].includes(doc.status)}
                 watchKey={`${doc.status}:${doc.updated_at}`}
                 availableStages={availableStages}
               />
@@ -1432,7 +1435,41 @@ export default function DocumentDetailPage() {
                       <span className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Current approver</span>
                     </div>
                     <Suspense fallback={<div className="text-sm text-muted-foreground">Loading workflow actions…</div>}>
-                      <WorkflowActionPanel task={activeTask} documentId={id!} onCompleted={() => setWorkflowActionCompleted(true)} />
+                      <WorkflowActionPanel
+                        task={activeTask}
+                        documentId={id!}
+                        onCompleted={() => {
+                          if ((doc as any)?.metadata?.form?.sections) {
+                            const phase = String(
+                              (doc as any)?.metadata?.form?.workflow_phase
+                                ?? (doc as any)?.builder_workflow_phase
+                                ?? "",
+                            ).toLowerCase();
+                            const order = activeTask.step?.order ?? 0;
+                            const lpoSteps = (workflowData?.steps ?? []).filter((step) =>
+                              step.kind === "task"
+                                && /^approver-\d+$/.test(step.id)
+                                && (!step.phase || step.phase === "lpo"),
+                            );
+                            const laterLpoStepExists = lpoSteps.some((step) =>
+                              Number(step.id.slice("approver-".length)) > order,
+                            );
+                            const isLastLpoApprover = phase === "lpo"
+                              && order > 0
+                              && lpoSteps.some((step) => step.id === `approver-${order}`)
+                              && !laterLpoStepExists;
+                            navigate(`/${id}`, {
+                              replace: true,
+                              state: {
+                                awaitLpo: isLastLpoApprover,
+                                workflowActionCompleted: !isLastLpoApprover,
+                              },
+                            });
+                            return;
+                          }
+                          setWorkflowActionCompleted(true);
+                        }}
+                      />
                     </Suspense>
                   </div>
                 )}

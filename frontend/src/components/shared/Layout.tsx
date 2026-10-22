@@ -1,5 +1,19 @@
 /**
- * Layout.tsx (updated)
+ * Layout.tsx
+ *
+ * Changes this pass (command-bar scoping + dark sidebar)
+ * ────────────────────────────────────────────────────────
+ * 1. The blue WorkspaceCommandBar no longer spans the full window: the
+ *    sidebar is a full-height column, so the command bar lives in the
+ *    content column above the page. When the sidebar is collapsed the
+ *    bar naturally spans the full width again.
+ * 2. The logo moved from the command bar to the top of the sidebar. It is
+ *    the FSE DMS PNG with a transparent background (white artwork on the
+ *    dark charcoal sidebar) — from "@/assets/images/fse-dms-logo-white.png".
+ * 3. The sidebar is recolored dark charcoal (#1F2933) with white text and
+ *    the brand-blue (#287EAD) active item; nav hover/active states, group
+ *    dividers, the Administration label and the profile card were restyled
+ *    for the dark background.
  *
  * Changes from previous version
  * ──────────────────────────────
@@ -47,7 +61,7 @@ import { QUERY_ONE_MINUTE_STALE } from "@/lib/reactQueryDefaults";
 import { preloadCommonRoutes, preloadRouteForPath } from "@/lib/routePreload";
 import { FolderTree } from "@/components/folders/FolderTree";
 import clsx from "clsx";
-import { FlaxemLogo } from "./FlaxemLogo";
+import fseDmsLogo from "@/assets/images/fse-dms-logo-white.png";
 
 const ChatLauncher = lazy(() =>
   import("@/components/chat/ChatLauncher").then((module) => ({ default: module.ChatLauncher })),
@@ -92,9 +106,9 @@ const sidebarItemBase =
 const sidebarItemActive =
   "bg-[#287EAD] text-white shadow-sm";
 const sidebarItemInactive =
-  "text-[#3D454D] hover:bg-white/75 hover:text-[#1F2933] hover:shadow-sm";
+  "text-[#C9D1D8] hover:bg-white/10 hover:text-white";
 const sidebarIconActive = "text-white";
-const sidebarIconInactive = "text-[#6E767D] group-hover:text-[#287EAD]";
+const sidebarIconInactive = "text-[#8A949C] group-hover:text-white";
 
 // Content-heavy routes that open with the sidebar collapsed (full-width canvas)
 // by default. The user can still toggle the sidebar back open on these pages.
@@ -130,13 +144,13 @@ const mainNav: NavEntry[] = [
     label: "Documents",
     prefix: "/documents",
     children: [
-      { to: "/documents",                 icon: FileText, label: "All documents" },
-      { to: "/documents?status=archived", icon: Archive,  label: "Archived" },
-      { to: "/documents/upload",          icon: Upload,   label: "Upload" },
-      { to: "/documents/scan",            icon: ScanLine, label: "Scan" },
-      { to: "/documents/review",          icon: ClipboardCheck, label: "Pending review" },
-      { to: "/documents/trash",           icon: Trash2,   label: "Trash" },
-      { to: "/search",                    icon: Search,   label: "Search" },
+      { to: "/documents", icon: FileText, label: "All documents" },
+      { to: "/documents?status=archived", icon: Archive, label: "Archived" },
+      { to: "/documents/upload", icon: Upload, label: "Upload" },
+      { to: "/documents/scan", icon: ScanLine, label: "Scan" },
+      { to: "/documents/review", icon: ClipboardCheck, label: "Pending review" },
+      { to: "/documents/trash", icon: Trash2, label: "Trash" },
+      { to: "/search", icon: Search, label: "Search" },
     ],
   } as NavGroup,
   { to: "/forms", icon: ClipboardList, label: "Forms" } as NavLeaf,
@@ -166,15 +180,15 @@ const mainNav: NavEntry[] = [
 ];
 
 const adminNav: NavLeaf[] = [
-  { to: "/admin/document-types", icon: FileText,  label: "Document types", allowedRoles: ["admin"] },
-  { to: "/admin/templates",      icon: LayoutTemplate, label: "Templates", allowedRoles: ["admin"] },
-  { to: "/admin/users",       icon: Users,     label: "Users",       allowedRoles: ["admin"] },
+  { to: "/admin/document-types", icon: FileText, label: "Document types", allowedRoles: ["admin"] },
+  { to: "/admin/templates", icon: LayoutTemplate, label: "Templates", allowedRoles: ["admin"] },
+  { to: "/admin/users", icon: Users, label: "Users", allowedRoles: ["admin"] },
   { to: "/admin/departments", icon: Building2, label: "Departments", allowedRoles: ["admin"] },
-  { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"] },
-  { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"] },
-  { to: "/admin/migration",   icon: Database,  label: "IDM Migration", allowedRoles: ["admin"] },
-  { to: "/admin/mailboxes",   icon: Inbox,     label: "Email Ingestion", allowedRoles: ["admin"] },
-  { to: "/admin/sunsystems",  icon: Plug,      label: "SunSystems", allowedRoles: ["admin"] },
+  { to: "/admin/groups", icon: Shield, label: "Groups", allowedRoles: ["admin"] },
+  { to: "/admin/settings", icon: Settings, label: "Settings", allowedRoles: ["admin"] },
+  { to: "/admin/migration", icon: Database, label: "IDM Migration", allowedRoles: ["admin"] },
+  { to: "/admin/mailboxes", icon: Inbox, label: "Email Ingestion", allowedRoles: ["admin"] },
+  { to: "/admin/sunsystems", icon: Plug, label: "SunSystems", allowedRoles: ["admin"] },
   { to: "/workflow/builder", icon: Settings, label: "Workflow Builder", allowedRoles: ["admin"] },
 ];
 
@@ -218,17 +232,17 @@ function SidebarGroup({
         <group.icon className={clsx("h-4 w-4 flex-shrink-0", isGroupActive ? sidebarIconActive : sidebarIconInactive)} />
         <span className="flex-1 text-left">{group.label}</span>
         {open
-          ? <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-[#6E767D]" />
-          : <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-[#6E767D]" />}
+          ? <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-[#8A949C]" />
+          : <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-[#8A949C]" />}
       </button>
 
       {open && (
-        <div className="ml-5 border-l border-[#CDD3D8] py-1">
+        <div className="ml-5 border-l border-[#3D454D] py-1">
           {visibleChildren.map(({ to, icon: Icon, label, exact }) => {
             const badgeValue =
               to === "/workflow" ? taskCount
-              : to === "/documents/review" ? reviewCount
-              : undefined;
+                : to === "/documents/review" ? reviewCount
+                  : undefined;
             const target = navTarget(to);
             const isChildActive =
               location.pathname === target.pathname &&
@@ -246,11 +260,11 @@ function SidebarGroup({
                     "group flex items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors",
                     isChildActive
                       ? "bg-[#287EAD] text-white shadow-sm"
-                      : "text-[#4B5560] hover:bg-white/75 hover:text-[#1F2933] hover:shadow-sm"
+                      : "text-[#B9C1C8] hover:bg-white/10 hover:text-white"
                   )
                 }
               >
-                <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? sidebarIconActive : "text-[#7C8790] group-hover:text-[#287EAD]")} />
+                <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? sidebarIconActive : "text-[#8A949C] group-hover:text-white")} />
                 <span className="flex-1">{label}</span>
                 {badgeValue ? (
                   <span
@@ -345,7 +359,7 @@ function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
                 logout();
                 // 3. End Keycloak session — LAST (triggers browser redirect)
                 //    id_token_hint triggers front-channel logout to all clients.
-                await oidcLogout(idToken).catch(() => {});
+                await oidcLogout(idToken).catch(() => { });
               }}
               className="flex w-full items-center gap-2 px-4 py-2 text-sm text-red-700 transition-colors hover:bg-red-50"
             >
@@ -620,16 +634,16 @@ function SidebarProfile() {
   const initials = `${user?.first_name?.[0] ?? ""}${user?.last_name?.[0] ?? ""}` || "U";
 
   return (
-    <div className="border-t border-[#C8CDD2] bg-[#F7F8F9] p-3">
-      <div className="flex items-center gap-3 border border-[#D7DCE0] bg-white px-2 py-2">
+    <div className="border-t border-[#3D454D] bg-[#26303A] p-3">
+      <div className="flex items-center gap-3 border border-[#3D454D] bg-white/5 px-2 py-2">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center bg-[#287EAD] text-xs font-bold text-white">
           {initials}
         </div>
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-[#1F2933]">
+          <p className="truncate text-sm font-semibold text-white">
             {user?.first_name} {user?.last_name}
           </p>
-          <p className="truncate text-[11px] capitalize text-[#5E6870]">
+          <p className="truncate text-[11px] capitalize text-[#A7B0B8]">
             {user?.job_description || "Staff"}
           </p>
         </div>
@@ -863,191 +877,184 @@ export default function Layout() {
   }, [idleReady]);
 
   return (
-    <div
-      className="flex h-screen flex-col bg-background text-foreground"
-      style={{ "--app-sidebar-width": sidebarCollapsed ? "0px" : "270px" } as React.CSSProperties}
-    >
+    <div className="flex h-screen bg-background text-foreground">
 
-      {/* ── Single continuous blue command bar ─────────────────────────────
-          • Logo area on the left (same width as the sidebar) keeps content
-            visually aligned with the page below.
-          • Sidebar toggle sits between logo and the page-content slot.
+      {/* ── Sidebar — full-height dark charcoal column ──────────────────────
+          • The FSE DMS logo sits at the top of the sidebar.
+          • Nav, folder tree, admin links and the profile card live here.
+          • Collapsing slides the whole column shut; the command bar then
+            spans the full window width.
+      ──────────────────────────────────────────────────────────────────── */}
+      <aside
+        className={clsx(
+          "flex flex-shrink-0 flex-col overflow-hidden bg-[#1F2933] text-white transition-[width] duration-200",
+          sidebarCollapsed ? "w-0" : "w-[270px] border-r border-[#10191F]",
+        )}
+      >
+        {/* Logo */}
+        {!sidebarCollapsed && (
+          <div className="flex h-24 shrink-0 items-center justify-center border-b border-[#3D454D] px-4">
+            <img
+              src={fseDmsLogo}
+              alt="FSE Document Management System"
+              className="max-h-20 w-auto max-w-full object-contain"
+            />
+          </div>
+        )}
+
+        {/* Nav — scrollable */}
+        <nav className="scrollbar-minimal flex-1 overflow-y-auto">
+          {/* ── Primary nav ────────────────────────────────────────── */}
+          <div className="space-y-0.5 px-2 py-3">
+            {mainNav.map((entry) => {
+              if (isGroup(entry)) {
+                if (entry.allowedRoles && !hasAdminAccess) return null;
+                return (
+                  <SidebarGroup
+                    key={entry.prefix}
+                    group={entry}
+                    userAccess={hasAdminAccess ? "admin" : undefined}
+                    taskCount={pendingTasksCount}
+                    reviewCount={pendingReviewsCount}
+                    onWarmRoute={warmRoute}
+                  />
+                );
+              }
+              const { to, icon: Icon, label, exact, allowedRoles } = entry;
+              if (allowedRoles && !hasAdminAccess) return null;
+              const badgeValue = to === "/notifications" ? unread
+                : to === "/workflow" ? pendingTasksCount
+                  : to === "/request-signature" ? (signatureCount || undefined)
+                    : undefined;
+              return (
+                <NavLink
+                  key={to}
+                  to={to}
+                  end={exact}
+                  onMouseEnter={() => warmRoute(to)}
+                  onFocus={() => warmRoute(to)}
+                  className={({ isActive }) =>
+                    clsx(
+                      sidebarItemBase,
+                      isActive
+                        ? sidebarItemActive
+                        : sidebarItemInactive
+                    )
+                  }
+                >
+                  {({ isActive }) => (
+                    <>
+                      <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
+                      <span className="flex-1">{label}</span>
+                      {badgeValue ? (
+                        <span
+                          className={clsx(
+                            "inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
+                            to === "/workflow" || to === "/notifications" || to === "/request-signature" ? "bg-red-700" : "bg-[#287EAD]"
+                          )}
+                        >
+                          {badgeValue}
+                        </span>
+                      ) : null}
+                    </>
+                  )}
+                </NavLink>
+              );
+            })}
+          </div>
+
+          {/* ── Folder tree ────────────────────────────────────────── */}
+          <div className="pb-2">
+            {idleReady && (
+              <FolderTree
+                activeFolderId={
+                  location.pathname.startsWith("/documents/folders/")
+                    ? location.pathname.split("/").pop() ?? null
+                    : null
+                }
+              />
+            )}
+          </div>
+
+          {/* ── Administration ─────────────────────────────────────── */}
+          {visibleAdmin.length > 0 && (
+            <div className="space-y-0.5 px-2 py-3">
+              <div className="px-3 pb-1 pt-0">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#8A949C]">
+                  Administration
+                </p>
+              </div>
+              {visibleAdmin.map(({ to, icon: Icon, label }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  onMouseEnter={() => warmRoute(to)}
+                  onFocus={() => warmRoute(to)}
+                  className={({ isActive }) =>
+                    clsx(
+                      sidebarItemBase,
+                      isActive
+                        ? sidebarItemActive
+                        : sidebarItemInactive
+                    )
+                  }
+                >
+                  {({ isActive }) => (
+                    <>
+                      <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
+                      <span>{label}</span>
+                    </>
+                  )}
+                </NavLink>
+              ))}
+            </div>
+          )}
+        </nav>
+
+        <SidebarProfile />
+      </aside>
+
+      {/* ── Content column — blue command bar over the page area only ──────
+          • Sidebar toggle sits at the bar's left edge.
           • WorkspaceCommandBar portals its content into #wcb-slot.
           • Global actions (chat / bell / profile) are on the far right.
-      ───────────────────────────────────────────────────────────────── */}
-      <div className="flex h-[69px] shrink-0 items-center bg-[#287EAD] text-white">
+          • When the sidebar is collapsed the bar spans the full width.
+      ──────────────────────────────────────────────────────────────────── */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex h-[69px] shrink-0 items-center bg-[#287EAD] text-white">
+          {/* Sidebar toggle */}
+          <button
+            type="button"
+            onClick={toggleSidebar}
+            className="flex h-full w-11 shrink-0 items-center justify-center text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!sidebarCollapsed}
+          >
+            {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+          </button>
+          <div className="h-6 w-px bg-white/25" />
 
-        {/* Logo — animates with the sidebar */}
-        <div
-          className="flex h-full shrink-0 items-center overflow-hidden border-r border-[#206D99] transition-[width] duration-200"
-          style={{ width: `var(--app-sidebar-width)` }}
-        >
-          {!sidebarCollapsed && (
-            <div className="flex h-full w-full items-center px-4">
-              <FlaxemLogo variant="light" />
-            </div>
-          )}
+          {/* Portal mount — WorkspaceCommandBar from each page renders here */}
+          <div id="wcb-slot" className="flex min-w-0 flex-1 items-center" />
+
+          {/* Global actions */}
+          <div className="flex shrink-0 items-center gap-1 border-l border-white/20 pl-4 pr-3">
+            {idleReady ? (
+              <Suspense fallback={null}>
+                <ChatLauncher variant="blue" />
+              </Suspense>
+            ) : null}
+            <NotificationsTray
+              notifications={notifications as any}
+              tasks={myTasks as unknown[]}
+              attentionCount={trayAttentionCount}
+              variant="blue"
+            />
+            <div className="mx-0.5 h-5 w-px bg-white/20" />
+            <ProfileMenu variant="blue" />
+          </div>
         </div>
-
-        {/* Sidebar toggle */}
-        <button
-          type="button"
-          onClick={toggleSidebar}
-          className="flex h-full w-11 shrink-0 items-center justify-center text-white/70 transition-colors hover:bg-white/10 hover:text-white"
-          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-expanded={!sidebarCollapsed}
-        >
-          {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-        </button>
-        <div className="h-6 w-px bg-white/25" />
-
-        {/* Portal mount — WorkspaceCommandBar from each page renders here */}
-        <div id="wcb-slot" className="flex min-w-0 flex-1 items-center" />
-
-        {/* Global actions */}
-        <div className="flex shrink-0 items-center gap-1 border-l border-white/20 pl-4 pr-3">
-          {idleReady ? (
-            <Suspense fallback={null}>
-              <ChatLauncher variant="blue" />
-            </Suspense>
-          ) : null}
-          <NotificationsTray
-            notifications={notifications as any}
-            tasks={myTasks as unknown[]}
-            attentionCount={trayAttentionCount}
-            variant="blue"
-          />
-          <div className="mx-0.5 h-5 w-px bg-white/20" />
-          <ProfileMenu variant="blue" />
-        </div>
-      </div>
-
-
-      {/* ══════════════════════════════════════════════════════════════════
-          BODY ROW — sidebar on the left, content on the right, both
-          filling the remaining height below the header.
-      ══════════════════════════════════════════════════════════════════ */}
-      <div className="flex min-h-0 flex-1">
-
-        {/* ── Sidebar ── */}
-        <aside
-          className={clsx(
-            "flex flex-shrink-0 flex-col overflow-hidden bg-[#F2F3F4] text-[#1F2933] transition-[width] duration-200",
-            sidebarCollapsed ? "w-0" : "w-[270px] border-r border-[#C8CDD2]",
-          )}
-        >
-          {/* Nav — scrollable */}
-          <nav className="scrollbar-minimal flex-1 overflow-y-auto">
-            {/* ── Primary nav ────────────────────────────────────────── */}
-            <div className="space-y-0.5 px-2 py-3">
-              {mainNav.map((entry) => {
-                if (isGroup(entry)) {
-                  if (entry.allowedRoles && !hasAdminAccess) return null;
-                  return (
-                    <SidebarGroup
-                      key={entry.prefix}
-                      group={entry}
-                      userAccess={hasAdminAccess ? "admin" : undefined}
-                      taskCount={pendingTasksCount}
-                      reviewCount={pendingReviewsCount}
-                      onWarmRoute={warmRoute}
-                    />
-                  );
-                }
-                const { to, icon: Icon, label, exact, allowedRoles } = entry;
-                if (allowedRoles && !hasAdminAccess) return null;
-                const badgeValue = to === "/notifications" ? unread
-                  : to === "/workflow" ? pendingTasksCount
-                  : to === "/request-signature" ? (signatureCount || undefined)
-                  : undefined;
-                return (
-                  <NavLink
-                    key={to}
-                    to={to}
-                    end={exact}
-                    onMouseEnter={() => warmRoute(to)}
-                    onFocus={() => warmRoute(to)}
-                    className={({ isActive }) =>
-                      clsx(
-                        sidebarItemBase,
-                        isActive
-                          ? sidebarItemActive
-                          : sidebarItemInactive
-                      )
-                    }
-                  >
-                    {({ isActive }) => (
-                      <>
-                        <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
-                        <span className="flex-1">{label}</span>
-                            {badgeValue ? (
-                              <span
-                                className={clsx(
-                                  "inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
-                                  to === "/workflow" || to === "/notifications" || to === "/request-signature" ? "bg-red-700" : "bg-[#287EAD]"
-                                )}
-                              >
-                                {badgeValue}
-                              </span>
-                            ) : null}
-                      </>
-                    )}
-                  </NavLink>
-                );
-              })}
-            </div>
-
-            {/* ── Folder tree ────────────────────────────────────────── */}
-            <div className="pb-2">
-              {idleReady && (
-                <FolderTree
-                  activeFolderId={
-                    location.pathname.startsWith("/documents/folders/")
-                      ? location.pathname.split("/").pop() ?? null
-                      : null
-                  }
-                />
-              )}
-            </div>
-
-            {/* ── Administration ─────────────────────────────────────── */}
-            {visibleAdmin.length > 0 && (
-              <div className="space-y-0.5 px-2 py-3">
-                <div className="px-3 pb-1 pt-0">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#6E767D]">
-                    Administration
-                  </p>
-                </div>
-                {visibleAdmin.map(({ to, icon: Icon, label }) => (
-                  <NavLink
-                    key={to}
-                    to={to}
-                    onMouseEnter={() => warmRoute(to)}
-                    onFocus={() => warmRoute(to)}
-                    className={({ isActive }) =>
-                      clsx(
-                        sidebarItemBase,
-                        isActive
-                          ? sidebarItemActive
-                          : sidebarItemInactive
-                      )
-                    }
-                  >
-                    {({ isActive }) => (
-                      <>
-                        <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
-                        <span>{label}</span>
-                      </>
-                    )}
-                  </NavLink>
-                ))}
-              </div>
-            )}
-          </nav>
-
-          <SidebarProfile />
-        </aside>
 
         {/* ── Page content ── */}
         <main
@@ -1061,7 +1068,6 @@ export default function Layout() {
             <Outlet />
           </Suspense>
         </main>
-
       </div>
     </div>
   );

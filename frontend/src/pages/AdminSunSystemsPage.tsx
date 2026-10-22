@@ -264,7 +264,7 @@ function PostingRow({
               <button
                 onClick={() => onViewXml(
                   `${p.document_reference ?? p.document_id} — Stage ${p.stage} Response`,
-                  p.response_xml || p.request_xml,
+                  p.response_xml || p.request_xml || "",
                 )}
                 title="View SunSystems response XML"
                 className="inline-flex items-center gap-1 rounded border border-[#C8CDD2] px-2 py-1 text-[11px] font-semibold text-[#5E6870] hover:border-[#287EAD] hover:text-[#287EAD] transition-colors">
@@ -370,15 +370,16 @@ const PAYRUN_STATUS_FILTERS = [
   { value: "paid", label: "Paid" },
 ];
 
+type ActivitySubTab = "postings" | "payruns";
+
 function ActivityTab() {
+  const [subTab, setSubTab]         = useState<ActivitySubTab>("postings");
   const [postingStatus, setPostingStatus] = useState("failed");
   const [payRunStatus,  setPayRunStatus]  = useState("failed");
   const [retrying, setRetrying] = useState<string | null>(null);
   const [xmlModal, setXmlModal]  = useState<{ title: string; xml: string } | null>(null);
 
-  function openXml(title: string, xml: string) {
-    setXmlModal({ title, xml });
-  }
+  function openXml(title: string, xml: string) { setXmlModal({ title, xml }); }
 
   const postingsQ = useQuery({
     queryKey: ["sunsystems-postings-list", postingStatus],
@@ -396,7 +397,7 @@ function ActivityTab() {
   const payruns:  PaymentRunRecord[]     = payrunsQ.data?.payment_runs ?? [];
 
   const failedPostings = postings.filter((p) => p.status === "failed").length;
-  const failedPayruns  = payruns.filter((r)  => r.status  === "failed" || r.status === "processing").length;
+  const failedPayruns  = payruns.filter((r) => r.status === "failed" || r.status === "processing").length;
 
   async function handleRetry(documentId: string, stage: number) {
     setRetrying(`${documentId}-${stage}`);
@@ -412,113 +413,126 @@ function ActivityTab() {
   }
 
   const thCls = "px-4 py-2.5 text-left text-[10px] font-bold uppercase tracking-wider text-[#5E6870] bg-[#F3F5F6] border-b border-[#C8CDD2]";
+  const isFetching = postingsQ.isFetching || payrunsQ.isFetching;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* XML viewer modal */}
       {xmlModal && (
-        <XmlViewerModal
-          title={xmlModal.title}
-          xml={xmlModal.xml}
-          onClose={() => setXmlModal(null)}
-        />
+        <XmlViewerModal title={xmlModal.title} xml={xmlModal.xml} onClose={() => setXmlModal(null)} />
       )}
 
-      {/* Summary pills */}
-      <div className="flex gap-3">
+      {/* Summary + refresh */}
+      <div className="flex flex-wrap items-center gap-3">
         {[
-          { label: "Failed postings",      count: failedPostings, color: failedPostings > 0 ? "bg-red-600" : "bg-emerald-600" },
-          { label: "Failed/processing runs", count: failedPayruns, color: failedPayruns > 0 ? "bg-red-600" : "bg-emerald-600" },
+          { label: "Failed postings",       count: failedPostings, color: failedPostings > 0 ? "bg-red-600" : "bg-emerald-600" },
+          { label: "Failed / processing runs", count: failedPayruns,  color: failedPayruns  > 0 ? "bg-red-600" : "bg-emerald-600" },
         ].map(({ label, count, color }) => (
-          <div key={label} className="flex items-center gap-2 rounded border border-[#C8CDD2] bg-white px-4 py-2 shadow-sm">
+          <div key={label} className="flex items-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2">
             <span className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold text-white ${color}`}>{count}</span>
-            <span className="text-sm font-medium text-[#1F2933]">{label}</span>
+            <span className="text-xs font-medium text-[#1F2933]">{label}</span>
           </div>
         ))}
-        <button onClick={() => { postingsQ.refetch(); payrunsQ.refetch(); }}
-          className="ml-auto flex items-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-3 py-2 text-xs font-semibold text-[#5E6870] hover:border-[#287EAD] hover:text-[#287EAD]">
-          <RefreshCw className={`h-3.5 w-3.5 ${postingsQ.isFetching || payrunsQ.isFetching ? "animate-spin" : ""}`} />
+        <button
+          onClick={() => { postingsQ.refetch(); payrunsQ.refetch(); }}
+          className="ml-auto flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-3 py-2 text-xs font-semibold text-[#5E6870] hover:border-[#287EAD] hover:text-[#287EAD] transition-colors"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
           Refresh
         </button>
       </div>
 
-      {/* Journal postings panel */}
-      <div className="border border-[#C8CDD2] bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-          <div>
-            <h2 className="text-sm font-bold text-[#1F2933]">Journal Postings</h2>
-            <p className="mt-0.5 text-xs text-[#5E6870]">SunSystems document journal postings across all workflows.</p>
-          </div>
-          <div className="flex gap-1">
-            {POSTING_STATUS_FILTERS.map(({ value, label }) => (
-              <button key={value} onClick={() => setPostingStatus(value)}
-                className={`rounded px-2.5 py-1 text-xs font-semibold transition-colors ${postingStatus === value ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:bg-[#EEF6FB] hover:text-[#287EAD]"}`}>
+      {/* Combined panel with internal sub-tab bar */}
+      <div className="border border-[#C8CDD2] bg-white">
+        {/* Sub-tab bar + status filters in one row */}
+        <div className="flex items-center justify-between gap-4 border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-0">
+          {/* Sub-tabs (left) */}
+          <div className="flex">
+            {([
+              { id: "postings" as ActivitySubTab, label: "Journal Postings" },
+              { id: "payruns"  as ActivitySubTab, label: "Payment Runs" },
+            ]).map(({ id, label }) => (
+              <button
+                key={id}
+                onClick={() => setSubTab(id)}
+                className={`flex items-center gap-1.5 px-4 py-3 text-xs font-bold transition-colors border-b-2 -mb-px ${
+                  subTab === id
+                    ? "border-[#287EAD] text-[#287EAD] bg-white"
+                    : "border-transparent text-[#5E6870] hover:text-[#1F2933]"
+                }`}
+              >
                 {label}
+                {id === "postings" && failedPostings > 0 && (
+                  <span className="rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-bold text-white">{failedPostings}</span>
+                )}
+                {id === "payruns" && failedPayruns > 0 && (
+                  <span className="rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-bold text-white">{failedPayruns}</span>
+                )}
               </button>
             ))}
           </div>
-        </div>
-        {postingsQ.isLoading ? (
-          <div className="flex items-center gap-2 p-6 text-sm text-[#5E6870]"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
-        ) : postings.length === 0 ? (
-          <div className="flex items-center gap-2 p-6 text-sm text-[#5E6870]"><CheckCircle2 className="h-4 w-4 text-emerald-500" /> No {postingStatus || ""} postings found.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  {["Document", "Stage", "Status", "Component", "Journal #", "Updated", ""].map((h) => (
-                    <th key={h} className={thCls}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {postings.map((p) => (
-                  <PostingRow key={p.id} p={p} onRetry={handleRetry} onViewXml={openXml} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
 
-      {/* Payment runs panel */}
-      <div className="border border-[#C8CDD2] bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-          <div>
-            <h2 className="text-sm font-bold text-[#1F2933]">Payment Runs</h2>
-            <p className="mt-0.5 text-xs text-[#5E6870]">Supplier payment batches — approval and SunSystems processing status.</p>
-          </div>
-          <div className="flex gap-1">
-            {PAYRUN_STATUS_FILTERS.map(({ value, label }) => (
-              <button key={value} onClick={() => setPayRunStatus(value)}
-                className={`rounded px-2.5 py-1 text-xs font-semibold transition-colors ${payRunStatus === value ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:bg-[#EEF6FB] hover:text-[#287EAD]"}`}>
-                {label}
-              </button>
-            ))}
+          {/* Status filter pills (right — context-aware) */}
+          <div className="flex gap-1 py-2">
+            {subTab === "postings"
+              ? POSTING_STATUS_FILTERS.map(({ value, label }) => (
+                  <button key={value} onClick={() => setPostingStatus(value)}
+                    className={`px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                      postingStatus === value ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+                    }`}>
+                    {label}
+                  </button>
+                ))
+              : PAYRUN_STATUS_FILTERS.map(({ value, label }) => (
+                  <button key={value} onClick={() => setPayRunStatus(value)}
+                    className={`px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                      payRunStatus === value ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+                    }`}>
+                    {label}
+                  </button>
+                ))
+            }
           </div>
         </div>
-        {payrunsQ.isLoading ? (
-          <div className="flex items-center gap-2 p-6 text-sm text-[#5E6870]"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
-        ) : payruns.length === 0 ? (
-          <div className="flex items-center gap-2 p-6 text-sm text-[#5E6870]"><CheckCircle2 className="h-4 w-4 text-emerald-500" /> No {payRunStatus || ""} payment runs found.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  {["Reference", "Status", "Lines", "Total", "Submitted by", "Updated", ""].map((h) => (
-                    <th key={h} className={thCls}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {payruns.map((r) => (
-                  <PayRunRow key={r.id} r={r} onViewXml={openXml} />
-                ))}
-              </tbody>
-            </table>
-          </div>
+
+        {/* Journal Postings content */}
+        {subTab === "postings" && (
+          postingsQ.isLoading ? (
+            <div className="flex items-center gap-2 p-6 text-sm text-[#5E6870]"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
+          ) : postings.length === 0 ? (
+            <div className="flex items-center gap-2 p-6 text-sm text-[#5E6870]"><CheckCircle2 className="h-4 w-4 text-emerald-500" /> No {postingStatus || ""} postings found.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr>{["Document", "Stage", "Status", "Component", "Journal #", "Updated", ""].map((h) => <th key={h} className={thCls}>{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {postings.map((p) => <PostingRow key={p.id} p={p} onRetry={handleRetry} onViewXml={openXml} />)}
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
+
+        {/* Payment Runs content */}
+        {subTab === "payruns" && (
+          payrunsQ.isLoading ? (
+            <div className="flex items-center gap-2 p-6 text-sm text-[#5E6870]"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
+          ) : payruns.length === 0 ? (
+            <div className="flex items-center gap-2 p-6 text-sm text-[#5E6870]"><CheckCircle2 className="h-4 w-4 text-emerald-500" /> No {payRunStatus || ""} payment runs found.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr>{["Reference", "Status", "Lines", "Total", "Submitted by", "Updated", ""].map((h) => <th key={h} className={thCls}>{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {payruns.map((r) => <PayRunRow key={r.id} r={r} onViewXml={openXml} />)}
+                </tbody>
+              </table>
+            </div>
+          )
         )}
       </div>
     </div>
@@ -531,7 +545,8 @@ export default function AdminSunSystemsPage() {
   const [tab, setTab] = useState<Tab>("Connection");
 
   return (
-    <div className="mx-auto max-w-5xl space-y-5 p-8">
+    <div className="admin-shell">
+      <div className="mx-auto max-w-5xl space-y-5">
       {/* Header */}
       <div className="flex items-center gap-3">
         <div className="flex h-10 w-10 items-center justify-center rounded bg-[#EEF6FB] text-[#287EAD]">
@@ -560,6 +575,7 @@ export default function AdminSunSystemsPage() {
 
       {tab === "Connection"       && <ConnectionTab />}
       {tab === "Activity Monitor" && <ActivityTab />}
+      </div>
     </div>
   );
 }

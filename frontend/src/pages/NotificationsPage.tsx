@@ -157,7 +157,12 @@ export default function NotificationsPage() {
             notifications={visibleNotifications}
             isLoading={isLoading}
             onMarkRead={(id) => markReadMutation.mutate(id)}
-            onOpenLink={(link) => navigate(link)}
+            onOpenLink={(link) => {
+              // Legacy notifications stored links as /documents/{uuid};
+              // the SPA routes documents at /{uuid} — normalise old rows.
+              const normalized = link.replace(/^\/documents\/([^/]+)$/, "/$1");
+              navigate(normalized);
+            }}
             onOpenWorkflow={(detail) => {
               if (!detail.documentId) return;
               navigate(`/notifications/workflow/${detail.documentId}`, {

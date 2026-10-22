@@ -280,15 +280,19 @@ export default function FormFillModal({
                 </ul>
               </div>
             )}
-            {Boolean((template.sunsystems?.budget as any)?.enabled) && (
-              <BudgetBanner
-                values={values}
-                templateId={template.id}
-                mapping={template.sunsystems?.budget ?? null}
-                sections={template.sections ?? []}
-                enabled
-              />
-            )}
+            {Boolean((template.sunsystems?.budget as any)?.enabled) && (() => {
+              const budgetMeta = (template.sunsystems?.budget ?? {}) as Record<string, any>;
+              const amountField = budgetMeta.amount_field as string | undefined;
+              const amount = amountField ? (values[amountField] ?? 0) : 0;
+              return (
+                <BudgetBanner
+                  amount={amount as number | string}
+                  budget={budgetMeta.limit ?? budgetMeta.budget ?? null}
+                  currency={budgetMeta.currency ?? undefined}
+                  accountCode={budgetMeta.account_code ?? undefined}
+                />
+              );
+            })()}
             <TemplateForm
               sections={template.sections ?? []}
               values={values}

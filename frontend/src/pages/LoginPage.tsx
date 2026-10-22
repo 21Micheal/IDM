@@ -4,24 +4,16 @@
 import { useState, useRef, useEffect } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useNavigate, useLocation } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Loader2, RefreshCw, ArrowLeft, CheckCircle2, ShieldCheck } from "lucide-react";
+import { Loader2, RefreshCw, ArrowLeft, CheckCircle2 } from "lucide-react";
 
-import {
-  api,
-  authAPI,
-  documentsAPI,
-  notificationsAPI,
-  workflowAPI,
-} from "@/services/api";
+import { authAPI } from "@/services/api";
 
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
-import { oidcLogin, trySilentRenew } from "@/lib/oidcClient";
 import { toast } from "@/components/ui/vault-toast";
-import type { AuthUser, ServerSessionPolicy } from "@/store/authStore";
+import type { AuthUser, ServerSessionPolicy, DeploymentConfig } from "@/store/authStore";
 
 import dmsLogo from "@/assets/images/FSEDMSlogo.png";
 
@@ -132,7 +124,7 @@ function ForgotPasswordPanel({ onBack }: { onBack: () => void }) {
           <button
             type="submit"
             disabled={loading}
-            className="inline-flex h-9 min-w-[110px] items-center justify-center bg-white px-6 text-[14px] font-normal text-[#155a86] transition-colors hover:bg-white/90 disabled:opacity-70"
+            className="inline-flex h-9 min-w-[130px] items-center justify-center bg-white px-6 text-[14px] font-normal text-[#155a86] transition-colors hover:bg-white/90 disabled:opacity-70"
           >
             {loading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -146,7 +138,7 @@ function ForgotPasswordPanel({ onBack }: { onBack: () => void }) {
             onClick={onBack}
             className="text-[13px] text-white/80 hover:text-white hover:underline"
           >
-            Cancel
+            Back
           </button>
         </div>
       </form>
@@ -154,23 +146,13 @@ function ForgotPasswordPanel({ onBack }: { onBack: () => void }) {
   );
 }
 
-// ── Main LoginPage ─────────────────────────────────────────────────────────────
-//
-// Displays the appropriate login method based on AUTH_MODE backend config:
-//   keycloak  — Show only "Sign in with Keycloak" button (IdP-connected deployments)
-//   native    — Show native username/password form (standalone on-prem deployments)
-//
-// Break-glass access: /admin/admin route provides emergency native
-// auth for platform admins when Keycloak is unavailable. (Note: URL intentionally obfuscated)
+// ── Main LoginPage ────────────────────────────────────────────────────────────
 
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const qc = useQueryClient();
-  const { setTokens, setUser, isAuthenticated } = useAuthStore();
+  const { setTokens, setUser } = useAuthStore();
 
-  const [authMode, setAuthMode] = useState<"keycloak" | "native" | null>(null);
-  const [checking, setChecking] = useState(true);
   const [step, setStep] = useState<"credentials" | "otp" | "forgot">(
     "credentials"
   );
@@ -184,54 +166,23 @@ export default function LoginPage() {
   const credForm = useForm<CredForm>({ resolver: zodResolver(credSchema) });
   const otpForm = useForm<OTPForm>({ resolver: zodResolver(otpSchema) });
 
-  // Fetch auth mode config on mount; if Keycloak session exists and user not authenticated locally, auto-sign-in
-  useEffect(() => {
-    const fetchConfig = async () => {
-      try {
-        const response = await fetch("/api/v1/config/");
-        if (response.ok) {
-          const data = await response.json();
-          const mode = data.auth_mode || "native";
-          setAuthMode(mode);
-          
-          // Only try silent renew if not already authenticated locally and in Keycloak mode
-          if (mode === "keycloak" && !isAuthenticated) {
-            const silent = await trySilentRenew();
-            if (silent?.id_token) {
-              const res = await api.post("/auth/oidc/exchange/", { id_token: silent.id_token });
-              await completeLogin(res.data);
-              return;
-            }
-          }
-        } else {
-          setAuthMode("native");
-        }
-      } catch (error) {
-        console.error("Failed to fetch config:", error);
-        setAuthMode("native");
-      } finally {
-        setChecking(false);
-      }
-    };
-    fetchConfig();
-  }, []);
-
-  // If already authenticated, redirect to home
-  useEffect(() => {
-    if (isAuthenticated && !checking) {
-      navigate("/", { replace: true });
-    }
-  }, [isAuthenticated, checking, navigate]);
-
   const completeLogin = async (tokenData: {
     access: string;
     refresh: string;
     must_change_password?: boolean;
     user?: AuthUser;
     session_policy?: ServerSessionPolicy;
+    deployment?: DeploymentConfig;
   }) => {
+    // Apply the configured session policy before starting the session clock so
+    // the absolute deadline uses the admin-defined lifetime, not the fallback.
     applyServerSessionPolicy(tokenData.session_policy);
     setTokens(tokenData.access, tokenData.refresh);
+
+    if (tokenData.deployment) {
+      const { setDeployment } = useAuthStore.getState();
+      setDeployment(tokenData.deployment);
+    }
 
     if (tokenData.user) {
       setUser(tokenData.user);
@@ -243,34 +194,6 @@ export default function LoginPage() {
         toast.warn("Signed in, but your profile could not be loaded yet.");
       }
     }
-
-    await Promise.allSettled([
-      qc.prefetchQuery({
-        queryKey: ["documents", "recent"],
-        queryFn: () =>
-          documentsAPI.list({ page_size: 5, ordering: "-created_at" }).then((r) => r.data),
-      }),
-      qc.prefetchQuery({
-        queryKey: ["documents", "pending", "count"],
-        queryFn: () =>
-          documentsAPI.list({ status: "pending_approval", page_size: 1 }).then((r) => r.data.count ?? 0),
-      }),
-      qc.prefetchQuery({
-        queryKey: ["workflow", "my-tasks"],
-        queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
-      }),
-      qc.prefetchQuery({
-        queryKey: ["audit", "recent"],
-        queryFn: () =>
-          api
-            .get("/audit/", { params: { ordering: "-timestamp", page_size: 5 } })
-            .then((r) => r.data.results ?? r.data),
-      }),
-      qc.prefetchQuery({
-        queryKey: ["notifications"],
-        queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
-      }),
-    ]);
 
     if (tokenData.must_change_password) {
       navigate("/change-password", { replace: true });
@@ -334,27 +257,6 @@ export default function LoginPage() {
     }
   };
 
-  const handleKeycloakSignIn = async () => {
-    setLoading(true);
-    try {
-      await oidcLogin();
-    } catch {
-      toast.error("Could not reach the identity provider. Please try again.");
-      setLoading(false);
-    }
-  };
-
-  if (checking) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
-        <div className="flex items-center gap-2 text-gray-600">
-          <Loader2 className="h-5 w-5 animate-spin" />
-          <span>Loading...</span>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
       <div className="w-full max-w-[440px]">
@@ -375,39 +277,7 @@ export default function LoginPage() {
             }}
           >
           <div className="px-10 pt-8 pb-10">
-            {authMode === "keycloak" ? (
-              /* Keycloak-only mode */
-              <>
-                <h2 className="text-[15px] font-semibold text-white">Sign in</h2>
-                <p className="mt-1.5 text-[13px] text-white/70">
-                  Authenticate with your organisational account.
-                </p>
-
-                <div className="mt-7">
-                  <button
-                    id="oidc-signin-btn"
-                    type="button"
-                    onClick={handleKeycloakSignIn}
-                    disabled={loading}
-                    className="
-                      inline-flex w-full items-center justify-center gap-2.5
-                      h-10 bg-white px-6
-                      text-[14px] font-medium text-[#155a86]
-                      transition-all hover:bg-white/90 hover:shadow-md
-                      disabled:opacity-70
-                    "
-                  >
-                    {loading ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <ShieldCheck className="h-4 w-4" />
-                    )}
-                    {loading ? "Redirecting…" : "Sign in with Keycloak"}
-                  </button>
-                </div>
-              </>
-            ) : step === "credentials" ? (
-              /* Native mode - credentials form */
+            {step === "credentials" ? (
               <>
                 <h2 className="text-[15px] font-semibold text-white">
                     Sign in
@@ -468,7 +338,6 @@ export default function LoginPage() {
                   </form>
                 </>
               ) : step === "otp" ? (
-                /* Native mode - OTP verification */
                 <>
                   <h2 className="text-[15px] font-semibold text-white">
                     Verification
@@ -548,8 +417,8 @@ export default function LoginPage() {
               © {new Date().getFullYear()} Flaxem
             </div>
           </div>
+          </div>
         </div>
       </div>
-    </div>
   );
 }

@@ -1,0 +1,2 @@
+CONTAINER           REPOSITORY          TAG                 PLATFORM            IMAGE ID            SIZE                CREATED
+idm-postgres-1      postgres            16-alpine           linux/amd64         81bd698b4594        294MB               4 weeks ago

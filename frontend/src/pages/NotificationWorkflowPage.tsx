@@ -104,9 +104,9 @@ export default function NotificationWorkflowPage() {
   });
 
   const isForm = Boolean(doc?.metadata?.form?.sections || doc?.is_form);
-  const viewDocumentLink =
-    notificationContext?.viewDocumentLink ||
-    (isForm ? `/forms/${documentId}` : `/documents/${documentId}`);
+  const viewDocumentLink = isForm
+    ? `/${documentId}`
+    : notificationContext?.viewDocumentLink || `/documents/${documentId}`;
 
   const isLoading = isSignatureNotification ? sigLoading : workflowLoading;
 
