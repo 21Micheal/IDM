@@ -73,6 +73,21 @@ const nested: W.ConditionGroup = { ...W.newGroup("and"), children: [rule("gte", 
 assert.equal(W.evalGroup(nested, fields, env({ amount: { amount: 2000, currency: "USD" }, f_dept: "IT" })), true);
 assert.equal(W.evalGroup(nested, fields, env({ amount: { amount: 2000, currency: "USD" }, f_dept: "HR" })), false);
 
+
+// ── skip_when / auto_approve_when ──
+{
+  const skipRule = grp(rule("lt", 100));
+  const aSkip: W.ApprovalBlock = { kind: "approval", id: "askip", step: { name: "SkipMe", step_type: "approval", assignee_group: "g1", assignee_type: "group_any", sla_hours: 24, allow_approve: true, skip_when: skipRule } };
+  const aKeep: W.ApprovalBlock = { kind: "approval", id: "akeep", step: { name: "KeepMe", step_type: "approval", assignee_group: "g1", assignee_type: "group_any", sla_hours: 24, allow_approve: true } };
+  const skipped = W.simulate([aSkip, aKeep], fields, { amount: { amount: 50, currency: "USD" } });
+  assert.deepEqual(skipped.chain.map((c) => c.step.name), ["KeepMe"]);
+  assert.ok(skipped.warnings.some((w) => /Skipped/.test(w)));
+  const auto: W.ApprovalBlock = { kind: "approval", id: "aauto", step: { name: "Auto", step_type: "approval", assignee_group: "g1", assignee_type: "group_any", sla_hours: 24, allow_approve: true, auto_approve_when: grp(rule("lt", 100)) } };
+  const autoRes = W.simulate([auto, aKeep], fields, { amount: { amount: 50, currency: "USD" } });
+  assert.deepEqual(autoRes.chain.map((c) => c.step.name), ["Auto", "KeepMe"]);
+  assert.ok(autoRes.warnings.some((w) => /Auto-approved/.test(w)));
+}
+
 // ── switch + set_value + end ──
 const sw: W.SwitchBlock = { kind: "switch", id: "sw", field_id: "f_dept", cases: [
   { id: "c1", values: ["IT"], blocks: [{ kind: "set_value", id: "sv", variable: "risk", value: "high" }] },
