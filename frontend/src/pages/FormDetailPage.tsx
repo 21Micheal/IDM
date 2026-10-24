@@ -157,6 +157,7 @@ export default function FormDetailPage() {
   const [awaitingLpo, setAwaitingLpo] = useState(
     Boolean(navigationState?.awaitLpo),
   );
+  const [awaitingImprestPostSince, setAwaitingImprestPostSince] = useState(0);
   const [isSigningOpen, setIsSigningOpen] = useState(false);
   const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
   const [searchParams] = useSearchParams();
@@ -177,24 +178,32 @@ export default function FormDetailPage() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [formEditing]);
 
-  const { data: doc, isLoading } = useQuery<any>({
+  const { data: doc, isLoading, dataUpdatedAt: formDataUpdatedAt } = useQuery<any>({
     queryKey: ["form", id],
     queryFn: () => documentsAPI.get(id!).then((r) => r.data),
     enabled: !!id,
     ...QUERY_SHORT_STALE,
-    refetchInterval: awaitingLpo ? 1_000 : 8_000,
+    refetchInterval: awaitingLpo || awaitingImprestPostSince > 0 ? 1_000 : 8_000,
   });
 
   const formData = (doc?.metadata as Record<string, any> | undefined)?.form as
     | {
       sections?: unknown[];
       values?: Record<string, unknown>;
+      imprest_request_workflow_status?: string;
       print_config?: Record<string, any>;
       lpo_document_id?: string;
       lpo_reference?: string;
       lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string }>;
     }
     | undefined;
+
+  useEffect(() => {
+    if (!awaitingImprestPostSince || formDataUpdatedAt <= awaitingImprestPostSince) return;
+    if (String(formData?.imprest_request_workflow_status || "").toLowerCase() === "posting") return;
+    setAwaitingImprestPostSince(0);
+    setWorkflowActionCompleted(true);
+  }, [awaitingImprestPostSince, formDataUpdatedAt, formData?.imprest_request_workflow_status]);
   const generatedLpos = formData?.lpo_documents?.length
     ? formData.lpo_documents
     : formData?.lpo_document_id
@@ -1209,9 +1218,17 @@ export default function FormDetailPage() {
                   && lpoApprovalSteps.some((step) => step.id === `approver-${activeOrder}`)
                   && !laterLpoStepExists;
                 const isLpoGenerationApprover = Boolean((activeTask?.step as any)?.post_lpo_after_approval);
+                const isImprestPostingApprover = phase === "request"
+                  && Boolean((activeTask?.step as any)?.post_imprest_request_after_approval);
 
                 if (!isLpoGenerationApprover && !isLastLpoApprover) {
                   setAwaitingLpo(false);
+                  if (isImprestPostingApprover) {
+                    setWorkflowActionCompleted(false);
+                    setAwaitingImprestPostSince(Date.now());
+                    void qc.invalidateQueries({ queryKey: ["form", id] });
+                    return;
+                  }
                   setWorkflowActionCompleted(true);
                   return;
                 }
@@ -1278,6 +1295,18 @@ export default function FormDetailPage() {
             <div>
               <p className="text-sm font-bold text-[#1F2933]">Approval complete</p>
               <p className="mt-1 text-xs text-[#5E6870]">Preparing the generated LPO…</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {awaitingImprestPostSince > 0 && (
+        <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
+          <div className="flex w-full max-w-sm items-center gap-3 border border-[#C8CDD2] bg-white px-6 py-5 shadow-2xl">
+            <Loader2 className="h-5 w-5 shrink-0 animate-spin text-[#287EAD]" />
+            <div>
+              <p className="text-sm font-bold text-[#1F2933]">Imprest posting in progress</p>
+              <p className="mt-1 text-xs text-[#5E6870]">The next Request approver will be notified after SunSystems confirms the posting.</p>
             </div>
           </div>
         </div>

@@ -155,6 +155,10 @@ class WorkflowStep(models.Model):
         default=False,
         help_text="After this approval, post configured purchase orders and generate their LPO documents before continuing.",
     )
+    post_imprest_request_after_approval = models.BooleanField(
+        default=False,
+        help_text="After this approval in the Request phase, post the Imprest request before continuing.",
+    )
 
     # ── Approval-step fields ──────────────────────────────────────────────────
     assignee_type = models.CharField(max_length=20, choices=ASSIGNEE_TYPES, default="group_any")
@@ -319,7 +323,7 @@ class WorkflowStep(models.Model):
 
 class WorkflowRule(models.Model):
     DEFAULT_PHASE = "request"
-    PROCUREMENT_PHASES = ("requisition", "rfq", "lpo")
+    PROCUREMENT_PHASES = ("requisition", "request", "rfq", "lpo")
 
     id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     target_type      = models.CharField(max_length=30, choices=WorkflowTemplate.TARGET_TYPES, default="document", db_index=True)

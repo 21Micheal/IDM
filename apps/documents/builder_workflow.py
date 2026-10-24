@@ -9,7 +9,9 @@ from django.utils import timezone
 from apps.documents.models import Document, DocumentStatus
 
 
-PROCUREMENT_WORKFLOW_STAGES = ("requisition", "rfq", "lpo")
+# Request is the sequential Imprest approval/posting phase in procurement forms.
+# RFQ remains in the path for non-travel requisitions that need quotations.
+PROCUREMENT_WORKFLOW_STAGES = ("requisition", "request", "rfq", "lpo")
 
 
 def is_procurement_document(document: Document) -> bool:
@@ -422,8 +424,9 @@ def next_procurement_stage(document: Document) -> str | None:
     """The stage the document is ready to start next, or ``None``.
 
     Mirrors ``can_start_procurement_workflow_stage``: the previous stage must be
-    complete and the document approved, with no workflow still running. Travel
-    requisitions always skip RFQ."""
+    complete and the document approved, with no workflow still running. An
+    Imprest Request phase is inserted when an advance was entered; Travel then
+    skips RFQ, while other requisitions retain it."""
     if not is_procurement_document(document):
         return None
     if (document.status or "").strip() != DocumentStatus.APPROVED:
@@ -436,11 +439,47 @@ def next_procurement_stage(document: Document) -> str | None:
     if phase not in PROCUREMENT_WORKFLOW_STAGES or phase not in completed:
         return None
     if phase == "requisition":
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            if has_imprest_request_lines(document):
+                return "request"
+        except Exception:
+            # Fail closed: a bad Imprest configuration must not bypass the
+            # approval and posting gate and open the LPO phase.
+            return None
+        return "lpo" if travel_requisition_skips_rfq(document) else "rfq"
+    if phase == "request":
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            if has_imprest_request_lines(document) and not imprest_request_postings_complete(document):
+                return None
+        except Exception:
+            return None
+        # RFQ remains required for non-travel requisitions; Travel skips it.
         return "lpo" if travel_requisition_skips_rfq(document) else "rfq"
     index = PROCUREMENT_WORKFLOW_STAGES.index(phase)
     if index + 1 < len(PROCUREMENT_WORKFLOW_STAGES):
         return PROCUREMENT_WORKFLOW_STAGES[index + 1]
     return None
+
+
+def imprest_request_postings_complete(document: Document) -> bool:
+    """True when every configured Imprest request journal has posted."""
+    try:
+        from apps.sunsystems.config import get_imprest_request_postings
+        from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+        requested = get_imprest_request_postings(document)
+        if not requested:
+            return False
+        stages = [int(item["stage"]) for item in requested]
+        posted = dict(
+            JournalPosting.objects.filter(document=document, stage__in=stages)
+            .values_list("stage", "status")
+        )
+        return all(posted.get(stage) == JournalPostingStatus.POSTED for stage in stages)
+    except Exception:
+        return False
 
 
 def can_start_procurement_workflow_stage(document: Document, stage: str, *, user=None) -> bool:
@@ -456,12 +495,57 @@ def can_start_procurement_workflow_stage(document: Document, stage: str, *, user
             DocumentStatus.DRAFT, DocumentStatus.RETURNED, "Returned for Review",
         }
 
+    if normalized == "request":
+        if (
+            "requisition" not in completed_procurement_stages(document)
+            or (document.status or "").strip() != DocumentStatus.APPROVED
+        ):
+            return False
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            if not has_imprest_request_lines(document):
+                return False
+        except Exception:
+            return False
+        try:
+            from apps.workflows.models import WorkflowInstance
+            return not WorkflowInstance.objects.filter(document=document, status="in_progress").exists()
+        except Exception:
+            return False
+
+    if normalized == "rfq":
+        skips_rfq = travel_requisition_skips_rfq(document)
+        if skips_rfq:
+            return False
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            request_required = has_imprest_request_lines(document)
+        except Exception:
+            return False
+        previous = "request" if request_required else "requisition"
+        if previous not in completed_procurement_stages(document):
+            return False
+        if request_required and not imprest_request_postings_complete(document):
+            return False
+        if (document.status or "").strip() != DocumentStatus.APPROVED:
+            return False
+        try:
+            from apps.workflows.models import WorkflowInstance
+            return not WorkflowInstance.objects.filter(document=document, status="in_progress").exists()
+        except Exception:
+            return False
+
     # Travel requisitions always skip RFQ, even if General/Imprest rows were entered.
     skips_rfq = travel_requisition_skips_rfq(document)
-    if normalized == "rfq" and skips_rfq:
-        return False
     if normalized == "lpo" and skips_rfq:
-        previous = "requisition"
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            request_required = has_imprest_request_lines(document)
+        except Exception:
+            return False
+        previous = "request" if request_required else "requisition"
+        if request_required and not imprest_request_postings_complete(document):
+            return False
     else:
         previous = PROCUREMENT_WORKFLOW_STAGES[PROCUREMENT_WORKFLOW_STAGES.index(normalized) - 1]
     if previous not in completed_procurement_stages(document):
@@ -651,6 +735,8 @@ def builder_process_step(document: Document) -> str:
                 return "lpo_approved" if "lpo" in completed_procurement_stages(document) else "retirement_ready"
             if phase == "lpo" and travel_retirement_config(document) and is_travel_requisition(document) and "lpo" in completed_procurement_stages(document):
                 return "lpo_approved"
+            if phase == "request" and form.get("imprest_request_workflow_status") == "posting":
+                return "request_pending"
             return "fully_approved" if phase == "lpo" and phase in completed_procurement_stages(document) else f"{phase}_approved"
         return status
 

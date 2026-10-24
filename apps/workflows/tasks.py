@@ -3,6 +3,7 @@ apps/workflows/tasks.py
 Celery tasks for the workflow engine.
 """
 from celery import shared_task
+from django.db import models
 import logging
 
 logger = logging.getLogger(__name__)
@@ -23,8 +24,11 @@ def resume_ready_lpo_gates() -> int:
         .filter(
             status="in_progress",
             tasks__status="approved",
-            tasks__step__post_lpo_after_approval=True,
             tasks__actions__action="approved",
+        )
+        .filter(
+            models.Q(tasks__step__post_lpo_after_approval=True)
+            | models.Q(tasks__step__post_imprest_request_after_approval=True)
         )
         .select_related("document")
         .distinct()
@@ -34,7 +38,9 @@ def resume_ready_lpo_gates() -> int:
         if not instance.document_id:
             continue
         try:
-            if WorkflowService._resume_lpo_workflow_if_ready(instance.document):
+            resumed_imprest = WorkflowService._resume_imprest_request_workflow_if_ready(instance.document)
+            resumed_lpo = WorkflowService._resume_lpo_workflow_if_ready(instance.document)
+            if resumed_imprest or resumed_lpo:
                 resumed += 1
         except Exception:
             logger.exception(

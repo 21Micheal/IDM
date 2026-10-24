@@ -90,7 +90,7 @@ type WorkflowTemplateRecord = {
 };
 
 /** Display order for procurement and its retirement sub-process. */
-export const PROCUREMENT_PHASE_ORDER: WorkflowPhase[] = ["requisition", "rfq", "lpo", "retirement"];
+export const PROCUREMENT_PHASE_ORDER: WorkflowPhase[] = ["requisition", "request", "rfq", "lpo", "retirement"];
 
 export const PHASE_LABELS: Record<string, string> = {
   requisition: "Requisition",
@@ -236,10 +236,8 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
     instances.find((row) => row.status === "in_progress") ??
     instances[0];
 
-  // The document's current phase describes the primary requisition/LPO lane.
-  // The workflow instance can lag while its parallel Imprest lane is advancing,
-  // so prefer the caller's current document phase and only use instance phase
-  // when the document does not provide one.
+  // Prefer the document phase, which is the current sequential procurement
+  // stage, and use the instance only while the document metadata catches up.
   const effectivePhase = workflowPhase ?? (instance?.phase as WorkflowPhase | undefined) ?? null;
 
   const template = instance?.template
@@ -338,7 +336,10 @@ function buildApproverWorkflow(
   // reconciled with the current mirror below before phase filtering is applied.
   const phaseMap = phaseOrdersFromDefinition(templateDefinition);
   const orderPhase = new Map<number, string>();
-  const parallelImprestOrders = parallelImprestOrdersFromDefinition(templateDefinition);
+  const sequentialRequestCase = workflowPhase === "request" && Boolean(phaseMap?.request);
+  const parallelImprestOrders = sequentialRequestCase
+    ? new Set<number>()
+    : parallelImprestOrdersFromDefinition(templateDefinition);
   if (phaseMap) {
     for (const [phaseName, orders] of Object.entries(phaseMap)) {
       for (const order of orders) orderPhase.set(order, phaseName);
@@ -404,8 +405,10 @@ function buildApproverWorkflow(
       .filter((item) => item.task.acted_at)
       .sort((a, b) => Date.parse(String(b.task.acted_at)) - Date.parse(String(a.task.acted_at)))[0];
     const statuses = items.map((item) => mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action));
-    const lane = parallelImprestOrders.has(stepOrder)
-      || items.some(({ task }) => task.execution_lane === "imprest_request");
+    const lane = !sequentialRequestCase && (
+      parallelImprestOrders.has(stepOrder)
+      || items.some(({ task }) => task.execution_lane === "imprest_request")
+    );
     const laneNotRequired = lane && ["not_required", "cancelled"].includes(String(imprestRequestStatus ?? ""))
       && !items.length;
     const rawStatus: WorkflowStep["status"] = laneNotRequired

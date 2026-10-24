@@ -158,6 +158,7 @@ export interface StepData {
   /** Stable graph-node identity copied to the flat runtime mirror. */
   node_id?: string;
   post_lpo_after_approval?: boolean;
+  post_imprest_request_after_approval?: boolean;
   parallel_lane?: "imprest_request" | null;
   order?: number;
   [key: string]: any;

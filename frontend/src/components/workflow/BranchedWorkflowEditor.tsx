@@ -698,6 +698,9 @@ export default function BranchedWorkflowEditor(props: BranchedWorkflowEditorProp
               {!isN && s.post_lpo_after_approval && (
                 <p className="mt-1 text-[10px] font-semibold text-primary">LPOs generate after this approval</p>
               )}
+              {!isN && s.post_imprest_request_after_approval && (
+                <p className="mt-1 text-[10px] font-semibold text-emerald-700">Imprest posts before the next Request approval</p>
+              )}
             </div>
             {bad && <AlertCircle className="w-4 h-4 text-destructive flex-shrink-0" />}
           </div>

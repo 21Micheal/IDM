@@ -188,9 +188,10 @@ def post_journal_for_document(
 
 
 def _resume_lpo_workflow_after_posting(document) -> None:
-    """Release the marked LPO approval only after all POs and PDFs are ready."""
+    """Release procurement approval gates after their required postings finish."""
     try:
         from apps.workflows.services import WorkflowService
+        WorkflowService._resume_imprest_request_workflow_if_ready(document)
         WorkflowService._resume_lpo_workflow_if_ready(document)
     except Exception:
         logger.exception("Could not resume the LPO workflow for %s after posting", document.pk)

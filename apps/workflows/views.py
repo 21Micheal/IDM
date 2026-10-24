@@ -123,6 +123,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                     assignee_user_auto=step.assignee_user_auto,
                     assignee_user_field=step.assignee_user_field,
                     post_lpo_after_approval=step.post_lpo_after_approval,
+                    post_imprest_request_after_approval=step.post_imprest_request_after_approval,
                     sla_hours=step.sla_hours, allow_resubmit=step.allow_resubmit,
                     allow_approve=step.allow_approve, allow_reject=step.allow_reject,
                     allow_return=step.allow_return,
@@ -200,7 +201,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
 
         Every option carries the ``value`` a document's ``builder_process_step``
         actually returns at runtime. Procurement steps are STAGE-AWARE: each
-        stage (Requisition -> RFQ -> LPO) exposes one generic option per outcome
+        stage (Requisition -> Request -> RFQ -> LPO) exposes one generic option per outcome
         that covers EVERY approval step in that stage, regardless of the
         step's ``status_label``. Individual workflow-builder step labels are
         folded into their stage's generic "in progress" option and surfaced on
@@ -221,7 +222,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
         seen: set = set()
         stage_group_names = {
             "requisition": "Requisition", "rfq": "RFQ", "lpo": "LPO",
-            "request": "Request", "retirement": "Retirement",
+            "request": "Imprest Request", "retirement": "Retirement",
         }
 
         def add(value, label, *, stage=None, generic=False, group=None):
@@ -240,7 +241,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
         # Draft is the implicit starting state while a document is being created.
         add(DocumentStatus.DRAFT, DocumentStatus.DRAFT.label)
 
-        stage_names = {"requisition": "Requisition", "rfq": "RFQ", "lpo": "LPO"}
+        stage_names = {"requisition": "Requisition", "request": "Imprest Request", "rfq": "RFQ", "lpo": "LPO"}
 
         if workflow_type == "requisition":
             for stage in PROCUREMENT_WORKFLOW_STAGES:

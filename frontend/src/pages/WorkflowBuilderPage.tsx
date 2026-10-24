@@ -37,6 +37,7 @@ interface WorkflowStep {
   status_label: string;
   step_type: StepType;
   post_lpo_after_approval?: boolean;
+  post_imprest_request_after_approval?: boolean;
   parallel_lane?: "imprest_request" | null;
   // Approval-step fields
   assignee_type: AssigneeType;
@@ -355,6 +356,7 @@ function normalizeStep(step: WorkflowStep): WorkflowStep {
     ...step,
     step_type: normalizeStepType((step as any).step_type),
     post_lpo_after_approval: Boolean((step as any).post_lpo_after_approval),
+    post_imprest_request_after_approval: Boolean((step as any).post_imprest_request_after_approval),
     parallel_lane: (step as any).parallel_lane === "imprest_request" ? "imprest_request" : null,
     assignee_type: normalizeAssigneeType(step.assignee_type),
     assignee_group: isUuidLike(step.assignee_group) ? step.assignee_group : null,
@@ -482,6 +484,7 @@ function blankStep(): WorkflowStep {
     order: 0, name: "", status_label: "Pending Approval",
     step_type: "approval",
     post_lpo_after_approval: false,
+    post_imprest_request_after_approval: false,
     parallel_lane: null,
     assignee_type: "group_any", assignee_group: null, assignee_user: null, assignee_user_field: "",
     sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, allow_return_submitter: true,
@@ -495,6 +498,7 @@ function blankNotificationStep(): WorkflowStep {
     order: 0, name: "Send Notification", status_label: "Notification Sent",
     step_type: "notification",
     post_lpo_after_approval: false,
+    post_imprest_request_after_approval: false,
     assignee_type: "group_any", assignee_group: null, assignee_user: null,
     sla_hours: 1,
     allow_resubmit: false, allow_approve: false, allow_reject: false, allow_return: false, allow_return_submitter: false,
@@ -532,6 +536,7 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
     rest.allow_return_submitter = false;
     rest.allow_resubmit     = false;
     rest.requires_signature = false;
+    rest.post_imprest_request_after_approval = false;
     rest.assignee_user_auto = false;
     rest.assignee_group     = null;
     rest.assignee_user      = null;
@@ -696,15 +701,14 @@ function RuleFormFields({ values, routeKind, isRequisitionWorkflow, disabledPhas
   values: RuleFormValues;
   routeKind: WorkflowRouteKind;
   isRequisitionWorkflow: boolean;
-  /* Procurement stages that cannot be configured yet (the preceding stage has
-   * no routing rule). RFQ needs Requisition; LPO needs RFQ (or Requisition for
-   * Travel requisitions configured to skip RFQ when General/Imprest lines are unused). */
+  /* Procurement stages that cannot be configured yet because their preceding
+   * stage has no routing rule. */
   disabledPhases?: WorkflowPhase[];
   onChange: (patch: Partial<RuleFormValues>) => void;
 }) {
   const phaseOptions = WORKFLOW_PHASES
     .filter((phase) => {
-      if (isRequisitionWorkflow) return ["requisition", "rfq", "lpo", "retirement"].includes(phase.value);
+      if (isRequisitionWorkflow) return ["requisition", "request", "rfq", "lpo", "retirement"].includes(phase.value);
       if (routeKind === "payment_run") return phase.value === "payment_run";
       if (routeKind === "form") return ["request", "retirement"].includes(phase.value);
       return phase.value === "request";
@@ -969,22 +973,11 @@ function StepEditPanel({
         {/* ── Approval step fields ────────────────────────────────────────── */}
         {step.step_type === "approval" && (<>
           {isRequisitionWorkflow && (
-            <button
-              type="button"
-              onClick={() => onChange({ parallel_lane: step.parallel_lane === "imprest_request" ? null : "imprest_request" })}
-              className={clsx(
-                "w-full flex items-start gap-3 p-4 rounded-xl border text-left transition-colors",
-                step.parallel_lane === "imprest_request" ? "border-amber-500/40 bg-amber-50 text-amber-950" : "border-border bg-muted/30 text-foreground hover:bg-muted/60"
-              )}
-            >
-              <span className={clsx("mt-0.5 w-4 h-4 rounded border flex items-center justify-center", step.parallel_lane === "imprest_request" ? "bg-amber-600 border-amber-600 text-white" : "border-muted-foreground/50")}>
-                {step.parallel_lane === "imprest_request" ? <Check className="w-3 h-3" /> : null}
-              </span>
-              <span>
-                <span className="block text-xs font-semibold">Run as an independent Imprest request approval</span>
-                <span className="block text-[11px] mt-1 opacity-80">This step is removed from the requisition and LPO approval path. It starts after requisition approval and does not hold up LPO approvals.</span>
-              </span>
-            </button>
+            step.parallel_lane === "imprest_request" && (
+              <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+                This step has a legacy detached-lane marker. Under the Request case it runs in sequence, and the LPO phase waits for its Imprest posting.
+              </div>
+            )
           )}
           <button
             type="button"
@@ -1002,6 +995,24 @@ function StepEditPanel({
               <span className="block text-[11px] mt-1 opacity-80">Post the purchase orders and create their documents before the next approval step.</span>
             </span>
           </button>
+          {isRequisitionWorkflow && (
+            <button
+              type="button"
+              onClick={() => onChange({ post_imprest_request_after_approval: !step.post_imprest_request_after_approval })}
+              className={clsx(
+                "w-full flex items-start gap-3 p-4 rounded-xl border text-left transition-colors",
+                step.post_imprest_request_after_approval ? "border-emerald-400/50 bg-emerald-50 text-emerald-900" : "border-border bg-muted/30 text-foreground hover:bg-muted/60"
+              )}
+            >
+              <span className={clsx("mt-0.5 w-4 h-4 rounded border flex items-center justify-center", step.post_imprest_request_after_approval ? "bg-emerald-600 border-emerald-600 text-white" : "border-muted-foreground/50")}>
+                {step.post_imprest_request_after_approval ? <Check className="w-3 h-3" /> : null}
+              </span>
+              <span>
+                <span className="block text-xs font-semibold">Post Imprest request after this approval</span>
+                <span className="block text-[11px] mt-1 opacity-80">Use on one approval in the Request CASE. The next Request approver waits until SunSystems confirms the posting.</span>
+              </span>
+            </button>
+          )}
           <div className="grid grid-cols-1 gap-4 p-4 rounded-lg bg-muted/40 border border-border">
             <div>
               <Label required>Approver group</Label>

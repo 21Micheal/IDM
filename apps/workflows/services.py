@@ -378,7 +378,20 @@ class WorkflowService:
         rule, template = WorkflowService._resolve_routing(document)
         phase = WorkflowService._document_workflow_phase(document)
         reusable = None
-        if phase != WorkflowRule.DEFAULT_PHASE:
+        reuse_completed_instance = phase != WorkflowRule.DEFAULT_PHASE
+        if document is not None:
+            try:
+                from apps.documents.builder_workflow import (
+                    PROCUREMENT_WORKFLOW_STAGES,
+                    is_procurement_document,
+                )
+                reuse_completed_instance = reuse_completed_instance or (
+                    is_procurement_document(document)
+                    and phase in PROCUREMENT_WORKFLOW_STAGES
+                )
+            except Exception:
+                pass
+        if reuse_completed_instance:
             reusable = (
                 WorkflowInstance.objects
                 .filter(document=document)
@@ -393,9 +406,16 @@ class WorkflowService:
             reusable.status = "in_progress"
             reusable.current_step_order = 1
             reusable.completed_at = None
+            if phase == "request":
+                # Request is now the ordinary main workflow phase. Clear any
+                # detached-lane cursor/status left by earlier template runs.
+                reusable.imprest_request_status = ""
+                reusable.imprest_request_current_step_order = None
+                reusable.imprest_request_completed_at = None
             reusable.save(update_fields=[
                 "template", "rule", "started_by", "status",
                 "current_step_order", "completed_at", "updated_at",
+                *(["imprest_request_status", "imprest_request_current_step_order", "imprest_request_completed_at"] if phase == "request" else []),
             ])
             # Use v2 activation if applicable
             if WorkflowService.is_v2_workflow(reusable.template):
@@ -543,6 +563,16 @@ class WorkflowService:
         if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, task_step_order, execution_lane):
             return
 
+        if (
+            execution_lane == "main"
+            and step.post_imprest_request_after_approval
+            and doc is not None
+            and WorkflowService._start_imprest_request_step_posting_gate(
+                instance, step, doc, actor=actor,
+            )
+        ):
+            return
+
         if execution_lane == "main" and step.post_lpo_after_approval and doc is not None:
             if WorkflowService._start_lpo_posting_gate(instance, step, doc, actor=actor):
                 return
@@ -658,7 +688,15 @@ class WorkflowService:
         # return_to only controls who is notified / recorded on the action.
         if execution_lane == "main":
             doc.status = DocumentStatus.RETURNED
-            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+            update_fields = ["status", "updated_at"]
+            if WorkflowService._document_workflow_phase(doc) == "request":
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["imprest_request_workflow_status"] = "returned"
+                metadata["form"] = form
+                doc.metadata = metadata
+                update_fields.append("metadata")
+            WorkflowService._save_document(doc, update_fields=update_fields)
         else:
             instance.imprest_request_status = "returned"
             instance.imprest_request_completed_at = timezone.now()
@@ -854,7 +892,21 @@ class WorkflowService:
             return lane_orders, None
 
         active_orders, end_outcome = resolve_active_path(definition, field_map, context)
-        if lane_orders:
+        procurement_request_phase = False
+        if document is not None:
+            try:
+                from apps.documents.builder_workflow import is_procurement_document
+                procurement_request_phase = (
+                    is_procurement_document(document)
+                    and str(context.get("context.phase") or "").strip().lower() == "request"
+                )
+            except Exception:
+                pass
+        # Older definitions may still carry the detached-lane marker on their
+        # Request CASE steps. During the new sequential Request phase, include
+        # those steps in the ordinary ordered path instead of hiding them in a
+        # separate lane.
+        if lane_orders and not procurement_request_phase:
             active_orders = [order for order in active_orders if order not in set(lane_orders)]
         return active_orders, end_outcome
 
@@ -1565,7 +1617,11 @@ class WorkflowService:
     def _complete(instance: WorkflowInstance, outcome: str, *, execution_lane: str = "main") -> None:
         WorkflowService._skip_active_tasks(instance, execution_lane=execution_lane)
         if execution_lane == "imprest_request":
-            instance.imprest_request_status = outcome
+            # Detached Imprest approval lanes belonged to the former parallel
+            # design. They must never post a request journal now: the Request
+            # CASE is the sole approval path and its configured checkpoint
+            # controls when posting occurs.
+            instance.imprest_request_status = "cancelled"
             instance.imprest_request_completed_at = timezone.now()
             instance.save(update_fields=[
                 "imprest_request_status", "imprest_request_completed_at", "updated_at",
@@ -1574,22 +1630,10 @@ class WorkflowService:
             if doc is not None:
                 metadata = dict(doc.metadata or {})
                 form = dict(metadata.get("form") or {})
-                form["imprest_request_workflow_status"] = outcome
+                form["imprest_request_workflow_status"] = "cancelled"
                 metadata["form"] = form
                 doc.metadata = metadata
                 WorkflowService._save_document(doc, update_fields=["metadata", "updated_at"])
-                if outcome == "approved":
-                    last_action = WorkflowTaskAction.objects.filter(
-                        task__workflow_instance=instance,
-                        task__execution_lane="imprest_request",
-                        action="approved",
-                        actor__isnull=False,
-                    ).select_related("actor").order_by("-created_at").first()
-                    WorkflowService._queue_imprest_request_postings(
-                        doc,
-                        actor=last_action.actor if last_action else instance.started_by,
-                        message="Queued after Imprest request approval.",
-                    )
             return
 
         instance.status       = outcome
@@ -1599,9 +1643,8 @@ class WorkflowService:
         from apps.documents.access import outcome_status_for
 
         doc = instance.document
-        # The Imprest request approval is a detached lane. Its completion only
-        # controls the advance journal; it must never change document status,
-        # procurement phase, LPO progress, or the document-wide completion UI.
+        # Resolve the main approval actor before updating stage state; the
+        # Request phase also uses that actor to audit its advance posting.
         last_approver_action = None
         if doc is not None:
             last_approver_action = (
@@ -1617,7 +1660,23 @@ class WorkflowService:
             )
         if doc is not None:
             completion_phase = WorkflowService._document_workflow_phase(doc)
-            parallel_imprest_started = False
+            if completion_phase == "requisition":
+                # Clean up live tasks created by the old detached Imprest lane.
+                # Leaving them actionable can post the advance during the
+                # Requisition phase and strand the sequential Request CASE.
+                WorkflowService._skip_active_tasks(instance, execution_lane="imprest_request")
+                if instance.imprest_request_status == "in_progress":
+                    instance.imprest_request_status = "cancelled"
+                    instance.imprest_request_completed_at = timezone.now()
+                    instance.save(update_fields=[
+                        "imprest_request_status", "imprest_request_completed_at", "updated_at",
+                    ])
+                    metadata = dict(doc.metadata or {})
+                    form = dict(metadata.get("form") or {})
+                    form["imprest_request_workflow_status"] = "cancelled"
+                    metadata["form"] = form
+                    doc.metadata = metadata
+            imprest_posting_gate_started = False
             doc.status = outcome_status_for(doc.document_type, outcome)
             update_fields = ["status", "updated_at"]
             try:
@@ -1633,6 +1692,13 @@ class WorkflowService:
                 metadata["form"] = form
                 doc.metadata = metadata
                 update_fields.append("metadata")
+            if completion_phase == "request" and outcome in {"approved", "rejected", "returned"}:
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["imprest_request_workflow_status"] = outcome
+                metadata["form"] = form
+                doc.metadata = metadata
+                update_fields.append("metadata")
             if completion_phase == "lpo" and outcome == "approved" and last_approver_action:
                 metadata = dict(doc.metadata or {})
                 form = dict(metadata.get("form") or {})
@@ -1642,10 +1708,10 @@ class WorkflowService:
                 update_fields.append("metadata")
             WorkflowService._save_document(doc, update_fields=update_fields)
 
-            if completion_phase == "requisition" and outcome == "approved":
-                parallel_imprest_started = WorkflowService._start_parallel_imprest_request(
-                    instance,
+            if completion_phase == "request" and outcome == "approved":
+                imprest_posting_gate_started = WorkflowService._start_imprest_request_posting_gate(
                     doc,
+                    actor=last_approver_action.actor if last_approver_action else instance.started_by,
                 )
 
             if completion_phase == "lpo" and outcome == "approved":
@@ -1656,11 +1722,11 @@ class WorkflowService:
                     logger.exception("Could not queue pending supplier LPO emails for %s", doc.pk)
 
             # Does an intermediate procurement stage follow this approval?
-            advances = False
+            advances = bool(imprest_posting_gate_started)
             if outcome == "approved":
                 try:
                     from apps.documents.builder_workflow import next_procurement_stage
-                    advances = bool(next_procurement_stage(doc))
+                    advances = advances or bool(next_procurement_stage(doc))
                 except Exception:
                     advances = False
 
@@ -1679,18 +1745,12 @@ class WorkflowService:
                     pass
 
             lpo_actor = last_approver_action.actor if last_approver_action else instance.started_by
-            WorkflowService._maybe_post_sunsystems_journal(
-                doc,
-                outcome,
-                actor=lpo_actor,
-                defer_imprest_request=parallel_imprest_started,
-            )
+            WorkflowService._maybe_post_sunsystems_journal(doc, outcome, actor=lpo_actor)
 
             # A fully-approved procurement stage opens the next stage on its
-            # own (Requisition -> RFQ -> LPO; Travel skips RFQ). The requestor
-            # no longer has to click "Submit RFQ"/"Submit LPO". Starting the new
-            # stage also emails its first approver via notify_task_assigned.
-            if advances:
+            # own. The Request posting gate releases RFQ/LPO only after the
+            # advance journal succeeds.
+            if advances and not imprest_posting_gate_started:
                 try:
                     WorkflowService._maybe_advance_procurement_stage(
                         doc, actor=instance.started_by
@@ -1699,7 +1759,7 @@ class WorkflowService:
                     logger.exception(
                         "Could not auto-advance procurement stage for %s", doc.id
                     )
-            else:
+            elif not advances:
                 try:
                     from apps.documents.builder_workflow import open_travel_retirement_phase
                     open_travel_retirement_phase(doc)
@@ -1797,7 +1857,9 @@ class WorkflowService:
         for item in items:
             stage = int(item["stage"])
             posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
-            if not created:
+            if not created and posting.status == JournalPostingStatus.POSTED:
+                continue
+            if not created and posting.status == JournalPostingStatus.POSTING:
                 continue
             posting.status = JournalPostingStatus.PENDING
             posting.stage_label = str(item.get("label") or "Imprest request")[:64]
@@ -1808,6 +1870,153 @@ class WorkflowService:
             _queue_after_commit(
                 lambda did=document_id, current_stage=stage, aid=actor_id: post_journal_for_document.delay(did, current_stage, aid)
             )
+
+    @staticmethod
+    def _start_imprest_request_posting_gate(document, *, actor=None) -> bool:
+        """Queue a final-step fallback journal before RFQ/LPO.
+
+        New workflows can mark a Request approval as the checkpoint. This is
+        retained for templates that do not yet have a selected checkpoint.
+        """
+        try:
+            from apps.documents.builder_workflow import (
+                imprest_request_postings_complete,
+                is_procurement_document,
+            )
+            if (
+                not is_procurement_document(document)
+                or WorkflowService._document_workflow_phase(document) != "request"
+            ):
+                return False
+            WorkflowService._queue_imprest_request_postings(
+                document,
+                actor=actor,
+                message="Queued after the final Imprest Request approval; the next procurement phase is waiting for posting.",
+            )
+            if imprest_request_postings_complete(document):
+                return False
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "posting"
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+            return True
+        except WorkflowError:
+            raise
+        except Exception as exc:
+            logger.exception("Could not start the Imprest request posting gate for %s", document.pk)
+            raise WorkflowError(
+                "Could not queue the Imprest request posting. The Request approval was not completed; please retry."
+            ) from exc
+
+    @staticmethod
+    def _start_imprest_request_step_posting_gate(instance, step, document, *, actor=None) -> bool:
+        """Post at a marked Request approval and pause its chain."""
+        try:
+            from apps.documents.builder_workflow import (
+                imprest_request_postings_complete,
+                is_procurement_document,
+            )
+            if (
+                not is_procurement_document(document)
+                or WorkflowService._document_workflow_phase(document) != "request"
+            ):
+                return False
+            WorkflowService._queue_imprest_request_postings(
+                document,
+                actor=actor,
+                message=f"Queued after {step.name}; later Request approvals are waiting for posting.",
+            )
+            if imprest_request_postings_complete(document):
+                return False
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "posting"
+            form["imprest_request_posting_gate_step_id"] = str(step.pk)
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+            return True
+        except WorkflowError:
+            raise
+        except Exception as exc:
+            logger.exception("Could not start the Imprest Request step posting gate for %s", document.pk)
+            raise WorkflowError(
+                "Could not queue the Imprest request posting. This approval has not advanced; please retry."
+            ) from exc
+
+    @staticmethod
+    def _resume_imprest_request_workflow_if_ready(document) -> bool:
+        """Resume a marked Request step, or open RFQ/LPO after final posting."""
+        try:
+            from apps.documents.builder_workflow import (
+                completed_procurement_stages,
+                imprest_request_postings_complete,
+                is_procurement_document,
+            )
+            if (
+                not is_procurement_document(document)
+                or WorkflowService._document_workflow_phase(document) != "request"
+                or not imprest_request_postings_complete(document)
+            ):
+                return False
+
+            form = ((document.metadata or {}).get("form") or {})
+            gate_step_id = str(form.get("imprest_request_posting_gate_step_id") or "").strip()
+            if gate_step_id:
+                instance = WorkflowInstance.objects.filter(
+                    document=document, status="in_progress",
+                ).select_related("template").first()
+                if not instance:
+                    return False
+                step = instance.template.steps.filter(pk=gate_step_id).first()
+                if not step:
+                    logger.error(
+                        "Imprest posting gate step %s no longer exists for document %s",
+                        gate_step_id, document.pk,
+                    )
+                    return False
+                with transaction.atomic():
+                    locked = WorkflowInstance.objects.select_for_update().get(pk=instance.pk)
+                    if locked.status != "in_progress" or not locked.tasks.filter(
+                        step=step,
+                        execution_lane="main",
+                        status="approved",
+                        actions__action="approved",
+                    ).exists():
+                        return False
+                    active_orders, _ = WorkflowService._v2_active_step_orders(locked)
+                    if WorkflowService.is_v2_workflow(locked.template) and step.order not in active_orders:
+                        logger.error(
+                            "Imprest posting gate step %s is not on the active Request path for document %s",
+                            gate_step_id, document.pk,
+                        )
+                        return False
+                    metadata = dict(document.metadata or {})
+                    form = dict(metadata.get("form") or {})
+                    form.pop("imprest_request_posting_gate_step_id", None)
+                    form["imprest_request_workflow_status"] = "in_progress"
+                    metadata["form"] = form
+                    document.metadata = metadata
+                    WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+                    WorkflowService._advance_step(locked, step.order, task_step_order=step.order)
+                return True
+
+            if "request" not in completed_procurement_stages(document):
+                return False
+            if WorkflowInstance.objects.filter(document=document, status="in_progress").exists():
+                return False
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "approved"
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+            return WorkflowService._maybe_advance_procurement_stage(document, actor=document.uploaded_by)
+        except Exception:
+            logger.exception("Could not resume procurement after Imprest request posting for %s", document.pk)
+            return False
 
     @staticmethod
     def _maybe_advance_procurement_stage(document, actor=None) -> bool:
@@ -1833,6 +2042,14 @@ class WorkflowService:
             return False
 
         set_procurement_workflow_stage(document, next_stage)
+        if next_stage == "request":
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "in_progress"
+            form.pop("imprest_request_posting_gate_step_id", None)
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
         WorkflowService.start(document, actor or document.uploaded_by)
         return True
 
@@ -1959,22 +2176,6 @@ class WorkflowService:
                 or (isinstance(imprest_profile, dict) and imprest_profile.get("enabled"))
                 or is_legacy_po
             )
-
-            # The Imprest advance journal reuses common bindings from the PO
-            # profile and posts as soon as requisition approval completes.
-            if (
-                not defer_imprest_request
-                and
-                has_po_mapping
-                and outcome == "approved"
-                and phase == "requisition"
-                and "requisition" in completed_procurement_stages(document)
-            ):
-                WorkflowService._queue_imprest_request_postings(
-                    document,
-                    actor=actor,
-                    message="Queued for requisition-stage Imprest posting.",
-                )
 
             # Retirement reconciliations are compiled from the retirement
             # table's exact/under/over rules, independently of the ordinary

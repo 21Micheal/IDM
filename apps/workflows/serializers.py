@@ -93,6 +93,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             "id", "template", "order", "node_id", "name", "status_label",
             "step_type",
             "post_lpo_after_approval",
+            "post_imprest_request_after_approval",
             # approval-step fields
             "assignee_type", "assignee_group", "assignee_group_name",
             "assignee_user", "assignee_user_name", "assignee_user_auto", "assignee_user_field",
@@ -171,6 +172,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "id", "node_id", "name", "status_label",
             "step_type",
             "post_lpo_after_approval",
+            "post_imprest_request_after_approval",
             # approval-step
             "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto", "assignee_user_field",
             "sla_hours", "allow_resubmit",
@@ -188,6 +190,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "instructions":            {"required": False, "allow_blank": True},
             "step_type":               {"required": False},
             "post_lpo_after_approval": {"required": False},
+            "post_imprest_request_after_approval": {"required": False},
             "assignee_user_field":    {"required": False, "allow_blank": True},
             "approver_email_subject":  {"required": False, "allow_blank": True},
             "approver_email_body":     {"required": False, "allow_blank": True},
@@ -465,6 +468,18 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
         # Require at least one approval step (notification-only templates make no sense)
         steps_data = attrs.get("steps")
         if steps_data is not None:
+            imprest_checkpoints = [
+                step for step in steps_data
+                if step.get("post_imprest_request_after_approval")
+            ]
+            if len(imprest_checkpoints) > 1:
+                raise serializers.ValidationError({
+                    "steps": "Choose one approval step to post the Imprest request after."
+                })
+            if any((step.get("step_type") or "approval") != "approval" for step in imprest_checkpoints):
+                raise serializers.ValidationError({
+                    "steps": "The Imprest request posting checkpoint must be an approval step."
+                })
             has_approval = any(
                 (s.get("step_type") or "approval") == "approval"
                 for s in steps_data

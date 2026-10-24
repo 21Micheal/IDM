@@ -52,7 +52,7 @@ function statusPresentation(doc: any): { label: string; className: string } {
   const key = String(doc?.status || "unknown").toLowerCase();
   const labels: Record<string, string> = {
     pending_approval: "Pending approval",
-    request_pending: "Request pending",
+    request_pending: "Imprest request pending",
     on_hold: "On hold",
     pending_review: "Pending review",
     approved: "Approved",

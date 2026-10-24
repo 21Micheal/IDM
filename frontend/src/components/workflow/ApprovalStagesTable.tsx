@@ -63,15 +63,6 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
     () => steps.filter((step) => !step.kind || step.kind === "task"),
     [steps],
   );
-  const parallelImprestSteps = useMemo(
-    () => taskSteps.filter((step) => step.executionLane === "imprest_request").sort((a, b) => a.order - b.order),
-    [taskSteps],
-  );
-  const mainTaskSteps = useMemo(
-    () => taskSteps.filter((step) => step.executionLane !== "imprest_request"),
-    [taskSteps],
-  );
-
   const phaseRank = (value?: string) => {
     if (!value) return -1;
     const index = PROCUREMENT_PHASE_ORDER.indexOf(value as (typeof PROCUREMENT_PHASE_ORDER)[number]);
@@ -80,12 +71,21 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
 
   // The active task's phase is the best signal when a document's metadata or
   // caller prop has not caught up with a workflow transition yet.
-  const activeStepPhase = mainTaskSteps.find(
+  const activeStepPhase = taskSteps.find(
     (step) => step.status === "in-progress" || step.status === "on-hold",
   )?.phase;
   const effectivePhase = activeStepPhase && phaseRank(activeStepPhase) >= 0
     ? activeStepPhase
     : phase;
+  const isSequentialRequest = effectivePhase === "request";
+  const parallelImprestSteps = useMemo(
+    () => isSequentialRequest ? [] : taskSteps.filter((step) => step.executionLane === "imprest_request").sort((a, b) => a.order - b.order),
+    [taskSteps, isSequentialRequest],
+  );
+  const mainTaskSteps = useMemo(
+    () => isSequentialRequest ? taskSteps : taskSteps.filter((step) => step.executionLane !== "imprest_request"),
+    [taskSteps, isSequentialRequest],
+  );
 
   // Always start collapsed when the document moves to a new phase.
   useEffect(() => {
@@ -174,6 +174,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
             {(() => {
               switch (effectivePhase) {
                 case "requisition": return "Requisition Approval Stages";
+                case "request":     return "Imprest Request Approval Stages";
                 case "rfq":         return "RFQ Approval Stages";
                 case "lpo":         return "LPO Approval Stages";
                 case "retirement":  return "Retirement Approval Stages";
@@ -251,7 +252,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
                   {startGroup && (
                     <tr className="bg-[#EEF2F6]">
                       <td colSpan={5} className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-[#475569]">
-                        {step.executionLane === "imprest_request" ? "Imprest request approval · independent lane" : `${PHASE_LABELS[step.phase ?? ""] ?? step.phase} stage`}
+                        {step.executionLane === "imprest_request" && !isSequentialRequest ? "Imprest request approval · legacy lane" : `${PHASE_LABELS[step.phase ?? ""] ?? step.phase} stage`}
                       </td>
                     </tr>
                   )}
