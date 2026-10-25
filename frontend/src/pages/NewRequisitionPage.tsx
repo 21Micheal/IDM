@@ -254,6 +254,9 @@ export default function NewRequisitionPage() {
   const submitMutation = useMutation({
     mutationFn: async () => {
       if (!selectedTemplateId) throw new Error("No template selected");
+      // New requisitions are still in the draft process step — using "submit"
+      // here skipped any column/field with draft-only editableWhen rules, so
+      // mandatory table columns never warned.
       const missing = requiredFieldLabels(
         selectedTemplate?.sections ?? [],
         formValues,
@@ -262,15 +265,18 @@ export default function NewRequisitionPage() {
           isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
           canEditConditionalSections: true,
         },
-        "submit"
+        "draft",
       );
       const pastDates = pastDateFieldLabels(selectedTemplate?.sections ?? [], formValues, {
         groupNames: user?.group_names ?? [],
         isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
         canEditConditionalSections: true,
-      }, "submit");
+      }, "draft");
       if (missing.length || pastDates.length) {
         setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
+        toast.error(
+          `${missing.length + pastDates.length} required field${missing.length + pastDates.length === 1 ? "" : "s"} need${missing.length + pastDates.length === 1 ? "s" : ""} attention.`,
+        );
         throw new Error("FORM_REQUIRED_FIELDS");
       }
       setMissingFields([]);

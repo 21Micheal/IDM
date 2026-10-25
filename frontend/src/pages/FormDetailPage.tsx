@@ -593,26 +593,36 @@ export default function FormDetailPage() {
 
   const submitMutation = useMutation({
     mutationFn: async (workflowStage?: "requisition" | "rfq" | "lpo" | "retirement") => {
+      // Always gate submission on required fields (including table columns),
+      // even when the form was not dirtied — blank mandatory table cells were
+      // previously skipped whenever the user submitted without an edit.
+      const valuesToCheck = formEditing ? formValues : (formData?.values ?? {});
+      const process = formProcessStep();
+      const missing = requiredFieldLabels(formData?.sections ?? [], valuesToCheck, {
+        groupNames: user?.group_names ?? [],
+        isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+        canEditConditionalSections: canEditConditionalSections(),
+      }, process);
+      const pastDates = pastDateFieldLabels(formData?.sections ?? [], valuesToCheck, {
+        groupNames: user?.group_names ?? [],
+        isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+        canEditConditionalSections: canEditConditionalSections(),
+      }, process);
+      if (missing.length || pastDates.length) {
+        if (!formEditing) {
+          setFormValues({ ...(formData?.values ?? {}) });
+          formDirtyRef.current = false;
+          setFormEditing(true);
+        }
+        setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
+        toast.error(
+          `${missing.length + pastDates.length} required field${missing.length + pastDates.length === 1 ? "" : "s"} need${missing.length + pastDates.length === 1 ? "s" : ""} attention.`,
+        );
+        throw new Error("FORM_REQUIRED_FIELDS");
+      }
+      setMissingFields([]);
       if (formEditing && formDirtyRef.current) {
         // Never advance a workflow with values that exist only in this tab.
-        // Previously declining the optional save prompt still submitted the
-        // workflow, so the next approver saw the last persisted (often blank)
-        // retirement table.
-        const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
-          groupNames: user?.group_names ?? [],
-          isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
-          canEditConditionalSections: canEditConditionalSections(),
-        }, formProcessStep());
-        const pastDates = pastDateFieldLabels(formData?.sections ?? [], formValues, {
-          groupNames: user?.group_names ?? [],
-          isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
-          canEditConditionalSections: canEditConditionalSections(),
-        }, formProcessStep());
-        if (missing.length || pastDates.length) {
-          setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
-          throw new Error("FORM_REQUIRED_FIELDS");
-        }
-        setMissingFields([]);
         await updateFormMutation.mutateAsync();
       }
       return documentsAPI.submit(id!, workflowStage ? { workflow_stage: workflowStage } : undefined);
@@ -631,6 +641,7 @@ export default function FormDetailPage() {
       if (/required fields missing/i.test(message)) {
         const fieldList = message.split(/required fields missing:\s*/i)[1];
         setMissingFields(fieldList ? fieldList.split(/,\s*/) : [message]);
+        toast.error("Required fields are missing.");
         return;
       }
       toast.error(message);

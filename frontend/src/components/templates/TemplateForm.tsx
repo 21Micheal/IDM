@@ -1237,14 +1237,23 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
 function hasFieldValue(value: unknown, type?: string): boolean {
   if (value === undefined || value === null || value === "") return false;
   if (typeof value === "string") return Boolean(value.trim());
+  // Table boolean cells store "true"/"false" strings; treat unchecked as empty
+  // when the column is required (mirrors top-level boolean required checks).
   if (typeof value === "boolean") return value;
+  if (type === "boolean" && (value === "false" || value === false || value === 0 || value === "0")) return false;
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === "object") {
     const record = value as Record<string, unknown>;
     if (type === "budget_line") return Boolean(String(record.account_code ?? "").trim());
+    // External / analysis-panel style objects are empty until at least one slot is set.
     return Object.values(record).some((entry) => entry !== undefined && entry !== null && String(entry).trim() !== "");
   }
   return true;
+}
+
+/** True when a required scalar or table-cell value is missing. */
+function isMissingRequiredValue(value: unknown, type?: string): boolean {
+  return !hasFieldValue(value, type);
 }
 
 function validationMessageFor(issues: string[], label: string, value?: unknown, type?: string): string | undefined {
@@ -1302,10 +1311,6 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
     if (!issue.startsWith("Past date:") && hasFieldValue(value, col.type)) return undefined;
     return issue.startsWith("Past date:") ? "Choose today or a later date." : "Required";
   };
-  const columnHasIssue = (col: Column) => rows.length
-    ? rows.some((row, rowIndex) => columnIssue(col, rowIndex, row[col.key ?? ""]))
-    : Boolean(columnIssue(col));
-  const tableIssues = allCols.flatMap((col) => columnIssue(col) ? [`${col.label ?? col.key}: Required`] : []);
 
   const emptyRow = (): Record<string, unknown> => {
     const r: Record<string, unknown> = {};
@@ -1323,6 +1328,14 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   // second write must build on the first, before React re-renders).
   const rowsRef = useRef<Record<string, unknown>[]>(rows);
   useEffect(() => { rowsRef.current = rows; }, [rows]);
+
+  const columnHasIssue = (col: Column) => rows.length
+    ? rows.some((row, rowIndex) => columnIssue(col, rowIndex, row[col.key ?? ""]))
+    : Boolean(columnIssue(col));
+  const tableIssues = allCols.flatMap((col) => {
+    if (!columnHasIssue(col)) return [];
+    return [`${col.label ?? col.key}: Required`];
+  });
 
   // ── Sync rows from parent prop ─────────────────────────────────────────────
   // The parent passes the saved/live table rows via `value`. Because useState
@@ -1573,7 +1586,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
           </table>
         </div>
       </div>
-      {rows.length === 0 && tableIssues.length > 0 && (
+      {tableIssues.length > 0 && (
         <p role="alert" className="flex items-center gap-1 text-xs font-semibold text-red-700"><AlertCircle className="h-3.5 w-3.5" />{tableIssues.join(" · ")}</p>
       )}
       {!readOnly && (
@@ -3047,28 +3060,34 @@ export function requiredFieldLabels(
       // (`readonly`/`editableWhen`) — only a column the person can actually see
       // and edit is enforced, mirroring the field-level rule just above. A
       // required column with zero rows (nothing entered yet) counts as missing,
-      // same as an empty scalar field.
+      // same as an empty scalar field. When values have no rows yet the
+      // renderer still shows `minRows` placeholder rows, so emit per-row
+      // labels too so cell highlighting matches what the user sees.
       if (type === "table") {
         const rows = Array.isArray(values[key]) ? (values[key] as Record<string, unknown>[]) : [];
+        const placeholderRows = Math.max(1, Number(f.minRows) || 1);
         for (const col of f.columns ?? []) {
           if (!col.required || !col.key || col.calc?.expression) continue;
           if (col.hidden) continue;
           const colKey = col.key;
-          // Column rules are row-scoped (they may reference sibling columns),
-          // so a value is only enforced in the rows where the column is
-          // actually shown and editable.
           const tableColumnLabel = `${f.label ?? key} — ${col.label ?? colKey}`;
           if (rows.length === 0) {
-            if (evalVisible(col, values, allFields, processStep, null, viewer) && evalEditable(col, values, allFields, processStep, null, viewer)) missing.push(tableColumnLabel);
+            if (
+              evalVisible(col, values, allFields, processStep, null, viewer)
+              && evalEditable(col, values, allFields, processStep, null, viewer)
+            ) {
+              missing.push(tableColumnLabel);
+              for (let rowIndex = 0; rowIndex < placeholderRows; rowIndex += 1) {
+                missing.push(`${tableColumnLabel} (row ${rowIndex + 1})`);
+              }
+            }
           } else {
             rows.forEach((row, rowIndex) => {
               if (!evalVisible(col, values, allFields, processStep, row, viewer)) return;
               if (!evalEditable(col, values, allFields, processStep, row, viewer)) return;
-              const v = row?.[colKey];
-              const empty = col.type === "budget_line"
-                ? !v || typeof v !== "object" || Array.isArray(v) || !String((v as Record<string, unknown>).account_code ?? "").trim()
-                : v === undefined || v === null || (typeof v === "string" && v.trim() === "");
-              if (empty) missing.push(`${tableColumnLabel} (row ${rowIndex + 1})`);
+              if (isMissingRequiredValue(row?.[colKey], col.type)) {
+                missing.push(`${tableColumnLabel} (row ${rowIndex + 1})`);
+              }
             });
           }
         }
@@ -3077,15 +3096,7 @@ export function requiredFieldLabels(
 
       const v = values[key];
       if (f.required) {
-        const empty =
-          v === undefined || v === null ||
-          (typeof v === "string" && v.trim() === "") ||
-          (typeof v === "boolean" && !v) ||
-          (Array.isArray(v) && v.length === 0) ||
-          (((type === "external" && f.external?.source === "analysis_codes") || type === "analysis_panel") &&
-            typeof v === "object" && !Array.isArray(v) &&
-            !Object.values(v as Record<string, unknown>).some((x) => x));
-        if (empty) { missing.push(f.label ?? key); continue; }
+        if (isMissingRequiredValue(v, type)) { missing.push(f.label ?? key); continue; }
       }
       // Regex validation
       if (f.regex && typeof v === "string" && v) {

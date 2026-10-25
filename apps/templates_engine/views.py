@@ -343,6 +343,29 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 and _eval_visible(f, generation_values, viewer=viewer)
                 and is_editable(f, generation_values, viewer=viewer)
             ]
+            def _cell_missing(value, col_type=None) -> bool:
+                """Mirror TemplateForm.hasFieldValue / isMissingRequiredValue."""
+                if value is None or value == "":
+                    return True
+                if isinstance(value, str):
+                    if not value.strip():
+                        return True
+                    if col_type == "boolean" and value.strip().lower() in {"false", "0"}:
+                        return True
+                    return False
+                if isinstance(value, bool):
+                    return not value
+                if isinstance(value, (list, tuple)):
+                    return len(value) == 0
+                if isinstance(value, dict):
+                    if col_type == "budget_line":
+                        return not str(value.get("account_code") or "").strip()
+                    return not any(
+                        item not in (None, "", [], {})
+                        for item in value.values()
+                    )
+                return False
+
             for f in table_fields:
                 rows = generation_values.get(f.get("key")) or []
                 if not isinstance(rows, list):
@@ -351,17 +374,19 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                     col_key = col.get("key")
                     if not col.get("required") or not col_key:
                         continue
+                    if col.get("calc") and (col.get("calc") or {}).get("expression"):
+                        continue
                     if not _eval_visible(col, generation_values, viewer=viewer) or not is_editable(col, generation_values, viewer=viewer):
                         continue
-                    missing_in_any_row = (
-                        len(rows) == 0
-                        or any(
-                            not isinstance(row, dict) or str(row.get(col_key, "")).strip() == ""
-                            for row in rows
-                        )
-                    )
-                    if missing_in_any_row:
-                        missing.append(f"{f.get('label', f.get('key'))} — {col.get('label', col_key)}")
+                    label = f"{f.get('label', f.get('key'))} — {col.get('label', col_key)}"
+                    if len(rows) == 0:
+                        missing.append(label)
+                        continue
+                    if any(
+                        not isinstance(row, dict) or _cell_missing(row.get(col_key), col.get("type"))
+                        for row in rows
+                    ):
+                        missing.append(label)
 
             if missing:
                 raise ValidationError(

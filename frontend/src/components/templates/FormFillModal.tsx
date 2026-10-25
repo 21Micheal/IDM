@@ -163,14 +163,20 @@ export default function FormFillModal({
       {
         groupNames: currentUser?.group_names ?? [],
         isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
+        canEditConditionalSections: true,
       },
+      "draft",
     );
     const pastDates = pastDateFieldLabels(template.sections ?? [], jsonValues, {
       groupNames: currentUser?.group_names ?? [],
       isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
-    });
+      canEditConditionalSections: true,
+    }, "draft");
     if (missing.length || pastDates.length) {
       setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
+      toast.error(
+        `${missing.length + pastDates.length} required field${missing.length + pastDates.length === 1 ? "" : "s"} need${missing.length + pastDates.length === 1 ? "s" : ""} attention.`,
+      );
       return;
     }
     setMissingFields([]);
