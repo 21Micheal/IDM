@@ -265,6 +265,12 @@ export default function JournalPostingCard({
   const handleRetryDone = useCallback((updated: JournalPosting) => {
     setLocalPostings((prev) => ({ ...prev, [updated.stage]: updated }));
     qc.invalidateQueries({ queryKey: ["sunsystems-postings", documentId] });
+    // Successful postings may resume a gated Request/LPO workflow; refresh the
+    // form document so the next approver / generated LPO appears without a reload.
+    if (updated.status === "posted") {
+      qc.invalidateQueries({ queryKey: ["form", documentId] });
+      qc.invalidateQueries({ queryKey: ["document", documentId] });
+    }
   }, [documentId, qc]);
 
   /* ── early exits ── */

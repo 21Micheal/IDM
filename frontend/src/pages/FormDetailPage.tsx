@@ -17,11 +17,11 @@
  * turns out to matter for forms too, say so and it can be ported over.
  */
 
-import { Suspense, useEffect, useRef, useState, useMemo } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useParams, useNavigate, useLocation, useSearchParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, workflowAPI } from "@/services/api";
+import { documentsAPI, sunsystemsAPI, workflowAPI, type JournalPosting } from "@/services/api";
 import TemplateForm, { hasVisibleEditableSection, hasVisibleRetirementEditSection, pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
 import PrintableRequisition from "@/components/templates/PrintableRequisition";
 import BudgetBanner from "@/components/templates/BudgetBanner";
@@ -36,7 +36,7 @@ import { format } from "date-fns";
 import {
   ArrowLeft, Send, Loader2, Edit2, Info, FileCode, Eye, EyeOff, Check, X, Save,
   MessageSquare, Download, AlertTriangle, ShieldCheck, PanelRightOpen, PanelRightClose,
-  TrendingUp, TrendingDown, CheckCircle2, Printer,
+  TrendingUp, TrendingDown, CheckCircle2, Printer, RefreshCw,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -50,6 +50,128 @@ import SignaturePlacementModal, {
 import InvoiceAttachmentsPanel from "@/components/templates/InvoiceAttachmentsPanel";
 import LpoPdfPreview from "@/components/documents/LpoPdfPreview";
 import CustomListbox from "@/components/ui/CustomListbox";
+
+/** Imprest request journals use stages 20000–29999; LPO POs use 1000–19999. */
+function isImprestRequestPostingStage(stage: number) {
+  return stage >= 20000 && stage < 30000;
+}
+function isLpoPurchaseOrderStage(stage: number) {
+  return stage >= 1000 && stage < 20000;
+}
+
+function postingGateErrorSummary(postings: JournalPosting[]): string {
+  const failed = postings.filter((p) => p.status === "failed" || p.status === "skipped");
+  const first = failed[0];
+  if (!first) return "SunSystems did not accept the posting.";
+  const detail = (first.error || first.message || "").trim();
+  const label = first.stage_label || `Stage ${first.stage}`;
+  return detail ? `${label}: ${detail}` : `${label} posting failed.`;
+}
+
+function PostingGateOverlay({
+  title,
+  pendingMessage,
+  failedPostings,
+  retrying,
+  onRetry,
+  onDismiss,
+}: {
+  title: string;
+  pendingMessage: string;
+  failedPostings: JournalPosting[];
+  retrying: boolean;
+  onRetry: () => void;
+  onDismiss: () => void;
+}) {
+  const failed = failedPostings.length > 0 && !retrying;
+  return (
+    <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="posting-gate-title"
+        className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-2xl"
+      >
+        <div className="flex items-start gap-3 px-6 pt-5 pb-4">
+          {failed ? (
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+          ) : (
+            <Loader2 className="mt-0.5 h-5 w-5 shrink-0 animate-spin text-[#287EAD]" />
+          )}
+          <div className="min-w-0">
+            <h2 id="posting-gate-title" className="text-sm font-bold text-[#1F2933]">
+              {failed ? "Posting failed" : title}
+            </h2>
+            <p className="mt-1.5 text-xs leading-relaxed text-[#5E6870]">
+              {failed
+                ? postingGateErrorSummary(failedPostings)
+                : retrying
+                  ? "Retrying the SunSystems posting…"
+                  : pendingMessage}
+            </p>
+            {failed && (
+              <p className="mt-2 text-xs leading-relaxed text-[#5E6870]">
+                The workflow stays at this step until posting succeeds. You can retry now, or dismiss — a reminder stays on this form until posting succeeds.
+              </p>
+            )}
+          </div>
+        </div>
+        {failed && (
+          <div className="flex flex-wrap justify-end gap-2 border-t border-[#E8EDF2] bg-[#F8FAFC] px-4 py-3">
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="border border-[#C8CDD2] bg-white px-3 py-2 text-xs font-semibold text-[#35434D] hover:bg-[#E9EEF1]"
+            >
+              Dismiss
+            </button>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99]"
+            >
+              <RefreshCw className="h-3.5 w-3.5" /> Retry posting
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Compact header reminder when a Request/LPO posting gate is blocked.
+ * Lives next to the reference number so it is visible without scrolling;
+ * technical error detail stays in the SunSystems panel.
+ */
+function PostingGateHeaderReminder({
+  kind,
+  retrying,
+  onRetry,
+}: {
+  kind: "imprest" | "lpo";
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-2" role="status">
+      <span className="text-xs font-medium text-red-600">
+        {kind === "lpo"
+          ? "Later LPO approvals wait until this posting succeeds and the LPO is generated."
+          : "The next Request approver is notified only after this posting succeeds."}
+      </span>
+      <button
+        type="button"
+        disabled={retrying}
+        onClick={onRetry}
+        className="inline-flex shrink-0 items-center gap-1 border border-red-600 px-2 py-0.5 text-[11px] font-semibold text-red-600 hover:bg-red-50 disabled:opacity-60"
+      >
+        {retrying ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+        {retrying ? "Retrying…" : "Retry posting"}
+      </button>
+    </div>
+  );
+}
 
 const AUDIT_PAGE_SIZE = 5;
 
@@ -158,6 +280,7 @@ export default function FormDetailPage() {
     Boolean(navigationState?.awaitLpo),
   );
   const [awaitingImprestPostSince, setAwaitingImprestPostSince] = useState(0);
+  const [gateRetrying, setGateRetrying] = useState(false);
   const [isSigningOpen, setIsSigningOpen] = useState(false);
   const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
   const [searchParams] = useSearchParams();
@@ -178,12 +301,22 @@ export default function FormDetailPage() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [formEditing]);
 
+  const awaitingPostingGate = awaitingLpo || awaitingImprestPostSince > 0;
+
   const { data: doc, isLoading, dataUpdatedAt: formDataUpdatedAt } = useQuery<any>({
     queryKey: ["form", id],
     queryFn: () => documentsAPI.get(id!).then((r) => r.data),
     enabled: !!id,
     ...QUERY_SHORT_STALE,
-    refetchInterval: awaitingLpo || awaitingImprestPostSince > 0 ? 1_000 : 8_000,
+    // Fast-poll while an overlay is open or the Request posting gate is held,
+    // so a successful retry clears the persistent reminder promptly.
+    refetchInterval: (query) => {
+      if (awaitingPostingGate) return 1_000;
+      const form = (query.state.data as { metadata?: { form?: { imprest_request_workflow_status?: string } } } | undefined)
+        ?.metadata?.form;
+      if (String(form?.imprest_request_workflow_status || "").toLowerCase() === "posting") return 3_000;
+      return 8_000;
+    },
   });
 
   const formData = (doc?.metadata as Record<string, any> | undefined)?.form as
@@ -198,10 +331,116 @@ export default function FormDetailPage() {
     }
     | undefined;
 
+  const imprestPostingGateActive =
+    String(formData?.imprest_request_workflow_status || "").toLowerCase() === "posting";
+  const workflowPhase = String(
+    (formData as { workflow_phase?: string } | undefined)?.workflow_phase
+    || doc?.builder_workflow_phase
+    || "",
+  ).toLowerCase();
+  // PO rows without a generated LPO mean the LPO generation gate is still open.
+  const generatedLpoCount = (formData?.lpo_documents?.length || 0)
+    || (formData?.lpo_document_id ? 1 : 0);
+  // Watch Request/LPO gates after dismiss/reopen so a failed post still surfaces.
+  const watchPostingGate = awaitingPostingGate
+    || imprestPostingGateActive
+    || workflowPhase === "lpo";
+
+  const { data: gatePostings = [] } = useQuery({
+    queryKey: ["sunsystems-postings", id, "gate"],
+    queryFn: () =>
+      sunsystemsAPI.getPostings(id!)
+        .then((r) => (Array.isArray(r.data) ? r.data : [] as JournalPosting[]))
+        .catch(() => [] as JournalPosting[]),
+    enabled: Boolean(id && watchPostingGate),
+    refetchInterval: (awaitingPostingGate || imprestPostingGateActive) ? 2_000 : 10_000,
+    staleTime: 0,
+  });
+
+  const failedImprestGatePostings = useMemo(
+    () => gatePostings.filter(
+      (p) => isImprestRequestPostingStage(p.stage) && (p.status === "failed" || p.status === "skipped"),
+    ),
+    [gatePostings],
+  );
+  const failedLpoGatePostings = useMemo(
+    () => gatePostings.filter(
+      (p) => isLpoPurchaseOrderStage(p.stage) && (p.status === "failed" || p.status === "skipped"),
+    ),
+    [gatePostings],
+  );
+  const lpoPostingGateActive = useMemo(() => {
+    if (generatedLpoCount > 0 || workflowPhase !== "lpo") return false;
+    return gatePostings.some((p) => isLpoPurchaseOrderStage(p.stage));
+  }, [gatePostings, generatedLpoCount, workflowPhase]);
+  // Hide the page banner while the modal overlay is already covering the same
+  // failure — otherwise show it whenever the gate is still blocked.
+  const showImprestGateBanner = imprestPostingGateActive && failedImprestGatePostings.length > 0
+    && awaitingImprestPostSince === 0;
+  const showLpoGateBanner = lpoPostingGateActive && failedLpoGatePostings.length > 0
+    && !awaitingLpo;
+
+  const retryGatePostings = useCallback(async (postings: JournalPosting[]) => {
+    if (!id || !postings.length || gateRetrying) return;
+    setGateRetrying(true);
+    try {
+      let anyPosted = false;
+      let lastFailure: JournalPosting | null = null;
+      for (const posting of postings) {
+        try {
+          const { data: result } = await sunsystemsAPI.retryPosting(id, posting.stage);
+          if (result.status === "posted") {
+            anyPosted = true;
+          } else {
+            lastFailure = result;
+          }
+        } catch (e: any) {
+          // Failed retries often return 502 with the updated JournalPosting body.
+          const body = e?.response?.data;
+          if (body && typeof body === "object" && (body.status || body.error || body.message)) {
+            lastFailure = { ...posting, ...body } as JournalPosting;
+          } else {
+            const detail = body?.detail || e?.message;
+            toast.error(typeof detail === "string" ? detail : "Could not retry posting.");
+            lastFailure = posting;
+          }
+        }
+      }
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["sunsystems-postings", id] }),
+        qc.invalidateQueries({ queryKey: ["form", id] }),
+      ]);
+      if (lastFailure && !anyPosted) {
+        toast.error(postingGateErrorSummary([lastFailure]));
+      } else if (anyPosted && lastFailure) {
+        toast.error("Some postings still failed. The workflow will advance only after every required posting succeeds.");
+      } else if (anyPosted) {
+        toast.success("Posting succeeded. Waiting for the workflow to advance…");
+      }
+    } finally {
+      setGateRetrying(false);
+    }
+  }, [gateRetrying, id, qc]);
+
+  const dismissImprestPostingGate = useCallback(() => {
+    setAwaitingImprestPostSince(0);
+    setGateRetrying(false);
+    toast.info("A reminder stays on this form until posting succeeds. The next Request approver is not notified yet.");
+  }, []);
+
+  const dismissLpoGenerationGate = useCallback(() => {
+    setAwaitingLpo(false);
+    setGateRetrying(false);
+    toast.info("A reminder stays on this form until the purchase order posts and the LPO is generated.");
+  }, []);
+
   useEffect(() => {
     if (!awaitingImprestPostSince || formDataUpdatedAt <= awaitingImprestPostSince) return;
     if (String(formData?.imprest_request_workflow_status || "").toLowerCase() === "posting") return;
+    // A failed posting leaves the form status as "posting"; only treat leaving
+    // that state as success after the gate has actually resumed.
     setAwaitingImprestPostSince(0);
+    setGateRetrying(false);
     setWorkflowActionCompleted(true);
   }, [awaitingImprestPostSince, formDataUpdatedAt, formData?.imprest_request_workflow_status]);
   const generatedLpos = formData?.lpo_documents?.length
@@ -222,6 +461,7 @@ export default function FormDetailPage() {
   useEffect(() => {
     if (!generatedLpos.length) return;
     setAwaitingLpo(false);
+    setGateRetrying(false);
     if (!generatedLpos.some((lpo) => lpo.id === selectedLpoId)) setSelectedLpoId(generatedLpos[0].id);
     setLpoModalOpen(true);
     setLpoMinimized(false);
@@ -830,16 +1070,26 @@ export default function FormDetailPage() {
         )}>
           <div className="overflow-hidden rounded-2xl border border-[#D7E2E9] bg-white shadow-[0_4px_18px_rgba(31,55,72,0.05)]">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2EAF0] bg-gradient-to-r from-white to-[#F7FAFC] px-4 py-3 sm:px-5">
-              <div className="flex items-center gap-2 min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <p className="text-sm font-bold text-[#1F2933]">Form</p>
                 {doc.reference_number && (
                   <span className="inline-flex items-center border border-[#B7D7E8] bg-[#EEF6FB] px-2 py-0.5 text-[11px] font-semibold text-[#1E648A]">
                     {doc.reference_number}
                   </span>
                 )}
-                <span className="text-xs text-[#5E6870]">
-                  {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
-                </span>
+                {(showImprestGateBanner || showLpoGateBanner) ? (
+                  <PostingGateHeaderReminder
+                    kind={showImprestGateBanner ? "imprest" : "lpo"}
+                    retrying={gateRetrying}
+                    onRetry={() => void retryGatePostings(
+                      showImprestGateBanner ? failedImprestGatePostings : failedLpoGatePostings,
+                    )}
+                  />
+                ) : (
+                  <span className="text-xs text-[#5E6870]">
+                    {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-2 flex-wrap justify-end">
                 {canSubmit && (
@@ -1064,11 +1314,22 @@ export default function FormDetailPage() {
           {(isWorkflowActiveOrCompleted(step) || sunSystemsPostingEnabled) && (
             <div className={cn("grid gap-3", isWorkflowActiveOrCompleted(step) && sunSystemsPostingEnabled ? "lg:grid-cols-2" : "")}>
               {isWorkflowActiveOrCompleted(step) && (
-                <ApprovalStagesTable steps={workflowData?.steps ?? []} isLoading={workflowDataLoading} phase={doc.builder_workflow_phase} />
+                <ApprovalStagesTable
+                  steps={workflowData?.steps ?? []}
+                  isLoading={workflowDataLoading}
+                  phase={doc.builder_workflow_phase}
+                />
               )}
               <JournalPostingCard
                 documentId={doc.id}
-                expectPosting={sunSystemsPostingEnabled && ["request_approved", "fully_approved"].includes(step)}
+                expectPosting={
+                  sunSystemsPostingEnabled
+                  && (
+                    ["request_approved", "fully_approved"].includes(step)
+                    || imprestPostingGateActive
+                    || lpoPostingGateActive
+                  )
+                }
                 watchKey={`${step}:${doc.updated_at}`}
                 availableStages={availableStages}
               />
@@ -1289,27 +1550,25 @@ export default function FormDetailPage() {
       )}
 
       {awaitingLpo && !generatedLpos.length && (
-        <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
-          <div className="flex w-full max-w-sm items-center gap-3 border border-[#C8CDD2] bg-white px-6 py-5 shadow-2xl">
-            <Loader2 className="h-5 w-5 shrink-0 animate-spin text-[#287EAD]" />
-            <div>
-              <p className="text-sm font-bold text-[#1F2933]">Approval complete</p>
-              <p className="mt-1 text-xs text-[#5E6870]">Preparing the generated LPO…</p>
-            </div>
-          </div>
-        </div>
+        <PostingGateOverlay
+          title="Approval complete"
+          pendingMessage="Preparing the generated LPO after SunSystems returns the purchase order number…"
+          failedPostings={failedLpoGatePostings}
+          retrying={gateRetrying}
+          onRetry={() => void retryGatePostings(failedLpoGatePostings)}
+          onDismiss={dismissLpoGenerationGate}
+        />
       )}
 
       {awaitingImprestPostSince > 0 && (
-        <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
-          <div className="flex w-full max-w-sm items-center gap-3 border border-[#C8CDD2] bg-white px-6 py-5 shadow-2xl">
-            <Loader2 className="h-5 w-5 shrink-0 animate-spin text-[#287EAD]" />
-            <div>
-              <p className="text-sm font-bold text-[#1F2933]">Imprest posting in progress</p>
-              <p className="mt-1 text-xs text-[#5E6870]">The next Request approver will be notified after SunSystems confirms the posting.</p>
-            </div>
-          </div>
-        </div>
+        <PostingGateOverlay
+          title="Imprest posting in progress"
+          pendingMessage="The next Request approver will be notified after SunSystems confirms the posting."
+          failedPostings={failedImprestGatePostings}
+          retrying={gateRetrying}
+          onRetry={() => void retryGatePostings(failedImprestGatePostings)}
+          onDismiss={dismissImprestPostingGate}
+        />
       )}
 
       {workflowActionCompleted && !awaitingLpo && !activeTask && !generatedLpos.length && (
