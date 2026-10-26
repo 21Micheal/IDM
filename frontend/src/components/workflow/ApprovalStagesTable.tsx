@@ -54,9 +54,10 @@ interface ApprovalStagesTableProps {
   steps: WorkflowStep[];
   isLoading?: boolean;
   phase?: "request" | "retirement" | "requisition" | "rfq" | "lpo" | "payment_run" | string | null;
+  retirementAwaitingSubmission?: boolean;
 }
 
-export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalStagesTableProps) {
+export function ApprovalStagesTable({ steps = [], isLoading, phase, retirementAwaitingSubmission = false }: ApprovalStagesTableProps) {
   const [shownEarlierPhases, setShownEarlierPhases] = useState<Set<string>>(new Set());
 
   const taskSteps = useMemo(
@@ -247,6 +248,11 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
             )}
             {rows.map(({ step, number, startGroup }) => {
               const tone = STATUS_TONE[step.status];
+              const statusDisplay = retirementAwaitingSubmission
+                && step.phase === "retirement"
+                && step.status === "pending"
+                ? "Awaiting retirement submission"
+                : step.statusDisplay || step.status;
               return (
                 <Fragment key={step.id}>
                   {startGroup && (
@@ -270,7 +276,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
                       <span className="inline-flex items-center gap-1.5 text-xs font-semibold">
                         <span style={{ color: tone.text }}>{tone.icon}</span>
                         <span style={{ color: tone.text }}>
-                          {step.statusDisplay || step.status}
+                          {statusDisplay}
                         </span>
                       </span>
                     </td>

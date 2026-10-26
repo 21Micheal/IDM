@@ -702,7 +702,7 @@ export interface TravelRetirementConfig {
 
 export interface PrintSignatureSlotConfig {
   /** Workflow phase/lane which supplies this signature. */
-  stage: "requisition" | "rfq" | "lpo" | "retirement" | "imprest_request";
+  stage: "requisition" | "request" | "rfq" | "lpo" | "retirement" | "imprest_request";
   /** __first__ / __last__ selects by approval order; otherwise this is a step name. */
   step: string;
 }
@@ -7707,10 +7707,20 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
     lineManager: { stage: "requisition", step: "__first__" },
     finance: { stage: "requisition", step: "__contains__:finance" },
     bookingOfficer: { stage: "lpo", step: "__contains__:booking officer" },
-    imprestRequest: { stage: "imprest_request", step: "__first__" },
+    imprestRequest: { stage: "request", step: "__first__" },
     authorization: { stage: "lpo", step: "__last__" },
   };
-  const signatureSlots = { ...defaultSignatureSlots, ...(template.print_config?.signatureSlots ?? {}) };
+  const configuredSignatureSlots = template.print_config?.signatureSlots ?? {};
+  const signatureSlots = {
+    ...defaultSignatureSlots,
+    ...configuredSignatureSlots,
+    // Older templates pointed this signature at the independent Imprest lane.
+    // Request approval is now a normal workflow CASE, so migrate the UI value
+    // to that phase while retaining its selected approval step.
+    ...(configuredSignatureSlots.imprestRequest?.stage === "imprest_request"
+      ? { imprestRequest: { ...configuredSignatureSlots.imprestRequest, stage: "request" as const } }
+      : {}),
+  };
   const updateSignatureSlot = (key: keyof NonNullable<PrintConfig["signatureSlots"]>, patch: Partial<PrintSignatureSlotConfig>) => {
     const current = signatureSlots[key] ?? defaultSignatureSlots[key]!;
     onCommit({
@@ -7728,15 +7738,16 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
     { key: "lineManager", label: "Line Manager", help: "The first approval in the selected phase is used by default." },
     { key: "finance", label: "Finance verification", help: "Choose the workflow approval that signs the budget verification." },
     { key: "bookingOfficer", label: "Travel booking", help: "Choose the workflow approval shown beside the Travel Itinerary." },
-    { key: "imprestRequest", label: "Imprest request", help: "Uses the independent Imprest Request approval lane." },
+    { key: "imprestRequest", label: "Imprest request", help: "Uses the approver who approved the Imprest Request CASE." },
     { key: "authorization", label: "Trip authorization", help: "The last approval in the selected phase is used by default." },
   ];
   const phaseOptions = [
     { value: "requisition", label: "Requisition" },
+    { value: "request", label: "Imprest Request" },
     { value: "rfq", label: "RFQ" },
     { value: "lpo", label: "LPO" },
     { value: "retirement", label: "Retirement" },
-    { value: "imprest_request", label: "Imprest Request lane" },
+    { value: "imprest_request", label: "Legacy Imprest Request lane" },
   ];
   const getSignatureStepOptions = (stage: string, selectedStep: string) => {
     const covered = processSteps

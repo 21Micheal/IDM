@@ -1026,6 +1026,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
                         pass
             results.append({
                 "step_name": action.task.step.name,
+                "step_order": action.task.step.order,
                 "signer": {"id": str(actor.pk), "full_name": actor.get_full_name() or actor.email},
                 "signed_at": action.created_at,
                 "signature_data": image_data,

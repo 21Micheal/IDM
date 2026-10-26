@@ -324,6 +324,7 @@ export default function FormDetailPage() {
     | {
       sections?: unknown[];
       values?: Record<string, unknown>;
+      travel_retirement?: { enabled?: boolean };
       imprest_request_workflow_status?: string;
       print_config?: Record<string, any>;
       lpo_document_id?: string;
@@ -603,6 +604,21 @@ export default function FormDetailPage() {
     ...QUERY_SHORT_STALE,
   });
 
+  const refreshRequisitionListings = async () => {
+    await qc.invalidateQueries({ queryKey: ["requisitions"] });
+    await qc.fetchQuery({
+      queryKey: ["requisitions", "pool"],
+      queryFn: () => documentsAPI.list({
+        is_form: true,
+        requisition_summary: true,
+        ordering: "-created_at",
+        page: 1,
+        page_size: 500,
+      }).then((response) => response.data),
+      staleTime: 0,
+    });
+  };
+
   const submitMutation = useMutation({
     mutationFn: async (workflowStage?: "requisition" | "rfq" | "lpo" | "retirement") => {
       // Always gate submission on required fields (including table columns),
@@ -639,7 +655,7 @@ export default function FormDetailPage() {
       }
       return documentsAPI.submit(id!, workflowStage ? { workflow_stage: workflowStage } : undefined);
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       toast.success("Submitted for approval");
       setFormEditing(false);
       formDirtyRef.current = false;
@@ -654,6 +670,14 @@ export default function FormDetailPage() {
       qc.invalidateQueries({ queryKey: ["form", id] });
       qc.invalidateQueries({ queryKey: ["form-workflow", id] });
       qc.invalidateQueries({ queryKey: ["forms"] });
+      try {
+        await refreshRequisitionListings();
+      } catch {
+        // The successful submission should remain successful even if the list
+        // refresh is temporarily unavailable. The invalidated list will retry
+        // when the user returns to it.
+        qc.invalidateQueries({ queryKey: ["requisitions"] });
+      }
     },
     onError: (err: any) => {
       if (err?.message === "FORM_REQUIRED_FIELDS") return;
@@ -798,6 +822,12 @@ export default function FormDetailPage() {
     });
   const retirementOnlyEdit = canEditRetirementSection && isApprovalLockedStatus(step) && !hasActiveApprovalTask;
   const retirementSectionReadOnly = !lpoApproved;
+  const retirementAwaitingSubmission = Boolean(
+    formData?.travel_retirement?.enabled
+    && requisitionApproved
+    && lpoApproved
+    && ["lpo_approved", "retirement_ready"].includes(step),
+  );
   const canEditForm = ["draft", "returned"].includes(doc.status) && canEdit;
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
@@ -1013,16 +1043,7 @@ export default function FormDetailPage() {
     // document cache refreshed by WorkflowActionPanel. Fetch that pool before
     // navigating so its status filter and status badge use the completed state.
     try {
-      await qc.fetchQuery({
-        queryKey: ["requisitions", "pool"],
-        queryFn: () => documentsAPI.list({
-          is_form: true,
-          requisition_summary: true,
-          ordering: "-created_at",
-          page: 1,
-          page_size: 500,
-        }).then((response) => response.data),
-      });
+      await refreshRequisitionListings();
     } catch {
       // RequisitionsPage will retry the now-stale pool query on mount.
       await qc.invalidateQueries({ queryKey: ["requisitions", "pool"] });
@@ -1407,6 +1428,7 @@ export default function FormDetailPage() {
                   steps={workflowData?.steps ?? []}
                   isLoading={workflowDataLoading}
                   phase={doc.builder_workflow_phase}
+                  retirementAwaitingSubmission={retirementAwaitingSubmission}
                 />
               )}
               <JournalPostingCard

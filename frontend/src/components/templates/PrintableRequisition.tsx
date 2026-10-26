@@ -142,14 +142,13 @@ function WorkflowApprovalSignatures({
   showName?: boolean;
   showDate?: boolean;
 }) {
-  const signedRecords: AnyRecord[] = [
-    ...(Array.isArray(document.signatures) ? document.signatures : []),
-    ...(Array.isArray(document.approval_signatures) ? document.approval_signatures : []),
-  ];
+  const explicitSignatureRecords: AnyRecord[] = Array.isArray(document.signatures) ? document.signatures : [];
+  const approvalSignatureRecords: AnyRecord[] = Array.isArray(document.approval_signatures) ? document.approval_signatures : [];
   const isApprovedTask = (step: WorkflowStep) =>
     step.kind === "task"
     && /completed|approved/i.test(String(step.status));
-  const isImprestLane = mapping.stage === "imprest_request";
+  const hasRequestCase = workflowSteps.some((step) => step.phase === "request");
+  const isImprestLane = mapping.stage === "imprest_request" && !hasRequestCase;
   const phase = isImprestLane ? undefined : mapping.stage;
   let approvedSteps = workflowSteps.filter((step) =>
     isApprovedTask(step)
@@ -186,7 +185,14 @@ function WorkflowApprovalSignatures({
     );
   }
   return <div className="rq-print-signatures">{approvedSteps.map((step, index) => {
-    const record = signedRecords.find((item) => normalized(item.step_name) === normalized(step.name));
+    const matchingRecord = (records: AnyRecord[]) => [...records].reverse().find((item) =>
+      normalized(item.step_name) === normalized(step.name)
+      && (item.step_order == null || Number(item.step_order) === Number(step.order)),
+    );
+    // Workflow actions record the person who actually approved. Prefer these
+    // to placement records so delegated/reassigned approvals print the acting
+    // approver's saved signature and name.
+    const record = matchingRecord(approvalSignatureRecords) || matchingRecord(explicitSignatureRecords);
     const image = text(record?.signature_data);
     const name = text(record?.signer?.full_name || step.approver);
     const date = displayDate(record?.signed_at || step.completedAt);
@@ -227,9 +233,12 @@ export default function PrintableRequisition({
     lineManager: { stage: "requisition", step: "__first__" },
     finance: { stage: "requisition", step: "__contains__:finance" },
     bookingOfficer: { stage: "lpo", step: "__contains__:booking officer" },
-    imprestRequest: { stage: "imprest_request", step: "__first__" },
+    imprestRequest: { stage: "request", step: "__first__" },
     authorization: { stage: "lpo", step: "__last__" },
     ...configuredSlots,
+    ...(configuredSlots.imprestRequest?.stage === "imprest_request"
+      ? { imprestRequest: { ...configuredSlots.imprestRequest, stage: "request" } }
+      : {}),
   };
   const { data: activityCodes = [] } = useQuery({
     queryKey: ["print-analysis-codes", "10", businessUnit],
