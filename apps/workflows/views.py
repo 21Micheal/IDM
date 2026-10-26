@@ -126,6 +126,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                     post_imprest_request_after_approval=step.post_imprest_request_after_approval,
                     sla_hours=step.sla_hours, allow_resubmit=step.allow_resubmit,
                     allow_approve=step.allow_approve, allow_reject=step.allow_reject,
+                    approve_button_label=step.approve_button_label,
                     allow_return=step.allow_return,
                     requires_signature=step.requires_signature,
                     instructions=step.instructions,

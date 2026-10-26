@@ -220,6 +220,7 @@ export interface WorkflowTask {
     name: string;
     order: number;
     instructions?: string;
+    approve_button_label?: string;
     allow_approve?: boolean;
     allow_reject?: boolean;
     allow_return?: boolean;

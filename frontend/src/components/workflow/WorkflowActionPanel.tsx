@@ -35,6 +35,7 @@ interface WorkflowTask {
     name: string;
     order: number;
     instructions?: string;
+    approve_button_label?: string;
     allow_approve?: boolean;
     allow_reject?: boolean;
     allow_return?: boolean;
@@ -208,6 +209,10 @@ function TaskHistoryDrawer({ taskId, task, currentUserId: _currentUserId }: { ta
 
 // ── Main panel ────────────────────────────────────────────────────────────────
 export default function WorkflowActionPanel({ task, documentId, onCompleted, onBeforeApprove, variant = "panel" }: Props) {
+  const approveButtonLabel = task.step.approve_button_label?.trim() || "Approve";
+  const approvalConfirmLabel = approveButtonLabel.toLowerCase() === "approve"
+    ? "Confirm Approval"
+    : approveButtonLabel;
   const qc = useQueryClient();
   const currentUser = useAuthStore((s) => s.user);
   const hasDocument = Boolean(documentId);
@@ -514,7 +519,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
                     onClick={() => setActiveAction("approve")}
                     className="inline-flex h-8 items-center gap-1.5 bg-[#287EAD] px-3 text-xs font-semibold text-white hover:bg-[#1E6F99]"
                   >
-                    <CheckCircle className="h-3.5 w-3.5" /> Approve
+                    <CheckCircle className="h-3.5 w-3.5" /> {approveButtonLabel}
                   </button>
                 )}
               </>
@@ -566,7 +571,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
                     className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#206D99] disabled:opacity-50"
                   >
                     {approveMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                    Confirm approval
+                    {approvalConfirmLabel}
                   </button>
                 </div>
               </div>
@@ -830,10 +835,10 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
           {task.step?.allow_approve !== false && (
             <button
               onClick={() => setActiveAction("approve")}
-              title="Approve"
+              title={approveButtonLabel}
               className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] transition-colors"
             >
-              <CheckCircle className="w-3.5 h-3.5" /> Approve
+              <CheckCircle className="w-3.5 h-3.5" /> {approveButtonLabel}
             </button>
           )}
         </div>
@@ -892,11 +897,11 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
             <button
               onClick={confirmApproval}
               disabled={anyPending || (task.requires_signature && !signedResult)}
-              title={task.requires_signature && !signedResult ? "Sign the document first" : "Confirm approval"}
+              title={task.requires_signature && !signedResult ? "Sign the document first" : approvalConfirmLabel}
               className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {approveMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              Confirm approval
+              {approvalConfirmLabel}
             </button>
             <button onClick={resetForm} className="inline-flex items-center border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8]">Cancel</button>
           </div>

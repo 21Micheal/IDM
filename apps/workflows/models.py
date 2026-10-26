@@ -186,6 +186,12 @@ class WorkflowStep(models.Model):
     sla_hours      = models.PositiveSmallIntegerField(default=48)
     allow_resubmit = models.BooleanField(default=True)
     allow_approve  = models.BooleanField(default=True, help_text="Approver can approve at this step")
+    approve_button_label = models.CharField(
+        max_length=80,
+        blank=True,
+        default="",
+        help_text="Optional label for the approval action button. Leave blank to show Approve.",
+    )
     allow_reject   = models.BooleanField(default=True, help_text="Approver can reject at this step")
     allow_return   = models.BooleanField(
         default=True,

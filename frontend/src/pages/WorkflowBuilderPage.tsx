@@ -50,6 +50,7 @@ interface WorkflowStep {
   sla_hours: number;
   allow_resubmit: boolean;
   allow_approve: boolean;
+  approve_button_label?: string;
   allow_reject: boolean;
   /** Approver may send the document back to the PREVIOUS approval on the path it took. */
   allow_return: boolean;
@@ -363,6 +364,7 @@ function normalizeStep(step: WorkflowStep): WorkflowStep {
     assignee_user: isUuidLike(step.assignee_user) ? step.assignee_user : null,
     notify_user: isUuidLike(step.notify_user) ? step.notify_user : (step.notify_user ?? null),
     requires_signature: Boolean(step.requires_signature),
+    approve_button_label: typeof (step as any).approve_button_label === "string" ? (step as any).approve_button_label : "",
     // Templates saved before this option existed keep their behaviour: no return-to-submitter.
     allow_return_submitter: Boolean((step as any).allow_return_submitter),
     approver_email_subject: step.approver_email_subject ?? "",
@@ -488,6 +490,7 @@ function blankStep(): WorkflowStep {
     parallel_lane: null,
     assignee_type: "group_any", assignee_group: null, assignee_user: null, assignee_user_field: "",
     sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, allow_return_submitter: true,
+    approve_button_label: "",
     requires_signature: false, instructions: "",
     approver_email_subject: "", approver_email_body: "",
   };
@@ -1160,6 +1163,22 @@ function StepEditPanel({
                   <div className={clsx("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform", step.allow_approve ? "translate-x-4" : "translate-x-0.5")} />
                 </div>
               </button>
+
+              {step.allow_approve && (
+                <div className="rounded-xl border border-border bg-muted/20 p-3">
+                  <Label>Approval button label</Label>
+                  <input
+                    value={step.approve_button_label ?? ""}
+                    onChange={e => onChange({ approve_button_label: e.target.value })}
+                    maxLength={80}
+                    className={inp}
+                    placeholder="Approve"
+                  />
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Leave blank to use “Approve”. Examples: “Confirm budget” or “Authorize”.
+                  </p>
+                </div>
+              )}
 
               <button
                 type="button"

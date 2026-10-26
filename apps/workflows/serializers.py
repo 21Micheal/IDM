@@ -98,7 +98,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             "assignee_type", "assignee_group", "assignee_group_name",
             "assignee_user", "assignee_user_name", "assignee_user_auto", "assignee_user_field",
             "sla_hours", "allow_resubmit",
-            "allow_approve", "allow_reject", "allow_return", "allow_return_submitter",
+            "allow_approve", "approve_button_label", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
             "instructions",
             # custom approver email
@@ -176,7 +176,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             # approval-step
             "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto", "assignee_user_field",
             "sla_hours", "allow_resubmit",
-            "allow_approve", "allow_reject", "allow_return", "allow_return_submitter",
+            "allow_approve", "approve_button_label", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
             "instructions",
             # custom approver email
@@ -194,6 +194,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "assignee_user_field":    {"required": False, "allow_blank": True},
             "approver_email_subject":  {"required": False, "allow_blank": True},
             "approver_email_body":     {"required": False, "allow_blank": True},
+            "approve_button_label":    {"required": False, "allow_blank": True, "trim_whitespace": True},
             "notify_email":            {"required": False, "allow_blank": True},
             "notify_emails":           {"required": False},
             "notification_subject":    {"required": False, "allow_blank": True},
