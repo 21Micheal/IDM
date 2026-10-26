@@ -231,7 +231,10 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
   const [holdHours, setHoldHours] = useState(24);
   const [returnTo, setReturnTo] = useState<"previous_step" | "uploader">("uploader");
 
-  const canReturnPrevious = Boolean(task.step?.allow_return) && (task.step?.order ?? 1) > 1;
+  // Previous approval can live in an earlier workflow phase, so order 1 in
+  // the current phase does not mean there is no previous approver. The API
+  // resolves and validates the actual workflow history.
+  const canReturnPrevious = Boolean(task.step?.allow_return);
   // Legacy steps only had allow_return; treat that as submitter return when the
   // dedicated flag is absent.
   const canReturnSubmitter = task.step?.allow_return_submitter !== undefined
@@ -613,7 +616,9 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
                 <div>
                   <p className="text-sm font-bold text-[#1F2933]">Return for review</p>
                   <p className="mt-0.5 text-xs text-[#5E6870]">
-                    The workflow pauses here. After rework and resubmit, approval resumes at this step.
+                    {returnTo === "previous_step"
+                      ? "The previous approver will be notified to amend the form. They can only edit and resubmit it; this step will then resume for your review."
+                      : "The submitter will receive the document for changes. After resubmission, approval resumes at this step."}
                   </p>
                 </div>
                 {(canReturnPrevious || canReturnSubmitter) && (
@@ -946,7 +951,9 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
           <div>
             <p className="text-sm font-medium text-foreground">Return for review</p>
             <p className="text-xs text-muted-foreground mt-0.5">
-              The workflow pauses here. After rework and resubmit, approval resumes at this step — it does not restart from the beginning.
+              {returnTo === "previous_step"
+                ? "The previous approver will be notified to amend the form. They can only edit and resubmit it; this step will then resume for your review."
+                : "The submitter will receive the document for changes. After resubmission, approval resumes at this step."}
             </p>
           </div>
           {(canReturnPrevious || canReturnSubmitter) && (

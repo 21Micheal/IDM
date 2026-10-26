@@ -140,6 +140,16 @@ class HasDocumentPermission(permissions.BasePermission):
             return True
         if required_action == GroupAction.SUBMIT.value and is_owner:
             return True
+        from apps.documents.access import returned_rework_editor_id
+        if (
+            (obj.status or "").strip().lower() == "returned"
+            and returned_rework_editor_id(obj) == str(request.user.id)
+            and action in ("update_form", "submit")
+        ):
+            # The workflow explicitly assigned this previous approver as the
+            # rework editor. Keep that grant scoped to the form save/resubmit
+            # endpoints; it does not grant general metadata editing.
+            return True
 
         user_perms = request.user.get_all_permissions_for_doctype(
             document_type_id,

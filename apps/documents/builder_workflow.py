@@ -758,6 +758,12 @@ def user_may_submit_document(user, document: Document) -> bool:
         return False
     if getattr(user, "has_admin_access", False):
         return True
+    from apps.documents.access import returned_rework_editor_id
+    if (
+        (document.status or "").strip().lower() == "returned"
+        and returned_rework_editor_id(document) == str(user.id)
+    ):
+        return True
     if document.uploaded_by_id == user.id or getattr(document, "owned_by_id", None) == user.id:
         return True
     from apps.accounts.models import GroupAction

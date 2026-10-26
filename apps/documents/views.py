@@ -546,6 +546,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             access_filter = (
                 models.Q(uploaded_by=user) |
                 models.Q(owned_by=user) |
+                models.Q(metadata__form__return_for_rework__editor_id=str(user.id)) |
                 models.Q(
                     workflow_instance__tasks__assigned_to=user,
                     workflow_instance__tasks__status__in=["in_progress", "held", "awaiting_posting"],
@@ -1395,11 +1396,18 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # Returned forms are back with their submitter for amendments. Their
         # visibility/editability rules should resolve as they did in draft;
         # other viewers retain the actual returned/workflow process step.
+        from apps.documents.access import returned_rework_editor_id
         if (
             (doc.status or "").strip().lower() == "returned"
             and doc.uploaded_by_id == request.user.id
         ):
             process_step = "draft"
+        elif (
+            (doc.status or "").strip().lower() == "returned"
+            and returned_rework_editor_id(doc) == str(request.user.id)
+        ):
+            handoff = ((doc.metadata or {}).get("form") or {}).get("return_for_rework") or {}
+            process_step = handoff.get("editor_process_step") or process_step
         viewer = viewer_for_user(request.user)
         prior_render = descriptors_to_names(prior_values)
         lpo_approved = "lpo" in completed_procurement_stages(doc)

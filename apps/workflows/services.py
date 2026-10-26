@@ -373,6 +373,17 @@ class WorkflowService:
                     WorkflowService._activate_v2_step(existing)
                 else:
                     WorkflowService._activate_step(existing, order=existing.current_step_order)
+            if document is not None:
+                metadata = dict(document.metadata or {})
+                form = dict(metadata.get("form") or {})
+                handoff = form.pop("return_for_rework", None)
+                if handoff is not None:
+                    form["last_return_for_rework"] = handoff
+                    if form.get("imprest_request_workflow_status") == "returned":
+                        form["imprest_request_workflow_status"] = "in_progress"
+                    metadata["form"] = form
+                    document.metadata = metadata
+                    WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
             return existing
 
         rule, template = WorkflowService._resolve_routing(document)
@@ -640,8 +651,33 @@ class WorkflowService:
         if return_to not in ["previous_step", "uploader", "same_step"]:
             raise WorkflowError(f"Invalid return_to value: {return_to}")
 
-        if return_to == "previous_step" and task.step.order <= 1:
-            raise WorkflowError("There is no previous step to return to.")
+        previous_step = None
+        previous_phase_task = None
+        if return_to == "previous_step":
+            previous_step = WorkflowService._previous_approval_step(
+                instance,
+                current_order=task.step.order,
+                execution_lane=task.execution_lane or "main",
+            )
+            if previous_step is None and instance.document is not None:
+                # Workflow stages can reuse one instance while swapping its
+                # template. If this is the first approval in the active stage,
+                # walk the instance history to find the last completed approval
+                # from the preceding stage, regardless of procurement phase.
+                previous_phase_task = instance.tasks.filter(
+                    execution_lane=task.execution_lane or "main",
+                    status="approved",
+                    acted_at__isnull=False,
+                    step__step_type="approval",
+                    actions__action="approved",
+                    created_at__lt=task.created_at,
+                ).exclude(step=task.step).select_related(
+                    "step", "step__template",
+                ).order_by("-acted_at", "-created_at").first()
+                if previous_phase_task is not None:
+                    previous_step = previous_phase_task.step
+            if previous_step is None:
+                raise WorkflowError("There is no previous approval step to return to.")
 
         task.status     = "returned"
         task.comment    = comment
@@ -683,32 +719,71 @@ class WorkflowService:
 
         WorkflowService._skip_active_tasks(instance, step_order=current_order, execution_lane=execution_lane)
 
-        # Both destinations pause the instance and keep current_step_order so
-        # resubmission resumes THIS step instead of restarting from step 1.
-        # return_to only controls who is notified / recorded on the action.
-        if execution_lane == "main":
-            doc.status = DocumentStatus.RETURNED
-            update_fields = ["status", "updated_at"]
-            if WorkflowService._document_workflow_phase(doc) == "request":
-                metadata = dict(doc.metadata or {})
-                form = dict(metadata.get("form") or {})
-                form["imprest_request_workflow_status"] = "returned"
-                metadata["form"] = form
-                doc.metadata = metadata
-                update_fields.append("metadata")
-            WorkflowService._save_document(doc, update_fields=update_fields)
-        else:
+        rework_editor = None
+        if return_to == "previous_step" and previous_step is not None:
+            prior_task = previous_phase_task or instance.tasks.filter(
+                step=previous_step,
+                execution_lane=execution_lane,
+                status="approved",
+            ).exclude(pk=task.pk).order_by("-acted_at", "-created_at").first()
+            if prior_task:
+                rework_editor = prior_task.actions.filter(
+                    action="approved", actor__isnull=False,
+                ).order_by("-created_at").values_list("actor_id", flat=True).first()
+            if not rework_editor:
+                raise WorkflowError("The previous approval has no recorded approver to return this document to.")
+
+        # A returned document is a rework handoff. The previous approver gets
+        # edit access and a notification, but no approval task controls. On
+        # resubmission the active workflow cursor reactivates the step that
+        # requested the changes.
+        if execution_lane != "main":
             instance.imprest_request_status = "returned"
             instance.imprest_request_completed_at = timezone.now()
             instance.save(update_fields=["imprest_request_status", "imprest_request_completed_at", "updated_at"])
-            metadata = dict(doc.metadata or {})
-            form = dict(metadata.get("form") or {})
+        doc.status = DocumentStatus.RETURNED
+        metadata = dict(doc.metadata or {})
+        form = dict(metadata.get("form") or {})
+        if return_to == "previous_step":
+            document_phase = WorkflowService._document_workflow_phase(doc)
+            form["return_for_rework"] = {
+                "editor_id": str(rework_editor),
+                "returned_by_task_id": str(task.id),
+                "resume_step_id": str(task.step_id),
+                "execution_lane": execution_lane,
+                "editor_process_step": f"{document_phase}_pending",
+            }
+        else:
+            form.pop("return_for_rework", None)
+        if WorkflowService._document_workflow_phase(doc) == "request":
             form["imprest_request_workflow_status"] = "returned"
-            metadata["form"] = form
-            doc.metadata = metadata
-            WorkflowService._save_document(doc, update_fields=["metadata", "updated_at"])
+        metadata["form"] = form
+        doc.metadata = metadata
+        WorkflowService._save_document(doc, update_fields=["status", "metadata", "updated_at"])
 
-        WorkflowService._notify_action(action, doc)
+        WorkflowService._notify_action(
+            action, doc,
+            extra_recipients=[rework_editor] if rework_editor else [],
+        )
+
+    @staticmethod
+    def _previous_approval_step(
+        instance: WorkflowInstance,
+        *,
+        current_order: int,
+        execution_lane: str = "main",
+    ) -> WorkflowStep | None:
+        """Find the most recent completed approval before this active step."""
+        prior_task = instance.tasks.filter(
+            execution_lane=execution_lane,
+            status="approved",
+            acted_at__isnull=False,
+            step__template_id=instance.template_id,
+            step__order__lt=current_order,
+            step__step_type="approval",
+            actions__action="approved",
+        ).select_related("step").order_by("-acted_at", "-created_at").first()
+        return prior_task.step if prior_task else None
 
     # ── Hold ───────────────────────────────────────────────────────────────
 
@@ -2402,7 +2477,7 @@ class WorkflowService:
     # ── Notifications ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _notify_action(action: WorkflowTaskAction, document) -> None:
+    def _notify_action(action: WorkflowTaskAction, document, extra_recipients=None) -> None:
         from apps.workflows.models import WorkflowTaskActionNotification
 
         template = action.task.workflow_instance.template
@@ -2424,6 +2499,13 @@ class WorkflowService:
             )
         except Exception:
             notify_users = set()
+        if extra_recipients:
+            from django.contrib.auth import get_user_model
+            notify_users.update(
+                get_user_model().objects.filter(
+                    id__in=extra_recipients, is_active=True,
+                )
+            )
 
         if not notify_users:
             if action.action in ("approved", "rejected", "returned"):

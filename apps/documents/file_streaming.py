@@ -22,6 +22,7 @@ from apps.documents.access import (
     document_allows_edit,
     document_allows_form_edit,
     is_built_form_document,
+    returned_rework_editor_id,
     user_has_active_approval_task,
 )
 from apps.documents.models import DMSSettings, Document, DocumentRelationship, DocumentShare, DocumentVersion
@@ -166,6 +167,11 @@ def user_is_involved_with_document(user: User, doc: Document) -> bool:
     if getattr(user, "sees_all_documents", False):
         return True
     if doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id:
+        return True
+    if (
+        str(getattr(doc, "status", "")).strip().lower() == "returned"
+        and returned_rework_editor_id(doc) == str(user.id)
+    ):
         return True
     if user_generated_lpo_for_document(user, doc):
         return True
@@ -332,6 +338,11 @@ def user_can_edit_document(user: User, doc: Document) -> bool:
     if is_built_form_document(doc):
         if not document_allows_form_edit(doc, user=user):
             return False
+        if (
+            str(getattr(doc, "status", "")).strip().lower() == "returned"
+            and returned_rework_editor_id(doc) == str(user.id)
+        ):
+            return True
     elif not document_allows_edit(doc, user=user):
         return False
     document_type_id = str(getattr(doc, "document_type_id", None) or "")
@@ -344,7 +355,13 @@ def user_can_edit_document(user: User, doc: Document) -> bool:
     return GroupAction.EDIT.value in perms or (
         is_built_form_document(doc)
         and GroupAction.APPROVE.value in perms
-        and user_has_active_approval_task(user, doc)
+        and (
+            user_has_active_approval_task(user, doc)
+            or (
+                str(getattr(doc, "status", "")).strip().lower() == "returned"
+                and returned_rework_editor_id(doc) == str(user.id)
+            )
+        )
     )
 
 

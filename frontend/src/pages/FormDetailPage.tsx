@@ -491,8 +491,18 @@ export default function FormDetailPage() {
     // A returned document is back with its submitter for amendments. Evaluate
     // that user's conditions exactly as they would be on a draft; other users
     // continue to see the real workflow step and its narrower permissions.
-    const returnedToSubmitter = doc.status === "returned" && doc.uploaded_by?.id === user?.id;
-    const formProcessStep = returnedToSubmitter ? "draft" : doc.builder_process_step || doc.status;
+    const handoffEditorId = doc.metadata?.form?.return_for_rework?.editor_id;
+    const returnedForRework = doc.status === "returned" && (
+      doc.uploaded_by?.id === user?.id
+      || String(handoffEditorId ?? "") === String(user?.id ?? "")
+    );
+    const returnedToPriorApprover = doc.status === "returned"
+      && String(handoffEditorId ?? "") === String(user?.id ?? "");
+    const formProcessStep = returnedToPriorApprover
+      ? handoffEditorId && doc.metadata?.form?.return_for_rework?.editor_process_step
+        ? doc.metadata.form.return_for_rework.editor_process_step
+        : doc.builder_process_step || doc.status
+      : returnedForRework ? "draft" : doc.builder_process_step || doc.status;
     const viewer = {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
@@ -514,7 +524,7 @@ export default function FormDetailPage() {
       viewer,
     );
     const isEditableApprovalStep = ["request_approved", "requisition_approved", "rfq_approved", "lpo_approved", "retirement_approved"].includes(formProcessStep);
-    if (!formEditing && canEdit && isEditableApprovalStep && !isFinalFormProcessStep(formProcessStep) && hasConfiguredEditableSection) {
+    if (!formEditing && canEdit && (returnedToPriorApprover || (isEditableApprovalStep && !isFinalFormProcessStep(formProcessStep))) && hasConfiguredEditableSection) {
       setFormValues({ ...(formData?.values ?? {}) });
       formDirtyRef.current = false;
       setFormEditing(true);
@@ -741,11 +751,20 @@ export default function FormDetailPage() {
   const hasActiveApprovalTask = Boolean(activeTask && activeTask.status === "in_progress");
 
   function formProcessStep() {
+    const handoffEditorId = doc.metadata?.form?.return_for_rework?.editor_id;
+    const returnedToPriorApprover = doc.status === "returned"
+      && String(handoffEditorId ?? "") === String(user?.id ?? "");
+    if (returnedToPriorApprover) {
+      return doc.metadata?.form?.return_for_rework?.editor_process_step
+        || doc.builder_process_step
+        || doc.status;
+    }
     const returnedToSubmitter = doc.status === "returned" && doc.uploaded_by?.id === user?.id;
     return returnedToSubmitter ? "draft" : doc.builder_process_step || doc.status;
   }
   function canEditConditionalSections() {
-    return hasAdminAccess || isOwnerOrSubmitter || hasActiveApprovalTask;
+    return hasAdminAccess || isOwnerOrSubmitter || hasActiveApprovalTask
+      || (doc.status === "returned" && String(doc.metadata?.form?.return_for_rework?.editor_id ?? "") === String(user?.id ?? ""));
   }
 
   const step = formProcessStep();
@@ -763,6 +782,8 @@ export default function FormDetailPage() {
   const retirementOnlyEdit = canEditRetirementSection && isApprovalLockedStatus(step) && !hasActiveApprovalTask;
   const retirementSectionReadOnly = !lpoApproved;
   const canEditForm = ["draft", "returned"].includes(doc.status) && canEdit;
+  const isReturnedReworkEditor = doc.status === "returned"
+    && String(doc.metadata?.form?.return_for_rework?.editor_id ?? "") === String(user?.id ?? "");
 
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
@@ -784,10 +805,10 @@ export default function FormDetailPage() {
   // Only allow retirement submission if template has multiple stages configured (Stage 2 exists)
   const hasRetirementStage = availableStages.includes(2)
     || Boolean(doc.metadata?.form?.travel_retirement?.enabled);
-  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage
+  const canSubmitRetirement = !isReturnedReworkEditor && Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage
     && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
   const canInitiateRetirement = canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit");
-  const showRetirementSubmit = Boolean(doc.metadata?.form?.travel_retirement?.enabled)
+  const showRetirementSubmit = !isReturnedReworkEditor && Boolean(doc.metadata?.form?.travel_retirement?.enabled)
     && requisitionApproved
     && canInitiateRetirement
     && hasVisibleRetirementEditSection(formData.sections ?? [], formData.values ?? {}, step, {
@@ -796,7 +817,7 @@ export default function FormDetailPage() {
     });
   // Server-computed, travel-aware: requisition -> (rfq | lpo for Travel) -> lpo.
   const procurementNextStage = doc.builder_next_stage ?? null;
-  const canSubmitProcurementStage = Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
+  const canSubmitProcurementStage = !isReturnedReworkEditor && Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
   const canSubmit = canSubmitRequest || canSubmitProcurementStage;
   const submitLabel = canSubmitProcurementStage
     ? `Submit ${procurementNextStage!.toUpperCase()}`
@@ -1129,7 +1150,7 @@ export default function FormDetailPage() {
                     Submit retirement
                   </button>
                 )}
-                {canPreviewSunSystemsPayload && (
+                {!isReturnedReworkEditor && canPreviewSunSystemsPayload && (
                   <button type="button" onClick={() => setShowJournalXml((s) => !s)}
                     className={cn(
                       "inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]",
@@ -1138,13 +1159,13 @@ export default function FormDetailPage() {
                     <FileCode className="h-3.5 w-3.5" /> {isRetirementSubmitted ? "Retirement XML" : purchaseOrderEnabled && isLpoWorkflowStep ? "LPO XML" : "Journal XML"}
                   </button>
                 )}
-                {canDownload && (
+                {!isReturnedReworkEditor && canDownload && (
                   <button type="button" onClick={() => void handlePrintRequisition()}
                     className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
                     <Printer className="h-3.5 w-3.5" /> Print requisition
                   </button>
                 )}
-                {generatedLpos.length > 1 && (
+                {!isReturnedReworkEditor && generatedLpos.length > 1 && (
                   <CustomListbox
                     value={generatedLpoId ?? ""}
                     onChange={(val) => setSelectedLpoId(val)}
@@ -1156,12 +1177,12 @@ export default function FormDetailPage() {
                     ariaLabel="Select LPO"
                   />
                 )}
-                {generatedLpoId && canDownloadLpo && (
+                {!isReturnedReworkEditor && generatedLpoId && canDownloadLpo && (
                   <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99]">
                     <Download className="h-3.5 w-3.5" /> Download LPO
                   </button>
                 )}
-                {generatedLpoId && (
+                {!isReturnedReworkEditor && generatedLpoId && (
                   <button type="button" onClick={() => { setLpoMinimized(false); setLpoModalOpen(true); }} className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
                     <Eye className="h-3.5 w-3.5" /> Open LPO
                   </button>
@@ -1172,7 +1193,7 @@ export default function FormDetailPage() {
                     <Edit2 className="h-3.5 w-3.5" /> Edit form
                   </button>
                 )}
-                {formEditing && (
+                {formEditing && !isReturnedReworkEditor && (
                   <>
                     <button type="button" onClick={cancelFormEdit}
                       disabled={updateFormMutation.isPending || saveFormAsDraftMutation.isPending}
@@ -1465,7 +1486,7 @@ export default function FormDetailPage() {
         )}
       </div>
 
-      {activeTask && (
+        {activeTask && !isReturnedReworkEditor && (
         <div ref={taskPanelRef} className="z-10 shrink-0 border-t border-[#C8CDD2] bg-white">
           <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
             <WorkflowActionPanel

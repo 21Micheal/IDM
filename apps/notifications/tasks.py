@@ -1431,7 +1431,35 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
     )
 
     for recipient in recipients:
-        default_body = f"Hello {recipient.first_name},\n\n{body_tail}"
+        form_meta = ((doc.metadata or {}).get("form") or {}) if doc is not None else {}
+        rework_editor_id = (
+            (form_meta.get("return_for_rework") or {}).get("editor_id")
+            or (form_meta.get("last_return_for_rework") or {}).get("editor_id")
+        )
+        is_rework_editor = (
+            action_type == "returned"
+            and action.return_to == "previous_step"
+            and str(rework_editor_id or "") == str(recipient.id)
+        )
+        recipient_msg = msg
+        recipient_body_tail = body_tail
+        recipient_subject = default_subject
+        if is_rework_editor:
+            recipient_msg = (
+                f"✎ Action required: Please amend {target_type} '{title}' ({reference}) and resubmit it."
+            )
+            recipient_subject = f"DMS — Amend and resubmit: {reference}"
+            recipient_body_tail = (
+                f"You have been asked to amend and resubmit this {target_type}.\n\n"
+                f"  {target_type.capitalize()}: {title}\n"
+                f"  Reference: {reference}\n"
+                f"  Sent back by: {actor_name}\n"
+                f"  Step: {step_name}\n"
+                + reason_line
+                + "\nOpen the form, make the required changes, and select Resubmit. "
+                  "It will return to the step that requested these changes.\n"
+            )
+        default_body = f"Hello {recipient.first_name},\n\n{recipient_body_tail}"
         ctx = dict(
             uploader_name=recipient.first_name,
             document_title=title,
@@ -1446,12 +1474,12 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
         if template_key != "action_other":
             subject, body = _resolve_email(
                 workflow_template, template_key,
-                default_subject, default_body, **ctx,
+                recipient_subject, default_body, **ctx,
             )
         else:
-            subject, body = default_subject, default_body
+            subject, body = recipient_subject, default_body
 
-        _create_notification(recipient, msg, link, "workflow_action")
+        _create_notification(recipient, recipient_msg, link, "workflow_action")
         _send_email(recipient, subject, body, link=link)
 
 

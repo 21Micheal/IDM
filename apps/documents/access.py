@@ -88,6 +88,14 @@ def _document_has_active_workflow(document: Document) -> bool:
     )
 
 
+def returned_rework_editor_id(document: Document):
+    """Return the user id assigned to amend a form sent back for rework."""
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    handoff = form.get("return_for_rework") or {}
+    editor_id = handoff.get("editor_id")
+    return str(editor_id) if editor_id else None
+
+
 def resolve_access_stage(document: Document) -> str:
     """
     Map a document to a lifecycle stage for permission checks.
@@ -417,9 +425,9 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
     # should have creation-stage permissions. Approvers who returned it should
     # not retain creation rights even if their group grants them.
     status_lower = (document.status or "").strip().lower()
-    if status_lower == "returned" and document.uploaded_by_id != user.id:
-        # Non-uploaders only get VIEW permission on returned documents
-        # They cannot edit, upload, submit, or delete
+    rework_editor = status_lower == "returned" and returned_rework_editor_id(document) == str(user.id)
+    if status_lower == "returned" and document.uploaded_by_id != user.id and not rework_editor:
+        # Only the designated prior approver receives creation-stage access.
         return [GroupAction.VIEW.value]
 
     perms = user.get_all_permissions_for_doctype(
@@ -427,6 +435,12 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
         document=document,
     )
     perms = filter_permissions_for_document(user, document, perms)
+    if rework_editor:
+        perms.update({
+            GroupAction.EDIT.value,
+            GroupAction.APPROVE.value,
+            GroupAction.SUBMIT.value,
+        })
     if (
         is_built_form_document(document)
         and GroupAction.APPROVE.value in perms

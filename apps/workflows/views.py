@@ -596,11 +596,6 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
                     {"detail": "Return to previous step is not permitted for this step."},
                     status=403,
                 )
-            if task.step.order <= 1:
-                return Response(
-                    {"detail": "There is no previous step to return to."},
-                    status=400,
-                )
         elif return_to in ("uploader", "same_step"):
             # Legacy templates only had allow_return; treat that as submitter return.
             allow_submitter = getattr(step, "allow_return_submitter", False) or step.allow_return
