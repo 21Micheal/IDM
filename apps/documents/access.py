@@ -398,6 +398,16 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
 
     if not user or not getattr(user, "is_authenticated", False):
         return []
+    status_lower = (document.status or "").strip().lower()
+    assigned_editor_id = returned_rework_editor_id(document)
+    if (
+        status_lower == "returned"
+        and assigned_editor_id
+        and assigned_editor_id != str(user.id)
+    ):
+        # A previous-approver handoff is exclusive, including when the
+        # submitter has administrator access. Admins can still view the form.
+        return [GroupAction.VIEW.value]
     if user.has_admin_access:
         return [
             choice[0]
@@ -421,13 +431,16 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
     if not user_is_involved_with_document(user, document):
         return []
 
-    # CRITICAL FIX: When a document is returned for review, only the uploader
-    # should have creation-stage permissions. Approvers who returned it should
-    # not retain creation rights even if their group grants them.
-    status_lower = (document.status or "").strip().lower()
-    rework_editor = status_lower == "returned" and returned_rework_editor_id(document) == str(user.id)
-    if status_lower == "returned" and document.uploaded_by_id != user.id and not rework_editor:
-        # Only the designated prior approver receives creation-stage access.
+    # A previous-approver return is assigned to one approver only. The uploader
+    # must not inherit edit rights just because they created the document.
+    if status_lower == "returned" and assigned_editor_id:
+        if assigned_editor_id != str(user.id):
+            return [GroupAction.VIEW.value]
+        rework_editor = True
+    else:
+        rework_editor = False
+    if status_lower == "returned" and not assigned_editor_id and document.uploaded_by_id != user.id:
+        # Submitter returns remain limited to the uploader.
         return [GroupAction.VIEW.value]
 
     perms = user.get_all_permissions_for_doctype(

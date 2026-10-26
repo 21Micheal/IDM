@@ -756,13 +756,12 @@ def builder_process_step(document: Document) -> str:
 def user_may_submit_document(user, document: Document) -> bool:
     if not user or not getattr(user, "is_authenticated", False):
         return False
-    if getattr(user, "has_admin_access", False):
-        return True
     from apps.documents.access import returned_rework_editor_id
-    if (
-        (document.status or "").strip().lower() == "returned"
-        and returned_rework_editor_id(document) == str(user.id)
-    ):
+    status_lower = (document.status or "").strip().lower()
+    assigned_editor_id = returned_rework_editor_id(document)
+    if status_lower == "returned" and assigned_editor_id:
+        return assigned_editor_id == str(user.id)
+    if getattr(user, "has_admin_access", False):
         return True
     if document.uploaded_by_id == user.id or getattr(document, "owned_by_id", None) == user.id:
         return True

@@ -331,6 +331,13 @@ def user_can_download_document(user: User, doc: Document) -> bool:
 def user_can_edit_document(user: User, doc: Document) -> bool:
     if not user or not user.is_authenticated:
         return False
+    assigned_editor_id = returned_rework_editor_id(doc)
+    if (
+        str(getattr(doc, "status", "")).strip().lower() == "returned"
+        and assigned_editor_id
+        and assigned_editor_id != str(user.id)
+    ):
+        return False
     if user.has_admin_access:
         return True
     if getattr(doc, "is_self_upload", False):

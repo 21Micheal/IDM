@@ -1248,7 +1248,11 @@ def clear_resolved_task_notifications(task_id: str) -> None:
 # ── Workflow action (approve, reject, held, released, returned) ────────────────
 
 @shared_task(queue="notifications")
-def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
+def notify_workflow_action(
+    action_id: str,
+    user_ids: list[str] = None,
+    exclude_user_ids: list[str] = None,
+) -> None:
     """
     Notify users of any workflow action: approve, reject, hold, release, return.
     Sends both in-app and email notifications with context-specific messages.
@@ -1288,6 +1292,9 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
         for user in User.objects.filter(id__in=user_ids, is_active=True):
             if _is_notifiable_user(user) and all(user.id != r.id for r in recipients):
                 recipients.append(user)
+    if exclude_user_ids:
+        excluded = {str(user_id) for user_id in exclude_user_ids}
+        recipients = [recipient for recipient in recipients if str(recipient.id) not in excluded]
 
     if not recipients:
         logger.warning(
@@ -1429,17 +1436,24 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
         f"{action.hold_hours} hour{'s' if action.hold_hours != 1 else ''}"
         if action.hold_hours else "indefinitely"
     )
+    rework_editor_id = None
+    if action_type == "returned" and action.return_to == "previous_step":
+        previous_approval = WorkflowTaskAction.objects.filter(
+            task__workflow_instance=instance,
+            task__execution_lane=task.execution_lane or "main",
+            task__step__step_type="approval",
+            action="approved",
+            actor__isnull=False,
+            created_at__lt=task.created_at,
+        ).order_by("-created_at").first()
+        if previous_approval:
+            rework_editor_id = str(previous_approval.actor_id)
 
     for recipient in recipients:
-        form_meta = ((doc.metadata or {}).get("form") or {}) if doc is not None else {}
-        rework_editor_id = (
-            (form_meta.get("return_for_rework") or {}).get("editor_id")
-            or (form_meta.get("last_return_for_rework") or {}).get("editor_id")
-        )
         is_rework_editor = (
             action_type == "returned"
             and action.return_to == "previous_step"
-            and str(rework_editor_id or "") == str(recipient.id)
+            and rework_editor_id == str(recipient.id)
         )
         recipient_msg = msg
         recipient_body_tail = body_tail

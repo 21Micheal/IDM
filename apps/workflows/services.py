@@ -651,32 +651,20 @@ class WorkflowService:
         if return_to not in ["previous_step", "uploader", "same_step"]:
             raise WorkflowError(f"Invalid return_to value: {return_to}")
 
-        previous_step = None
-        previous_phase_task = None
+        previous_approval_action = None
         if return_to == "previous_step":
-            previous_step = WorkflowService._previous_approval_step(
-                instance,
-                current_order=task.step.order,
-                execution_lane=task.execution_lane or "main",
-            )
-            if previous_step is None and instance.document is not None:
-                # Workflow stages can reuse one instance while swapping its
-                # template. If this is the first approval in the active stage,
-                # walk the instance history to find the last completed approval
-                # from the preceding stage, regardless of procurement phase.
-                previous_phase_task = instance.tasks.filter(
-                    execution_lane=task.execution_lane or "main",
-                    status="approved",
-                    acted_at__isnull=False,
-                    step__step_type="approval",
-                    actions__action="approved",
-                    created_at__lt=task.created_at,
-                ).exclude(step=task.step).select_related(
-                    "step", "step__template",
-                ).order_by("-acted_at", "-created_at").first()
-                if previous_phase_task is not None:
-                    previous_step = previous_phase_task.step
-            if previous_step is None:
+            # CASE branches can have unrelated numeric step orders. The actual
+            # previous approver is the last approval action completed before
+            # this task was created, regardless of phase or branch.
+            previous_approval_action = WorkflowTaskAction.objects.filter(
+                task__workflow_instance=instance,
+                task__execution_lane=task.execution_lane or "main",
+                task__step__step_type="approval",
+                action="approved",
+                actor__isnull=False,
+                created_at__lt=task.created_at,
+            ).select_related("task__step__template", "actor").order_by("-created_at").first()
+            if previous_approval_action is None:
                 raise WorkflowError("There is no previous approval step to return to.")
 
         task.status     = "returned"
@@ -719,19 +707,7 @@ class WorkflowService:
 
         WorkflowService._skip_active_tasks(instance, step_order=current_order, execution_lane=execution_lane)
 
-        rework_editor = None
-        if return_to == "previous_step" and previous_step is not None:
-            prior_task = previous_phase_task or instance.tasks.filter(
-                step=previous_step,
-                execution_lane=execution_lane,
-                status="approved",
-            ).exclude(pk=task.pk).order_by("-acted_at", "-created_at").first()
-            if prior_task:
-                rework_editor = prior_task.actions.filter(
-                    action="approved", actor__isnull=False,
-                ).order_by("-created_at").values_list("actor_id", flat=True).first()
-            if not rework_editor:
-                raise WorkflowError("The previous approval has no recorded approver to return this document to.")
+        rework_editor = previous_approval_action.actor_id if previous_approval_action else None
 
         # A returned document is a rework handoff. The previous approver gets
         # edit access and a notification, but no approval task controls. On
@@ -745,7 +721,10 @@ class WorkflowService:
         metadata = dict(doc.metadata or {})
         form = dict(metadata.get("form") or {})
         if return_to == "previous_step":
-            document_phase = WorkflowService._document_workflow_phase(doc)
+            document_phase = (
+                WorkflowService._phase_for_step(previous_approval_action.task.step)
+                or WorkflowService._document_workflow_phase(doc)
+            )
             form["return_for_rework"] = {
                 "editor_id": str(rework_editor),
                 "returned_by_task_id": str(task.id),
@@ -764,26 +743,53 @@ class WorkflowService:
         WorkflowService._notify_action(
             action, doc,
             extra_recipients=[rework_editor] if rework_editor else [],
+            exclude_recipients=(
+                [
+                    value for value in (doc.uploaded_by_id, doc.owned_by_id)
+                    if value and str(value) != str(rework_editor)
+                ]
+                if return_to == "previous_step" else []
+            ),
         )
 
     @staticmethod
-    def _previous_approval_step(
-        instance: WorkflowInstance,
-        *,
-        current_order: int,
-        execution_lane: str = "main",
-    ) -> WorkflowStep | None:
-        """Find the most recent completed approval before this active step."""
-        prior_task = instance.tasks.filter(
-            execution_lane=execution_lane,
-            status="approved",
-            acted_at__isnull=False,
-            step__template_id=instance.template_id,
-            step__order__lt=current_order,
-            step__step_type="approval",
-            actions__action="approved",
-        ).select_related("step").order_by("-acted_at", "-created_at").first()
-        return prior_task.step if prior_task else None
+    def _phase_for_step(step: WorkflowStep) -> str | None:
+        """Resolve the context.phase CASE containing a step in a v2 graph."""
+        definition = getattr(step.template, "definition", None) or {}
+        target_id = str(step.node_id or "")
+        if not target_id:
+            return None
+
+        def visit(blocks, phase=None):
+            if not isinstance(blocks, list):
+                return None
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if str(block.get("id") or "") == target_id:
+                    return phase
+                if block.get("kind") == "switch":
+                    phase_switch = str(block.get("field_id") or "").strip() == "context.phase"
+                    for case in block.get("cases") or []:
+                        if not isinstance(case, dict):
+                            continue
+                        case_values = case.get("values") or []
+                        case_phase_value = case.get("label") or (case_values[0] if case_values else "")
+                        case_phase = str(case_phase_value).strip().lower() if phase_switch else phase
+                        found = visit(case.get("blocks") or [], case_phase)
+                        if found:
+                            return found
+                    found = visit(block.get("default_blocks") or [], phase)
+                    if found:
+                        return found
+                else:
+                    for key in ("blocks", "then_blocks", "else_blocks", "true_blocks", "false_blocks"):
+                        found = visit(block.get(key) or [], phase)
+                        if found:
+                            return found
+            return None
+
+        return visit(definition.get("blocks") or [])
 
     # ── Hold ───────────────────────────────────────────────────────────────
 
@@ -2477,7 +2483,12 @@ class WorkflowService:
     # ── Notifications ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _notify_action(action: WorkflowTaskAction, document, extra_recipients=None) -> None:
+    def _notify_action(
+        action: WorkflowTaskAction,
+        document,
+        extra_recipients=None,
+        exclude_recipients=None,
+    ) -> None:
         from apps.workflows.models import WorkflowTaskActionNotification
 
         template = action.task.workflow_instance.template
@@ -2506,6 +2517,9 @@ class WorkflowService:
                     id__in=extra_recipients, is_active=True,
                 )
             )
+        excluded_ids = {str(user_id) for user_id in (exclude_recipients or [])}
+        if excluded_ids:
+            notify_users = {user for user in notify_users if str(user.id) not in excluded_ids}
 
         if not notify_users:
             if action.action in ("approved", "rejected", "returned"):
@@ -2528,8 +2542,11 @@ class WorkflowService:
             from apps.notifications.tasks import notify_workflow_action
             action_id = str(action.id)
             user_id_list = [str(u.id) for u in notify_users]
+            excluded_user_ids = list(excluded_ids)
             _queue_after_commit(
-                lambda aid=action_id, uids=user_id_list: notify_workflow_action.delay(aid, uids)
+                lambda aid=action_id, uids=user_id_list, xids=excluded_user_ids: notify_workflow_action.delay(
+                    aid, uids, xids,
+                )
             )
         except Exception:
             pass

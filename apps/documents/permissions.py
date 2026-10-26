@@ -84,6 +84,21 @@ class HasDocumentPermission(permissions.BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
 
+        action = getattr(view, "action", None)
+        if (obj.status or "").strip().lower() == "returned":
+            from apps.documents.access import returned_rework_editor_id
+            assigned_editor_id = returned_rework_editor_id(obj)
+            write_actions = {
+                "update_form", "submit", "edit_metadata", "partial_update",
+                "update", "upload_version", "delete", "archive",
+            }
+            if (
+                assigned_editor_id
+                and assigned_editor_id != str(request.user.id)
+                and action in write_actions
+            ):
+                return False
+
         if request.user.has_admin_access:
             return True
 
@@ -138,9 +153,16 @@ class HasDocumentPermission(permissions.BasePermission):
         # Involved users can always read; owners can also submit (e.g. after a return).
         if required_action == GroupAction.VIEW.value:
             return True
+        from apps.documents.access import returned_rework_editor_id
+        if (obj.status or "").strip().lower() == "returned":
+            assigned_editor_id = returned_rework_editor_id(obj)
+            if assigned_editor_id and action in ("update_form", "submit"):
+                # A previous-step return is assigned exclusively to that
+                # approver. The submitter must not inherit their edit/resubmit
+                # actions merely because they own the document.
+                return assigned_editor_id == str(request.user.id)
         if required_action == GroupAction.SUBMIT.value and is_owner:
             return True
-        from apps.documents.access import returned_rework_editor_id
         if (
             (obj.status or "").strip().lower() == "returned"
             and returned_rework_editor_id(obj) == str(request.user.id)

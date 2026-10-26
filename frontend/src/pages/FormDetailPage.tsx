@@ -264,6 +264,7 @@ export default function FormDetailPage() {
   const [activeTab, setActiveTab] = useState<TabId>("workflow");
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [formEditing, setFormEditing] = useState(false);
+  const [reworkResubmitted, setReworkResubmitted] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const formDirtyRef = useRef(false);
   const [showJournalXml, setShowJournalXml] = useState(false);
@@ -487,19 +488,20 @@ export default function FormDetailPage() {
   useEffect(() => {
     if (!doc) return;
     const hasAdminAccess = Boolean(user?.has_admin_access);
-    const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
-    // A returned document is back with its submitter for amendments. Evaluate
-    // that user's conditions exactly as they would be on a draft; other users
-    // continue to see the real workflow step and its narrower permissions.
     const handoffEditorId = doc.metadata?.form?.return_for_rework?.editor_id;
-    const returnedForRework = doc.status === "returned" && (
-      doc.uploaded_by?.id === user?.id
-      || String(handoffEditorId ?? "") === String(user?.id ?? "")
-    );
-    const returnedToPriorApprover = doc.status === "returned"
+    const hasPreviousApproverHandoff = doc.status === "returned" && Boolean(handoffEditorId);
+    const isAssignedReworkEditor = hasPreviousApproverHandoff
       && String(handoffEditorId ?? "") === String(user?.id ?? "");
-    const formProcessStep = returnedToPriorApprover
-      ? handoffEditorId && doc.metadata?.form?.return_for_rework?.editor_process_step
+    const isUnassignedHandoffViewer = hasPreviousApproverHandoff && !isAssignedReworkEditor;
+    const canEdit = !isUnassignedHandoffViewer
+      && (hasAdminAccess || (doc.permissions ?? []).includes("edit"));
+    const returnedForRework = isAssignedReworkEditor || (
+      doc.status === "returned"
+      && !hasPreviousApproverHandoff
+      && doc.uploaded_by?.id === user?.id
+    );
+    const formProcessStep = isAssignedReworkEditor
+      ? doc.metadata?.form?.return_for_rework?.editor_process_step
         ? doc.metadata.form.return_for_rework.editor_process_step
         : doc.builder_process_step || doc.status
       : returnedForRework ? "draft" : doc.builder_process_step || doc.status;
@@ -524,7 +526,7 @@ export default function FormDetailPage() {
       viewer,
     );
     const isEditableApprovalStep = ["request_approved", "requisition_approved", "rfq_approved", "lpo_approved", "retirement_approved"].includes(formProcessStep);
-    if (!formEditing && canEdit && (returnedToPriorApprover || (isEditableApprovalStep && !isFinalFormProcessStep(formProcessStep))) && hasConfiguredEditableSection) {
+    if (!formEditing && canEdit && (isAssignedReworkEditor || (isEditableApprovalStep && !isFinalFormProcessStep(formProcessStep))) && hasConfiguredEditableSection) {
       setFormValues({ ...(formData?.values ?? {}) });
       formDirtyRef.current = false;
       setFormEditing(true);
@@ -641,6 +643,14 @@ export default function FormDetailPage() {
       toast.success("Submitted for approval");
       setFormEditing(false);
       formDirtyRef.current = false;
+      const reworkEditorId = doc?.metadata?.form?.return_for_rework?.editor_id;
+      const resubmittedByPreviousApprover = doc?.status === "returned"
+        && Boolean(reworkEditorId)
+        && String(reworkEditorId) === String(user?.id ?? "");
+      if (resubmittedByPreviousApprover) {
+        setReworkResubmitted(true);
+        setWorkflowActionCompleted(false);
+      }
       qc.invalidateQueries({ queryKey: ["form", id] });
       qc.invalidateQueries({ queryKey: ["form-workflow", id] });
       qc.invalidateQueries({ queryKey: ["forms"] });
@@ -743,28 +753,35 @@ export default function FormDetailPage() {
 
   const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
   const hasAdminAccess = Boolean(user?.has_admin_access);
-  const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
+  const handoffEditorId = doc.metadata?.form?.return_for_rework?.editor_id;
+  const hasPreviousApproverHandoff = doc.status === "returned" && Boolean(handoffEditorId);
+  const isReturnedReworkEditor = hasPreviousApproverHandoff
+    && String(handoffEditorId ?? "") === String(user?.id ?? "");
+  const isUnassignedHandoffViewer = hasPreviousApproverHandoff && !isReturnedReworkEditor;
+  const canEdit = !isUnassignedHandoffViewer
+    && (hasAdminAccess || (doc.permissions ?? []).includes("edit"));
   const canDownload = hasAdminAccess || (doc.permissions ?? []).includes("download");
   const canDownloadLpo = hasAdminAccess || (lpoDocumentQuery.data?.permissions ?? []).includes("download");
   const canComment = hasAdminAccess || (doc.permissions ?? []).includes("comment");
-  const canApprove = hasAdminAccess || (doc.permissions ?? []).includes("approve");
+  const canApprove = !isUnassignedHandoffViewer
+    && (hasAdminAccess || (doc.permissions ?? []).includes("approve"));
   const hasActiveApprovalTask = Boolean(activeTask && activeTask.status === "in_progress");
 
   function formProcessStep() {
-    const handoffEditorId = doc.metadata?.form?.return_for_rework?.editor_id;
-    const returnedToPriorApprover = doc.status === "returned"
-      && String(handoffEditorId ?? "") === String(user?.id ?? "");
-    if (returnedToPriorApprover) {
+    if (isReturnedReworkEditor) {
       return doc.metadata?.form?.return_for_rework?.editor_process_step
         || doc.builder_process_step
         || doc.status;
     }
-    const returnedToSubmitter = doc.status === "returned" && doc.uploaded_by?.id === user?.id;
+    const returnedToSubmitter = doc.status === "returned"
+      && !hasPreviousApproverHandoff
+      && doc.uploaded_by?.id === user?.id;
     return returnedToSubmitter ? "draft" : doc.builder_process_step || doc.status;
   }
   function canEditConditionalSections() {
-    return hasAdminAccess || isOwnerOrSubmitter || hasActiveApprovalTask
-      || (doc.status === "returned" && String(doc.metadata?.form?.return_for_rework?.editor_id ?? "") === String(user?.id ?? ""));
+    return !isUnassignedHandoffViewer && (
+      hasAdminAccess || isOwnerOrSubmitter || hasActiveApprovalTask || isReturnedReworkEditor
+    );
   }
 
   const step = formProcessStep();
@@ -782,9 +799,6 @@ export default function FormDetailPage() {
   const retirementOnlyEdit = canEditRetirementSection && isApprovalLockedStatus(step) && !hasActiveApprovalTask;
   const retirementSectionReadOnly = !lpoApproved;
   const canEditForm = ["draft", "returned"].includes(doc.status) && canEdit;
-  const isReturnedReworkEditor = doc.status === "returned"
-    && String(doc.metadata?.form?.return_for_rework?.editor_id ?? "") === String(user?.id ?? "");
-
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
   const purchaseOrderEnabled = Boolean(doc.metadata?.sunsystems?.purchase_order?.enabled)
@@ -800,15 +814,16 @@ export default function FormDetailPage() {
   const payloadInitialStage = isRetirementSubmitted ? 2 : (purchaseOrderEnabled && isLpoWorkflowStep ? 1000 : 1);
   const isRetirementFinalized = isRetirementPhase && isFinalFormProcessStep(step);
   const canSubmitRequest = ["draft", "returned"].includes(doc.status)
+    && !isUnassignedHandoffViewer
     && (!isRetirementPhase || doc.status === "returned")
     && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
   // Only allow retirement submission if template has multiple stages configured (Stage 2 exists)
   const hasRetirementStage = availableStages.includes(2)
     || Boolean(doc.metadata?.form?.travel_retirement?.enabled);
-  const canSubmitRetirement = !isReturnedReworkEditor && Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage
+  const canSubmitRetirement = !isUnassignedHandoffViewer && !isReturnedReworkEditor && Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage
     && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
   const canInitiateRetirement = canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit");
-  const showRetirementSubmit = !isReturnedReworkEditor && Boolean(doc.metadata?.form?.travel_retirement?.enabled)
+  const showRetirementSubmit = !isUnassignedHandoffViewer && !isReturnedReworkEditor && Boolean(doc.metadata?.form?.travel_retirement?.enabled)
     && requisitionApproved
     && canInitiateRetirement
     && hasVisibleRetirementEditSection(formData.sections ?? [], formData.values ?? {}, step, {
@@ -817,7 +832,7 @@ export default function FormDetailPage() {
     });
   // Server-computed, travel-aware: requisition -> (rfq | lpo for Travel) -> lpo.
   const procurementNextStage = doc.builder_next_stage ?? null;
-  const canSubmitProcurementStage = !isReturnedReworkEditor && Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
+  const canSubmitProcurementStage = !isUnassignedHandoffViewer && !isReturnedReworkEditor && Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
   const canSubmit = canSubmitRequest || canSubmitProcurementStage;
   const submitLabel = canSubmitProcurementStage
     ? `Submit ${procurementNextStage!.toUpperCase()}`
@@ -992,6 +1007,27 @@ export default function FormDetailPage() {
     if (formEditing && formDirtyRef.current) {
       await updateFormMutation.mutateAsync();
     }
+  };
+  const dismissWorkflowCompletion = async () => {
+    // RequisitionsPage renders from its own capped pool query, not the detail
+    // document cache refreshed by WorkflowActionPanel. Fetch that pool before
+    // navigating so its status filter and status badge use the completed state.
+    try {
+      await qc.fetchQuery({
+        queryKey: ["requisitions", "pool"],
+        queryFn: () => documentsAPI.list({
+          is_form: true,
+          requisition_summary: true,
+          ordering: "-created_at",
+          page: 1,
+          page_size: 500,
+        }).then((response) => response.data),
+      });
+    } catch {
+      // RequisitionsPage will retry the now-stale pool query on mount.
+      await qc.invalidateQueries({ queryKey: ["requisitions", "pool"] });
+    }
+    navigate("/list", { replace: true });
   };
 
   // Leaving edit mode throws away unsaved work — always confirm first.
@@ -1208,7 +1244,7 @@ export default function FormDetailPage() {
                     <Eye className="h-3.5 w-3.5" /> Open LPO
                   </button>
                 )}
-                {!formEditing && canEditForm && (
+                {!formEditing && canEditForm && !reworkResubmitted && (
                   <button type="button" onClick={startFormEdit}
                     className="inline-flex items-center gap-1.5 border border-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]">
                     <Edit2 className="h-3.5 w-3.5" /> Edit form
@@ -1634,7 +1670,7 @@ export default function FormDetailPage() {
         />
       )}
 
-      {workflowActionCompleted && !awaitingLpo && !activeTask && !generatedLpos.length && (
+      {(reworkResubmitted || (workflowActionCompleted && !awaitingLpo && !activeTask && !generatedLpos.length)) && (
         <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
           <div
             role="alertdialog"
@@ -1644,16 +1680,18 @@ export default function FormDetailPage() {
           >
             <div className="px-6 pt-5 pb-4">
               <h2 id="workflow-complete-title" className="text-sm font-bold text-[#1F2933]">
-                Workflow action complete
+                {reworkResubmitted ? "Form resubmitted" : "Workflow action complete"}
               </h2>
               <p className="mt-1.5 text-xs leading-relaxed text-[#5E6870]">
-                This form has moved to the next stage and is no longer actionable from your current access level.
+                {reworkResubmitted
+                  ? "Your changes have been submitted back into the workflow. Close this form to return to the requisitions list."
+                  : "This form has moved to the next stage and is no longer actionable from your current access level."}
               </p>
             </div>
             <div className="flex justify-center pb-5">
               <button
                 type="button"
-                onClick={() => navigate("/list", { replace: true })}
+                onClick={() => void dismissWorkflowCompletion()}
                 className="inline-flex items-center bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors"
               >
                 OK
