@@ -1456,7 +1456,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
           <span className="ml-2 font-normal text-muted-foreground">{field.helpText ?? field.help_text}</span>
         )}
       </div>
-      <div className="overflow-x-auto rounded-xl border border-border bg-white shadow-sm">
+      <div className="overflow-x-auto border border-border bg-white shadow-sm">
         <div className="min-w-full">
           <table className="w-full text-sm border-separate border-spacing-0">
             <thead>

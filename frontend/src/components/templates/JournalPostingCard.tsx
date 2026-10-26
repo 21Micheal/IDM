@@ -223,6 +223,7 @@ export default function JournalPostingCard({
   // Tracks seconds since last successful fetch for the live indicator.
   const [secondsAgo, setSecondsAgo]     = useState(0);
   const lastFetchRef                     = useRef<number>(Date.now());
+  const previousStatusesRef = useRef<Record<number, string>>({});
 
   const { data: serverPostings, isLoading, isFetching, refetch } = useQuery({
     queryKey: ["sunsystems-postings", documentId, watchKey ?? ""],
@@ -242,6 +243,35 @@ export default function JournalPostingCard({
     refetchOnWindowFocus: true,
     staleTime: 0,
   });
+
+  // Journal posting runs asynchronously after the workflow action returns.
+  // When polling first observes success, refresh the document/form and
+  // workflow queries too: those carry generated LPO links, gate state, and the
+  // next approval task, and otherwise can remain stale until their own poll.
+  useEffect(() => {
+    if (!serverPostings?.length) return;
+    const previous = previousStatusesRef.current;
+    const newlyPosted = serverPostings.some((posting) =>
+      posting.status === "posted"
+      && previous[posting.stage] !== undefined
+      && previous[posting.stage] !== "posted",
+    );
+    previousStatusesRef.current = Object.fromEntries(
+      serverPostings.map((posting) => [posting.stage, posting.status]),
+    );
+    if (!newlyPosted) return;
+
+    void Promise.all([
+      qc.invalidateQueries({ queryKey: ["form", documentId] }),
+      qc.invalidateQueries({ queryKey: ["document", documentId] }),
+      qc.invalidateQueries({ queryKey: ["form-workflow", documentId] }),
+      qc.invalidateQueries({ queryKey: ["document-workflow", documentId] }),
+      qc.invalidateQueries({ queryKey: ["notification-workflow", documentId] }),
+      qc.invalidateQueries({ queryKey: ["workflow", "instances", documentId] }),
+      qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] }),
+      qc.invalidateQueries({ queryKey: ["documents"] }),
+    ]);
+  }, [documentId, qc, serverPostings]);
 
   // Tick the "updated X ago" counter every second.
   useEffect(() => {
