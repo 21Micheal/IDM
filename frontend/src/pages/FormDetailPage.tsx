@@ -1473,7 +1473,17 @@ export default function FormDetailPage() {
               documentId={id!}
               variant="bar"
               onBeforeApprove={savePendingFormEditsBeforeApproval}
-              onCompleted={() => {
+              onCompleted={(action) => {
+                // Only a successful approval can trigger a configured posting
+                // checkpoint. Reject/return/hold must never show a posting
+                // spinner for this step while the completion overlay opens.
+                if (action !== "approve") {
+                  setAwaitingLpo(false);
+                  setAwaitingImprestPostSince(0);
+                  setGateRetrying(false);
+                  setWorkflowActionCompleted(true);
+                  return;
+                }
                 setWorkflowActionCompleted(false);
                 const phase = String((formData as any)?.workflow_phase ?? doc?.builder_workflow_phase ?? "").toLowerCase();
                 const lpoApprovalSteps = (workflowData?.steps ?? []).filter((step) =>

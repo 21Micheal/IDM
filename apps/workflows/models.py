@@ -454,6 +454,7 @@ class WorkflowTask(models.Model):
         ("pending",     "Pending"),
         ("in_progress", "In Progress"),
         ("approved",    "Approved"),
+        ("awaiting_posting", "Awaiting SunSystems posting"),
         ("rejected",    "Rejected"),
         ("returned",    "Returned for Review"),
         ("held",        "On Hold"),

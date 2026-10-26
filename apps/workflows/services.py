@@ -1386,6 +1386,10 @@ class WorkflowService:
 
     @staticmethod
     def _assert_actionable(task: WorkflowTask, instance: WorkflowInstance | None = None) -> None:
+        if task.status == "awaiting_posting":
+            raise WorkflowError(
+                "This approval is complete and is waiting for the SunSystems posting to succeed."
+            )
         if task.status not in ("in_progress", "held"):
             raise WorkflowError(
                 f"This task is '{task.get_status_display()}' and cannot be actioned."
@@ -1937,6 +1941,17 @@ class WorkflowService:
             metadata["form"] = form
             document.metadata = metadata
             WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+            # Keep the checkpoint visible in the approver's queue while the
+            # posting runs. Its recorded approval cannot be actioned twice.
+            instance.tasks.filter(
+                step=step,
+                execution_lane="main",
+                status="approved",
+                actions__action="approved",
+            ).update(status="awaiting_posting", updated_at=timezone.now())
+            WorkflowService._skip_active_tasks(
+                instance, step_order=step.order, execution_lane="main",
+            )
             return True
         except WorkflowError:
             raise
@@ -1982,7 +1997,7 @@ class WorkflowService:
                     if locked.status != "in_progress" or not locked.tasks.filter(
                         step=step,
                         execution_lane="main",
-                        status="approved",
+                        status__in=["approved", "awaiting_posting"],
                         actions__action="approved",
                     ).exists():
                         return False
@@ -2000,6 +2015,12 @@ class WorkflowService:
                     metadata["form"] = form
                     document.metadata = metadata
                     WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+                    locked.tasks.filter(
+                        step=step,
+                        execution_lane="main",
+                        status="awaiting_posting",
+                        actions__action="approved",
+                    ).update(status="approved", updated_at=timezone.now())
                     WorkflowService._advance_step(locked, step.order, task_step_order=step.order)
                 return True
 

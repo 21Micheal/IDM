@@ -295,7 +295,7 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
   // The workflow is still "live" (worth polling) while at least one stage is
   // running or yet to be reached, and it hasn't ended in a rejection.
   const taskSteps = steps.filter((step) => !step.kind || step.kind === "task");
-  const hasActiveTask = orderedTasks.some((task) => ["in_progress", "held"].includes(String(task.status)));
+  const hasActiveTask = orderedTasks.some((task) => ["in_progress", "held", "awaiting_posting"].includes(String(task.status)));
   const isActive = instance?.status === "in_progress"
     || instance?.imprest_request_status === "in_progress"
     || hasActiveTask
@@ -369,7 +369,7 @@ function buildApproverWorkflow(
       .filter(([order]) => !validOrders.has(order))
       .sort(([a], [b]) => a - b);
     for (const [orphanOrder, items] of orphanGroups) {
-      const active = items.some(({ task }) => task.status === "in_progress" || task.status === "held");
+      const active = items.some(({ task }) => ["in_progress", "held", "awaiting_posting"].includes(String(task.status)));
       const isImprestLane = parallelImprestOrders.has(orphanOrder)
         || items.some(({ task }) => task.execution_lane === "imprest_request");
       const laneCursor = isImprestLane ? imprestRequestCurrentStepOrder : currentStepOrder;
@@ -420,7 +420,7 @@ function buildApproverWorkflow(
     const taskWithAssignee = rawStatus === "pending"
       ? undefined
       : rawStatus === "in-progress" || rawStatus === "on-hold"
-        ? items.find((item) => ["in_progress", "held"].includes(String(item.task.status)))
+        ? items.find((item) => ["in_progress", "held", "awaiting_posting"].includes(String(item.task.status)))
         : [...items]
             .filter((item) => ["approved", "rejected", "returned", "notified"].includes(String(item.task.status)))
             .sort((a, b) => Date.parse(String(b.task.acted_at ?? "")) - Date.parse(String(a.task.acted_at ?? "")))[0];
@@ -741,6 +741,7 @@ function mapTaskStatus(taskStatus?: string, action?: string): WorkflowStep["stat
   if (normalizedStatus === "rejected") return "rejected";
   if (normalizedStatus === "returned") return "returned";
   if (normalizedStatus === "held") return "on-hold";
+  if (normalizedStatus === "awaiting_posting") return "in-progress";
   if (normalizedStatus === "in_progress") return "in-progress";
   if (normalizedStatus === "skipped") return "skipped";
   const normalizedAction = String(action ?? "").toLowerCase();

@@ -435,6 +435,11 @@ export default function WorkflowPage() {
                     {!isPaymentRun && <span className="border border-[#E2E7EB] bg-[#F7F9FA] px-2 py-1">{documentFormat}</span>}
                     <span className="border border-[#E2E7EB] bg-[#F7F9FA] px-2 py-1">{department}</span>
                     <span className="border border-[#E2E7EB] bg-[#F7F9FA] px-2 py-1 font-semibold text-[#1F2933]">{task.step.name}</span>
+                    {task.status === "awaiting_posting" && (
+                      <span className="border border-amber-200 bg-amber-50 px-2 py-1 font-semibold text-amber-800">
+                        Awaiting SunSystems posting
+                      </span>
+                    )}
                     {uploaderName && (
                       <span>{isPaymentRun ? "Submitted by" : "Uploader"}: <span className="font-semibold text-[#1F2933]">{uploaderName}</span></span>
                     )}

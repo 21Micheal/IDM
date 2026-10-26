@@ -8,6 +8,7 @@ from apps.accounts.models import User, UserDelegation
 from apps.workflows.models import WorkflowTask
 
 ACTIVE_TASK_STATUSES = ("in_progress", "held")
+VISIBLE_TASK_STATUSES = (*ACTIVE_TASK_STATUSES, "awaiting_posting")
 
 
 def active_delegations_qs(
@@ -41,13 +42,13 @@ def delegation_covers_task(delegation: UserDelegation, task: WorkflowTask) -> bo
     return True
 
 
-def delegated_tasks_q(delegate: User) -> Q:
+def delegated_tasks_q(delegate: User, *, include_awaiting_posting: bool = False) -> Q:
     """OR filter for tasks currently actionable by `delegate` via delegation."""
     clauses: list[Q] = []
     for delegation in active_delegations_qs(delegate=delegate):
         clause = Q(
             assigned_to_id=delegation.delegator_id,
-            status__in=ACTIVE_TASK_STATUSES,
+            status__in=(VISIBLE_TASK_STATUSES if include_awaiting_posting else ACTIVE_TASK_STATUSES),
         )
         if delegation.document_type_id:
             clause &= Q(
@@ -64,8 +65,8 @@ def delegated_tasks_q(delegate: User) -> Q:
 
 def tasks_visible_to_user(user: User) -> QuerySet[WorkflowTask]:
     return WorkflowTask.objects.filter(
-        Q(assigned_to=user) | delegated_tasks_q(user),
-        status__in=ACTIVE_TASK_STATUSES,
+        Q(assigned_to=user) | delegated_tasks_q(user, include_awaiting_posting=True),
+        status__in=VISIBLE_TASK_STATUSES,
     )
 
 

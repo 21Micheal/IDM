@@ -64,7 +64,7 @@ interface TaskAction {
 interface Props {
   task: WorkflowTask;
   documentId?: string;
-  onCompleted?: () => void | Promise<void>;
+  onCompleted?: (action: WorkflowActionKind) => void | Promise<void>;
   onBeforeApprove?: () => Promise<void>;
   variant?: "panel" | "bar";
 }
@@ -311,12 +311,12 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     patchDocumentStatus("pending_approval");
   };
 
-  const completeAction = async () => {
+  const completeAction = async (action: WorkflowActionKind) => {
     setOptimisticAction(null);
     setActiveAction(null);
     setComment("");
     refetchWorkflowState();
-    await onCompleted?.();
+    await onCompleted?.(action);
   };
 
   const failAction = (message: string) => {
@@ -331,7 +331,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
       return workflowAPI.approveTask(task.id, comment, result ?? undefined);
     },
     onMutate: () => beginOptimisticAction("approve"),
-    onSuccess: async () => { toast.success(`${capitalizedTargetLabel} approved`); await completeAction(); },
+    onSuccess: async () => { toast.success(`${capitalizedTargetLabel} approved`); await completeAction("approve"); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Approval failed")),
   });
@@ -339,7 +339,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
   const rejectMutation = useMutation({
     mutationFn: () => workflowAPI.rejectTask(task.id, comment),
     onMutate: () => beginOptimisticAction("reject"),
-    onSuccess: async () => { toast.success(`${capitalizedTargetLabel} rejected`); await completeAction(); },
+    onSuccess: async () => { toast.success(`${capitalizedTargetLabel} rejected`); await completeAction("reject"); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Rejection failed")),
   });
@@ -349,7 +349,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     onMutate: () => beginOptimisticAction("return"),
     onSuccess: async () => {
       toast.success(`${capitalizedTargetLabel} sent back`);
-      await completeAction();
+      await completeAction("return");
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Return failed")),
@@ -360,7 +360,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     onMutate: () => beginOptimisticAction("hold"),
     onSuccess: async () => {
       toast.success(`${capitalizedTargetLabel} placed on hold for ${holdHours}h`);
-      await completeAction();
+      await completeAction("hold");
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Hold failed")),
@@ -369,7 +369,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
   const releaseMutation = useMutation({
     mutationFn: () => workflowAPI.releaseHold(task.id),
     onMutate: () => beginOptimisticAction("release"),
-    onSuccess: async () => { toast.success("Hold released"); await completeAction(); },
+    onSuccess: async () => { toast.success("Hold released"); await completeAction("release"); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Release failed")),
   });

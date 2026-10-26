@@ -23,7 +23,7 @@ def resume_ready_lpo_gates() -> int:
         WorkflowInstance.objects
         .filter(
             status="in_progress",
-            tasks__status="approved",
+            tasks__status__in=["approved", "awaiting_posting"],
             tasks__actions__action="approved",
         )
         .filter(

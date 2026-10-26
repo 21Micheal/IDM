@@ -538,7 +538,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             for delegation in active_delegations_qs(delegate=user):
                 clause = models.Q(
                     workflow_instance__tasks__assigned_to_id=delegation.delegator_id,
-                    workflow_instance__tasks__status__in=["in_progress", "held"],
+                    workflow_instance__tasks__status__in=["in_progress", "held", "awaiting_posting"],
                 )
                 if delegation.document_type_id:
                     clause &= models.Q(document_type_id=delegation.document_type_id)
@@ -548,7 +548,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 models.Q(owned_by=user) |
                 models.Q(
                     workflow_instance__tasks__assigned_to=user,
-                    workflow_instance__tasks__status__in=["in_progress", "held"],
+                    workflow_instance__tasks__status__in=["in_progress", "held", "awaiting_posting"],
                 ) |
                 delegated_task_filter |
                 lpo_participation |
@@ -667,7 +667,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     models.Q(document_type_id__in=user_view_doc_types) |  # Has VIEW permission on type
                     models.Q(uploaded_by=user) |                         # Own uploads (always visible)
                     models.Q(owned_by=user) |                             # Owned documents (always visible)  
-                    models.Q(workflow_instance__tasks__assigned_to=user, workflow_instance__tasks__status__in=["in_progress", "held"]) |  # Work queue (always visible)
+                    models.Q(workflow_instance__tasks__assigned_to=user, workflow_instance__tasks__status__in=["in_progress", "held", "awaiting_posting"]) |  # Work queue (always visible)
                     lpo_participation  # LPO generator/final approver keeps the generated LPO visible
                 ).distinct()
 

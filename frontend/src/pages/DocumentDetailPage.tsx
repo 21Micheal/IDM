@@ -1438,7 +1438,7 @@ export default function DocumentDetailPage() {
                       <WorkflowActionPanel
                         task={activeTask}
                         documentId={id!}
-                        onCompleted={() => {
+                        onCompleted={(action) => {
                           if ((doc as any)?.metadata?.form?.sections) {
                             const phase = String(
                               (doc as any)?.metadata?.form?.workflow_phase
@@ -1461,8 +1461,8 @@ export default function DocumentDetailPage() {
                             navigate(`/${id}`, {
                               replace: true,
                               state: {
-                                awaitLpo: isLastLpoApprover,
-                                workflowActionCompleted: !isLastLpoApprover,
+                                awaitLpo: action === "approve" && isLastLpoApprover,
+                                workflowActionCompleted: action !== "approve" || !isLastLpoApprover,
                               },
                             });
                             return;

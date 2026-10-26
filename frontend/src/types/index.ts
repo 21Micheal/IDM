@@ -268,7 +268,7 @@ export interface WorkflowTask {
   uploader_department_name?: string | null;
   file_name?: string;
   file_mime_type?: string;
-  status: "pending" | "in_progress" | "approved" | "rejected" | "returned" | "held" | "skipped";
+  status: "pending" | "in_progress" | "awaiting_posting" | "approved" | "rejected" | "returned" | "held" | "skipped";
   due_at: string | null;
   held_until?: string | null;
   status_display?: string;
