@@ -340,8 +340,14 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     },
     onMutate: () => beginOptimisticAction("approve"),
     onSuccess: async () => { toast.success(`${capitalizedTargetLabel} approved`); await completeAction("approve"); },
-    onError:   (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(extractApiError(e, "Approval failed")),
+    onError:   (e: { message?: string; response?: { data?: { detail?: string } } }) => {
+      if (e?.message === "FORM_REQUIRED_FIELDS") {
+        setOptimisticAction(null);
+        refetchWorkflowState();
+        return;
+      }
+      failAction(extractApiError(e, "Approval failed"));
+    },
   });
 
   const rejectMutation = useMutation({

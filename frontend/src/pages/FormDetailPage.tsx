@@ -968,6 +968,27 @@ export default function FormDetailPage() {
     updateFormMutation.mutate();
   };
   const savePendingFormEditsBeforeApproval = async () => {
+    const valuesToCheck = formEditing ? formValues : (formData?.values ?? {});
+    const viewer = {
+      groupNames: user?.group_names ?? [],
+      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      canEditConditionalSections: canEditConditionalSections(),
+    };
+    const missing = requiredFieldLabels(formData?.sections ?? [], valuesToCheck, viewer, step);
+    const pastDates = pastDateFieldLabels(formData?.sections ?? [], valuesToCheck, viewer, step);
+    if (missing.length || pastDates.length) {
+      setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
+      if (!formEditing) {
+        setFormValues({ ...(formData?.values ?? {}) });
+        formDirtyRef.current = false;
+        setFormEditing(true);
+      }
+      toast.error(
+        `${missing.length + pastDates.length} required field${missing.length + pastDates.length === 1 ? "" : "s"} need${missing.length + pastDates.length === 1 ? "s" : ""} attention.`,
+      );
+      throw new Error("FORM_REQUIRED_FIELDS");
+    }
+    setMissingFields([]);
     if (formEditing && formDirtyRef.current) {
       await updateFormMutation.mutateAsync();
     }
