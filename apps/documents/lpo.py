@@ -1,0 +1,934 @@
+"""Generate printable LPOs after SunSystems accepts their PurchaseOrders.
+
+The PurchaseOrder response supplies the authoritative LPO number. This module
+uses that number in the PDF and links each generated document to its requisition;
+the DMS document itself keeps its own unique internal reference.
+"""
+from __future__ import annotations
+
+import logging
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from django.db import transaction
+
+logger = logging.getLogger(__name__)
+
+LPO_DOC_TYPE_CODE = "LPO"
+LPO_TEMPLATE_NAME_HINT = "purchase order"
+
+# Business-unit-independent amount wording units.
+_ONES = [
+    "", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
+    "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen",
+    "Seventeen", "Eighteen", "Nineteen",
+]
+_TENS = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"]
+_SCALES = ["", "Thousand", "Million", "Billion", "Trillion"]
+
+
+def find_lpo_template():
+    """Return ``(template, document_type)`` for the built LPO document template.
+
+    Prefers a built, ``kind="document"`` template bound to the ``LPO`` document
+    type; falls back to any built document template whose name mentions
+    "purchase order". Returns ``(None, None)`` when the deployment has no LPO
+    template, so callers can skip generation without failing the workflow.
+    """
+    from apps.templates_engine.models import DocumentTemplate
+    from apps.documents.models import DocumentType
+
+    qs = DocumentTemplate.objects.filter(type="built", kind="document")
+    doc_type = DocumentType.objects.filter(code=LPO_DOC_TYPE_CODE).first()
+    if doc_type is not None:
+        template = qs.filter(document_type=doc_type).order_by("-updated_at").first()
+        if template:
+            return template, doc_type
+    template = (
+        qs.filter(name__icontains=LPO_TEMPLATE_NAME_HINT).order_by("-updated_at").first()
+    )
+    if template is None:
+        return None, doc_type
+    return template, (template.document_type or doc_type)
+
+
+@transaction.atomic
+def generate_lpo_for_document(
+    document,
+    actor=None,
+    *,
+    purchase_order_reference=None,
+    posting_stage=None,
+    table_key=None,
+    table_label=None,
+    values_override=None,
+):
+    """Generate an LPO document, using the SSC reference when supplied.
+
+    Calls associated with a posting stage are idempotent and can render that
+    posting's subset of table rows. Returns ``None`` when no template is set.
+    """
+    from apps.documents.models import Document, DocumentRelationship
+    document = Document.objects.select_for_update().get(pk=document.pk)
+
+    meta = dict(getattr(document, "metadata", None) or {})
+    form = dict(meta.get("form") or {})
+    records = [item for item in (form.get("lpo_documents") or []) if isinstance(item, dict)]
+    if purchase_order_reference:
+        match = next((item for item in records if (
+            (posting_stage is not None and str(item.get("posting_stage")) == str(posting_stage))
+            or str(item.get("reference") or "") == str(purchase_order_reference)
+        )), None)
+        if match:
+            existing = Document.objects.filter(pk=match.get("id")).first()
+            if existing:
+                return existing
+
+        # A prior concurrent posting result may have overwritten the source
+        # requisition's metadata after this LPO was generated. Recover the
+        # already-created child by its SunSystems reference and relationship,
+        # then restore its pointer instead of generating a duplicate PDF.
+        linked_lpos = Document.objects.filter(
+            incoming_relationships__source_document=document,
+            incoming_relationships__relation_type=DocumentRelationship.RelationType.REFERENCES,
+            document_type__code=LPO_DOC_TYPE_CODE,
+        ).distinct().order_by("created_at")
+        for existing in linked_lpos:
+            existing_meta = existing.metadata if isinstance(existing.metadata, dict) else {}
+            if str(existing_meta.get("lpo.number") or "") != str(purchase_order_reference):
+                continue
+            recovered = {
+                "id": str(existing.id),
+                "reference": str(purchase_order_reference),
+                "document_reference": existing.reference_number,
+                "table_key": table_key or "",
+                "table_label": table_label or "Requisition",
+            }
+            if posting_stage is not None:
+                recovered["posting_stage"] = int(posting_stage)
+            records = [item for item in records if str(item.get("id")) != str(existing.id)]
+            records.append(recovered)
+            form["lpo_documents"] = records
+            form["lpo_document_id"] = records[0].get("id")
+            form["lpo_reference"] = records[0].get("reference")
+            meta["form"] = form
+            document.metadata = meta
+            document.save(update_fields=["metadata", "updated_at"])
+            return existing
+    else:
+        existing_id = form.get("lpo_document_id")
+        if existing_id:
+            existing = Document.objects.filter(pk=existing_id).first()
+            if existing:
+                return existing
+        existing_ids = [item.get("id") for item in records if item.get("id")] or form.get("lpo_document_ids") or []
+        if existing_ids:
+            existing_docs = list(Document.objects.filter(pk__in=existing_ids).order_by("created_at"))
+            if existing_docs:
+                return existing_docs[0]
+
+    template, doc_type = find_lpo_template()
+    if template is None or doc_type is None:
+        logger.warning("No LPO document template configured; skipping LPO generation for %s", document.pk)
+        return None
+
+    user = actor or getattr(document, "uploaded_by", None)
+
+    from apps.documents.serializers import _generate_unique_reference
+    from apps.templates_engine.tasks import generate_document_from_template_sync
+    meta = dict(getattr(document, "metadata", None) or {})
+    form = dict(meta.get("form") or {})
+    sections = form.get("sections") or []
+    values = dict(form.get("values") or {})
+    render_values = dict(values_override) if isinstance(values_override, dict) else values
+    tables = _requisition_tables(sections, render_values)
+    if table_key:
+        tables = [table for table in tables if str(table.get("key") or "") == str(table_key)]
+    if not tables:
+        tables = [{"key": table_key, "label": table_label or "Requisition", "columns": []}]
+
+    table = tables[0]
+    lpo_reference = str(purchase_order_reference or _generate_unique_reference(doc_type)).strip()
+    # Keep the repository's globally-unique document identifier separate from
+    # the SunSystems PO reference shown in the PDF. The finance system owns the
+    # latter, and its numbering may overlap the local document-type sequence.
+    document_reference = _generate_unique_reference(doc_type) if purchase_order_reference else lpo_reference
+    merge_values = build_lpo_merge_values(
+        document, lpo_reference, doc_type=doc_type, actor=user,
+        table_key=table.get("key"), values_override=render_values,
+    )
+    title = f"Purchase Order {lpo_reference}"
+    lpo_doc = generate_document_from_template_sync(
+        template,
+        merge_values,
+        fmt="pdf",
+        title=title,
+        user=user,
+        type_id=doc_type.id,
+        reference_number=document_reference,
+    )
+    # Keep the resolved supplier contact on the generated order so later
+    # delivery does not have to query SunSystems a second time.
+    lpo_metadata = dict(lpo_doc.metadata or {})
+    lpo_metadata["lpo_supplier"] = {
+        "code": _as_text(merge_values.get("supplier.code")),
+        "name": _as_text(merge_values.get("supplier.name")),
+        "email": _as_text(merge_values.get("supplier.email")),
+    }
+    lpo_doc.metadata = lpo_metadata
+    Document.objects.filter(pk=lpo_doc.pk).update(metadata=lpo_metadata)
+    try:
+        DocumentRelationship.objects.get_or_create(
+            source_document=document,
+            target_document=lpo_doc,
+            relation_type=DocumentRelationship.RelationType.REFERENCES,
+            defaults={"created_by": user, "note": "Generated after SunSystems PurchaseOrder posting"},
+        )
+    except Exception:
+        logger.exception("Could not link LPO %s to requisition %s", lpo_doc.pk, document.pk)
+
+    now = _today_str()
+    if not values.get("__lpo_number"):
+        values["__lpo_number"] = lpo_reference
+    values["__lpo_date"] = now
+    values["__requisition_number"] = document.reference_number or values.get("__requisition_number", "")
+    form["values"] = values
+    lpo_record = {
+        "id": str(lpo_doc.id),
+        "reference": lpo_reference,
+        "document_reference": lpo_doc.reference_number,
+        "table_key": table.get("key") or "",
+        "table_label": table_label or table.get("label") or "Requisition",
+    }
+    if posting_stage is not None:
+        lpo_record["posting_stage"] = int(posting_stage)
+    if not any(item.get("id") == lpo_record["id"] for item in records):
+        records.append(lpo_record)
+    form["lpo_documents"] = records
+    if records:
+        form["lpo_document_id"] = records[0].get("id")
+        form["lpo_reference"] = records[0].get("reference")
+    meta["form"] = form
+    document.metadata = meta
+    document.save(update_fields=["metadata", "updated_at"])
+    return lpo_doc
+
+
+def generate_lpo_for_posting(document, posting, actor=None):
+    """Render the PO posting's PDF using the reference returned by SunSystems."""
+    reference = str(getattr(posting, "journal_number", "") or "").strip()
+    if not reference:
+        logger.warning(
+            "SunSystems accepted PO stage %s for %s without returning its PO reference; LPO PDF deferred",
+            getattr(posting, "stage", "?"), document.pk,
+        )
+        return None
+
+    from apps.sunsystems.config import get_journal_mapping
+
+    mapping = get_journal_mapping(document, stage=int(posting.stage)) or {}
+    po = mapping.get("purchase_order") or {}
+    specs = po.get("lines") or []
+    spec = specs[0] if specs and isinstance(specs[0], dict) else {}
+    table_key = str(spec.get("repeat_over") or "") or None
+    values = mapping.get("_posting_values")
+    lpo = generate_lpo_for_document(
+        document,
+        actor=actor,
+        purchase_order_reference=reference,
+        posting_stage=posting.stage,
+        table_key=table_key,
+        table_label=(spec.get("table_label") or mapping.get("_posting_label") or posting.stage_label),
+        values_override=values if isinstance(values, dict) else None,
+    )
+    # Send every generated LPO to the supplier selected for its own table.
+    # Delivery waits for the LPO approval chain when the PO was generated at
+    # an intermediate approval gate; otherwise it can be queued immediately.
+    if lpo:
+        supplier_email = _as_text(
+            ((lpo.metadata or {}).get("lpo_supplier") or {}).get("email")
+        )
+        # LPOs generated before supplier delivery was introduced do not have
+        # the contact snapshot yet. Resolve it from the same table-scoped data.
+        if not supplier_email:
+            merge_values = build_lpo_merge_values(
+                document,
+                reference,
+                actor=actor or getattr(posting, "posted_by", None),
+                table_key=table_key,
+                values_override=values if isinstance(values, dict) else None,
+            )
+            supplier_email = _as_text(merge_values.get("supplier.email"))
+        if supplier_email:
+            try:
+                delivery = {
+                    "status": "pending_approval" if _lpo_delivery_waiting_for_approval(document) else "queued",
+                    "recipient": supplier_email,
+                    "reference": reference,
+                }
+                metadata = dict(lpo.metadata or {})
+                metadata["supplier_email"] = delivery
+                lpo.metadata = metadata
+                lpo.save(update_fields=["metadata", "updated_at"])
+                if delivery["status"] == "queued":
+                    from apps.documents.tasks import email_generated_lpo_to_supplier
+                    email_generated_lpo_to_supplier.delay(str(lpo.pk), supplier_email, str(document.pk), reference)
+            except Exception:
+                logger.exception("Could not queue supplier email for LPO %s", lpo.pk)
+        else:
+            logger.warning(
+                "Supplier email is unavailable for LPO %s (%s)",
+                lpo.pk,
+                reference,
+            )
+    return lpo
+
+
+def _lpo_delivery_waiting_for_approval(document) -> bool:
+    """True while a workflow is paused at its configured LPO generation gate."""
+    try:
+        from apps.workflows.models import WorkflowInstance
+        for instance in WorkflowInstance.objects.filter(document=document, status="in_progress").select_related("template"):
+            if instance.template.steps.filter(
+                order=instance.current_step_order,
+                post_lpo_after_approval=True,
+            ).exists():
+                return True
+        return False
+    except Exception:
+        logger.exception("Could not determine whether LPO supplier email should wait for approval")
+        return False
+
+
+def queue_pending_lpo_supplier_emails(document) -> None:
+    """Queue deferred supplier emails when the LPO approval chain completes."""
+    from apps.documents.models import Document
+    from apps.documents.tasks import email_generated_lpo_to_supplier
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    for record in form.get("lpo_documents") or []:
+        if not isinstance(record, dict) or not record.get("id"):
+            continue
+        try:
+            lpo = Document.objects.get(pk=record["id"])
+        except (Document.DoesNotExist, ValueError, TypeError):
+            continue
+        metadata = dict(lpo.metadata or {})
+        state = dict(metadata.get("supplier_email") or {})
+        if state.get("status") != "pending_approval":
+            continue
+        recipient = _as_text(state.get("recipient") or (metadata.get("lpo_supplier") or {}).get("email"))
+        reference = _as_text(state.get("reference") or record.get("reference"))
+        if not recipient:
+            continue
+        state["status"] = "queued"
+        metadata["supplier_email"] = state
+        lpo.metadata = metadata
+        lpo.save(update_fields=["metadata", "updated_at"])
+        lpo_id = str(lpo.pk)
+        requisition_id = str(document.pk)
+        transaction.on_commit(
+            lambda lid=lpo_id, email=recipient, rid=requisition_id, ref=reference:
+            email_generated_lpo_to_supplier.delay(lid, email, rid, ref)
+        )
+
+
+def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None, table_key=None, values_override=None) -> dict:
+    """Build the flat designer merge-field values for the LPO document.
+
+    Keys are dotted exactly as the designer emits them (``lpo.number``,
+    ``supplier.name``, …), plus ``line_items`` as the bound data-table source.
+    """
+    from apps.documents.models import DMSSettings
+
+    meta = dict(getattr(document, "metadata", None) or {})
+    form = dict(meta.get("form") or {})
+    values = dict(values_override) if isinstance(values_override, dict) else dict(form.get("values") or {})
+    sections = form.get("sections") or []
+
+    lines = _build_line_items(values, sections, table_key=table_key)
+    subtotal = sum((_dec(line.get("net_price")) for line in lines), Decimal("0"))
+    vat_total = sum((_dec(line.get("vat")) for line in lines), Decimal("0"))
+    grand_total = sum((_dec(line.get("gross_value")) for line in lines), Decimal("0"))
+    if grand_total == 0:
+        grand_total = subtotal + vat_total
+
+    org_name = org_address = ""
+    try:
+        settings_row = DMSSettings.objects.first()
+        if settings_row:
+            org_name = settings_row.organization_name or ""
+            org_address = settings_row.organization_address or ""
+    except Exception:
+        pass
+
+    supplier_code, supplier_name, supplier_email, supplier_phone, supplier_address = _supplier_details(
+        values, meta, sections, table_key=table_key,
+    )
+
+    today = _today_str()
+    valid_until = _ticket_expiry_date(values, sections)
+    currency = _first_currency(values, lines) or "KES"
+
+    prepared_by = _requestor_name(values, sections) or _user_name(getattr(document, "uploaded_by", None))
+    line_descriptions = list(dict.fromkeys(
+        _as_text(line.get("description") or line.get("item")) for line in lines
+        if _as_text(line.get("description") or line.get("item"))
+    ))
+
+    return {
+        "line_items": lines,
+        "lpo.number": lpo_reference,
+        "lpo.date": today,
+        "lpo.valid_until": valid_until,
+        "lpo.description": "; ".join(line_descriptions),
+        "lpo.currency": currency,
+        "lpo.subtotal": _money(subtotal),
+        "lpo.vat_total": _money(vat_total),
+        "lpo.grand_total": _money(grand_total),
+        "lpo.amount_words": amount_in_words(grand_total, currency=currency),
+        "supplier.code": supplier_code,
+        "supplier.name": supplier_name,
+        "supplier.email": supplier_email,
+        "supplier.phone": supplier_phone,
+        "supplier.address": supplier_address,
+        "company.name": org_name,
+        "company.address": org_address,
+        "company.email": "",
+        "company.phone": "",
+        "prepared_by.name": prepared_by,
+        "prepared_by.role": _as_text(values.get("department_chk9")) or "Requestor",
+        "prepared_by.date": today,
+        "approved_by.name": _user_name(actor),
+        "approved_by.role": "Approver",
+        "approved_by.date": today,
+    }
+
+
+# ── line items ─────────────────────────────────────────────────────────────────
+def _build_line_items(values: dict, sections: list, *, table_key=None) -> list[dict]:
+    """Turn one requisition table's rows into the LPO template's columns."""
+    items: list[dict] = []
+    tables = _requisition_tables(sections, values)
+    for table in tables:
+        if table_key and table.get("key") != table_key:
+            continue
+        columns = table.get("columns") or []
+        rows = values.get(table.get("key"))
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if not any(v not in (None, "", [], {}) for v in row.values()):
+                continue
+            item = _row_line_item(row, columns)
+            if not any(item.get(k) for k in ("item", "gross_value", "net_price")):
+                continue
+            items.append(item)
+
+    for index, item in enumerate(items, start=1):
+        item["number"] = index
+    return items
+
+
+def _requisition_tables(sections: list, values: dict) -> list[dict]:
+    """Table fields on the form that look like requisition line grids.
+
+    A table qualifies when it has rows in ``values`` and at least one money or
+    item-like column. This keeps the LPO honest when a template carries both a
+    Travel grid and an on-demand General grid — only the one the user filled
+    contributes lines.
+    """
+    tables: list[dict] = []
+    for section in sections or []:
+        for field in section.get("fields") or []:
+            if field.get("type") != "table":
+                continue
+            key = field.get("key")
+            if not key or not isinstance(values.get(key), list):
+                continue
+            labels = " ".join(str(c.get("label", "")).lower() for c in (field.get("columns") or []))
+            keys = " ".join(str(c.get("key", "")) for c in (field.get("columns") or []))
+            looks_like_lines = any(token in labels for token in ("cost", "price", "value", "item", "quantity", "qty")) or any(
+                token in keys for token in ("gross", "price", "cost", "item", "quantity")
+            )
+            rows = values.get(key) or []
+            has_data = any(isinstance(row, dict) and any(v not in (None, "", [], {}) for v in row.values()) for row in rows)
+            if looks_like_lines and has_data:
+                tables.append(field)
+    return tables
+
+
+def _row_line_item(row: dict, columns: list) -> dict:
+    """Map one requisition row onto the LPO table's nine columns using labels."""
+    def pick(*needles: str) -> str:
+        for column in columns:
+            label = str(column.get("label", "")).lower()
+            if any(needle in label for needle in needles):
+                raw = row.get(column.get("key"))
+                if raw not in (None, ""):
+                    return _as_text(raw)
+        return ""
+
+    def pick_role(role: str) -> str | None:
+        for column in columns:
+            sunsystems = column.get("sunsystems") or {}
+            if sunsystems.get("role") == role:
+                return _as_text(row.get(column.get("key")))
+        return None
+
+    # A role mapping is the schema contract. Labels remain a fallback for
+    # tables created before SunSystems role mapping was available.
+    role_description = pick_role("description")
+    description = role_description if role_description is not None else pick("description")
+    role_item_code = pick_role("item_code")
+    item_code = role_item_code if role_item_code is not None else pick("item")
+    item_column = next((column for column in columns if (column.get("sunsystems") or {}).get("role") == "item_code"), None)
+    if item_column is None:
+        item_column = next((
+            column for column in columns
+            if "item" in str(column.get("label", "")).lower()
+            and "description" not in str(column.get("label", "")).lower()
+        ), {})
+    external = item_column.get("external") if isinstance(item_column, dict) else {}
+    is_sunsystems_item = isinstance(external, dict) and external.get("source") == "items"
+    item_description = _query_item_description(item_code) if item_code and is_sunsystems_item else ""
+    item = " — ".join(part for part in (item_code, item_description) if part)
+    if not item:
+        item = " — ".join(
+            part for part in (pick("purpose"), pick("destination")) if part
+        )
+    uom = pick("uom", "unit of measure")
+    quantity = pick("qty", "quantity")
+    unit_price = pick("unit price")
+    net_price = pick("net")
+    line_amount = pick_role("line_amount")
+    if line_amount not in (None, ""):
+        # Travel itinerary carries the actual requested amount; the Travel
+        # table's Line amount role is the explicit link to that value.
+        net_price = line_amount
+        if not unit_price:
+            unit_price = line_amount
+    vat_percent = pick("tax rate", "%vat", "vat%", "vat %")
+    if _dec(vat_percent) == 0:
+        # Budget Line keeps the selected Tax analysis code and its resolved
+        # numeric rate together. Use that rate when older calculated table
+        # cells still contain their initial zero value.
+        for column in columns:
+            if str(column.get("type") or "").strip().lower() != "budget_line":
+                continue
+            budget_line = row.get(column.get("key"))
+            if isinstance(budget_line, dict):
+                budget_line_rate = _as_text(budget_line.get("tax_rate"))
+                if _dec(budget_line_rate) > 0:
+                    vat_percent = budget_line_rate
+                    break
+    vat = ""
+    gross_value = pick("lpo amount", "gross value", "gross")
+    # A bare "VAT" column (not "VAT%"/"VAT ") is the tax amount.
+    for column in columns:
+        if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() in {"vat", "vat_amount", "tax_amount"}:
+            raw = row.get(column.get("key"))
+            if raw not in (None, ""):
+                vat = _as_text(raw)
+                break
+    for column in columns:
+        if vat:
+            break
+        label = str(column.get("label", "")).strip().lower()
+        if label in ("vat", "tax") and row.get(column.get("key")) not in (None, ""):
+            vat = _as_text(row.get(column.get("key")))
+            break
+    estimated = pick("estimated", "actual")
+
+    if not unit_price and estimated:
+        unit_price = estimated
+    if not net_price:
+        net_price = _mul(quantity or "1", unit_price) if unit_price else (estimated or "")
+    if not gross_value:
+        gross_value = _add(net_price, vat) if (net_price or vat) else estimated
+    currency = pick("currency")
+    # Some requisition templates persist calculated columns as zero before
+    # their client-side formulas have run. Rebuild those amounts from the
+    # entered quantity, price and VAT rate for the printed purchase order.
+    if unit_price and _dec(net_price) == 0:
+        net_price = _money(_dec(unit_price) * _dec(quantity or "1"))
+    if vat_percent and _dec(vat) == 0 and _dec(net_price) != 0:
+        vat = _money(_dec(net_price) * _dec(vat_percent) / Decimal("100"))
+    if _dec(gross_value) == 0 and (_dec(net_price) != 0 or _dec(vat) != 0):
+        gross_value = _money(_dec(net_price) + _dec(vat))
+    if not quantity:
+        quantity = "1"
+    return {
+        "number": 0,
+        "item": item,
+        # The line description is entered explicitly on the requisition. Keep
+        # it separate from the SunSystems item's own description shown beside
+        # its code in the Item column.
+        "description": description,
+        "uom": uom,
+        "quantity": quantity,
+        "unit_price": unit_price,
+        "net_price": net_price,
+        "vat_percent": vat_percent,
+        "vat": vat,
+        "gross_value": gross_value,
+        "currency": currency,
+    }
+
+
+# ── misc helpers ────────────────────────────────────────────────────────────────
+def _supplier_details(values: dict, meta: dict, sections: list, *, table_key=None) -> tuple[str, str, str, str, str]:
+    raw = _form_supplier_value(values, sections, table_key=table_key)
+    code, name, email, phone, address = _supplier_value_parts(raw)
+    if code:
+        resolved = _query_supplier_details(code)
+        name = name or resolved.get("name", "")
+        email = email or resolved.get("email", "")
+        phone = phone or resolved.get("phone", "")
+        address = address or resolved.get("address", "")
+        return code, name, email, phone, address
+    # Fall back to the configured constant so the printed LPO still names a
+    # supplier when only the mapping knows it.
+    sunsystems_config = meta.get("sunsystems") or {}
+    # New templates keep the LPO profile separate from the ledger journal;
+    # older snapshots nest it under ``journal.purchase_order``.
+    po = (
+        ((sunsystems_config.get("purchase_order") or {}).get("purchase_order") or {})
+        or ((sunsystems_config.get("journal") or {}).get("purchase_order") or {})
+    )
+    # Resolve configured header, table-row and default sources in the same
+    # order as PurchaseOrder posting. In particular, a selected table supplier
+    # must beat the configured default supplier.
+    code = ""
+    for configured in (po.get("supplier_code"), po.get("supplier_code_fallback"), po.get("supplier_code_default")):
+        if isinstance(configured, dict) and isinstance(configured.get("sources"), list):
+            candidates = configured["sources"]
+            if table_key:
+                candidates = [candidate for candidate in candidates if candidate.get("table") == table_key]
+        else:
+            candidates = [configured]
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                code = _as_text(candidate.get("const"))
+                if not code and candidate.get("field"):
+                    code = _as_text(values.get(candidate["field"]))
+                if not code and candidate.get("table") and candidate.get("row_field"):
+                    if table_key and candidate.get("table") != table_key:
+                        continue
+                    rows = values.get(candidate["table"])
+                    if isinstance(rows, list):
+                        code = next((
+                            _supplier_value_parts(row.get(candidate["row_field"]))[0]
+                            for row in rows if isinstance(row, dict)
+                            and row.get(candidate["row_field"]) not in (None, "", [], {})
+                        ), "")
+            else:
+                code = _as_text(candidate)
+            if code:
+                break
+        if code:
+            break
+    if code:
+        resolved = _query_supplier_details(code)
+        return code, resolved.get("name", ""), resolved.get("email", ""), resolved.get("phone", ""), resolved.get("address", "")
+    return "", name, email, phone, address
+
+
+def _query_item_description(code: str) -> str:
+    """Resolve the SunSystems description for an item code used on an LPO."""
+    if not code:
+        return ""
+    try:
+        from django.core.cache import cache
+        cached = cache.get(f"lpo-item-description:{code}")
+        if cached is not None:
+            return cached
+
+        import xml.etree.ElementTree as ET
+        from xml.sax.saxutils import escape
+        from apps.sunsystems.client import SunSystemsClient, SunSystemsConfig
+        from apps.sunsystems.models import effective_connection
+
+        config = SunSystemsConfig.from_mapping(effective_connection())
+        business_unit = escape(config.business_unit or "PK1")
+        item_code = escape(code)
+        payload = (
+            "<SSC><ErrorContext/><User/>"
+            f"<SunSystemsContext><BusinessUnit>{business_unit}</BusinessUnit></SunSystemsContext>"
+            "<Payload><Filter>"
+            f"<Item name=\"/Item/ItemCode\" operator=\"EQU\" value=\"{item_code}\"/>"
+            "</Filter><Select><Item><ItemCode>.</ItemCode><Description>.</Description>"
+            "</Item></Select></Payload></SSC>"
+        )
+        response = SunSystemsClient(config).execute("Item", "Query", payload)
+        item = ET.fromstring(response or "<SSC/>").find(".//Item")
+        description = (item.findtext("Description") or "").strip() if item is not None else ""
+        cache.set(f"lpo-item-description:{code}", description, 3600)
+        return description
+    except Exception:
+        logger.exception("Could not resolve SunSystems item %s for LPO", code)
+        return ""
+
+
+def _form_supplier_value(values: dict, sections: list, *, table_key=None):
+    def is_supplier(field):
+        return (
+            field.get("type") == "sunsystems_account"
+            or (field.get("sunsystems") or {}).get("role") == "supplier_code"
+            or "supplier" in str(field.get("label") or "").lower()
+        )
+
+    for section in sections or []:
+        for field in section.get("fields") or []:
+            if field.get("type") == "table":
+                if table_key and field.get("key") != table_key:
+                    continue
+                columns = [column for column in (field.get("columns") or []) if is_supplier(column)]
+                rows = values.get(field.get("key")) or []
+                for column in columns:
+                    for row in rows:
+                        if isinstance(row, dict) and row.get(column.get("key")) not in (None, "", [], {}):
+                            return row[column.get("key")]
+            elif is_supplier(field) and field.get("key") and values.get(field["key"]) not in (None, "", [], {}):
+                return values[field["key"]]
+    return values.get("supplier_wudn") or values.get("supplier") or ""
+
+
+def _supplier_value_parts(raw) -> tuple[str, str, str, str, str]:
+    if isinstance(raw, (list, tuple)):
+        raw = next((item for item in raw if item not in (None, "", [], {})), "")
+    if isinstance(raw, dict):
+        return (
+            _as_text(raw.get("account_code") or raw.get("accountCode") or raw.get("supplier_code") or raw.get("SupplierCode") or raw.get("code") or raw.get("id") or raw.get("value")),
+            _as_text(raw.get("SupplierName") or raw.get("supplier_name") or raw.get("name") or raw.get("label") or raw.get("description")),
+            _as_text(raw.get("EMailAddress") or raw.get("email")),
+            _as_text(raw.get("PhoneNumber") or raw.get("phone") or raw.get("telephone")),
+            _as_text(raw.get("Address") or raw.get("address")),
+        )
+    return _as_text(raw), "", "", "", ""
+
+
+def _query_supplier_details(code: str) -> dict[str, str]:
+    """Resolve selected supplier details from the same SunSystems Query used by the supplier directory."""
+    try:
+        import xml.etree.ElementTree as ET
+        from xml.sax.saxutils import escape
+        from apps.sunsystems.client import SunSystemsClient, SunSystemsConfig
+        from apps.sunsystems.models import effective_connection
+
+        config = SunSystemsConfig.from_mapping(effective_connection())
+        bu = escape(config.business_unit or "PK1")
+        code_xml = escape(code)
+        payload = (
+            "<SSC><ErrorContext/><User/>"
+            f"<SunSystemsContext><BusinessUnit>{bu}</BusinessUnit></SunSystemsContext><Payload>"
+            f"<Filter><Item name=\"/Supplier/SupplierCode\" operator=\"EQU\" value=\"{code_xml}\"/></Filter>"
+            "<Select><Supplier><Description>.</Description><EMailAddress>.</EMailAddress>"
+            "<SupplierCode>.</SupplierCode><SupplierName>.</SupplierName><SupplierAddress>"
+            "<AddressLine1>.</AddressLine1><AddressLine2>.</AddressLine2>"
+            "<AddressLine3>.</AddressLine3><AddressLine4>.</AddressLine4>"
+            "<AddressLine5>.</AddressLine5><Country>.</Country><PostalCode>.</PostalCode>"
+            "<TelephoneNumber>.</TelephoneNumber><TownCity>.</TownCity>"
+            "</SupplierAddress></Supplier></Select>"
+            "</Payload></SSC>"
+        )
+        response = SunSystemsClient(config).execute("Supplier", "Query", payload)
+        supplier = ET.fromstring(response or "<SSC/>").find(".//Supplier")
+        if supplier is None:
+            return {}
+        address_node = supplier.find("SupplierAddress")
+        address = " ".join(filter(None, (
+            (address_node.findtext(f"AddressLine{i}") or "").strip() for i in range(1, 6)
+        ))) if address_node is not None else ""
+        if address_node is not None:
+            city = (address_node.findtext("TownCity") or "").strip()
+            country = (address_node.findtext("Country") or "").strip()
+            postal = (address_node.findtext("PostalCode") or "").strip()
+            address = ", ".join(filter(None, (address, city, postal, country)))
+        return {
+            "name": (supplier.findtext("SupplierName") or supplier.findtext("Description") or "").strip(),
+            "email": (supplier.findtext("EMailAddress") or "").strip(),
+            "phone": (address_node.findtext("TelephoneNumber") or "").strip() if address_node is not None else "",
+            "address": address,
+        }
+    except Exception:
+        logger.exception("Could not resolve SunSystems supplier %s for LPO", code)
+        return {}
+
+
+def _first_currency(values: dict, lines: list[dict]) -> str:
+    for line in lines:
+        text = _as_text(line.get("currency"))
+        if text:
+            return text
+    for field in ("currency_8ia7", "currency_poa7", "currency"):
+        text = _as_text(values.get(field))
+        if text:
+            return text
+    return ""
+
+
+def _ticket_expiry_date(values: dict, sections: list) -> str:
+    """Find the ticket expiry date in a top-level field or itinerary row."""
+    for section in sections or []:
+        for field in section.get("fields") or []:
+            label = " ".join(str(field.get(k) or "") for k in ("label", "title")).strip().lower()
+            if "ticket expiry date" in label:
+                value = _as_text(values.get(field.get("key")))
+                if value:
+                    return _format_lpo_date(value)
+            if field.get("type") != "table":
+                continue
+            rows = values.get(field.get("key"))
+            if not isinstance(rows, list):
+                continue
+            for column in field.get("columns") or []:
+                column_label = " ".join(str(column.get(k) or "") for k in ("label", "title")).strip().lower()
+                if "ticket expiry date" not in column_label or not column.get("key"):
+                    continue
+                for row in rows:
+                    if isinstance(row, dict):
+                        value = _as_text(row.get(column["key"]))
+                        if value:
+                            return _format_lpo_date(value)
+    return ""
+
+
+def _format_lpo_date(value: str) -> str:
+    """Format ISO date/datetime values like the other LPO header dates."""
+    from datetime import date, datetime
+    raw = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00")) if "T" in raw else date.fromisoformat(raw[:10])
+        return parsed.strftime("%d %b %Y")
+    except (TypeError, ValueError):
+        return raw
+
+
+def _requestor_name(values: dict, sections: list) -> str:
+    for known_key in ("requested_by_copy", "requestor", "requester", "requisitioner"):
+        value = _as_text(values.get(known_key))
+        if value:
+            return value
+    for section in sections or []:
+        for field in section.get("fields") or []:
+            label = " ".join(str(field.get(k) or "") for k in ("label", "title")).strip().lower()
+            if any(token in label for token in ("requisitioner", "requestor", "requester", "requested by", "raised by")):
+                value = _as_text(values.get(field.get("key")))
+                if value:
+                    return value
+    return ""
+
+
+def _today():
+    from django.utils import timezone
+    return timezone.localdate()
+
+
+def _today_str() -> str:
+    return _today().strftime("%d %b %Y")
+
+
+def _dec(value) -> Decimal:
+    try:
+        return Decimal(str(value).replace(",", "").strip() or "0")
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def _mul(a, b) -> str:
+    return _money(_dec(a) * _dec(b))
+
+
+def _add(a, b) -> str:
+    return _money(_dec(a) + _dec(b))
+
+
+def _money(value: Decimal) -> str:
+    return format(value.quantize(Decimal("0.01")), "f")
+
+
+def _as_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, dict):
+        return _as_text(value.get("label") or value.get("name") or value.get("value") or value.get("id"))
+    if isinstance(value, (list, tuple)):
+        return ", ".join(filter(None, (_as_text(v) for v in value)))
+    return str(value).strip()
+
+
+def _user_name(user) -> str:
+    if not user:
+        return ""
+    return (user.get_full_name() or user.email or "").strip()
+
+
+def amount_in_words(amount, currency: str = "") -> str:
+    """Render a money amount with its currency and named minor units."""
+    value = _dec(amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    negative = value < 0
+    value = abs(value)
+    whole = int(value)
+    minor = int((value - whole) * 100)
+    words = _int_to_words(whole) or "Zero"
+    currency_code = _as_text(currency).strip()
+    minor_unit = _currency_minor_unit(currency_code)
+    text = f"{words} {currency_code}" if currency_code else words
+    if minor:
+        unit = minor_unit[0] if minor == 1 else minor_unit[1]
+        text = f"{text} And {_int_to_words(minor)} {unit}"
+    else:
+        text = f"{text} Only"
+    if negative:
+        text = f"Minus {text}"
+    return text
+
+
+def _currency_minor_unit(currency: str) -> tuple[str, str]:
+    """Return singular/plural names for common currency subdivisions."""
+    code = currency.upper()
+    if code in {"GBP", "UKP", "POUND", "POUNDS", "STERLING"}:
+        return "Penny", "Pence"
+    if code in {"AED", "BHD", "KWD"}:
+        return "Fil", "Fils"
+    if code == "OMR":
+        return "Baisa", "Baisa"
+    if code == "SAR":
+        return "Halala", "Halalas"
+    if code in {"JPY", "KRW", "CLP", "VND", "XAF", "XOF"}:
+        return "Sen", "Sen"
+    return "Cent", "Cents"
+
+
+def _int_to_words(number: int) -> str:
+    if number == 0:
+        return ""
+    parts: list[str] = []
+    scale_index = 0
+    while number > 0:
+        chunk = number % 1000
+        if chunk:
+            chunk_words = _chunk_to_words(chunk)
+            if _SCALES[scale_index]:
+                chunk_words = f"{chunk_words} {_SCALES[scale_index]}"
+            parts.insert(0, chunk_words)
+        number //= 1000
+        scale_index += 1
+    return " ".join(parts)
+
+
+def _chunk_to_words(chunk: int) -> str:
+    words: list[str] = []
+    if chunk >= 100:
+        words.append(f"{_ONES[chunk // 100]} Hundred")
+        chunk %= 100
+        if chunk:
+            words.append("And")
+    if chunk >= 20:
+        tens, ones = divmod(chunk, 10)
+        words.append(_TENS[tens] if not ones else f"{_TENS[tens]}-{_ONES[ones]}")
+    elif chunk:
+        words.append(_ONES[chunk])
+    return " ".join(words)
