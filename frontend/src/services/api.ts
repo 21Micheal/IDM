@@ -1572,7 +1572,7 @@ export const groupsAPI = {
   get: (id: string) => api.get(`/groups/${id}/`),
   create: (data: { name: string; description?: string }) =>
     api.post("/groups/", data),
-  update: (id: string, data: { name?: string; description?: string; head_id?: string | null; sees_all_documents?: boolean }) =>
+  update: (id: string, data: { name?: string; description?: string; head_id?: string | null; sees_all_documents?: boolean; can_view_system_audit?: boolean }) =>
     api.patch(`/groups/${id}/`, data),
   delete: (id: string) => api.delete(`/groups/${id}/`),
   duplicate: (id: string, data: { name: string; description?: string }) =>

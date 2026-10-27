@@ -14,13 +14,16 @@ import {
   Calendar,
   X,
   FileText,
+  FileSpreadsheet,
+  BarChart3,
 } from "lucide-react";
 import CustomListbox from "@/components/ui/CustomListbox";
-import { format, subDays, isToday, isYesterday, formatDistanceToNow } from "date-fns";
+import { format, subDays, isToday, isYesterday, formatDistanceToNow, startOfQuarter, startOfYear } from "date-fns";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import { Link } from "react-router-dom";
 
 // ─── Shared design tokens ─────────────────────────────────────────────────────
 const inputCls =
@@ -123,10 +126,13 @@ function formatGroupPermissionDetailedChanges(changes: any): string | null {
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function AuditPage() {
   const [searchTerm,  setSearchTerm]  = useState("");
+  const [actorFilter, setActorFilter] = useState("");
   const [eventFilter, setEventFilter] = useState("");
+  const [formReference, setFormReference] = useState("");
   const [dateFrom,    setDateFrom]    = useState(format(subDays(new Date(), 30), "yyyy-MM-dd"));
   const [dateTo,      setDateTo]      = useState(format(new Date(), "yyyy-MM-dd"));
   const [page,        setPage]        = useState(1);
+  const [exporting,   setExporting]   = useState<"csv" | "xlsx" | null>(null);
 
   const PAGE_SIZE = 10;
   const eventOptions = [
@@ -176,12 +182,14 @@ export default function AuditPage() {
   const listEndpoint = canViewSystemAudit ? "/audit/" : "/audit/my-activity/";
 
   const { data, isLoading } = useQuery({
-    queryKey: ["audit-logs", listEndpoint, searchTerm, eventFilter, dateFrom, dateTo, page],
+    queryKey: ["audit-logs", listEndpoint, searchTerm, actorFilter, eventFilter, formReference, dateFrom, dateTo, page],
     queryFn: () =>
       api.get(listEndpoint, {
         params: {
           search:    searchTerm   || undefined,
+          actor:     actorFilter  || undefined,
           event:     eventFilter  || undefined,
+          form_reference: formReference.trim() || undefined,
           date_from: dateFrom     || undefined,
           date_to:   dateTo       || undefined,
           page,
@@ -192,38 +200,55 @@ export default function AuditPage() {
     ...QUERY_SHORT_STALE,
   });
 
-  const exportAudit = async () => {
+  const exportAudit = async (fileFormat: "csv" | "xlsx") => {
+    setExporting(fileFormat);
     try {
       const response = await api.get("/audit/export/", {
-        params: { search: searchTerm || undefined, event: eventFilter || undefined, date_from: dateFrom || undefined, date_to: dateTo || undefined },
+        params: {
+          file_format: fileFormat,
+          search: searchTerm || undefined,
+          actor: actorFilter || undefined,
+          event: eventFilter || undefined,
+          form_reference: formReference.trim() || undefined,
+          date_from: dateFrom || undefined,
+          date_to: dateTo || undefined,
+        },
         responseType: "blob",
       });
-      const url  = window.URL.createObjectURL(new Blob([response.data]));
+      const mime = fileFormat === "xlsx"
+        ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        : "text/csv;charset=utf-8";
+      const url  = window.URL.createObjectURL(new Blob([response.data], { type: mime }));
       const link = document.createElement("a");
       link.href  = url;
-      link.setAttribute("download", `audit-trail-${format(new Date(), "yyyy-MM-dd")}.csv`);
+      link.setAttribute("download", `audit-trail-${format(new Date(), "yyyy-MM-dd")}.${fileFormat}`);
       document.body.appendChild(link);
       link.click();
       link.remove();
       window.URL.revokeObjectURL(url);
-      toast.success("Audit log exported successfully");
+      toast.success(`Audit report exported as ${fileFormat.toUpperCase()}`);
     } catch {
       toast.error("Failed to export audit log");
+    } finally {
+      setExporting(null);
     }
   };
 
   const resetFilters = () => {
-    setSearchTerm(""); setEventFilter("");
+    setSearchTerm(""); setActorFilter(""); setEventFilter(""); setFormReference("");
     setDateFrom(format(subDays(new Date(), 30), "yyyy-MM-dd"));
     setDateTo(format(new Date(), "yyyy-MM-dd"));
     setPage(1);
   };
 
   const totalPages = Math.ceil((data?.count ?? 0) / PAGE_SIZE);
+  const report = data?.summary;
 
   const activeFilterCount = [
     searchTerm,
+    actorFilter,
     eventFilter,
+    formReference,
     dateFrom !== format(subDays(new Date(), 30), "yyyy-MM-dd") ? dateFrom : "",
     dateTo   !== format(new Date(), "yyyy-MM-dd")              ? dateTo   : "",
   ].filter(Boolean).length;
@@ -271,18 +296,7 @@ export default function AuditPage() {
   return (
     <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
       {/* ── Command bar ─────────────────────────────────────────────────────── */}
-      <WorkspaceCommandBar
-        actions={
-          canViewSystemAudit ? (
-            <button
-              onClick={exportAudit}
-              className="flex items-center gap-2 border border-white/40 bg-white px-3 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
-            >
-              <Download className="h-4 w-4" /> Export CSV
-            </button>
-          ) : null
-        }
-      >
+      <WorkspaceCommandBar>
         <div className="min-w-0">
           <div className="flex items-center gap-3">
             <ShieldCheck className="h-5 w-5" />
@@ -332,7 +346,25 @@ export default function AuditPage() {
                 )}
               </div>
 
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+              <div className="mb-4 flex flex-wrap items-center gap-2">
+                <span className="mr-1 text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Period</span>
+                {[
+                  { label: "30 days", from: format(subDays(new Date(), 30), "yyyy-MM-dd"), to: format(new Date(), "yyyy-MM-dd") },
+                  { label: "This quarter", from: format(startOfQuarter(new Date()), "yyyy-MM-dd"), to: format(new Date(), "yyyy-MM-dd") },
+                  { label: "Year to date", from: format(startOfYear(new Date()), "yyyy-MM-dd"), to: format(new Date(), "yyyy-MM-dd") },
+                  { label: "All time", from: "", to: "" },
+                ].map((period) => (
+                  <button
+                    key={period.label}
+                    type="button"
+                    onClick={() => { setDateFrom(period.from); setDateTo(period.to); setPage(1); }}
+                    className="border border-[#C8CDD2] bg-[#F8FAFB] px-2.5 py-1 text-xs font-medium text-[#40515D] hover:bg-[#EEF6FB]"
+                  >
+                    {period.label}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 <div>
                   <label className={labelCls}>
                     <span className="flex items-center gap-1"><Search className="h-3 w-3" /> Search</span>
@@ -342,6 +374,16 @@ export default function AuditPage() {
                     value={searchTerm}
                     onChange={(e) => { setSearchTerm(e.target.value); setPage(1); }}
                     placeholder="Actor, object, or event…"
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Actor</label>
+                  <input
+                    type="text"
+                    value={actorFilter}
+                    onChange={(e) => { setActorFilter(e.target.value); setPage(1); }}
+                    placeholder="Name or email"
                     className={inputCls}
                   />
                 </div>
@@ -356,6 +398,16 @@ export default function AuditPage() {
                   />
                 </div>
                 <div>
+                  <label className={labelCls}>Requisition reference</label>
+                  <input
+                    type="text"
+                    value={formReference}
+                    onChange={(e) => { setFormReference(e.target.value); setPage(1); }}
+                    placeholder="e.g. REQ-00024"
+                    className={inputCls}
+                  />
+                </div>
+                <div>
                   <label className={labelCls}>From</label>
                   <input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setPage(1); }} className={inputCls} />
                 </div>
@@ -365,6 +417,49 @@ export default function AuditPage() {
                 </div>
               </div>
             </div>
+
+            {/* Report summary uses the full filtered result set, not only the visible page. */}
+            <section className="mb-4 border border-[#C8CDD2] bg-white p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <BarChart3 className="h-4 w-4 text-[#287EAD]" />
+                  <h2 className="text-sm font-semibold text-[#1F2933]">Requisition activity summary</h2>
+                  <span className="text-xs text-[#697780]">for requisition forms matching these filters</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => exportAudit("csv")}
+                    disabled={exporting !== null}
+                    className="flex items-center gap-2 border border-[#AEB5BB] bg-white px-3 py-2 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-60"
+                  >
+                    <Download className="h-4 w-4" /> {exporting === "csv" ? "Preparing…" : "Export CSV"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => exportAudit("xlsx")}
+                    disabled={exporting !== null}
+                    className="flex items-center gap-2 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#206D99] disabled:opacity-60"
+                  >
+                    <FileSpreadsheet className="h-4 w-4" /> {exporting === "xlsx" ? "Preparing…" : "Export Excel"}
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
+                {[
+                  ["Forms affected", report?.forms_affected],
+                  ["Submissions", report?.submissions],
+                  ["Approvals", report?.approvals],
+                  ["Returned", report?.returns],
+                  ["Rejected", report?.rejections],
+                ].map(([label, value]) => (
+                  <div key={String(label)} className="border border-[#E0E4E7] bg-[#F8FAFB] px-3 py-2.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-[#697780]">{label}</p>
+                    <p className="mt-1 text-xl font-semibold tabular-nums text-[#1F2933]">{isLoading ? "—" : Number(value ?? 0).toLocaleString()}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
 
             {/* Table */}
             <div className="overflow-hidden border border-[#C8CDD2] bg-white">
@@ -414,13 +509,14 @@ export default function AuditPage() {
                           )}
                           {(log.object_type || log.object_repr) && (
                             <div className="flex flex-wrap items-center gap-1.5">
-                              {log.object_type && (
-                                <span className="border border-[#C8CDD2] bg-[#F5F7F8] px-1.5 py-0.5 font-mono text-[11px] text-[#1F2933]">
-                                  {log.object_type}
-                                </span>
-                              )}
                               {log.object_repr && (
-                                <span className="max-w-[200px] truncate text-xs text-[#5E6870]">{log.object_repr}</span>
+                                log.object_type === "Document" && log.object_id ? (
+                                  <Link to={`/${log.object_id}?tab=audit`} className="max-w-[260px] truncate text-xs text-[#287EAD] hover:underline">
+                                    {log.object_repr}
+                                  </Link>
+                                ) : (
+                                  <span className="max-w-[260px] truncate text-xs text-[#5E6870]">{log.object_repr}</span>
+                                )
                               )}
                             </div>
                           )}

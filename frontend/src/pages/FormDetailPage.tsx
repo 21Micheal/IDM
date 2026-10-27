@@ -258,10 +258,13 @@ export default function FormDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
   const qc = useQueryClient();
   const user = useAuthStore((s) => s.user);
 
-  const [activeTab, setActiveTab] = useState<TabId>("workflow");
+  const [activeTab, setActiveTab] = useState<TabId>(() =>
+    searchParams.get("tab") === "audit" ? "audit" : "workflow",
+  );
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [formEditing, setFormEditing] = useState(false);
   const [reworkResubmitted, setReworkResubmitted] = useState(false);
@@ -286,7 +289,6 @@ export default function FormDetailPage() {
   const [gateRetrying, setGateRetrying] = useState(false);
   const [isSigningOpen, setIsSigningOpen] = useState(false);
   const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
-  const [searchParams] = useSearchParams();
   const taskPanelRef = useRef<HTMLDivElement>(null);
 
   // Required fields that failed the last save/submit attempt. Kept in state
@@ -1708,7 +1710,7 @@ export default function FormDetailPage() {
               className="inline-flex items-center gap-2 rounded-full bg-[#287EAD] px-5 py-3 text-sm font-semibold text-white shadow-lg ring-1 ring-white/80 hover:bg-[#1E6F99] disabled:cursor-wait disabled:opacity-60"
             >
               {submitLpoMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              Submit LPO
+              Submit for Approval
             </button>
           )}
         </div>
@@ -1731,7 +1733,7 @@ export default function FormDetailPage() {
                     className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
                   >
                     {submitLpoMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                    <Send className="h-3.5 w-3.5" /> Submit LPO
+                    <Send className="h-3.5 w-3.5" /> Submit for Approval
                   </button>
                 )}
                 {canDownloadLpo && (
