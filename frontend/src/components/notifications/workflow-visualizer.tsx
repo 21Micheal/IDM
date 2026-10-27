@@ -61,6 +61,8 @@ export interface WorkflowStep {
   lane?: number;
   /** Independent execution lane for procurement approval rows. */
   executionLane?: "imprest_request";
+  /** This approval is the configured LPO generation checkpoint. */
+  postLpoAfterApproval?: boolean;
   branchLabel?: string;
   next?: string[];
   description?: string;

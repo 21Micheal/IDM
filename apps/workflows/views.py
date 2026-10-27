@@ -553,6 +553,16 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": str(exc)}, status=400)
         return Response({"status": "approved"})
 
+    @action(detail=True, methods=["post"], url_path="submit_lpo")
+    def submit_lpo(self, request, pk=None):
+        task = self.get_object()
+        self._check_permission(task, request.user)
+        try:
+            WorkflowService.submit_generated_lpo(task, request.user)
+        except WorkflowError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response({"status": "submitted", "detail": "Generated LPO submitted to the next workflow step."})
+
     # ── Reject ─────────────────────────────────────────────────────────────
 
     @action(detail=True, methods=["post"])

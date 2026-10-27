@@ -1568,6 +1568,27 @@ class WorkflowService:
             from apps.sunsystems.models import JournalPosting, JournalPostingStatus
             from apps.sunsystems.tasks import post_journal_for_document
 
+            metadata = document.metadata if isinstance(document.metadata, dict) else {}
+            form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+            form["lpo_generation_ready"] = False
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata"])
+
+            # Keep the approving task in the actor's queue while the PO is
+            # posted and generated. It becomes the explicit Submit LPO action
+            # once every configured purchase order and PDF is ready.
+            gate_task = instance.tasks.filter(
+                step=step,
+                execution_lane="main",
+                status="approved",
+                actions__action="approved",
+            ).order_by("-acted_at").first()
+            if gate_task:
+                gate_task.status = "awaiting_posting"
+                gate_task.save(update_fields=["status", "updated_at"])
+                WorkflowService._skip_active_tasks(instance, step_order=step.order)
+
             for item in requested:
                 stage = int(item["stage"])
                 posting, created = JournalPosting.objects.get_or_create(
@@ -1603,7 +1624,7 @@ class WorkflowService:
 
     @staticmethod
     def _resume_lpo_workflow_if_ready(document) -> bool:
-        """Resume a marked approval once every configured PO and PDF is ready."""
+        """Mark a configured LPO approval ready for its actor to submit."""
         try:
             from apps.documents.builder_workflow import is_procurement_document
             from apps.sunsystems.config import get_purchase_order_postings
@@ -1643,22 +1664,92 @@ class WorkflowService:
                 # A periodic recovery may revisit a gate after a transient
                 # posting/resume failure. Never let ready posting records
                 # advance a step before its approval action has been recorded.
-                if not instance.tasks.filter(
+                gate_task = instance.tasks.filter(
                     step=step,
                     execution_lane="main",
-                    status="approved",
+                    status__in=["approved", "awaiting_posting"],
                     actions__action="approved",
-                ).exists():
+                ).order_by("-acted_at").first()
+                if not gate_task:
                     continue
                 with transaction.atomic():
                     locked = WorkflowInstance.objects.select_for_update().get(pk=instance.pk)
                     if locked.status != "in_progress" or locked.current_step_order != step.order:
                         continue
-                    WorkflowService._advance_step(locked, step.order)
+                    if gate_task.status == "approved":
+                        gate_task.status = "awaiting_posting"
+                        gate_task.save(update_fields=["status", "updated_at"])
+                    metadata = document.metadata if isinstance(document.metadata, dict) else {}
+                    form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+                    if form.get("lpo_generation_ready"):
+                        return False
+                    form["lpo_generation_ready"] = True
+                    metadata["form"] = form
+                    document.metadata = metadata
+                    WorkflowService._save_document(document, update_fields=["metadata"])
                 return True
         except Exception:
             logger.exception("Could not resume LPO workflow after generation for %s", document.pk)
         return False
+
+    @staticmethod
+    @transaction.atomic
+    def submit_generated_lpo(task: WorkflowTask, actor) -> None:
+        """Advance from the configured LPO generation step after an explicit submit."""
+        task, instance = WorkflowService._lock_action_task(task)
+        if task.status != "awaiting_posting":
+            raise WorkflowError("This LPO is not waiting for submission.")
+        if not task.step.post_lpo_after_approval:
+            raise WorkflowError("This step is not configured to generate an LPO.")
+        if instance.status != "in_progress" or instance.current_step_order != task.step.order:
+            raise WorkflowError("The workflow has moved on from this LPO approval step.")
+        if not task.actions.filter(action="approved").exists():
+            raise WorkflowError("Approve this step before submitting its generated LPO.")
+
+        document = instance.document
+        if not document:
+            raise WorkflowError("The LPO approval is not attached to a requisition.")
+        from apps.documents.builder_workflow import is_procurement_document
+        from apps.sunsystems.config import get_purchase_order_postings
+        from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+        if not is_procurement_document(document) or WorkflowService._document_workflow_phase(document) != "lpo":
+            raise WorkflowError("The requisition is no longer in its LPO phase.")
+        requested = get_purchase_order_postings(document)
+        stages = [int(item["stage"]) for item in requested]
+        if not stages:
+            raise WorkflowError("No LPO purchase order postings are configured.")
+        posted = dict(
+            JournalPosting.objects.filter(document=document, stage__in=stages)
+            .values_list("stage", "status")
+        )
+        if any(posted.get(stage) != JournalPostingStatus.POSTED for stage in stages):
+            raise WorkflowError("Wait for every configured LPO posting to succeed before submitting.")
+
+        metadata = document.metadata if isinstance(document.metadata, dict) else {}
+        form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+        generated = {
+            int(row.get("posting_stage"))
+            for row in (form.get("lpo_documents") or [])
+            if isinstance(row, dict) and str(row.get("posting_stage", "")).isdigit()
+        }
+        if not set(stages).issubset(generated) or not form.get("lpo_generation_ready"):
+            raise WorkflowError("Wait until all generated LPO documents are ready before submitting.")
+
+        form["lpo_generation_ready"] = False
+        metadata["form"] = form
+        document.metadata = metadata
+        WorkflowService._save_document(document, update_fields=["metadata"])
+
+        task.status = "approved"
+        task.save(update_fields=["status", "updated_at"])
+        WorkflowTaskAction.objects.create(
+            task=task,
+            actor=actor,
+            action="submitted_lpo",
+            comment="Submitted the generated LPO to the next workflow step.",
+        )
+        WorkflowService._advance_step(instance, task.step.order, task_step_order=task.step.order)
 
     @staticmethod
     def _active_group_members(group):

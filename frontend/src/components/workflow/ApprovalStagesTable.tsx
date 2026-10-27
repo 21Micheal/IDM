@@ -55,9 +55,10 @@ interface ApprovalStagesTableProps {
   isLoading?: boolean;
   phase?: "request" | "retirement" | "requisition" | "rfq" | "lpo" | "payment_run" | string | null;
   retirementAwaitingSubmission?: boolean;
+  lpoAwaitingSubmission?: boolean;
 }
 
-export function ApprovalStagesTable({ steps = [], isLoading, phase, retirementAwaitingSubmission = false }: ApprovalStagesTableProps) {
+export function ApprovalStagesTable({ steps = [], isLoading, phase, retirementAwaitingSubmission = false, lpoAwaitingSubmission = false }: ApprovalStagesTableProps) {
   const [shownEarlierPhases, setShownEarlierPhases] = useState<Set<string>>(new Set());
 
   const taskSteps = useMemo(
@@ -252,6 +253,8 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase, retirementAw
                 && step.phase === "retirement"
                 && step.status === "pending"
                 ? "Awaiting retirement submission"
+                : lpoAwaitingSubmission && step.postLpoAfterApproval && step.status === "in-progress"
+                  ? "Awaiting LPO submission"
                 : step.statusDisplay || step.status;
               return (
                 <Fragment key={step.id}>

@@ -889,7 +889,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     uploader_department_name = serializers.SerializerMethodField()
     file_name = serializers.SerializerMethodField()
     file_mime_type = serializers.SerializerMethodField()
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    status_display = serializers.SerializerMethodField()
     requires_signature = serializers.SerializerMethodField()
     is_delegated = serializers.SerializerMethodField()
     delegated_from = serializers.SerializerMethodField()
@@ -903,6 +903,17 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     def get_document_id(self, obj):
         doc = self._document(obj)
         return str(doc.id) if doc else None
+
+    def get_status_display(self, obj):
+        document = self._document(obj)
+        form = ((getattr(document, "metadata", None) or {}).get("form") or {}) if document else {}
+        if (
+            obj.status == "awaiting_posting"
+            and getattr(obj.step, "post_lpo_after_approval", False)
+            and form.get("lpo_generation_ready")
+        ):
+            return "Awaiting LPO submission"
+        return obj.get_status_display()
 
     def get_document_ref(self, obj):
         doc = self._document(obj)

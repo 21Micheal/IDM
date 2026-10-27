@@ -1396,6 +1396,7 @@ export const workflowAPI = {
           headers: { "Content-Type": undefined },
         })
       : api.post(`/workflows/tasks/${id}/approve/`, { comment }),
+  submitLpo: (id: string) => api.post(`/workflows/tasks/${id}/submit_lpo/`),
   rejectTask: (id: string, comment: string) =>
     api.post(`/workflows/tasks/${id}/reject/`, { comment }),
   returnForReview: (id: string, comment: string, returnTo: "previous_step" | "uploader" | "same_step" = "uploader") =>

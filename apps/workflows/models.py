@@ -522,6 +522,7 @@ class WorkflowTaskAction(models.Model):
     """
     ACTION_CHOICES = [
         ("approved",   "Approved"),
+        ("submitted_lpo", "LPO Submitted"),
         ("rejected",   "Rejected"),
         ("returned",   "Returned for Review"),
         ("held",       "Put on Hold"),

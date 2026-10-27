@@ -11,10 +11,11 @@ logger = logging.getLogger(__name__)
 
 @shared_task(queue="default")
 def resume_ready_lpo_gates() -> int:
-    """Recover LPO approval gates whose posting callback was missed.
+    """Mark LPO approval gates ready when their posting callback was missed.
 
-    The service rechecks approval, posting, and generated-document state before
-    advancing, so this is safe to run periodically and is idempotent.
+    The service rechecks approval, posting, and generated-document state. It
+    leaves the assigned approver's task waiting until they explicitly submit
+    the generated LPOs to the next step.
     """
     from .models import WorkflowInstance
     from .services import WorkflowService

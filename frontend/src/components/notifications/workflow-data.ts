@@ -80,6 +80,7 @@ type WorkflowTemplateStepRecord = {
   notify_user_name?: string | null;
   notify_email?: string;
   instructions?: string;
+  post_lpo_after_approval?: boolean;
 };
 
 type WorkflowTemplateRecord = {
@@ -211,6 +212,7 @@ type TaskHistoryRecord = {
     full_name?: string;
     first_name?: string;
     last_name?: string;
+    job_description?: string;
   };
   comment?: string;
   created_at?: string;
@@ -401,10 +403,18 @@ function buildApproverWorkflow(
       || items.some((item) => item.task.step?.step_type === "notification");
     const allHistory = items.flatMap((item) => item.history ?? []);
     const latestAction = latestActionForHistory(allHistory);
+    const approvalActions = allHistory
+      .filter((action) => String(action.action ?? "").toLowerCase() === "approved")
+      .sort((a, b) => Date.parse(String(a.created_at ?? "")) - Date.parse(String(b.created_at ?? "")));
+    const latestApprovalAction = approvalActions[approvalActions.length - 1];
     const latestTaskItem = [...items]
       .filter((item) => item.task.acted_at)
       .sort((a, b) => Date.parse(String(b.task.acted_at)) - Date.parse(String(a.task.acted_at)))[0];
-    const statuses = items.map((item) => mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action));
+    const statuses = items.map((item) => mapTaskStatus(
+      item.task.status,
+      latestActionForHistory(item.history)?.action,
+      item.task.acted_at,
+    ));
     const lane = !sequentialRequestCase && (
       parallelImprestOrders.has(stepOrder)
       || items.some(({ task }) => task.execution_lane === "imprest_request")
@@ -440,6 +450,8 @@ function buildApproverWorkflow(
         || formatAssigneeType(templateStep.assignee_type);
     const approver = isNotification
       ? recipientLabel
+      : latestApprovalAction?.actor
+        ? formatPerson(latestApprovalAction.actor) || configuredApprover || "Unassigned"
       : templateStep.assignee_type === "group_all"
         ? configuredApprover || "All group members"
         : (formatPerson(taskWithAssignee?.task.assigned_to) || configuredApprover || "Unassigned");
@@ -453,8 +465,12 @@ function buildApproverWorkflow(
       isNotification,
       name,
       approver,
-      approverFullName: formatPerson(taskWithAssignee?.task.assigned_to),
-      approverPosition: taskWithAssignee?.task.assigned_to?.job_description || "",
+      approverFullName: latestApprovalAction?.actor
+        ? formatPerson(latestApprovalAction.actor)
+        : formatPerson(taskWithAssignee?.task.assigned_to),
+      approverPosition: latestApprovalAction?.actor
+        ? latestApprovalAction.actor.job_description || ""
+        : taskWithAssignee?.task.assigned_to?.job_description || "",
       rawStatus,
       hasTasks: items.length > 0,
       completedAt: latestTaskItem?.task.acted_at || latestAction?.created_at || undefined,
@@ -462,6 +478,7 @@ function buildApproverWorkflow(
       description: isNotification
         ? "Automated notification step"
         : (templateStep.instructions || `${ordinal(index + 1)} approval step`),
+      postLpoAfterApproval: Boolean(templateStep.post_lpo_after_approval),
     };
   });
 
@@ -732,7 +749,7 @@ function getWorkflowMeta(orderedTasks: WorkflowTaskRecord[], instance?: Workflow
   };
 }
 
-function mapTaskStatus(taskStatus?: string, action?: string): WorkflowStep["status"] {
+function mapTaskStatus(taskStatus?: string, action?: string, actedAt?: string | null): WorkflowStep["status"] {
   const normalizedStatus = String(taskStatus ?? "").toLowerCase();
   // The persisted task state is authoritative. Histories can lag immediately
   // after an action, so an older action must never overwrite the current state.
@@ -741,7 +758,14 @@ function mapTaskStatus(taskStatus?: string, action?: string): WorkflowStep["stat
   if (normalizedStatus === "rejected") return "rejected";
   if (normalizedStatus === "returned") return "returned";
   if (normalizedStatus === "held") return "on-hold";
-  if (normalizedStatus === "awaiting_posting") return "in-progress";
+  // The generator task stays in the actor's queue while SunSystems posts and
+  // the LPO is built. Its approval action is already complete during that
+  // hold, so show the approval as completed in the stage table.
+  if (normalizedStatus === "awaiting_posting") {
+    return String(action ?? "").toLowerCase() === "approved" || Boolean(actedAt)
+      ? "completed"
+      : "in-progress";
+  }
   if (normalizedStatus === "in_progress") return "in-progress";
   if (normalizedStatus === "skipped") return "skipped";
   const normalizedAction = String(action ?? "").toLowerCase();

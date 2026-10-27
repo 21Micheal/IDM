@@ -280,6 +280,8 @@ export default function FormDetailPage() {
   const [awaitingLpo, setAwaitingLpo] = useState(
     Boolean(navigationState?.awaitLpo),
   );
+  const [awaitingLpoReady, setAwaitingLpoReady] = useState(false);
+  const [lpoGateTaskId, setLpoGateTaskId] = useState<string | null>(null);
   const [awaitingImprestPostSince, setAwaitingImprestPostSince] = useState(0);
   const [gateRetrying, setGateRetrying] = useState(false);
   const [isSigningOpen, setIsSigningOpen] = useState(false);
@@ -302,7 +304,7 @@ export default function FormDetailPage() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [formEditing]);
 
-  const awaitingPostingGate = awaitingLpo || awaitingImprestPostSince > 0;
+  const awaitingPostingGate = awaitingLpo || awaitingLpoReady || awaitingImprestPostSince > 0;
 
   const { data: doc, isLoading, dataUpdatedAt: formDataUpdatedAt } = useQuery<any>({
     queryKey: ["form", id],
@@ -325,6 +327,7 @@ export default function FormDetailPage() {
       sections?: unknown[];
       values?: Record<string, unknown>;
       travel_retirement?: { enabled?: boolean };
+      lpo_generation_ready?: boolean;
       imprest_request_workflow_status?: string;
       print_config?: Record<string, any>;
       lpo_document_id?: string;
@@ -542,6 +545,34 @@ export default function FormDetailPage() {
     ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
+  useEffect(() => {
+    if ((activeTask?.step as any)?.post_lpo_after_approval && activeTask?.id) {
+      setLpoGateTaskId(activeTask.id);
+    }
+    if (
+      activeTask?.status === "awaiting_posting"
+      && Boolean((activeTask.step as any)?.post_lpo_after_approval)
+      && !formData?.lpo_generation_ready
+    ) {
+      setAwaitingLpoReady(true);
+    }
+  }, [activeTask, formData?.lpo_generation_ready]);
+  useEffect(() => {
+    if (!formData?.lpo_generation_ready) return;
+    setAwaitingLpoReady(false);
+    // The task query may have fetched just before the posting transaction
+    // changed it from approved to awaiting_posting. Refresh it alongside the
+    // readiness update so the submit action appears without waiting for the
+    // shared task-list polling interval.
+    void qc.refetchQueries({ queryKey: ["workflow", "my-tasks"], type: "active" });
+  }, [formData?.lpo_generation_ready, qc]);
+  const lpoSubmitTaskId = lpoGateTaskId
+    || ((activeTask?.step as any)?.post_lpo_after_approval ? activeTask?.id : null);
+  const canSubmitLpo = Boolean(
+    lpoSubmitTaskId
+    && formData?.lpo_generation_ready
+    && generatedLpos.length,
+  );
 
   // When the page is opened via an email notification link (?task=<id>),
   // scroll the action panel into view once the approver's task has loaded.
@@ -569,11 +600,14 @@ export default function FormDetailPage() {
   }, [doc, activeTask, formEditing, formData?.values, user?.has_admin_access]);
 
   const { data: workflowData, isLoading: workflowDataLoading } = useQuery({
-    queryKey: ["form-workflow", id],
+    queryKey: ["form-workflow", id, formData?.lpo_generation_ready ? "lpo-ready" : "standard"],
     queryFn: () => loadWorkflowData(id!, doc?.builder_workflow_phase),
     enabled: !!id && !!doc,
     ...QUERY_SHORT_STALE,
-    refetchInterval: (query) => (query.state.data?.isActive ? 15_000 : false),
+    refetchInterval: (query) => {
+      if (awaitingLpoReady) return 1_000;
+      return query.state.data?.isActive ? 15_000 : false;
+    },
   });
   const workflowStepsCount = workflowData?.steps?.length ?? 0;
 
@@ -696,6 +730,22 @@ export default function FormDetailPage() {
     mutationFn: (content: string) => documentsAPI.addComment(id!, content),
     onSuccess: () => { setComment(""); qc.invalidateQueries({ queryKey: ["form", id] }); },
     onError: (err) => toast.error(extractApiError(err, "Failed to add comment")),
+  });
+
+  const submitLpoMutation = useMutation({
+    mutationFn: (taskId: string) => workflowAPI.submitLpo(taskId),
+    onSuccess: async () => {
+      toast.success("LPO submitted to the next approval step.");
+      setAwaitingLpoReady(false);
+      setLpoModalOpen(false);
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] }),
+        qc.invalidateQueries({ queryKey: ["form", id] }),
+        qc.invalidateQueries({ queryKey: ["form-workflow", id] }),
+        qc.invalidateQueries({ queryKey: ["requisitions"] }),
+      ]);
+    },
+    onError: (err) => toast.error(extractApiError(err, "Could not submit the generated LPO.")),
   });
 
   const updateFormMutation = useMutation({
@@ -864,6 +914,7 @@ export default function FormDetailPage() {
   const procurementNextStage = doc.builder_next_stage ?? null;
   const canSubmitProcurementStage = !isUnassignedHandoffViewer && !isReturnedReworkEditor && Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
   const canSubmit = canSubmitRequest || canSubmitProcurementStage;
+  const canResubmitAtBottom = doc.status === "returned" && canSubmitRequest;
   const submitLabel = canSubmitProcurementStage
     ? `Submit ${procurementNextStage!.toUpperCase()}`
     : doc.status === "returned"
@@ -1038,16 +1089,12 @@ export default function FormDetailPage() {
       await updateFormMutation.mutateAsync();
     }
   };
-  const dismissWorkflowCompletion = async () => {
-    // RequisitionsPage renders from its own capped pool query, not the detail
-    // document cache refreshed by WorkflowActionPanel. Fetch that pool before
-    // navigating so its status filter and status badge use the completed state.
-    try {
-      await refreshRequisitionListings();
-    } catch {
-      // RequisitionsPage will retry the now-stale pool query on mount.
-      await qc.invalidateQueries({ queryKey: ["requisitions", "pool"] });
-    }
+  const dismissWorkflowCompletion = () => {
+    // Start refreshing the listing cache, then navigate immediately. Waiting
+    // for the full requisitions pool request here made the OK button feel slow.
+    void refreshRequisitionListings().catch(() => {
+      void qc.invalidateQueries({ queryKey: ["requisitions", "pool"] });
+    });
     navigate("/list", { replace: true });
   };
 
@@ -1197,12 +1244,12 @@ export default function FormDetailPage() {
                   />
                 ) : (
                   <span className="text-xs text-[#5E6870]">
-                    {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
+                    {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitLpo ? "LPO generated — submit to continue" : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
                   </span>
                 )}
               </div>
               <div className="flex items-center gap-2 flex-wrap justify-end">
-                {canSubmit && (
+                {canSubmit && !canResubmitAtBottom && (
                   <button
                     type="button"
                     onClick={() => submitMutation.mutate(procurementNextStage ?? undefined)}
@@ -1429,6 +1476,7 @@ export default function FormDetailPage() {
                   isLoading={workflowDataLoading}
                   phase={doc.builder_workflow_phase}
                   retirementAwaitingSubmission={retirementAwaitingSubmission}
+                  lpoAwaitingSubmission={Boolean(formData?.lpo_generation_ready)}
                 />
               )}
               <JournalPostingCard
@@ -1565,7 +1613,7 @@ export default function FormDetailPage() {
         )}
       </div>
 
-        {activeTask && !isReturnedReworkEditor && (
+        {activeTask && !isReturnedReworkEditor && !canSubmitLpo && (
         <div ref={taskPanelRef} className="z-10 shrink-0 border-t border-[#C8CDD2] bg-white">
           <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
             <WorkflowActionPanel
@@ -1584,6 +1632,15 @@ export default function FormDetailPage() {
                   setWorkflowActionCompleted(true);
                   return;
                 }
+                // The approval table and active task are separate queries from
+                // the form/posting state. Refresh them as soon as the action
+                // completes so the approved row and any pending LPO gate do
+                // not wait for the normal workflow polling interval.
+                void Promise.all([
+                  qc.refetchQueries({ queryKey: ["form-workflow", id], type: "active" }),
+                  qc.refetchQueries({ queryKey: ["workflow", "my-tasks"], type: "active" }),
+                  qc.refetchQueries({ queryKey: ["form", id], type: "active" }),
+                ]);
                 setWorkflowActionCompleted(false);
                 const phase = String((formData as any)?.workflow_phase ?? doc?.builder_workflow_phase ?? "").toLowerCase();
                 const lpoApprovalSteps = (workflowData?.steps ?? []).filter((step) =>
@@ -1614,6 +1671,8 @@ export default function FormDetailPage() {
                   setWorkflowActionCompleted(true);
                   return;
                 }
+                if (activeTask?.id) setLpoGateTaskId(activeTask.id);
+                setAwaitingLpoReady(true);
                 if (generatedLpos.length) {
                   setSelectedLpoId(generatedLpos[0].id);
                   setLpoModalOpen(true);
@@ -1628,6 +1687,33 @@ export default function FormDetailPage() {
         </div>
       )}
 
+      {(canResubmitAtBottom || canSubmitLpo) && (
+        <div className="fixed bottom-6 right-6 z-[120] flex items-center gap-2">
+          {canResubmitAtBottom && (
+            <button
+              type="button"
+              onClick={() => submitMutation.mutate(procurementNextStage ?? undefined)}
+              disabled={submitMutation.isPending}
+              className="inline-flex items-center gap-2 rounded-full bg-[#287EAD] px-5 py-3 text-sm font-semibold text-white shadow-lg ring-1 ring-white/80 hover:bg-[#1E6F99] disabled:cursor-wait disabled:opacity-60"
+            >
+              {submitMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              Resubmit
+            </button>
+          )}
+          {canSubmitLpo && (
+            <button
+              type="button"
+              onClick={() => lpoSubmitTaskId && submitLpoMutation.mutate(lpoSubmitTaskId)}
+              disabled={submitLpoMutation.isPending}
+              className="inline-flex items-center gap-2 rounded-full bg-[#287EAD] px-5 py-3 text-sm font-semibold text-white shadow-lg ring-1 ring-white/80 hover:bg-[#1E6F99] disabled:cursor-wait disabled:opacity-60"
+            >
+              {submitLpoMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              Submit LPO
+            </button>
+          )}
+        </div>
+      )}
+
       {generatedLpoId && lpoModalOpen && !lpoMinimized && (
         <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/50 p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={`LPO ${generatedLpoReference || "document"}`}>
           <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden border border-[#AEB5BB] bg-white shadow-2xl">
@@ -1637,6 +1723,17 @@ export default function FormDetailPage() {
                 <p className="text-xs text-[#5E6870]">Generated LPO document</p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                {canSubmitLpo && (
+                  <button
+                    type="button"
+                    onClick={() => lpoSubmitTaskId && submitLpoMutation.mutate(lpoSubmitTaskId)}
+                    disabled={submitLpoMutation.isPending}
+                    className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+                  >
+                    {submitLpoMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    <Send className="h-3.5 w-3.5" /> Submit LPO
+                  </button>
+                )}
                 {canDownloadLpo && (
                   <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99]">
                     <Download className="h-3.5 w-3.5" /> Download PDF

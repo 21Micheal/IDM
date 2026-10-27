@@ -995,7 +995,7 @@ function StepEditPanel({
             </span>
             <span>
               <span className="block text-xs font-semibold">Generate LPOs after this approval</span>
-              <span className="block text-[11px] mt-1 opacity-80">Post the purchase orders and create their documents before the next approval step.</span>
+              <span className="block text-[11px] mt-1 opacity-80">Post the purchase orders and generate their LPO documents. The assigned approver must then submit the generated LPOs to continue.</span>
             </span>
           </button>
           {isRequisitionWorkflow && (
