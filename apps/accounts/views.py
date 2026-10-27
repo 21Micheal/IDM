@@ -914,6 +914,25 @@ class UserGroupViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    def perform_update(self, serializer):
+        group = self.get_object()
+        old_system_audit_access = group.can_view_system_audit
+        group = serializer.save()
+        if old_system_audit_access != group.can_view_system_audit:
+            from apps.audit.utils import record_audit_event
+            record_audit_event(
+                AuditEvent.GROUP_PERMISSION_UPDATED,
+                actor=self.request.user,
+                obj=group,
+                changes={
+                    "can_view_system_audit": {
+                        "previous": old_system_audit_access,
+                        "new": group.can_view_system_audit,
+                    }
+                },
+                request=self.request,
+            )
+
     def destroy(self, request, *args, **kwargs):
         group = self.get_object()
         if group.name in (UserGroup.ADMIN_GROUP_NAME, UserGroup.HOD_GROUP_NAME):

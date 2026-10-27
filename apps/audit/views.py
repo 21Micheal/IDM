@@ -17,7 +17,7 @@ class AuditLogListView(generics.ListAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if not user.has_admin_access:
+        if not user.can_view_system_audit:
             return AuditLog.objects.none()
 
         qs = AuditLog.objects.all().select_related('actor')
@@ -57,8 +57,8 @@ class AuditLogExportView(AuditLogListView):
     pagination_class = None
 
     def get(self, request, *args, **kwargs):
-        if not request.user.has_admin_access:
-            raise PermissionDenied("Only administrators can export the audit log.")
+        if not request.user.can_view_system_audit:
+            raise PermissionDenied("You do not have permission to export the system audit log.")
 
         qs = self.filter_queryset(self.get_queryset())
         response = HttpResponse(content_type="text/csv")
@@ -114,7 +114,7 @@ class MyActivityListView(generics.ListAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.has_admin_access:
+        if user.can_view_system_audit:
             return AuditLog.objects.none()
 
         doc_ids = list(

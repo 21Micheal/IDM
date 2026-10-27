@@ -280,6 +280,7 @@ export default function Layout({
   const isSunConnected = Boolean(sunConnection?.effective?.base_url);
 
   const hasAdminAccess = user?.has_admin_access;
+  const canViewSystemAudit = Boolean(user?.can_view_system_audit || hasAdminAccess);
 
   // Check if we're on the templates page
   const isTemplatesPage = location.pathname === "/admin/templates";
@@ -328,11 +329,11 @@ export default function Layout({
 
       {
         to: "/audit",
-        label: hasAdminAccess ? "Audit Trail" : "Document Activity",
+        label: canViewSystemAudit ? "Audit Trail" : "Document Activity",
         icon: Activity,
       },
     ],
-    [pendingApprovalsCount, unreadCount, hasAdminAccess]
+    [pendingApprovalsCount, unreadCount, hasAdminAccess, canViewSystemAudit]
   );
 
   const adminNavItems = useMemo(
@@ -640,7 +641,7 @@ export default function Layout({
                 : location.pathname.includes("/analytics")
                 ? "Procurement Spend Analytics"
                 : location.pathname.startsWith("/audit")
-                ? user?.has_admin_access ? "Audit Trail" : "Document Activity"
+                ? canViewSystemAudit ? "Audit Trail" : "Document Activity"
                 : location.pathname.includes("/dashboard")
                 ? "Requisition Dashboard"
                 : "Requisitions Register"}

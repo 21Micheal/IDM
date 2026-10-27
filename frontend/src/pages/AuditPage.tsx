@@ -172,7 +172,8 @@ export default function AuditPage() {
   ] as const;
 
   const user = useAuthStore((s) => s.user);
-  const listEndpoint = user?.has_admin_access ? "/audit/" : "/audit/my-activity/";
+  const canViewSystemAudit = Boolean(user?.can_view_system_audit || user?.has_admin_access);
+  const listEndpoint = canViewSystemAudit ? "/audit/" : "/audit/my-activity/";
 
   const { data, isLoading } = useQuery({
     queryKey: ["audit-logs", listEndpoint, searchTerm, eventFilter, dateFrom, dateTo, page],
@@ -272,7 +273,7 @@ export default function AuditPage() {
       {/* ── Command bar ─────────────────────────────────────────────────────── */}
       <WorkspaceCommandBar
         actions={
-          user?.has_admin_access ? (
+          canViewSystemAudit ? (
             <button
               onClick={exportAudit}
               className="flex items-center gap-2 border border-white/40 bg-white px-3 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
@@ -287,9 +288,9 @@ export default function AuditPage() {
             <ShieldCheck className="h-5 w-5" />
             <div className="flex min-w-0 items-center gap-2">
               <h1 className="truncate text-lg font-semibold tracking-tight">
-                {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
+                {canViewSystemAudit ? "Audit Trail" : "Document Activity"}
               </h1>
-              <span title={user?.has_admin_access ? "Full system audit log for administrators." : "Recent actions on documents you own."}>
+              <span title={canViewSystemAudit ? "Full system audit log." : "Recent actions on documents you own."}>
                 <Info className="h-4 w-4 text-white/75" />
               </span>
             </div>
@@ -301,7 +302,7 @@ export default function AuditPage() {
             )}
           </div>
           <p className="mt-0.5 max-w-2xl text-xs text-white/75">
-            {user?.has_admin_access
+            {canViewSystemAudit
               ? "Immutable record of all system activities and changes."
               : "A simple feed of recent actions on your documents — approvals, views, and uploads."}
           </p>
@@ -310,7 +311,7 @@ export default function AuditPage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto p-5">
         {/* ── Admin view ────────────────────────────────────────────────────── */}
-        {user?.has_admin_access ? (
+        {canViewSystemAudit ? (
           <>
             {/* Filters */}
             <div className="mb-4 border border-[#C8CDD2] bg-white p-4">

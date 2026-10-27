@@ -223,6 +223,19 @@ class User(AbstractBaseUser, PermissionsMixin):
         ).exists()
 
     @cached_property
+    def can_view_system_audit(self) -> bool:
+        """Whether this user can inspect the complete system audit log."""
+        if self.has_admin_access:
+            return True
+        now = timezone.now()
+        return self.group_memberships.filter(
+            group__is_active=True,
+            group__can_view_system_audit=True,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+        ).exists()
+
+    @cached_property
     def hod_department_ids(self) -> set[str]:
         """
         Department ids this user is Head of Department for (Department.head == self).
@@ -438,6 +451,7 @@ class UserGroup(models.Model):
     # document — full visibility/view across all types (e.g. auditors). What they
     # can DO is still governed by this group's per-type permissions.
     sees_all_documents = models.BooleanField(default=False)
+    can_view_system_audit = models.BooleanField(default=False)
     created_by  = models.ForeignKey(
         User, null=True, on_delete=models.SET_NULL, related_name="created_groups"
     )

@@ -32,6 +32,7 @@ export interface AuthUser {
   is_staff?: boolean;
   is_superuser?: boolean;
   has_admin_access?: boolean;
+  can_view_system_audit?: boolean;
   group_names?: string[];
   mfa_enabled: boolean;
   must_change_password: boolean;          // ← new field

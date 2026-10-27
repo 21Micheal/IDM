@@ -90,6 +90,7 @@ class UserSerializer(serializers.ModelSerializer):
     full_name        = serializers.SerializerMethodField()
     group_names      = serializers.SerializerMethodField()
     has_admin_access = serializers.SerializerMethodField()
+    can_view_system_audit = serializers.SerializerMethodField()
     admin_source     = serializers.SerializerMethodField()
 
     class Meta:
@@ -99,7 +100,7 @@ class UserSerializer(serializers.ModelSerializer):
             "job_description",
             "is_staff",
             "is_superuser",
-            "has_admin_access", "admin_source",
+            "has_admin_access", "can_view_system_audit", "admin_source",
             "department", "department_name",
             "mfa_enabled", "must_change_password",
             "is_active", "last_login_ip", "last_login",
@@ -108,7 +109,7 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id", "full_name", "department_name",
             "is_staff", "is_superuser",
-            "has_admin_access", "admin_source",
+            "has_admin_access", "can_view_system_audit", "admin_source",
             "must_change_password", "last_login_ip", "last_login",
             "group_names", "created_at", "updated_at",
         ]
@@ -125,6 +126,9 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_has_admin_access(self, obj):
         return obj.has_admin_access
+
+    def get_can_view_system_audit(self, obj):
+        return obj.can_view_system_audit
 
     def get_admin_source(self, obj):
         """Where a user's admin rights come from: their account vs. group membership."""
@@ -308,6 +312,7 @@ class UserGroupSerializer(serializers.ModelSerializer):
         model  = UserGroup
         fields = [
             "id", "name", "description", "is_active", "sees_all_documents",
+            "can_view_system_audit",
             "permissions", "has_admin_access", "member_count", "created_by", "created_at",
             "head", "head_id",
             "requisition_template_ids",

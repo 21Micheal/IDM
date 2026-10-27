@@ -720,10 +720,10 @@ export default function DashboardPage() {
   });
 
   const { data: recentAudit, isLoading: auditLoading } = useQuery({
-    queryKey: ["audit", user?.has_admin_access ? "all" : "mine", recentAuditPage],
+    queryKey: ["audit", user?.can_view_system_audit || user?.has_admin_access ? "all" : "mine", recentAuditPage],
     queryFn: () =>
       api
-        .get(user?.has_admin_access ? "/audit/" : "/audit/my-activity/", {
+        .get(user?.can_view_system_audit || user?.has_admin_access ? "/audit/" : "/audit/my-activity/", {
           params: {
             ordering: "-timestamp",
             page: recentAuditPage,
@@ -1294,7 +1294,7 @@ export default function DashboardPage() {
               <div className="flex items-start justify-between">
                 <div>
                   <h2 className="text-sm font-bold text-[#1F2933]">
-                    {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
+                    {user?.can_view_system_audit || user?.has_admin_access ? "Audit Trail" : "Document Activity"}
                   </h2>
                   <p className="mt-0.5 text-xs text-[#5E6870]">A plain-language feed of what just happened.</p>
                 </div>

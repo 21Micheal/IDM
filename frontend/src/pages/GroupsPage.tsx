@@ -19,7 +19,7 @@ interface GroupPerm {
   action: string;
 }
 interface Member    { id: string; user: { id: string; full_name: string; email: string; job_description?: string }; expires_at: string | null; is_active: boolean }
-interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean; sees_all_documents: boolean; requisition_template_ids?: string[] }
+interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean; sees_all_documents: boolean; can_view_system_audit: boolean; requisition_template_ids?: string[] }
 interface User      { id: string; full_name: string; email: string; job_description?: string }
 
 const ADMIN_GROUP_NAME = "Administrators";
@@ -502,6 +502,17 @@ function GroupDetail({
     },
     onError: (err) => toast.error(extractApiError(err, "Failed to update document visibility")),
   });
+  const setSystemAuditMutation = useMutation({
+    mutationFn: (value: boolean) => groupsAPI.update(group.id, { can_view_system_audit: value }),
+    onSuccess: (_d, value) => {
+      toast.success(value
+        ? "This group can now view the system-wide audit trail."
+        : "System-wide audit access has been removed from this group.");
+      qc.invalidateQueries({ queryKey: ["groups"] });
+      qc.invalidateQueries({ queryKey: ["group", group.id] });
+    },
+    onError: (err) => toast.error(extractApiError(err, "Failed to update audit access")),
+  });
 
   const deleteMutation = useMutation({
     mutationFn: () => groupsAPI.delete(group.id),
@@ -640,6 +651,22 @@ function GroupDetail({
                     Members get full visibility of every document (e.g. auditors) — in lists and
                     search — bypassing the involvement rule. What they can <span className="font-medium">do</span> with each
                     document is still governed by the permissions below.
+                  </p>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 border border-[#C8CDD2] bg-white p-4 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(groupDetail?.can_view_system_audit ?? group.can_view_system_audit)}
+                  disabled={setSystemAuditMutation.isPending}
+                  onChange={(e) => setSystemAuditMutation.mutate(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-[#287EAD]"
+                />
+                <div>
+                  <p className="text-sm font-semibold text-foreground">This group can view the system-wide audit trail</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Members can search and export all system audit events. This is separate from document visibility and does not grant document permissions.
                   </p>
                 </div>
               </label>
