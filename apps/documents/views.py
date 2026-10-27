@@ -1524,6 +1524,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # Recompute calculated fields authoritatively, exactly like create.
         from apps.templates_engine.conditions import compute_calculated_values
         values = compute_calculated_values(sections, values)
+        from apps.documents.metadata_audit import diff_form_value_fields
+        changed_form_fields = diff_form_value_fields(prior_values, values, sections)
 
         # The regenerated PDF view shows display strings, not structured dicts.
         render_values = descriptors_to_names(values)
@@ -1566,7 +1568,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             # catch up. Don't fail the edit.
             logger.warning("Form document %s saved but realtime indexing failed.", doc.id)
 
-        self.record_audit("document.updated", doc, {"version": new_version, "form": True})
+        self.record_audit("document.updated", doc, {
+            "version": new_version,
+            "form": True,
+            "changed_fields": changed_form_fields,
+        })
         from apps.search.indexing import schedule_document_search_pipeline
 
         schedule_document_search_pipeline(str(doc.id), reextract_content=True, index_immediately=True)

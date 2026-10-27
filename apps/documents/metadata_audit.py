@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import json
 from typing import Any
 
 from apps.documents.serializers import _normalize_personal_tags
@@ -132,3 +133,74 @@ def diff_metadata_snapshots(
             "new": new,
         })
     return edits
+
+
+def diff_form_value_fields(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    sections: list[dict[str, Any]],
+) -> list[str]:
+    """Return user-facing labels for changed form values, without storing values.
+
+    Table edits are reported at column level where possible so an LPO-related
+    change can be distinguished from opening a form that happens to contain LPO
+    details. Values are intentionally omitted from this audit summary.
+    """
+    before = before if isinstance(before, dict) else {}
+    after = after if isinstance(after, dict) else {}
+    labels: list[str] = []
+    known_keys: set[str] = set()
+
+    def differs(left: Any, right: Any) -> bool:
+        return json.dumps(left, sort_keys=True, ensure_ascii=False, default=str) != json.dumps(
+            right, sort_keys=True, ensure_ascii=False, default=str
+        )
+
+    for section in sections or []:
+        if not isinstance(section, dict):
+            continue
+        for field in section.get("fields", []):
+            if not isinstance(field, dict) or not field.get("key"):
+                continue
+            key = str(field["key"])
+            known_keys.add(key)
+            field_label = str(field.get("label") or key.replace("_", " ").title())
+            if field.get("type") != "table":
+                if differs(before.get(key), after.get(key)):
+                    labels.append(field_label)
+                continue
+
+            old_rows = before.get(key) if isinstance(before.get(key), list) else []
+            new_rows = after.get(key) if isinstance(after.get(key), list) else []
+            if len(old_rows) != len(new_rows):
+                labels.append(field_label)
+                continue
+
+            column_labels: list[str] = []
+            for column in field.get("columns", []):
+                if not isinstance(column, dict) or not column.get("key"):
+                    continue
+                column_key = str(column["key"])
+                if any(
+                    differs(
+                        old.get(column_key) if isinstance(old, dict) else None,
+                        new.get(column_key) if isinstance(new, dict) else None,
+                    )
+                    for old, new in zip(old_rows, new_rows)
+                ):
+                    column_label = str(column.get("label") or column_key.replace("_", " ").title())
+                    column_labels.append(f"{field_label}: {column_label}")
+
+            if column_labels:
+                labels.extend(column_labels)
+            elif differs(before.get(key), after.get(key)):
+                # Unknown row-level data changed; identify the table without
+                # implying which column changed.
+                labels.append(field_label)
+
+    for key in sorted((set(before) | set(after)) - known_keys):
+        if key.startswith("__") or not differs(before.get(key), after.get(key)):
+            continue
+        labels.append(key.replace("_", " ").replace(".", " · ").title())
+
+    return labels

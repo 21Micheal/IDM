@@ -385,6 +385,16 @@ function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
   const summary = (event.summary || "").trim();
   const objectTitle = cleanAuditTitle(event.object_repr || "");
 
+  // Prefer the server's business-aware summary for document updates. It
+  // distinguishes viewing from editing and can include changed form fields.
+  if (code === "document.updated" && summary) {
+    const actorName = event.actor_name?.trim();
+    if (actorName && summary.startsWith(`${actorName} `)) {
+      return { actor, verb: "", target: summary.slice(actorName.length).trim() };
+    }
+    return { actor: "", verb: "", target: summary };
+  }
+
   if (code === "permission.changed") {
     const { verb, target } = describePermissionChange(event);
     return { actor, verb, target };

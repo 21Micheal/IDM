@@ -1589,7 +1589,7 @@ export default function FormDetailPage() {
                       <div key={log.id} className="flex gap-2 border-b border-[#E3E7EA] pb-2 text-sm">
                         <ShieldCheck className="mt-0.5 h-4 w-4 flex-shrink-0 text-[#287EAD]" />
                         <div className="min-w-0">
-                          <p className="text-[#1F2933]">{log.summary || log.event} — <span className="font-semibold">{log.actor_name || "System"}</span></p>
+                          <p className="text-[#1F2933]">{log.summary || log.event}</p>
                           <p className="text-xs text-[#5E6870]">{format(new Date(log.timestamp), "dd MMM yyyy HH:mm:ss")}</p>
                         </div>
                       </div>

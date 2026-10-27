@@ -130,7 +130,8 @@ const EVENT_VERB_MAP: Record<string, string> = {
   "user.login": "signed in",
   "user.logout": "signed out",
   "document.created": "raised requisition",
-  "document.updated": "updated requisition",
+  "document.viewed": "viewed",
+  "document.updated": "updated",
   "document.submitted": "submitted requisition",
   "workflow.approved": "approved requisition",
   "workflow.rejected": "rejected requisition",
@@ -141,6 +142,20 @@ const EVENT_VERB_MAP: Record<string, string> = {
 function formatAuditSummary(event: DashboardAuditEvent): { actor: string; verb: string; target: string } {
   const actor = deriveActorName(event);
   const code = String(event.event ?? "").toLowerCase();
+  const summary = String(event.summary ?? "").trim();
+
+  // The API summary carries the meaningful action and, for new form saves,
+  // the changed field labels. Keep the dashboard from flattening every
+  // document.updated event to the same generic "updated requisition" label.
+  if (summary) {
+    const actorNames = [event.actor_name, "System"].filter((name): name is string => Boolean(name?.trim()));
+    const matchedActor = actorNames.find((name) => summary.startsWith(`${name.trim()} `));
+    if (matchedActor) {
+      return { actor, verb: "", target: summary.slice(matchedActor.trim().length).trim() };
+    }
+    return { actor: "", verb: "", target: summary };
+  }
+
   const objectTitle = cleanAuditTitle(event.object_repr || "");
   const verb = EVENT_VERB_MAP[code] || "updated";
   return { actor, verb, target: objectTitle };
