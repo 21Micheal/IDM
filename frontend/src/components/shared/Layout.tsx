@@ -89,11 +89,11 @@ function navTarget(to: string) {
 const sidebarItemBase =
   "group flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-colors";
 const sidebarItemActive =
-  "bg-[#1A3A4F] text-white";
+  "bg-[#C5E6F5] text-[#0B3B60] font-semibold";
 const sidebarItemInactive =
   "text-[#3D454D] hover:bg-[#E8EAEC] hover:text-[#1F2933]";
-const sidebarIconActive = "text-white";
-const sidebarIconInactive = "text-[#6E767D] group-hover:text-[#1A3A4F]";
+const sidebarIconActive = "text-[#0B3B60]";
+const sidebarIconInactive = "text-[#6E767D] group-hover:text-[#0B3B60]";
 
 // Content-heavy routes that open with the sidebar collapsed (full-width canvas)
 // by default. The user can still toggle the sidebar back open on these pages.
@@ -244,12 +244,12 @@ function SidebarGroup({
                   clsx(
                     "group flex items-center gap-2.5 px-3 py-1.5 text-sm transition-colors",
                     isChildActive
-                      ? "bg-[#1A3A4F] text-white"
+                      ? "bg-[#C5E6F5] text-[#0B3B60] font-semibold"
                       : "text-[#4B5560] hover:bg-[#E8EAEC] hover:text-[#1F2933]"
                   )
                 }
               >
-                <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? sidebarIconActive : "text-[#7C8790] group-hover:text-[#1A3A4F]")} />
+                <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? sidebarIconActive : "text-[#7C8790] group-hover:text-[#0B3B60]")} />
                 <span className="flex-1">{label}</span>
                 {badgeValue ? (
                   <span
@@ -257,7 +257,7 @@ function SidebarGroup({
                       "ml-auto inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
                       to === "/workflow" || to === "/notifications" || to === "/documents/review"
                         ? "bg-red-700"
-                        : "bg-[#1A3A4F]"
+                        : "bg-[#0B3B60]"
                     )}
                   >
                     {badgeValue > 9 ? "9+" : badgeValue}
@@ -1007,7 +1007,7 @@ export default function Layout() {
                               <span
                                 className={clsx(
                                   "inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
-                                  to === "/workflow" || to === "/notifications" || to === "/request-signature" ? "bg-red-700" : "bg-[#1A3A4F]"
+                                  to === "/workflow" || to === "/notifications" || to === "/request-signature" ? "bg-red-700" : "bg-[#0B3B60]"
                                 )}
                               >
                                 {badgeValue}
