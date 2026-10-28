@@ -895,16 +895,21 @@ export default function Layout() {
         >
           {/* Sidebar header: logo + toggle */}
           <div className={clsx(
-            "flex h-14 shrink-0 items-center border-b border-[#C8CDD2] bg-[#F6F7F8]",
-            sidebarCollapsed ? "justify-center px-0" : "justify-between px-3",
+            "relative flex shrink-0 items-center border-b border-[#C8CDD2] bg-[#F6F7F8]",
+            sidebarCollapsed ? "h-14 justify-center px-0" : "h-16 justify-center px-4",
           )}>
             {!sidebarCollapsed && (
-              <FlaxemLogo variant="dark" />
+              <div className="flex flex-1 items-center justify-center">
+                <FlaxemLogo variant="dark" />
+              </div>
             )}
             <button
               type="button"
               onClick={toggleSidebar}
-              className="flex h-8 w-8 shrink-0 items-center justify-center text-[#6E767D] transition-colors hover:bg-[#E8EAEC] hover:text-[#1F2933]"
+              className={clsx(
+                "flex h-8 w-8 shrink-0 items-center justify-center text-[#6E767D] transition-colors hover:bg-[#E8EAEC] hover:text-[#1F2933]",
+                !sidebarCollapsed && "absolute right-2 top-1/2 -translate-y-1/2",
+              )}
               title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
               aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
               aria-expanded={!sidebarCollapsed}

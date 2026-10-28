@@ -1,5 +1,5 @@
 import React from "react";
-import fseDmsLogo from "@/assets/images/dmslogo5.jpeg";
+import fseDmsLogo from "@/assets/images/FSEDMSlogo.png";
 
 interface FlaxemLogoProps {
   className?: string;
@@ -8,29 +8,22 @@ interface FlaxemLogoProps {
 }
 
 export const FlaxemLogo: React.FC<FlaxemLogoProps> = ({
-  className = "h-12 w-[148px]",
+  className = "h-[50px] w-auto",
   variant = "light",
   compact = false,
 }) => {
-  const isLight = variant === "light";
-
   return (
-    <div className={`flex items-center ${className}`} aria-label="FSE DMS">
-      <div
-        className={`flex h-full items-center justify-center overflow-hidden ${
-          compact ? "w-12 px-1" : "w-full px-2.5"
-        } ${isLight ? "bg-white" : "border border-[#D7DCE0] bg-white"}`}
-      >
-        <img
-          src={fseDmsLogo}
-          alt="FSE Document Management System"
-          className={
-            compact
-              ? "h-full w-full object-contain"
-              : "h-full w-full object-contain"
-          }
-        />
-      </div>
+    <div className={`flex items-center justify-center ${className}`} aria-label="FSE DMS">
+      <img
+        src={fseDmsLogo}
+        alt="FSE Document Management System"
+        className={
+          compact
+            ? "h-8 w-8 object-contain"
+            : "h-full w-auto max-h-full max-w-[180px] object-contain"
+        }
+      />
     </div>
   );
 };
+
