@@ -1877,16 +1877,17 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             </span>
           </div>
         }
-      >
-        <div className="min-w-0">
-          <h1 className="text-lg font-semibold tracking-tight">{scanOnly ? "Scan Document" : "Upload Document"}</h1>
-          <p className="mt-0.5 text-xs text-white/75">
+      />
+
+
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto">
+        {/* Page heading */}
+        <div className="border-b border-[#C8CDD2] bg-white px-6 py-4">
+          <h1 className="text-lg font-semibold tracking-tight text-[#1F2933]">{scanOnly ? "Scan Document" : "Upload Document"}</h1>
+          <p className="mt-0.5 text-xs text-[#5E6870]">
             {scanOnly ? "Review the file beside OCR results before saving." : "Attach a file, preview it, then complete the document details."}
           </p>
         </div>
-      </WorkspaceCommandBar>
-
-      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto">
 
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (

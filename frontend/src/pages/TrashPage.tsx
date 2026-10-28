@@ -205,21 +205,22 @@ export default function TrashPage() {
             </div>
           ) : null
         }
-      >
-        <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
-          <Trash2 className="h-5 w-5 text-white" />
-        </div>
-        <div>
-          <h1 className="text-xl font-semibold">Trash</h1>
-          <p className="mt-0.5 text-sm text-white/75">
-            Manage deleted documents — restore or permanently remove them.
-          </p>
-        </div>
-      </WorkspaceCommandBar>
+      />
+
 
       {/* ── Body ────────────────────────────────────────────────────────────── */}
       <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5 pr-0">
         <div className="mx-auto max-w-7xl space-y-4">
+          {/* Page heading */}
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center bg-[#1A3A4F]">
+              <Trash2 className="h-5 w-5 text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-semibold text-[#1F2933]">Trash</h1>
+              <p className="mt-0.5 text-sm text-[#5E6870]">Manage deleted documents — restore or permanently remove them.</p>
+            </div>
+          </div>
           {/* Retention notice */}
           <div className="flex items-start gap-2 border border-[#FCD34D] bg-[#FFFBEB] px-4 py-3 text-xs text-[#92400E]">
             <Info className="mt-0.5 h-4 w-4 flex-shrink-0" />

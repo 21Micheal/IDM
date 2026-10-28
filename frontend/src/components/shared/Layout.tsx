@@ -87,13 +87,13 @@ function navTarget(to: string) {
 }
 
 const sidebarItemBase =
-  "group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-semibold transition-colors";
+  "group flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-colors";
 const sidebarItemActive =
-  "bg-[#287EAD] text-white shadow-sm";
+  "bg-[#1A3A4F] text-white";
 const sidebarItemInactive =
-  "text-[#3D454D] hover:bg-white/75 hover:text-[#1F2933] hover:shadow-sm";
+  "text-[#3D454D] hover:bg-[#E8EAEC] hover:text-[#1F2933]";
 const sidebarIconActive = "text-white";
-const sidebarIconInactive = "text-[#6E767D] group-hover:text-[#287EAD]";
+const sidebarIconInactive = "text-[#6E767D] group-hover:text-[#1A3A4F]";
 
 // Content-heavy routes that open with the sidebar collapsed (full-width canvas)
 // by default. The user can still toggle the sidebar back open on these pages.
@@ -242,14 +242,14 @@ function SidebarGroup({
                 onFocus={() => onWarmRoute?.(to)}
                 className={() =>
                   clsx(
-                    "group flex items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors",
+                    "group flex items-center gap-2.5 px-3 py-1.5 text-sm transition-colors",
                     isChildActive
-                      ? "bg-[#287EAD] text-white shadow-sm"
-                      : "text-[#4B5560] hover:bg-white/75 hover:text-[#1F2933] hover:shadow-sm"
+                      ? "bg-[#1A3A4F] text-white"
+                      : "text-[#4B5560] hover:bg-[#E8EAEC] hover:text-[#1F2933]"
                   )
                 }
               >
-                <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? sidebarIconActive : "text-[#7C8790] group-hover:text-[#287EAD]")} />
+                <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? sidebarIconActive : "text-[#7C8790] group-hover:text-[#1A3A4F]")} />
                 <span className="flex-1">{label}</span>
                 {badgeValue ? (
                   <span
@@ -257,7 +257,7 @@ function SidebarGroup({
                       "ml-auto inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
                       to === "/workflow" || to === "/notifications" || to === "/documents/review"
                         ? "bg-red-700"
-                        : "bg-[#287EAD]"
+                        : "bg-[#1A3A4F]"
                     )}
                   >
                     {badgeValue > 9 ? "9+" : badgeValue}
@@ -849,42 +849,14 @@ export default function Layout() {
   return (
     <div
       className="flex h-screen flex-col bg-background text-foreground"
-      style={{ "--app-sidebar-width": sidebarCollapsed ? "0px" : "270px" } as React.CSSProperties}
     >
 
-      {/* ── Single continuous blue command bar ─────────────────────────────
-          • Logo area on the left (same width as the sidebar) keeps content
-            visually aligned with the page below.
-          • Sidebar toggle sits between logo and the page-content slot.
+      {/* ── Single continuous blue command bar (full-width, no sidebar indent)
+          • No logo area / sidebar toggle here — sidebar owns its own toggle.
           • WorkspaceCommandBar portals its content into #wcb-slot.
           • Global actions (chat / bell / profile) are on the far right.
       ───────────────────────────────────────────────────────────────── */}
-      <div className="flex h-[69px] shrink-0 items-center bg-[#287EAD] text-white">
-
-        {/* Logo — animates with the sidebar */}
-        <div
-          className="flex h-full shrink-0 items-center overflow-hidden border-r border-[#206D99] transition-[width] duration-200"
-          style={{ width: `var(--app-sidebar-width)` }}
-        >
-          {!sidebarCollapsed && (
-            <div className="flex h-full w-full items-center px-4">
-              <FlaxemLogo variant="light" />
-            </div>
-          )}
-        </div>
-
-        {/* Sidebar toggle */}
-        <button
-          type="button"
-          onClick={toggleSidebar}
-          className="flex h-full w-11 shrink-0 items-center justify-center text-white/70 transition-colors hover:bg-white/10 hover:text-white"
-          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-expanded={!sidebarCollapsed}
-        >
-          {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-        </button>
-        <div className="h-6 w-px bg-white/25" />
+      <div className="flex h-14 shrink-0 items-center bg-[#287EAD] text-white">
 
         {/* Portal mount — WorkspaceCommandBar from each page renders here */}
         <div id="wcb-slot" className="flex min-w-0 flex-1 items-center" />
@@ -917,10 +889,30 @@ export default function Layout() {
         {/* ── Sidebar ── */}
         <aside
           className={clsx(
-            "flex flex-shrink-0 flex-col overflow-hidden bg-[#F2F3F4] text-[#1F2933] transition-[width] duration-200",
-            sidebarCollapsed ? "w-0" : "w-[270px] border-r border-[#C8CDD2]",
+            "flex flex-shrink-0 flex-col overflow-hidden border-r border-[#C8CDD2] bg-[#F6F7F8] text-[#1F2933] transition-[width] duration-200",
+            sidebarCollapsed ? "w-[52px]" : "w-[240px]",
           )}
         >
+          {/* Sidebar header: logo + toggle */}
+          <div className={clsx(
+            "flex h-14 shrink-0 items-center border-b border-[#C8CDD2] bg-[#F6F7F8]",
+            sidebarCollapsed ? "justify-center px-0" : "justify-between px-3",
+          )}>
+            {!sidebarCollapsed && (
+              <FlaxemLogo variant="dark" />
+            )}
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              className="flex h-8 w-8 shrink-0 items-center justify-center text-[#6E767D] transition-colors hover:bg-[#E8EAEC] hover:text-[#1F2933]"
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-expanded={!sidebarCollapsed}
+            >
+              {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+            </button>
+          </div>
+
           {/* Nav — scrollable */}
           <nav className="scrollbar-minimal flex-1 overflow-y-auto">
             {/* ── Primary nav ────────────────────────────────────────── */}
@@ -928,6 +920,18 @@ export default function Layout() {
               {mainNav.map((entry) => {
                 if (isGroup(entry)) {
                   if (entry.allowedRoles && !hasAdminAccess) return null;
+                  if (sidebarCollapsed) {
+                    // In icon-only mode, render group icon as a simple nav button
+                    const isGroupActive = location.pathname.startsWith(entry.prefix);
+                    return (
+                      <div key={entry.prefix} title={entry.label} className={clsx(
+                        "flex h-9 w-full items-center justify-center transition-colors",
+                        isGroupActive ? sidebarItemActive : sidebarItemInactive,
+                      )}>
+                        <entry.icon className={clsx("h-4 w-4 flex-shrink-0", isGroupActive ? sidebarIconActive : sidebarIconInactive)} />
+                      </div>
+                    );
+                  }
                   return (
                     <SidebarGroup
                       key={entry.prefix}
@@ -945,6 +949,35 @@ export default function Layout() {
                   : to === "/workflow" ? pendingTasksCount
                   : to === "/request-signature" ? (signatureCount || undefined)
                   : undefined;
+                if (sidebarCollapsed) {
+                  return (
+                    <NavLink
+                      key={to}
+                      to={to}
+                      end={exact}
+                      onMouseEnter={() => warmRoute(to)}
+                      onFocus={() => warmRoute(to)}
+                      title={label}
+                      className={({ isActive }) =>
+                        clsx(
+                          "relative flex h-9 w-full items-center justify-center transition-colors",
+                          isActive ? sidebarItemActive : sidebarItemInactive,
+                        )
+                      }
+                    >
+                      {({ isActive }) => (
+                        <>
+                          <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
+                          {badgeValue ? (
+                            <span className="absolute right-1 top-1 flex h-3.5 min-w-[14px] items-center justify-center bg-red-700 px-0.5 text-[8px] font-bold text-white">
+                              {badgeValue > 9 ? "9+" : badgeValue}
+                            </span>
+                          ) : null}
+                        </>
+                      )}
+                    </NavLink>
+                  );
+                }
                 return (
                   <NavLink
                     key={to}
@@ -969,7 +1002,7 @@ export default function Layout() {
                               <span
                                 className={clsx(
                                   "inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
-                                  to === "/workflow" || to === "/notifications" || to === "/request-signature" ? "bg-red-700" : "bg-[#287EAD]"
+                                  to === "/workflow" || to === "/notifications" || to === "/request-signature" ? "bg-red-700" : "bg-[#1A3A4F]"
                                 )}
                               >
                                 {badgeValue}
@@ -982,62 +1015,89 @@ export default function Layout() {
               })}
             </div>
 
-            {/* ── Folder tree ────────────────────────────────────────── */}
-            <div className="pb-2">
-              {idleReady && (
-                <FolderTree
-                  activeFolderId={
-                    location.pathname.startsWith("/documents/folders/")
-                      ? location.pathname.split("/").pop() ?? null
-                      : null
-                  }
-                />
-              )}
-            </div>
+            {/* ── Folder tree — only when expanded ───────────────────── */}
+            {!sidebarCollapsed && (
+              <div className="pb-2">
+                {idleReady && (
+                  <FolderTree
+                    activeFolderId={
+                      location.pathname.startsWith("/documents/folders/")
+                        ? location.pathname.split("/").pop() ?? null
+                        : null
+                    }
+                  />
+                )}
+              </div>
+            )}
 
             {/* ── Administration ─────────────────────────────────────── */}
             {visibleAdmin.length > 0 && (
               <div className="space-y-0.5 px-2 py-3">
-                <div className="px-3 pb-1 pt-0">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#6E767D]">
-                    Administration
-                  </p>
-                </div>
-                {visibleAdmin.map(({ to, icon: Icon, label }) => (
-                  <NavLink
-                    key={to}
-                    to={to}
-                    onMouseEnter={() => warmRoute(to)}
-                    onFocus={() => warmRoute(to)}
-                    className={({ isActive }) =>
-                      clsx(
-                        sidebarItemBase,
-                        isActive
-                          ? sidebarItemActive
-                          : sidebarItemInactive
-                      )
-                    }
-                  >
-                    {({ isActive }) => (
-                      <>
-                        <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
-                        <span>{label}</span>
-                      </>
-                    )}
-                  </NavLink>
-                ))}
+                {!sidebarCollapsed && (
+                  <div className="px-3 pb-1 pt-0">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-[#6E767D]">
+                      Administration
+                    </p>
+                  </div>
+                )}
+                {visibleAdmin.map(({ to, icon: Icon, label }) => {
+                  if (sidebarCollapsed) {
+                    return (
+                      <NavLink
+                        key={to}
+                        to={to}
+                        onMouseEnter={() => warmRoute(to)}
+                        onFocus={() => warmRoute(to)}
+                        title={label}
+                        className={({ isActive }) =>
+                          clsx(
+                            "flex h-9 w-full items-center justify-center transition-colors",
+                            isActive ? sidebarItemActive : sidebarItemInactive,
+                          )
+                        }
+                      >
+                        {({ isActive }) => (
+                          <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
+                        )}
+                      </NavLink>
+                    );
+                  }
+                  return (
+                    <NavLink
+                      key={to}
+                      to={to}
+                      onMouseEnter={() => warmRoute(to)}
+                      onFocus={() => warmRoute(to)}
+                      className={({ isActive }) =>
+                        clsx(
+                          sidebarItemBase,
+                          isActive
+                            ? sidebarItemActive
+                            : sidebarItemInactive
+                        )
+                      }
+                    >
+                      {({ isActive }) => (
+                        <>
+                          <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
+                          <span>{label}</span>
+                        </>
+                      )}
+                    </NavLink>
+                  );
+                })}
               </div>
             )}
           </nav>
 
-          <SidebarProfile />
+          {!sidebarCollapsed && <SidebarProfile />}
         </aside>
 
         {/* ── Page content ── */}
         <main
           ref={mainRef}
           className={clsx(
-            "scrollbar-minimal min-w-0 flex-1 overflow-y-auto bg-background",
+            "scrollbar-minimal min-w-0 flex-1 overflow-y-auto bg-[#F8F9FA]",
             usesWorkspaceCommandBar ? "p-0" : "p-6",
           )}
         >

@@ -7,7 +7,6 @@ import {
   Clock,
   User,
   Download,
-  Info,
   ChevronLeft,
   ChevronRight,
   Search,
@@ -280,40 +279,34 @@ export default function AuditPage() {
             </button>
           ) : null
         }
-      >
-        <div className="min-w-0">
-          <div className="flex items-center gap-3">
-            <ShieldCheck className="h-5 w-5" />
-            <div className="flex min-w-0 items-center gap-2">
-              <h1 className="truncate text-lg font-semibold tracking-tight">
-                {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
-              </h1>
-              <span
-                title={
-                  user?.has_admin_access
-                    ? "Full system audit log for administrators."
-                    : "A plain-language feed of recent actions on documents you uploaded or own (approvals, views, uploads)."
-                }
-              >
-                <Info className="h-4 w-4 text-white/75" />
-              </span>
-            </div>
-            {!isLoading && data?.count !== undefined && (
-              <span className="ml-1 inline-flex items-center gap-1.5 border border-white/30 px-2.5 py-1 text-xs font-medium text-white/85">
-                <Activity className="w-3 h-3" />
-                {data.count.toLocaleString()} {data.count === 1 ? "event" : "events"}
-              </span>
-            )}
-          </div>
-          <p className="mt-0.5 max-w-2xl text-xs text-white/75">
-            {user?.has_admin_access
-              ? "Immutable record of all system activities and changes."
-              : "A simple feed of recent actions on your documents — approvals, views, and uploads."}
-          </p>
-        </div>
-      </WorkspaceCommandBar>
+      />
+
 
       <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5 pr-0">
+        {/* Page heading */}
+        <div className="mb-5 flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center bg-[#1A3A4F]">
+            <ShieldCheck className="h-5 w-5 text-white" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-lg font-semibold tracking-tight text-[#1F2933]">
+                {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
+              </h1>
+              {!isLoading && data?.count !== undefined && (
+                <span className="inline-flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-2.5 py-1 text-xs font-medium text-[#5E6870]">
+                  <Activity className="w-3 h-3" />
+                  {data.count.toLocaleString()} {data.count === 1 ? "event" : "events"}
+                </span>
+              )}
+            </div>
+            <p className="mt-0.5 text-xs text-[#5E6870]">
+              {user?.has_admin_access
+                ? "Immutable record of all system activities and changes."
+                : "A simple feed of recent actions on your documents — approvals, views, and uploads."}
+            </p>
+          </div>
+        </div>
         {user?.has_admin_access ? (
           <div className="mb-5 border border-[#C8CDD2] bg-white p-4">
             <div className="flex items-center justify-between mb-5">

@@ -139,20 +139,21 @@ export default function NotificationsPage() {
             </button>
           </>
         }
-      >
-        <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
-          <Bell className="h-5 w-5 text-white" />
-        </div>
-        <div>
-          <h1 className="text-xl font-semibold">Notifications</h1>
-          <p className="mt-0.5 text-sm text-white/75">
-            Document updates, shared items, and operational alerts.
-          </p>
-        </div>
-      </WorkspaceCommandBar>
+      />
+
 
       <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5">
         <div className="mx-auto w-full max-w-4xl">
+          {/* Page heading */}
+          <div className="mb-5 flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center bg-[#1A3A4F]">
+              <Bell className="h-5 w-5 text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-semibold text-[#1F2933]">Notifications</h1>
+              <p className="mt-0.5 text-sm text-[#5E6870]">Document updates, shared items, and operational alerts.</p>
+            </div>
+          </div>
           <NotificationList
             notifications={visibleNotifications}
             isLoading={isLoading}

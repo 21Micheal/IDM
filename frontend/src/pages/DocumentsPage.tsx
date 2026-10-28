@@ -883,76 +883,63 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 Add Document
               </Link>
             }
-          >
-            <div className="relative min-w-[220px] max-w-[340px] flex-1">
-              <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
-              <input
-                value={search}
-                onChange={(event) => {
-                  setSearch(event.target.value);
-                  setPage(1);
-                }}
-                placeholder="Search documents"
-                className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:ring-1 focus:ring-white/70"
-              />
-            </div>
-              <div className="w-full flex items-center gap-2">
-                <div className="flex items-center gap-2">
+          />
+
+          <div className="flex min-h-0 flex-1">
+            <section className="flex min-w-0 flex-1 flex-col">
+              {/* Filter toolbar */}
+              <div className="flex flex-wrap items-center gap-2 border-b border-[#C8CDD2] bg-[#F6F7F8] px-4 py-2.5">
+                <div className="relative min-w-[220px] max-w-[320px] flex-1">
+                  <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
+                  <input
+                    value={search}
+                    onChange={(event) => {
+                      setSearch(event.target.value);
+                      setPage(1);
+                    }}
+                    placeholder="Search documents"
+                    className="h-8 w-full border border-[#B7BEC5] bg-white pl-9 pr-3 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
                   <CustomListbox
                     value={statusFilter}
-                    onChange={(v) => {
-                      clearUrlListFilters();
-                      setStatusFilter(v);
-                      setPage(1);
-                    }}
+                    onChange={(v) => { clearUrlListFilters(); setStatusFilter(v); setPage(1); }}
                     options={[{ value: "", label: "All statuses" }, ...STATUS_OPTIONS.map((s) => ({ value: s, label: s.replace(/_/g, " ") }))]}
-                    buttonClassName="h-9 w-[140px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    buttonClassName="h-8 w-[130px] border border-[#B7BEC5] bg-white px-2 text-xs text-[#1F2933]"
                     ariaLabel="Status filter"
                   />
-
                   <CustomListbox
                     value={typeFilter}
-                    onChange={(v) => {
-                      setTypeFilter(v);
-                      setPage(1);
-                    }}
+                    onChange={(v) => { setTypeFilter(v); setPage(1); }}
                     options={[{ value: "", label: "All types" }, ...(typesData ?? []).map((t: any) => ({ value: String(t.id), label: t.name }))]}
-                    buttonClassName="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    buttonClassName="h-8 w-[140px] border border-[#B7BEC5] bg-white px-2 text-xs text-[#1F2933]"
                     ariaLabel="Document type filter"
                   />
-
                   <CustomListbox
                     value={supplierFilter}
-                    onChange={(v) => {
-                      setSupplierFilter(v);
-                      setPage(1);
-                    }}
+                    onChange={(v) => { setSupplierFilter(v); setPage(1); }}
                     options={[{ value: "", label: "All suppliers" }, ...supplierOptions.map((s) => ({ value: s, label: s }))]}
-                    buttonClassName="h-9 w-[160px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    buttonClassName="h-8 w-[150px] border border-[#B7BEC5] bg-white px-2 text-xs text-[#1F2933]"
                     ariaLabel="Supplier filter"
                   />
                   <CustomListbox
                     value={relationshipFilter}
-                    onChange={(v) => {
-                      clearUrlListFilters();
-                      setRelationshipFilter(v as typeof relationshipFilter);
-                      setPage(1);
-                    }}
+                    onChange={(v) => { clearUrlListFilters(); setRelationshipFilter(v as typeof relationshipFilter); setPage(1); }}
                     options={[
                       { value: "", label: "All links" },
                       { value: "linked", label: "Linked only" },
                       { value: "suggested", label: "Suggested only" },
                     ]}
                     buttonClassName={cn(
-                      "h-9 w-[145px] border px-2 text-sm",
+                      "h-8 w-[135px] border px-2 text-xs",
                       relationshipFilter
-                        ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]"
-                        : "border-[#AEB5BB] bg-white text-[#1F2933]",
+                        ? "border-[#1A3A4F] bg-[#EEF6FB] text-[#1A3A4F]"
+                        : "border-[#B7BEC5] bg-white text-[#1F2933]",
                     )}
                     ariaLabel="Relationship filter"
                   />
                 </div>
-
                 {(search || statusFilter || typeFilter || supplierFilter || relationshipFilter) && (
                   <button
                     type="button"
@@ -965,17 +952,13 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                       setRelationshipFilter("");
                       setPage(1);
                     }}
-                    className="h-9 inline-flex items-center gap-2 px-3 text-sm text-[#3D454D] bg-white border border-[#B7BEC5] hover:bg-[#EEF3F7]"
+                    className="h-8 inline-flex items-center gap-1.5 border border-[#B7BEC5] bg-white px-2.5 text-xs text-[#3D454D] hover:bg-[#EEF3F7]"
                   >
                     Clear
                   </button>
                 )}
               </div>
 
-          </WorkspaceCommandBar>
-
-          <div className="flex min-h-0 flex-1">
-            <section className="flex min-w-0 flex-1 flex-col">
               <div className="flex h-[66px] shrink-0 items-end border-b border-[#C8CDD2] bg-[#EDEDED] pl-4">
                 <button
                   type="button"

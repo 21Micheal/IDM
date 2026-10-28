@@ -347,75 +347,65 @@ export default function SearchPage() {
 
   return (
     <div className="flex h-full flex-col bg-[#EDEDED] text-[13px] text-[#1F2933]">
-      <WorkspaceCommandBar
-        actions={
-          <div className="flex items-center gap-2 text-white/85">
-            <SlidersHorizontal className="h-4 w-4" />
-            <span>{activeFilterCount} filters</span>
-          </div>
-        }
-      >
-          <div className="relative w-full max-w-[420px]">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
-            <input
-              value={searchTerm}
-              onChange={(event) => {
-                setSearchTerm(event.target.value);
-                setPage(1);
-              }}
-              placeholder="Search documents, references, suppliers, or content"
-              className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-9 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/30"
-              autoFocus
-            />
-            {searchTerm && (
-              <button
-                type="button"
-                onClick={() => setSearchTerm("")}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-[#5E6870] hover:text-[#1F2933]"
-                aria-label="Clear search text"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            )}
-          </div>
-          <div className="flex items-center gap-1">
-            <CustomListbox
-              value={statusFilter}
-              onChange={(v) => {
-                setStatusFilter(v);
-                setPage(1);
-              }}
-              options={[{ value: "", label: "All statuses" }, ...STATUS_OPTIONS.map((status) => ({ value: status, label: statusLabel(status) }))]}
-              buttonClassName="h-9 w-[140px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
-              ariaLabel="Status filter"
-            />
-
-            <CustomListbox
-              value={typeFilter}
-              onChange={(v) => {
-                setTypeFilter(v);
-                setPage(1);
-              }}
-              options={[{ value: "", label: "All types" }, ...documentTypes.map((type) => ({ value: String(type.name), label: type.name }))]}
-              buttonClassName="h-9 w-[140px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
-              ariaLabel="Document type filter"
-            />
-
-            <CustomListbox
-              value={formatFilter}
-              onChange={(v) => {
-                setFormatFilter(v);
-                setPage(1);
-              }}
-              options={[{ value: "", label: "All formats" }, ...FORMAT_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label }))]}
-              buttonClassName="h-9 w-[120px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
-              ariaLabel="Format filter"
-            />
-          </div>
-      </WorkspaceCommandBar>
+      <WorkspaceCommandBar />
 
       <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto px-5 pb-8 pr-0">
         <section className="border-b border-[#C8CDD2] bg-[#F7F7F7] px-4 py-3">
+          {/* Primary search + quick filters row */}
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="relative w-full max-w-[420px]">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
+              <input
+                value={searchTerm}
+                onChange={(event) => {
+                  setSearchTerm(event.target.value);
+                  setPage(1);
+                }}
+                placeholder="Search documents, references, suppliers, or content"
+                className="h-9 w-full border border-[#B7BEC5] bg-white pl-9 pr-9 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/30"
+                autoFocus
+              />
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-[#5E6870] hover:text-[#1F2933]"
+                  aria-label="Clear search text"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-1">
+              <CustomListbox
+                value={statusFilter}
+                onChange={(v) => { setStatusFilter(v); setPage(1); }}
+                options={[{ value: "", label: "All statuses" }, ...STATUS_OPTIONS.map((status) => ({ value: status, label: statusLabel(status) }))]}
+                buttonClassName="h-9 w-[140px] border border-[#B7BEC5] bg-white px-2 text-sm text-[#1F2933]"
+                ariaLabel="Status filter"
+              />
+              <CustomListbox
+                value={typeFilter}
+                onChange={(v) => { setTypeFilter(v); setPage(1); }}
+                options={[{ value: "", label: "All types" }, ...documentTypes.map((type) => ({ value: String(type.name), label: type.name }))]}
+                buttonClassName="h-9 w-[140px] border border-[#B7BEC5] bg-white px-2 text-sm text-[#1F2933]"
+                ariaLabel="Document type filter"
+              />
+              <CustomListbox
+                value={formatFilter}
+                onChange={(v) => { setFormatFilter(v); setPage(1); }}
+                options={[{ value: "", label: "All formats" }, ...FORMAT_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label }))]}
+                buttonClassName="h-9 w-[120px] border border-[#B7BEC5] bg-white px-2 text-sm text-[#1F2933]"
+                ariaLabel="Format filter"
+              />
+            </div>
+            {activeFilterCount > 0 && (
+              <span className="ml-auto inline-flex items-center gap-1.5 text-xs text-[#5E6870]">
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+                {activeFilterCount} active filter{activeFilterCount !== 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
           <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]">
             <input
               value={supplierFilter}
