@@ -53,6 +53,21 @@ def break_glass_login(request):
     })
 
 
+# ── Public Config ─────────────────────────────────────────────────────────────
+
+class ConfigView(APIView):
+    """
+    Public configuration endpoint for the frontend.
+    Returns deployment-time settings that control UI behavior.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        return Response({
+            "auth_mode": getattr(settings, "AUTH_MODE", "native"),
+        })
+
+
 # ── Session policy ────────────────────────────────────────────────────────────
 # The session lifetime (formerly a hardcoded ~6h) is admin-configurable via the
 # DMS settings. We expose the policy to the client at sign-in / refresh so the
