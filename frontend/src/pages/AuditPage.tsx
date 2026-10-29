@@ -511,7 +511,7 @@ export default function AuditPage() {
                             <div className="flex flex-wrap items-center gap-1.5">
                               {log.object_repr && (
                                 log.object_type === "Document" && log.object_id ? (
-                                  <Link to={`/${log.object_id}?tab=audit`} className="max-w-[260px] truncate text-xs text-[#287EAD] hover:underline">
+                                  <Link to={`/documents/${log.object_id}`} className="max-w-[260px] truncate text-xs text-[#287EAD] hover:underline">
                                     {log.object_repr}
                                   </Link>
                                 ) : (
