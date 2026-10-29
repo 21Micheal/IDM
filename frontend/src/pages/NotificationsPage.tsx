@@ -159,10 +159,16 @@ export default function NotificationsPage() {
             isLoading={isLoading}
             onMarkRead={(id) => markReadMutation.mutate(id)}
             onOpenLink={(link) => {
-              // Legacy notifications stored links as /documents/{uuid};
-              // the SPA routes documents at /{uuid} — normalise old rows.
-              const normalized = link.replace(/^\/documents\/([^/]+)$/, "/$1");
-              navigate(normalized);
+              // Navigate to the documents page
+              // If link is /documents/{uuid}, keep it as is
+              // If link is /{uuid}, convert to /documents/{uuid}
+              if (link.startsWith("/documents/")) {
+                navigate(link);
+              } else if (link.match(/^\/[0-9a-fA-F-]{36}$/)) {
+                navigate(`/documents${link}`);
+              } else {
+                navigate(link);
+              }
             }}
             onOpenWorkflow={(detail) => {
               if (!detail.documentId) return;
