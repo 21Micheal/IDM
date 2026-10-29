@@ -272,54 +272,33 @@ export async function loadWorkflowData(
   // or a document following a specific path. Show only the steps that have tasks.
   // Always keep start and end nodes as visual indicators.
   if (ordersWithTasks.size > 0 && ordersWithTasks.size < 5) {
-    filteredSteps = steps.filter((step) => {
-      // Always keep start and end nodes regardless of filter
-      if (step.kind === "start" || step.kind === "end") return true;
-      // Keep steps that have tasks
-      return ordersWithTasks.has(step.order);
-    });
-  }
-
-  // Ensure start and end nodes are always present as visual indicators
-  const hasStart = filteredSteps.some((s) => s.kind === "start");
-  const hasEnd = filteredSteps.some((s) => s.kind === "end");
-
-  if (!hasStart) {
-    filteredSteps.unshift({
-      id: "start",
-      name: "Start",
-      approver: "",
-      status: "completed",
-      kind: "start",
-      order: 0,
-      column: 0,
-      lane: 0,
-      next: filteredSteps[0]?.id || "end",
-    });
-  }
-
-  if (!hasEnd) {
-    // Update the last task's next to point to end
-    const lastTaskIndex = filteredSteps.findIndex((s, i) => 
-      s.kind === "task" && !filteredSteps.slice(i + 1).some(s2 => s2.kind === "task")
+    // Separate out start, end, and task nodes
+    const startNode = steps.find((s) => s.kind === "start");
+    const endNode = steps.find((s) => s.kind === "end");
+    const taskNodes = steps.filter((s) => 
+      !s.kind || s.kind === "task" || s.kind === "gateway"
     );
-    if (lastTaskIndex >= 0) {
-      filteredSteps[lastTaskIndex].next = ["end"];
-    }
 
-    // Find the last node's column to place end node after it
-    const lastColumn = Math.max(...filteredSteps.map((s) => s.column ?? 0), 0);
-    filteredSteps.push({
-      id: "end",
-      name: "End",
-      approver: "",
-      status: "pending",
-      kind: "end",
-      order: filteredSteps.length,
-      column: lastColumn + 1,
-      lane: 0,
-      next: [],
-    });
+    // Filter task nodes to only those with tasks
+    const filteredTaskNodes = taskNodes.filter((step) => ordersWithTasks.has(step.order));
+
+    // Rebuild the steps array with start, filtered tasks, and end
+    filteredSteps = [];
+    if (startNode) filteredSteps.push(startNode);
+    filteredSteps.push(...filteredTaskNodes);
+    if (endNode) {
+      // Update the last task's next to point to end
+      if (filteredTaskNodes.length > 0) {
+        const lastTask = filteredTaskNodes[filteredTaskNodes.length - 1];
+        lastTask.next = ["end"];
+      }
+      // Recalculate end node column
+      const lastColumn = Math.max(...filteredSteps.map((s) => s.column ?? 0), 0);
+      filteredSteps.push({
+        ...endNode,
+        column: lastColumn + 1,
+      });
+    }
   }
 
   // The workflow is still "live" (worth polling) while at least one stage is
