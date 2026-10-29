@@ -17,7 +17,44 @@ export function extractApiError(error: unknown, fallback = "Something went wrong
 
 function firstMessage(value: unknown): string | null {
   if (value == null) return null;
-  if (typeof value === "string") return value.trim() || null;
+  if (typeof value === "string") {
+    const str = value.trim();
+    if (!str) return null;
+    
+    // Handle database errors (IntegrityError, OperationalError, etc.)
+    if (str.includes("IntegrityError") || str.includes("OperationalError") || str.includes("DatabaseError")) {
+      // Extract MySQL error code and message
+      const match = str.match(/\((\d+),\s*"([^"]+)"\)/);
+      if (match) {
+        const code = match[1];
+        const message = match[2];
+        // Common MySQL error codes
+        switch (code) {
+          case "1364":
+            return `A required field is missing: ${message}`;
+          case "1062":
+            return `Duplicate entry: ${message}`;
+          case "1452":
+            return `Referenced record not found: ${message}`;
+          case "1050":
+            return `Table already exists: ${message}`;
+          case "1146":
+            return `Table not found: ${message}`;
+          default:
+            return `Database error: ${message}`;
+        }
+      }
+      // Fallback for other database errors - try to extract a readable message
+      const errorMatch = str.match(/Error:?\s*(.+?)(?:\n|$)/);
+      if (errorMatch) {
+        return errorMatch[1].trim();
+      }
+      // Last resort: just return the first line
+      return str.split('\n')[0];
+    }
+    
+    return str;
+  }
   if (Array.isArray(value)) {
     for (const item of value) {
       const message = firstMessage(item);

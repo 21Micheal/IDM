@@ -646,7 +646,33 @@ function validateStepData(raw: StepData): string | null {
 }
 
 function formatApiError(value: unknown): string | null {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") {
+    // Extract common database error patterns
+    if (value.includes("IntegrityError") || value.includes("OperationalError")) {
+      const match = value.match(/\((\d+),\s*"([^"]+)"\)/);
+      if (match) {
+        const code = match[1];
+        const message = match[2];
+        // Common database error codes
+        if (code === "1364") {
+          return `A required field is missing: ${message}`;
+        }
+        if (code === "1062") {
+          return `Duplicate entry: ${message}`;
+        }
+        if (code === "1452") {
+          return `Referenced record not found: ${message}`;
+        }
+        return `Database error: ${message}`;
+      }
+      // Fallback for other database errors
+      const errorMatch = value.match(/Error:?\s*(.+?)(?:\n|$)/);
+      if (errorMatch) {
+        return errorMatch[1].trim();
+      }
+    }
+    return value;
+  }
   if (Array.isArray(value)) {
     for (const item of value) {
       const message = formatApiError(item);

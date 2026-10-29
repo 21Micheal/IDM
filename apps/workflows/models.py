@@ -163,11 +163,40 @@ class WorkflowStep(models.Model):
     allow_approve  = models.BooleanField(default=True, help_text="Approver can approve at this step")
     allow_reject   = models.BooleanField(default=True, help_text="Approver can reject at this step")
     allow_return   = models.BooleanField(default=True, help_text="Approver can send back for review at this step")
+    allow_return_submitter = models.BooleanField(default=False, help_text="Allow returning directly to the document submitter")
     requires_signature = models.BooleanField(
         default=False,
         help_text="Approving this step must stamp the approver's saved e-signature onto the document.",
     )
     instructions   = models.TextField(blank=True)
+    # Auto-approval and skip conditions
+    skip_when = models.JSONField(default=dict, blank=True, help_text="Conditions to skip this step")
+    auto_approve_when = models.JSONField(default=dict, blank=True, help_text="Conditions to auto-approve this step")
+    # Notification enhancements
+    notify_emails = models.JSONField(default=list, blank=True, help_text="Additional email recipients")
+    notify_recipient_type = models.CharField(
+        max_length=20,
+        blank=True,
+        help_text="Type of notification recipient (user, email, supplier, etc.)",
+    )
+    notify_supplier_field = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Field containing supplier email for notifications",
+    )
+    notify_table_columns = models.JSONField(default=list, blank=True, help_text="Table columns to include in notification")
+    # Form-specific fields
+    assignee_user_field = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text="Form field to determine the assignee user",
+    )
+    # Post-approval actions
+    post_lpo_after_approval = models.BooleanField(
+        default=False,
+        help_text="Post LPO to SunSystems after approval",
+    )
 
     # ── Custom email for approvers (approval steps only) ──────────────────────
     # When set, these override the default hardcoded task-assignment email.
@@ -209,6 +238,15 @@ class WorkflowStep(models.Model):
     notification_message = models.TextField(
         blank=True,
         help_text="Email body for notification steps.",
+    )
+    notify_table_field = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Table field to include in notification (for form document types).",
+    )
+    notify_include_items_table = models.BooleanField(
+        default=False,
+        help_text="Include the items table in the notification email.",
     )
 
     created_at     = models.DateTimeField(auto_now_add=True, null=True)

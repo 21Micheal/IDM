@@ -96,7 +96,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             "assignee_type", "assignee_group", "assignee_group_name",
             "assignee_user", "assignee_user_name", "assignee_user_auto",
             "sla_hours", "allow_resubmit",
-            "allow_approve", "allow_reject", "allow_return",
+            "allow_approve", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
             "instructions",
             # custom approver email
@@ -104,6 +104,15 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             # notification-step fields
             "notify_user", "notify_user_name", "notify_email",
             "notification_subject", "notification_message",
+            "notify_table_field", "notify_include_items_table",
+            "notify_emails", "notify_recipient_type", "notify_supplier_field",
+            "notify_table_columns",
+            # form-specific
+            "assignee_user_field",
+            # conditions
+            "skip_when", "auto_approve_when",
+            # post-approval actions
+            "post_lpo_after_approval",
         ]
 
     def get_assignee_type(self, obj):
@@ -171,7 +180,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             # approval-step
             "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto",
             "sla_hours", "allow_resubmit",
-            "allow_approve", "allow_reject", "allow_return",
+            "allow_approve", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
             "instructions",
             # custom approver email
@@ -179,6 +188,15 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             # notification-step
             "notify_user", "notify_email",
             "notification_subject", "notification_message",
+            "notify_table_field", "notify_include_items_table",
+            "notify_emails", "notify_recipient_type", "notify_supplier_field",
+            "notify_table_columns",
+            # form-specific
+            "assignee_user_field",
+            # conditions
+            "skip_when", "auto_approve_when",
+            # post-approval actions
+            "post_lpo_after_approval",
         ]
         extra_kwargs = {
             "instructions":            {"required": False, "allow_blank": True},
@@ -188,6 +206,16 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "notify_email":            {"required": False, "allow_blank": True},
             "notification_subject":    {"required": False, "allow_blank": True},
             "notification_message":    {"required": False, "allow_blank": True},
+            "notify_table_field":       {"required": False, "allow_blank": True},
+            "notify_include_items_table": {"required": False},
+            "notify_emails":           {"required": False},
+            "notify_recipient_type":    {"required": False, "allow_blank": True},
+            "notify_supplier_field":    {"required": False, "allow_blank": True},
+            "notify_table_columns":     {"required": False},
+            "assignee_user_field":     {"required": False, "allow_blank": True},
+            "skip_when":               {"required": False},
+            "auto_approve_when":       {"required": False},
+            "post_lpo_after_approval":  {"required": False},
         }
 
     def to_internal_value(self, data):
@@ -224,9 +252,21 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             attrs["allow_approve"]       = False
             attrs["allow_reject"]        = False
             attrs["allow_return"]        = False
+            attrs["allow_return_submitter"] = False
             attrs["allow_resubmit"]      = False
             attrs["requires_signature"]  = False
             attrs["assignee_user_auto"]  = False
+            # Set defaults for notification fields
+            attrs.setdefault("notify_table_field", "")
+            attrs.setdefault("notify_include_items_table", False)
+            attrs.setdefault("notify_emails", [])
+            attrs.setdefault("notify_recipient_type", "")
+            attrs.setdefault("notify_supplier_field", None)
+            attrs.setdefault("notify_table_columns", [])
+            attrs.setdefault("assignee_user_field", "")
+            attrs.setdefault("skip_when", {})
+            attrs.setdefault("auto_approve_when", {})
+            attrs.setdefault("post_lpo_after_approval", False)
             return attrs
 
         # ── Approval step validation ──────────────────────────────────────────
@@ -266,9 +306,22 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         allow_approve      = attrs.get("allow_approve",      getattr(self.instance, "allow_approve",      True))
         allow_reject       = attrs.get("allow_reject",       getattr(self.instance, "allow_reject",       True))
         allow_return       = attrs.get("allow_return",       getattr(self.instance, "allow_return",       True))
+        allow_return_submitter = attrs.get("allow_return_submitter", getattr(self.instance, "allow_return_submitter", False))
         requires_signature = attrs.get("requires_signature", getattr(self.instance, "requires_signature", False))
+        
+        # Set defaults for new fields
+        attrs.setdefault("notify_table_field", "")
+        attrs.setdefault("notify_include_items_table", False)
+        attrs.setdefault("notify_emails", [])
+        attrs.setdefault("notify_recipient_type", "")
+        attrs.setdefault("notify_supplier_field", None)
+        attrs.setdefault("notify_table_columns", [])
+        attrs.setdefault("assignee_user_field", "")
+        attrs.setdefault("skip_when", {})
+        attrs.setdefault("auto_approve_when", {})
+        attrs.setdefault("post_lpo_after_approval", False)
 
-        if not any([allow_approve, allow_reject, allow_return]):
+        if not any([allow_approve, allow_reject, allow_return, allow_return_submitter]):
             raise serializers.ValidationError(
                 {"allow_approve": "At least one approver action (approve, reject, or send back) must be enabled."}
             )
