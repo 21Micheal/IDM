@@ -280,6 +280,38 @@ export async function loadWorkflowData(
     });
   }
 
+  // Ensure start and end nodes are always present as visual indicators
+  const hasStart = filteredSteps.some((s) => s.kind === "start");
+  const hasEnd = filteredSteps.some((s) => s.kind === "end");
+
+  if (!hasStart) {
+    filteredSteps.unshift({
+      id: "start",
+      name: "Start",
+      approver: "",
+      status: "completed",
+      kind: "start",
+      order: 0,
+      column: 0,
+      lane: 0,
+      next: filteredSteps[0]?.id || "end",
+    });
+  }
+
+  if (!hasEnd) {
+    filteredSteps.push({
+      id: "end",
+      name: "End",
+      approver: "",
+      status: "pending",
+      kind: "end",
+      order: filteredSteps.length,
+      column: filteredSteps.length,
+      lane: 0,
+      next: [],
+    });
+  }
+
   // The workflow is still "live" (worth polling) while at least one stage is
   // running or yet to be reached, and it hasn't ended in a rejection.
   const taskSteps = filteredSteps.filter((step) => !step.kind || step.kind === "task");
