@@ -299,6 +299,16 @@ export async function loadWorkflowData(
   }
 
   if (!hasEnd) {
+    // Update the last task's next to point to end
+    const lastTaskIndex = filteredSteps.findIndex((s, i) => 
+      s.kind === "task" && !filteredSteps.slice(i + 1).some(s2 => s2.kind === "task")
+    );
+    if (lastTaskIndex >= 0) {
+      filteredSteps[lastTaskIndex].next = ["end"];
+    }
+
+    // Find the last node's column to place end node after it
+    const lastColumn = Math.max(...filteredSteps.map((s) => s.column ?? 0), 0);
     filteredSteps.push({
       id: "end",
       name: "End",
@@ -306,7 +316,7 @@ export async function loadWorkflowData(
       status: "pending",
       kind: "end",
       order: filteredSteps.length,
-      column: filteredSteps.length,
+      column: lastColumn + 1,
       lane: 0,
       next: [],
     });
