@@ -10,6 +10,7 @@ from django.utils.crypto import get_random_string
 from django.utils import timezone
 from django.db.models import Q
 from django.http import FileResponse, Http404
+from django.shortcuts import render
 
 from rest_framework import generics, status, permissions, viewsets, filters, exceptions
 from rest_framework.decorators import action
@@ -33,8 +34,23 @@ from apps.notifications.tasks import (
 from apps.accounts.delegation import tasks_for_delegation
 from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ── Break-Glass Login Page ─────────────────────────────────────────────────────
+
+def break_glass_login(request):
+    """
+    Render the break-glass emergency login page.
+    This is a hidden route for platform admins to access native authentication
+    when Keycloak is unavailable. Not linked from the normal login UI.
+    """
+    frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
+    return render(request, "accounts/admin.html", {
+        'frontend_url': frontend_url
+    })
 
 
 # ── Session policy ────────────────────────────────────────────────────────────
