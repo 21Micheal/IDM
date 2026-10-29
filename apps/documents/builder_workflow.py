@@ -1,7 +1,38 @@
-"""Built-template (imprest) multi-phase workflow helpers."""
+"""Built-template workflow helpers."""
 from __future__ import annotations
 
+from datetime import date, timedelta
+
+from django.db.models import Q
+from django.utils import timezone
+
 from apps.documents.models import Document, DocumentStatus
+
+
+# Request is the sequential Imprest approval/posting phase in procurement forms.
+# RFQ remains in the path for non-travel requisitions that need quotations.
+PROCUREMENT_WORKFLOW_STAGES = ("requisition", "request", "rfq", "lpo")
+
+
+def is_procurement_document(document: Document) -> bool:
+    """Whether a built form belongs to the requisition procurement lifecycle."""
+    form = (document.metadata or {}).get("form") or {}
+    workflow_type = str(form.get("workflow_type") or "").strip().lower()
+    if workflow_type:
+        return workflow_type == "requisition"
+
+    document_type = getattr(document, "document_type", None)
+    if not document_type:
+        return False
+    haystack = " ".join(
+        str(value or "")
+        for value in (
+            getattr(document_type, "name", ""),
+            getattr(document_type, "code", ""),
+            getattr(document_type, "description", ""),
+        )
+    ).lower()
+    return "requisition" in haystack
 
 
 def is_built_form_document(document: Document) -> bool:
@@ -9,10 +40,160 @@ def is_built_form_document(document: Document) -> bool:
     return isinstance(form, dict) and bool(form.get("sections"))
 
 
+def travel_retirement_config(document: Document) -> dict:
+    form = ((document.metadata or {}).get("form") or {})
+    config = form.get("travel_retirement")
+    return config if isinstance(config, dict) and config.get("enabled") else {}
+
+
+def travel_retirement_due_date(document: Document) -> date | None:
+    """Return the configured retirement due date, or None if not resolvable."""
+    config = travel_retirement_config(document)
+    returned = travel_return_date(document)
+    if returned is None:
+        return None
+    try:
+        days = max(0, int(config.get("deadlineDays", config.get("deadline_days", 7))))
+    except (TypeError, ValueError):
+        return None
+    return returned + timedelta(days=days)
+
+
+def travel_return_date(document: Document) -> date | None:
+    config = travel_retirement_config(document)
+    field_key = str(config.get("returnDateField") or config.get("return_date_field") or "").strip()
+    values = ((document.metadata or {}).get("form") or {}).get("values") or {}
+    if not field_key or not isinstance(values, dict):
+        return None
+    raw = values.get(field_key)
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _retirement_workflow_statuses(document_ids):
+    if not document_ids:
+        return {}
+    try:
+        from apps.workflows.models import WorkflowInstance
+
+        rows = WorkflowInstance.objects.filter(
+                document_id__in=document_ids,
+                rule__phase="retirement",
+            ).order_by("document_id", "-started_at").values_list("document_id", "status")
+        result = {}
+        for document_id, status in rows:
+            result.setdefault(document_id, status)
+        # V2 CASE workflows do not have a WorkflowRule.phase foreign key.
+        # Persisted lifecycle status supplies the same summary for those runs.
+        for document in Document.objects.filter(pk__in=document_ids).only("id", "metadata"):
+            form = ((document.metadata or {}).get("form") or {})
+            status = str(form.get("retirement_workflow_status") or "").strip().lower()
+            if status:
+                result[document.id] = status
+        return result
+    except Exception:
+        return {}
+
+
+def retirement_status(document: Document, *, workflow_status=None) -> dict | None:
+    """Mapping-driven status summary used by requisition registers."""
+    config = travel_retirement_config(document)
+    if not config or not is_travel_requisition(document):
+        return None
+    due = travel_retirement_due_date(document)
+    phase = str((((document.metadata or {}).get("form") or {}).get("workflow_phase") or "")).lower()
+    status = workflow_status
+    if status is None:
+        status = _retirement_workflow_statuses([document.id]).get(document.id)
+    variance_summary = ((document.metadata or {}).get("form") or {}).get("retirement_variance")
+
+    if phase != "retirement":
+        label = "LPO pending"
+        kind = "not_started"
+    elif status == "approved" or retirement_journal_posted(document):
+        # V2 CASE workflows can finish the retirement journal successfully
+        # without a legacy WorkflowRule.phase row. The posted retirement
+        # posting is authoritative even if the workflow outcome mirror is stale.
+        try:
+            from apps.sunsystems.variance import compute_retirement_variance
+            variance_summary = compute_retirement_variance(document) or variance_summary
+        except Exception:
+            pass
+        scenario = (variance_summary or {}).get("scenario")
+        labels = {
+            "exact": ("Exact", "exact"),
+            "under": ("Refund due", "refund_due"),
+            "over": ("Top-up due", "top_up_due"),
+        }
+        label, kind = labels.get(scenario, ("Retired", "retired"))
+    elif status == "in_progress":
+        label, kind = "Awaiting Finance", "awaiting_finance"
+    elif status == "returned":
+        label, kind = "Returned for revision", "returned"
+    elif status == "rejected":
+        label, kind = "Retirement rejected", "rejected"
+    elif not travel_return_date(document):
+        label, kind = "Return date missing", "return_date_missing"
+    elif due and timezone.localdate() > due:
+        label, kind = "Retirement overdue", "overdue"
+    elif travel_return_date(document) and timezone.localdate() < travel_return_date(document):
+        label, kind = "Not yet returned", "not_due"
+    else:
+        label, kind = "Retirement due", "due"
+
+    return {
+        "status": kind,
+        "label": label,
+        "due_date": due.isoformat() if due else None,
+        "variance": variance_summary,
+    }
+
+
+def overdue_travel_retirement_for_user(user, *, exclude_document_id=None) -> Document | None:
+    """Find a user's travel requisition with an overdue, unsubmitted retirement."""
+    if not user or not getattr(user, "is_authenticated", False):
+        return None
+    docs = Document.objects.filter(
+        Q(uploaded_by=user) | Q(owned_by=user),
+        metadata__form__workflow_type="requisition",
+        metadata__form__workflow_phase="retirement",
+    ).exclude(deleted_at__isnull=False).only("id", "metadata", "reference_number", "document_type_id")
+    if exclude_document_id:
+        docs = docs.exclude(pk=exclude_document_id)
+    docs = list(docs.distinct())
+    submitted = _retirement_workflow_statuses([doc.id for doc in docs])
+    today = timezone.localdate()
+    for doc in docs:
+        if submitted.get(doc.id):
+            continue
+        if not is_travel_requisition(doc):
+            continue
+        due = travel_retirement_due_date(doc)
+        if due and today > due:
+            return doc
+    return None
+
+
 def infer_builder_workflow_phase(document: Document) -> str | None:
     """Return ``request`` / ``retirement`` for builder forms, else ``None``."""
     if not is_built_form_document(document):
         return None
+
+    if is_procurement_document(document):
+        form = (document.metadata or {}).get("form") or {}
+        stage = str(form.get("workflow_phase") or "requisition").strip().lower()
+        if (
+            stage == "retirement"
+            and travel_retirement_config(document)
+            and is_travel_requisition(document)
+            and "lpo" in completed_procurement_stages(document)
+        ):
+            return "retirement"
+        return stage if stage in PROCUREMENT_WORKFLOW_STAGES else "requisition"
 
     phase = "request"
     try:
@@ -55,6 +236,17 @@ def sync_builder_workflow_phase(document: Document) -> str | None:
     if not is_built_form_document(document):
         return None
 
+    if is_procurement_document(document):
+        phase = infer_builder_workflow_phase(document)
+        meta = dict(document.metadata or {})
+        form = dict(meta.get("form") or {})
+        if form.get("workflow_phase") != phase:
+            form["workflow_phase"] = phase
+            meta["form"] = form
+            document.metadata = meta
+            document.save(update_fields=["metadata", "updated_at"])
+        return phase
+
     phase = infer_builder_workflow_phase(document)
     meta = dict(document.metadata or {})
     form = dict(meta.get("form") or {})
@@ -64,6 +256,327 @@ def sync_builder_workflow_phase(document: Document) -> str | None:
         document.metadata = meta
         document.save(update_fields=["metadata", "updated_at"])
     return phase
+
+
+def set_procurement_workflow_stage(document: Document, stage: str) -> None:
+    """Persist the explicit stage selected for a requisition approval cycle."""
+    normalized = (stage or "").strip().lower()
+    if not is_procurement_document(document) or normalized not in PROCUREMENT_WORKFLOW_STAGES:
+        raise ValueError("Invalid procurement workflow stage.")
+    meta = dict(document.metadata or {})
+    form = dict(meta.get("form") or {})
+    form["workflow_phase"] = normalized
+    meta["form"] = form
+    document.metadata = meta
+    document.save(update_fields=["metadata", "updated_at"])
+
+
+def open_travel_retirement_phase(document: Document) -> bool:
+    """Open the retirement phase after the requisition's LPO is approved."""
+    if (
+        not is_procurement_document(document)
+        or not is_travel_requisition(document)
+        or not travel_retirement_config(document)
+        or "lpo" not in completed_procurement_stages(document)
+    ):
+        return False
+    meta = dict(document.metadata or {})
+    form = dict(meta.get("form") or {})
+    if form.get("workflow_phase") == "retirement":
+        return False
+    form["workflow_phase"] = "retirement"
+    meta["form"] = form
+    document.metadata = meta
+    document.save(update_fields=["metadata", "updated_at"])
+    return True
+
+
+def has_retirement_workflow_route(document: Document) -> bool:
+    """Whether a legacy retirement rule or v2 ``context.phase`` CASE exists."""
+    try:
+        from apps.workflows.models import WorkflowRule
+        if WorkflowRule.objects.filter(
+            document_type=document.document_type,
+            phase="retirement",
+            is_active=True,
+        ).exists():
+            return True
+    except Exception:
+        pass
+
+    try:
+        template = document.document_type.workflow_template
+        definition = template.definition or {}
+        if (
+            not template.is_active
+            or template.target_type != "document"
+            or definition.get("version") != 2
+        ):
+            return False
+
+        def has_case(blocks):
+            for block in blocks or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("kind") == "switch":
+                    values = (block.get("field_id") == "context.phase")
+                    if values:
+                        for case in block.get("cases") or []:
+                            case_values = case.get("values") or []
+                            if any(str(value).strip().lower() == "retirement" for value in case_values):
+                                return True
+                nested = []
+                nested.extend(block.get("blocks") or [])
+                nested.extend(block.get("default_blocks") or [])
+                for case in block.get("cases") or []:
+                    nested.extend(case.get("blocks") or [])
+                for branch in block.get("branches") or []:
+                    nested.extend(branch.get("blocks") or [])
+                if has_case(nested):
+                    return True
+            return False
+
+        return has_case(definition.get("blocks"))
+    except Exception:
+        return False
+
+
+def completed_procurement_stages(document: Document) -> list[str]:
+    form = ((document.metadata or {}).get("form") or {})
+    stages = form.get("completed_workflow_stages")
+    if not isinstance(stages, list):
+        return []
+    return [
+        str(stage).strip().lower()
+        for stage in stages
+        if str(stage).strip().lower() in PROCUREMENT_WORKFLOW_STAGES
+    ]
+
+
+def requisition_type_config(document: Document) -> tuple[str, str]:
+    """``(field_key, travel_value)`` for the requisition-type dropdown. Prefers
+    the snapshot on ``metadata.form``; falls back to the source template."""
+    form = ((document.metadata or {}).get("form") or {})
+    field = str(form.get("requisition_type_field") or "").strip()
+    value = str(form.get("travel_type_value") or "").strip() or "Travel"
+    if field:
+        return field, value
+    template_id = form.get("template_id")
+    if template_id:
+        try:
+            from apps.templates_engine.models import DocumentTemplate
+
+            tpl = DocumentTemplate.objects.filter(pk=template_id).first()
+            if tpl and tpl.requisition_type_field:
+                return tpl.requisition_type_field, (tpl.travel_type_value or "Travel")
+        except Exception:
+            pass
+    return "", value
+
+
+def is_travel_requisition(document: Document) -> bool:
+    """True when the selected requisition form is configured as Travel."""
+    if not is_procurement_document(document):
+        return False
+    form = ((document.metadata or {}).get("form") or {})
+    category = str(form.get("requisition_category") or "").strip().lower()
+    if category:
+        return category == "travel"
+    field, travel_value = requisition_type_config(document)
+    if not field:
+        return False
+    form = ((document.metadata or {}).get("form") or {})
+    values = form.get("values")
+    if not isinstance(values, dict):
+        return False
+    raw = values.get(field)
+    if raw is None:
+        return False
+    return str(raw).strip().lower() == travel_value.strip().lower()
+
+
+def travel_requisition_skips_rfq(document: Document) -> bool:
+    """Use the template-level procurement path; retain legacy snapshots."""
+    if not is_procurement_document(document):
+        return False
+    form = ((document.metadata or {}).get("form") or {})
+    if "skip_rfq" in form:
+        return bool(form.get("skip_rfq"))
+    template_id = form.get("template_id")
+    if template_id:
+        try:
+            from apps.templates_engine.models import DocumentTemplate
+            template = DocumentTemplate.objects.filter(pk=template_id).only("skip_rfq", "requisition_type_field", "travel_type_value").first()
+            if template:
+                if template.skip_rfq:
+                    return True
+                # Documents created before the template-level path setting keep
+                # their old dropdown-based stage behavior.
+                if template.requisition_type_field:
+                    return is_travel_requisition(document)
+                return False
+        except Exception:
+            pass
+    return is_travel_requisition(document)
+
+
+def next_procurement_stage(document: Document) -> str | None:
+    """The stage the document is ready to start next, or ``None``.
+
+    Mirrors ``can_start_procurement_workflow_stage``: the previous stage must be
+    complete and the document approved, with no workflow still running. An
+    Imprest Request phase is inserted when an advance was entered; Travel then
+    skips RFQ, while other requisitions retain it."""
+    if not is_procurement_document(document):
+        return None
+    if (document.status or "").strip() != DocumentStatus.APPROVED:
+        return None
+    if builder_workflow_in_progress(document):
+        return None
+    form = ((document.metadata or {}).get("form") or {})
+    phase = str(form.get("workflow_phase") or "").strip().lower()
+    completed = completed_procurement_stages(document)
+    if phase not in PROCUREMENT_WORKFLOW_STAGES or phase not in completed:
+        return None
+    if phase == "requisition":
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            if has_imprest_request_lines(document):
+                return "request"
+        except Exception:
+            # Fail closed: a bad Imprest configuration must not bypass the
+            # approval and posting gate and open the LPO phase.
+            return None
+        return "lpo" if travel_requisition_skips_rfq(document) else "rfq"
+    if phase == "request":
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            if has_imprest_request_lines(document) and not imprest_request_postings_complete(document):
+                return None
+        except Exception:
+            return None
+        # RFQ remains required for non-travel requisitions; Travel skips it.
+        return "lpo" if travel_requisition_skips_rfq(document) else "rfq"
+    index = PROCUREMENT_WORKFLOW_STAGES.index(phase)
+    if index + 1 < len(PROCUREMENT_WORKFLOW_STAGES):
+        return PROCUREMENT_WORKFLOW_STAGES[index + 1]
+    return None
+
+
+def imprest_request_postings_complete(document: Document) -> bool:
+    """True when every configured Imprest request journal has posted."""
+    try:
+        from apps.sunsystems.config import get_imprest_request_postings
+        from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+        requested = get_imprest_request_postings(document)
+        if not requested:
+            return False
+        stages = [int(item["stage"]) for item in requested]
+        posted = dict(
+            JournalPosting.objects.filter(document=document, stage__in=stages)
+            .values_list("stage", "status")
+        )
+        return all(posted.get(stage) == JournalPostingStatus.POSTED for stage in stages)
+    except Exception:
+        return False
+
+
+def can_start_procurement_workflow_stage(document: Document, stage: str, *, user=None) -> bool:
+    """Only allow the initial stage or the next completed procurement stage."""
+    normalized = (stage or "").strip().lower()
+    if not is_procurement_document(document) or normalized not in PROCUREMENT_WORKFLOW_STAGES:
+        return False
+    if user is not None and not user_may_submit_document(user, document):
+        return False
+
+    if normalized == "requisition":
+        return (document.status or "").strip() in {
+            DocumentStatus.DRAFT, DocumentStatus.RETURNED, "Returned for Review",
+        }
+
+    if normalized == "request":
+        if (
+            "requisition" not in completed_procurement_stages(document)
+            or (document.status or "").strip() != DocumentStatus.APPROVED
+        ):
+            return False
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            if not has_imprest_request_lines(document):
+                return False
+        except Exception:
+            return False
+        try:
+            from apps.workflows.models import WorkflowInstance
+            return not WorkflowInstance.objects.filter(document=document, status="in_progress").exists()
+        except Exception:
+            return False
+
+    if normalized == "rfq":
+        skips_rfq = travel_requisition_skips_rfq(document)
+        if skips_rfq:
+            return False
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            request_required = has_imprest_request_lines(document)
+        except Exception:
+            return False
+        previous = "request" if request_required else "requisition"
+        if previous not in completed_procurement_stages(document):
+            return False
+        if request_required and not imprest_request_postings_complete(document):
+            return False
+        if (document.status or "").strip() != DocumentStatus.APPROVED:
+            return False
+        try:
+            from apps.workflows.models import WorkflowInstance
+            return not WorkflowInstance.objects.filter(document=document, status="in_progress").exists()
+        except Exception:
+            return False
+
+    # Travel requisitions always skip RFQ, even if General/Imprest rows were entered.
+    skips_rfq = travel_requisition_skips_rfq(document)
+    if normalized == "lpo" and skips_rfq:
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            request_required = has_imprest_request_lines(document)
+        except Exception:
+            return False
+        previous = "request" if request_required else "requisition"
+        if request_required and not imprest_request_postings_complete(document):
+            return False
+    else:
+        previous = PROCUREMENT_WORKFLOW_STAGES[PROCUREMENT_WORKFLOW_STAGES.index(normalized) - 1]
+    if previous not in completed_procurement_stages(document):
+        return False
+    if (document.status or "").strip() != DocumentStatus.APPROVED:
+        return False
+
+    try:
+        from apps.workflows.models import WorkflowInstance
+        return not WorkflowInstance.objects.filter(document=document, status="in_progress").exists()
+    except Exception:
+        return False
+
+
+def record_procurement_stage_completion(document: Document, outcome: str) -> bool:
+    """Add a successful requisition stage to the document progression."""
+    if outcome != "approved" or not is_procurement_document(document):
+        return False
+    form = ((document.metadata or {}).get("form") or {})
+    stage = str(form.get("workflow_phase") or "").strip().lower()
+    if stage not in PROCUREMENT_WORKFLOW_STAGES:
+        return False
+    completed = completed_procurement_stages(document)
+    if stage in completed:
+        return False
+    meta = dict(document.metadata or {})
+    next_form = dict(form)
+    next_form["completed_workflow_stages"] = [*completed, stage]
+    meta["form"] = next_form
+    document.metadata = meta
+    return True
 
 
 def sync_retirement_variance(document: Document) -> dict | None:
@@ -127,25 +640,37 @@ def sync_retirement_variance(document: Document) -> dict | None:
 
 
 def retirement_journal_posted(document: Document) -> bool:
-    """True when a configured stage-2 SunSystems journal has been posted."""
+    """True when the configured retirement journal posting(s) have posted.
+
+    Older templates stored retirement as journal stage 2. Procurement forms
+    use generated posting stages starting at 30000 (one per retirement table).
+    """
     try:
-        from apps.sunsystems.config import _get_stages, get_journal_config
+        from apps.sunsystems.config import _get_stages, get_imprest_retirement_postings, get_journal_config
         from apps.sunsystems.models import JournalPosting, JournalPostingStatus
 
-        cfg = get_journal_config(document)
-        if not cfg or not cfg.get("enabled"):
+        stage_nums = {
+            int(posting.get("stage"))
+            for posting in get_imprest_retirement_postings(document)
+            if posting.get("stage") is not None
+        }
+        if not stage_nums:
+            cfg = get_journal_config(document)
+            if not cfg or not cfg.get("enabled"):
+                return False
+            stage_nums = {
+                int(stage.get("stage", 1))
+                for stage in _get_stages(cfg)
+                if int(stage.get("stage", 1)) == 2
+            }
+        if not stage_nums:
             return False
-        stages = _get_stages(cfg)
-        if len(stages) < 2:
-            return False
-        stage_nums = {int(s.get("stage", 1)) for s in stages}
-        if 2 not in stage_nums:
-            return False
-        return JournalPosting.objects.filter(
+        posted_stages = set(JournalPosting.objects.filter(
             document=document,
-            stage=2,
+            stage__in=stage_nums,
             status=JournalPostingStatus.POSTED,
-        ).exists()
+        ).values_list("stage", flat=True))
+        return stage_nums.issubset(posted_stages)
     except Exception:
         return False
 
@@ -166,6 +691,9 @@ def retirement_workflow_completed(document: Document) -> bool:
     """True once the retirement approval cycle has completed successfully."""
     if not is_built_form_document(document):
         return False
+    form = ((document.metadata or {}).get("form") or {})
+    if str(form.get("retirement_workflow_status") or "").strip().lower() == "approved":
+        return True
     try:
         from apps.workflows.models import WorkflowInstance
 
@@ -179,12 +707,7 @@ def retirement_workflow_completed(document: Document) -> bool:
 
 
 def builder_process_step(document: Document) -> str:
-    """Phase-aware process step for built-form visibility/editability rules.
-
-    ``Document.status`` is intentionally lifecycle/RBAC-oriented and therefore
-    cannot distinguish "request approved, retirement now open" from "retirement
-    fully approved". This derived value is the form engine's workflow vocabulary.
-    """
+    """Return the lifecycle value used by form visibility/editability rules."""
     status = (document.status or DocumentStatus.DRAFT).strip().lower()
     if not is_built_form_document(document):
         return status
@@ -192,28 +715,52 @@ def builder_process_step(document: Document) -> str:
     form = (document.metadata or {}).get("form") or {}
     phase = (form.get("workflow_phase") or infer_builder_workflow_phase(document) or "request").strip().lower()
 
+    if is_procurement_document(document):
+        if builder_workflow_in_progress(document):
+            return f"{phase}_pending"
+        if status == DocumentStatus.RETURNED:
+            return f"{phase}_returned"
+        if status == DocumentStatus.REJECTED:
+            return f"{phase}_rejected"
+        if status == DocumentStatus.APPROVED:
+            if phase == "retirement":
+                if retirement_journal_posted(document):
+                    return "fully_approved"
+                if retirement_workflow_completed(document):
+                    return "retirement_approved"
+                # The requisition's LPO is approved, but the traveller has not
+                # submitted retirement yet. Keep the current process step on
+                # the completed LPO milestone until a retirement workflow
+                # actually starts (which will then report retirement_pending).
+                return "lpo_approved" if "lpo" in completed_procurement_stages(document) else "retirement_ready"
+            if phase == "lpo" and travel_retirement_config(document) and is_travel_requisition(document) and "lpo" in completed_procurement_stages(document):
+                return "lpo_approved"
+            if phase == "request" and form.get("imprest_request_workflow_status") == "posting":
+                return "request_pending"
+            return "fully_approved" if phase == "lpo" and phase in completed_procurement_stages(document) else f"{phase}_approved"
+        return status
+
     if builder_workflow_in_progress(document):
         return "retirement_pending" if phase == "retirement" else "request_pending"
-
     if status == DocumentStatus.RETURNED:
         return "retirement_returned" if phase == "retirement" else "returned"
-
     if status == DocumentStatus.REJECTED:
         return "retirement_rejected" if phase == "retirement" else "rejected"
-
     if status == DocumentStatus.APPROVED:
-        if phase == "retirement" and retirement_workflow_completed(document):
-            return "fully_approved"
-        if phase == "retirement" and retirement_journal_posted(document):
+        if phase == "retirement" and (retirement_workflow_completed(document) or retirement_journal_posted(document)):
             return "fully_approved"
         return "request_approved"
-
     return status
 
 
 def user_may_submit_document(user, document: Document) -> bool:
     if not user or not getattr(user, "is_authenticated", False):
         return False
+    from apps.documents.access import returned_rework_editor_id
+    status_lower = (document.status or "").strip().lower()
+    assigned_editor_id = returned_rework_editor_id(document)
+    if status_lower == "returned" and assigned_editor_id:
+        return assigned_editor_id == str(user.id)
     if getattr(user, "has_admin_access", False):
         return True
     if document.uploaded_by_id == user.id or getattr(document, "owned_by_id", None) == user.id:
@@ -238,25 +785,26 @@ def can_submit_retirement_workflow(document: Document, *, user=None) -> bool:
     if not is_built_form_document(document):
         return False
 
-    # Explicitly check that this document type has a retirement workflow rule configured
-    try:
-        from apps.workflows.models import WorkflowRule
-        has_retirement_rule = WorkflowRule.objects.filter(
-            document_type=document.document_type,
-            phase="retirement",
-            is_active=True,
-        ).exists()
-        if not has_retirement_rule:
-            return False
-    except Exception:
+    # v2 workflows route by context.phase CASE and do not need a legacy rule row.
+    if not has_retirement_workflow_route(document):
         return False
-
     form = (document.metadata or {}).get("form") or {}
+    retirement_status_value = str(form.get("retirement_workflow_status") or "").strip().lower()
+    if retirement_status_value in {"in_progress", "approved"}:
+        return False
+    if is_procurement_document(document):
+        if not travel_retirement_config(document) or not is_travel_requisition(document) or "lpo" not in completed_procurement_stages(document):
+            return False
     phase = (form.get("workflow_phase") or infer_builder_workflow_phase(document) or "request").strip().lower()
     if phase != "retirement":
         return False
     if (document.status or "").strip() != DocumentStatus.APPROVED:
         return False
+
+    if is_procurement_document(document):
+        returned = travel_return_date(document)
+        if returned is not None and timezone.localdate() < returned:
+            return False
 
     # Check if retirement workflow is already in progress or completed
     try:
@@ -301,6 +849,10 @@ def can_submit_request_workflow(document: Document, *, user=None) -> bool:
             "Returned for Review",
         ):
             return False
+
+        if user is not None and is_travel_requisition(document):
+            if overdue_travel_retirement_for_user(user, exclude_document_id=document.id):
+                return False
 
     if user is not None and not user_may_submit_document(user, document):
         return False

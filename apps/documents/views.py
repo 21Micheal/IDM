@@ -48,7 +48,7 @@ from .models import (
     SignatureRequestSigner,
 )
 from .serializers import (
-    DocumentListSerializer, DocumentDetailSerializer,
+    DocumentListSerializer, RequisitionSummaryListSerializer, DocumentDetailSerializer,
     DocumentUploadSerializer, DocumentTypeSerializer, DocumentTypeWriteSerializer,
     DocumentVersionSerializer, DocumentCommentSerializer,
     DocumentMetadataEditSerializer, DocumentBulkActionSerializer,
@@ -471,17 +471,26 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs   = (
+        summary_list = (
+            self.action == "list"
+            and str(self.request.query_params.get("requisition_summary") or "").lower()
+            in {"1", "true", "yes"}
+        )
+        qs = (
             Document.objects
             .select_related(
                 "document_type",
                 "uploaded_by",
                 "uploaded_by__department",
                 "department",
-                "edit_locked_by",
             )
-            .prefetch_related("tags", "versions", "workflow_instance__tasks__step")
         )
+        if not summary_list:
+            qs = qs.select_related("edit_locked_by").prefetch_related(
+                "tags", "versions", "workflow_instance__tasks__step"
+            )
+        else:
+            qs = qs.select_related("workflow_instance")
         # UNCLASS placeholders are hidden from every listing, but single-object
         # lookups (retrieve/preview_url/file) opt in via get_object() so the
         # bulk-review screen can preview unreviewed email/scan drafts. Access is
@@ -499,17 +508,37 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             ).values("document_id")
 
             # INVOLVEMENT: own docs, an ACTIVE workflow task (including delegated),
-            # a PENDING signature assignment, or an active share. Both the task and
-            # the signature assignment must be status-filtered — a WorkflowTask row
-            # and a SignatureRequestSigner row both persist after being actioned,
-            # they just change status, so an unfiltered join keeps granting visibility
-            # forever after the action is complete.
+            # a generated LPO the user initiated, a PENDING
+            # signature assignment, or an active share. Tasks and signature
+            # assignments must be status-filtered because their rows persist after
+            # action; the generated LPO remains visible to its initiating/final
+            # approver, while its source requisition follows normal visibility.
             from apps.accounts.delegation import active_delegations_qs
+            from apps.documents.file_streaming import lpo_participation_filter
             delegated_task_filter = models.Q()
+            lpo_participation = lpo_participation_filter(user)
+            if self.action != "list":
+                from apps.workflows.models import WorkflowTaskAction
+
+                latest_approved_actor = WorkflowTaskAction.objects.filter(
+                    task__workflow_instance__document_id=models.OuterRef("pk"),
+                    action="approved",
+                    actor__isnull=False,
+                ).order_by("-created_at").values("actor_id")[:1]
+                lpo_generation_actor = WorkflowTaskAction.objects.filter(
+                    task__workflow_instance__document_id=models.OuterRef("pk"),
+                    task__step__post_lpo_after_approval=True,
+                    action="approved",
+                    actor__isnull=False,
+                ).order_by("-created_at").values("actor_id")[:1]
+                qs = qs.annotate(
+                    _latest_approved_workflow_actor_id=models.Subquery(latest_approved_actor),
+                    _lpo_generation_actor_id=models.Subquery(lpo_generation_actor),
+                )
             for delegation in active_delegations_qs(delegate=user):
                 clause = models.Q(
                     workflow_instance__tasks__assigned_to_id=delegation.delegator_id,
-                    workflow_instance__tasks__status__in=["in_progress", "held"],
+                    workflow_instance__tasks__status__in=["in_progress", "held", "awaiting_posting"],
                 )
                 if delegation.document_type_id:
                     clause &= models.Q(document_type_id=delegation.document_type_id)
@@ -517,17 +546,30 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             access_filter = (
                 models.Q(uploaded_by=user) |
                 models.Q(owned_by=user) |
+                models.Q(metadata__form__return_for_rework__editor_id=str(user.id)) |
                 models.Q(
                     workflow_instance__tasks__assigned_to=user,
-                    workflow_instance__tasks__status__in=["in_progress", "held"],
+                    workflow_instance__tasks__status__in=["in_progress", "held", "awaiting_posting"],
                 ) |
                 delegated_task_filter |
+                lpo_participation |
                 models.Q(
                     signature_request__signers__signer=user,
                     signature_request__signers__status="pending",
                 ) |
                 models.Q(id__in=active_shared_docs)
             )
+            if self.action != "list":
+                access_filter |= (
+                    models.Q(metadata__form__lpo_final_approver_id=str(user.id))
+                    | models.Q(_lpo_generation_actor_id=user.id)
+                    | models.Q(
+                        _latest_approved_workflow_actor_id=user.id,
+                        workflow_instance__status="approved",
+                        metadata__form__workflow_type="requisition",
+                        metadata__form__workflow_phase__in=["lpo", "retirement"],
+                    )
+                )
 
             # DEPARTMENT SCOPE: a department head (HOD) is involved with every
             # document in the department(s) they head.
@@ -626,7 +668,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     models.Q(document_type_id__in=user_view_doc_types) |  # Has VIEW permission on type
                     models.Q(uploaded_by=user) |                         # Own uploads (always visible)
                     models.Q(owned_by=user) |                             # Owned documents (always visible)  
-                    models.Q(workflow_instance__tasks__assigned_to=user, workflow_instance__tasks__status__in=["in_progress", "held"])  # Work queue (always visible)
+                    models.Q(workflow_instance__tasks__assigned_to=user, workflow_instance__tasks__status__in=["in_progress", "held", "awaiting_posting"]) |  # Work queue (always visible)
+                    lpo_participation  # LPO generator/final approver keeps the generated LPO visible
                 ).distinct()
 
         # Trash visibility: the list shows either live docs or Trash (?trash=true).
@@ -638,6 +681,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 status=DocumentStatus.PENDING_REVIEW,
                 bulk_upload__ingested_emails__isnull=False,
             )
+            if summary_list:
+                # Requisition registers do not show or filter relationship
+                # counts. Avoid their joins and metadata scans on these large
+                # form-only result sets.
+                return qs
             suggestion_ids = None
             wants_suggestions = str(self.request.query_params.get("has_relationship_suggestions", "")).lower()
             if wants_suggestions in ("true", "1", "yes", "false", "0", "no"):
@@ -691,6 +739,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         if self.action == "list":
+            if str(self.request.query_params.get("requisition_summary") or "").lower() in {"1", "true", "yes"}:
+                return RequisitionSummaryListSerializer
             return DocumentListSerializer
         if self.action == "create":
             return DocumentUploadSerializer
@@ -727,6 +777,37 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 generate_document_preview.delay(str(doc.id))
         except Exception:
             logger.exception("_queue_office_preview: failed for doc=%s", doc.id)
+
+    def _render_legacy_lpo_preview(self, doc: Document) -> bool:
+        """Upgrade a previously generated LPO DOCX to a direct ReportLab PDF preview."""
+        if (
+            not doc.is_office_doc()
+            or str(getattr(doc.document_type, "code", "") or "").strip().upper() != "LPO"
+            or doc.preview_pdf
+        ):
+            return False
+        metadata = doc.metadata if isinstance(doc.metadata, dict) else {}
+        template_id = metadata.get("template_id")
+        if not template_id:
+            return False
+        try:
+            from apps.templates_engine.models import DocumentTemplate
+            from apps.templates_engine.tasks import generate_designer_pdf
+
+            template = DocumentTemplate.objects.filter(
+                pk=template_id, type="built", kind="document"
+            ).first()
+            if not template:
+                return False
+            pdf_bytes = generate_designer_pdf(template.design, metadata)
+            safe_stem = (doc.file_name or doc.title or "purchase-order").rsplit(".", 1)[0]
+            doc.preview_pdf.save(f"{safe_stem}.pdf", ContentFile(pdf_bytes), save=False)
+            doc.preview_status = PreviewStatus.DONE
+            doc.save(update_fields=["preview_pdf", "preview_status", "updated_at"])
+            return True
+        except Exception:
+            logger.exception("Could not render legacy LPO %s with ReportLab", doc.id)
+            return False
 
     def _queue_office_version_preview(self, version: DocumentVersion) -> None:
         if not version.is_office_doc():
@@ -957,12 +1038,75 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def submit(self, request, pk=None):
         doc = self.get_object()
         from apps.documents.builder_workflow import (
+            can_start_procurement_workflow_stage,
             can_submit_request_workflow,
             can_submit_retirement_workflow,
+            is_travel_requisition,
+            overdue_travel_retirement_for_user,
+            is_procurement_document,
+            set_procurement_workflow_stage,
         )
 
         self._prepare_builder_workflow_phase(doc)
         doc.refresh_from_db(fields=["metadata", "updated_at"])
+
+        # Keep this check before the explicit procurement-stage branch too:
+        # new requisitions enter through workflow_stage="requisition" and
+        # return from that branch before the legacy submit checks below.
+        if is_travel_requisition(doc):
+            overdue = overdue_travel_retirement_for_user(
+                request.user, exclude_document_id=doc.id,
+            )
+            if overdue:
+                return Response(
+                    {"detail": f"Travel requisition blocked: retirement for {overdue.reference_number} is overdue. Submit that retirement before raising another travel requisition."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        requested_stage = str(request.data.get("workflow_stage") or "").strip().lower()
+        if requested_stage == "retirement":
+            if not can_submit_retirement_workflow(doc, user=request.user):
+                return Response(
+                    {"detail": "Retirement is not ready to submit. Complete LPO approval and reach the configured return date first."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            from apps.workflows.services import WorkflowService, WorkflowError
+            try:
+                WorkflowService.start(doc, request.user)
+            except WorkflowError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            doc.refresh_from_db()
+            if doc.status != DocumentStatus.APPROVED:
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["retirement_workflow_status"] = "in_progress"
+                metadata["form"] = form
+                doc.metadata = metadata
+                doc.save(update_fields=["metadata", "updated_at"])
+            self.record_audit("document.submitted", doc, {"workflow_stage": "retirement"})
+            doc.refresh_from_db()
+            return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
+
+        if requested_stage:
+            if not is_procurement_document(doc):
+                return Response(
+                    {"detail": "Workflow stages are only available for requisitions."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not can_start_procurement_workflow_stage(doc, requested_stage, user=request.user):
+                return Response(
+                    {"detail": "That procurement stage is not ready to start yet."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            set_procurement_workflow_stage(doc, requested_stage)
+            from apps.workflows.services import WorkflowService, WorkflowError
+            try:
+                WorkflowService.start(doc, request.user)
+            except WorkflowError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            self.record_audit("document.submitted", doc, {"workflow_stage": requested_stage})
+            doc.refresh_from_db()
+            return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
 
         can_submit_retirement = can_submit_retirement_workflow(doc, user=request.user)
         can_submit_request = can_submit_request_workflow(doc, user=request.user)
@@ -1161,7 +1305,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         from types import SimpleNamespace
         from django.core.files.base import ContentFile
         from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
-        from apps.documents.access import document_allows_form_edit, user_owns_document
+        from apps.documents.access import document_allows_form_edit
         from apps.documents.file_streaming import user_can_edit_document
         from apps.templates_engine.tasks import generate_built_pdf
 
@@ -1227,7 +1371,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 values[key] = descriptor
                 attachments[key] = descriptor
 
-        sections = form.get("sections") or []
+        # Raw snapshot keeps every section so a draft can still add/remove
+        # blocks; only the effective sections (normal + `__sections_added`) are
+        # re-checked, reconciled, recomputed and rendered. Linked tables are
+        # materialised from their snapshots so nothing downstream sees
+        # `source="table"`.
+        raw_sections = form.get("sections") or []
+        from apps.templates_engine.blocks import effective_sections, prune_inactive_values
+        values = prune_inactive_values(raw_sections, values)
+        sections = effective_sections(raw_sections, values)
 
         # ── Editability enforcement (the "Security" axis) ──────────────────────
         # A field/section can be marked read-only or "editable only when <process
@@ -1236,40 +1388,150 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # tampered request can't slip past. Locked fields are reverted to their
         # stored value; conditions are evaluated against the STORED values (a user
         # can't unlock a field within the same request that edits it).
-        from apps.documents.builder_workflow import builder_process_step
-        from apps.templates_engine.conditions import is_editable
+        from apps.documents.builder_workflow import builder_process_step, completed_procurement_stages
+        from apps.documents.access import viewer_for_user, retirement_editable_section_ids
+        from apps.documents.access import user_has_active_approval_task
+        from apps.templates_engine.conditions import is_editable, is_visible
         process_step = builder_process_step(doc)
+        # Returned forms are back with their submitter for amendments. Their
+        # visibility/editability rules should resolve as they did in draft;
+        # other viewers retain the actual returned/workflow process step.
+        from apps.documents.access import returned_rework_editor_id
+        if (
+            (doc.status or "").strip().lower() == "returned"
+            and doc.uploaded_by_id == request.user.id
+        ):
+            process_step = "draft"
+        elif (
+            (doc.status or "").strip().lower() == "returned"
+            and returned_rework_editor_id(doc) == str(request.user.id)
+        ):
+            handoff = ((doc.metadata or {}).get("form") or {}).get("return_for_rework") or {}
+            process_step = handoff.get("editor_process_step") or process_step
+        viewer = viewer_for_user(request.user)
         prior_render = descriptors_to_names(prior_values)
-        owns_document = user_owns_document(request.user, doc) or getattr(request.user, "has_admin_access", False)
-        owner_only_conditional_edit = process_step.strip().lower() != "returned"
+        lpo_approved = "lpo" in completed_procurement_stages(doc)
+        retirement_edit_ids = retirement_editable_section_ids(doc, user=request.user)
+        retirement_only_edit = bool(retirement_edit_ids) and not user_has_active_approval_task(request.user, doc)
+
+        # Analysis code fields are often visible only to one approval group.
+        # A later reviewer may therefore submit the rest of the form without
+        # those fields mounted. Keep their prior selections when omitted, or
+        # when they are currently hidden; allow an explicit clear while visible.
+        def has_analysis_value(value):
+            if isinstance(value, dict):
+                return any(item not in (None, "", [], {}) for item in value.values())
+            if isinstance(value, list):
+                return any(item not in (None, "", [], {}) for item in value)
+            return value not in (None, "", [], {})
+
+        for section in raw_sections:
+            if not isinstance(section, dict):
+                continue
+            section_visible = is_visible(section, prior_render, process_step, viewer)
+            for field in section.get("fields", []):
+                if not isinstance(field, dict) or not field.get("key"):
+                    continue
+                external = field.get("external") or {}
+                is_analysis_field = (
+                    field.get("type") == "analysis_panel"
+                    or (field.get("type") == "external" and external.get("source") == "analysis_codes")
+                )
+                key = field["key"]
+                if not is_analysis_field or key not in prior_values or not has_analysis_value(prior_values[key]):
+                    continue
+                field_visible = section_visible and is_visible(field, prior_render, process_step, viewer)
+                if key not in values or (not field_visible and not has_analysis_value(values.get(key))):
+                    values[key] = prior_values[key]
+
         locked_keys = set()
         for section in sections:
-            section_editable = is_editable(section, prior_render, process_step)
-            if section.get("editableWhen") and owner_only_conditional_edit and not owns_document:
-                section_editable = False
-            for f in section.get("fields", []):
+            section_id = str(section.get("id") or section.get("key") or "")
+            section_fields = section.get("fields", [])
+            is_retirement_section = any(
+                isinstance(field, dict) and field.get("workflowRole") == "retirement_expenses"
+                for field in section_fields
+            )
+            if is_retirement_section and not lpo_approved:
+                locked_keys.update(
+                    f.get("key") for f in section_fields
+                    if isinstance(f, dict) and f.get("key")
+                )
+                continue
+            if retirement_only_edit and section_id not in retirement_edit_ids:
+                locked_keys.update(
+                    f.get("key") for f in section_fields
+                    if isinstance(f, dict) and f.get("key")
+                )
+                continue
+            section_editable = is_editable(section, prior_render, process_step, viewer)
+            section_visible = is_visible(section, prior_render, process_step, viewer)
+            for f in section_fields:
                 key = f.get("key")
                 if not key:
                     continue
-                field_editable = is_editable(f, prior_render, process_step)
-                if f.get("editableWhen") and owner_only_conditional_edit and not owns_document:
-                    field_editable = False
-                if not (section_editable and field_editable):
+                field_editable = is_editable(f, prior_render, process_step, viewer)
+                field_visible = is_visible(f, prior_render, process_step, viewer)
+                if not (section_editable and field_editable) or (retirement_only_edit and not (section_visible and field_visible)):
                     locked_keys.add(key)
         for key in locked_keys:
             if key in prior_values:
                 values[key] = prior_values[key]
             else:
                 values.pop(key, None)
+        # Multi-file field slots are stored as ``field_key~index``. Apply the
+        # parent field's visibility/editability rule to every uploaded slot.
+        for key in list(values):
+            parent_key = str(key).split("~", 1)[0]
+            if parent_key in locked_keys:
+                if key in prior_values:
+                    values[key] = prior_values[key]
+                else:
+                    values.pop(key, None)
+
+        # Manual supplier uploads count as that supplier's RFQ response. The
+        # configured multi-file field still receives the actual file descriptors
+        # through the normal form attachment path above.
+        manual_supplier_code = str(request.data.get("rfq_supplier_code") or "").strip()
+        if manual_supplier_code:
+            from apps.documents.rfq import mark_supplier_response, rfq_state
+
+            rfq = dict(rfq_state(meta_form))
+            file_names = [
+                descriptor.get("name")
+                for name, descriptor in attachments.items()
+                if name.startswith(f"{rfq.get('attachment_field', '')}~")
+                and isinstance(descriptor, dict)
+                and isinstance(values.get(name), dict)
+                and values[name].get("storage_path")
+                and descriptor.get("storage_path") != (prior_attachments.get(name) or {}).get("storage_path")
+            ]
+            if not file_names or not mark_supplier_response(
+                rfq,
+                manual_supplier_code,
+                source="manual",
+                files=[{"name": name} for name in file_names],
+            ):
+                return Response(
+                    {"detail": "Upload a file for a supplier invited to this RFQ."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            meta_form["rfq_response"] = rfq
 
         # Re-derive picked reference/user labels server-side from their ids.
         values = reconcile_references(values, sections, default_reference_resolver)
+
+        # Recompute calculated fields authoritatively, exactly like create.
+        from apps.templates_engine.conditions import compute_calculated_values
+        values = compute_calculated_values(sections, values)
+        from apps.documents.metadata_audit import diff_form_value_fields
+        changed_form_fields = diff_form_value_fields(prior_values, values, sections)
 
         # The regenerated PDF view shows display strings, not structured dicts.
         render_values = descriptors_to_names(values)
         shim = SimpleNamespace(name=doc.title, sections=sections)
         try:
-            content = generate_built_pdf(shim, render_values)
+            content = generate_built_pdf(shim, render_values, sections=sections)
         except Exception as exc:
             logger.exception("update_form: regeneration failed for %s", doc.id)
             return Response({"detail": f"Could not regenerate the form: {exc}"}, status=400)
@@ -1306,7 +1568,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             # catch up. Don't fail the edit.
             logger.warning("Form document %s saved but realtime indexing failed.", doc.id)
 
-        self.record_audit("document.updated", doc, {"version": new_version, "form": True})
+        self.record_audit("document.updated", doc, {
+            "version": new_version,
+            "form": True,
+            "changed_fields": changed_form_fields,
+        })
         from apps.search.indexing import schedule_document_search_pipeline
 
         schedule_document_search_pipeline(str(doc.id), reextract_content=True, index_immediately=True)
@@ -1580,6 +1846,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             })
 
         if doc.is_office_doc():
+            self._render_legacy_lpo_preview(doc)
+            doc.refresh_from_db(fields=["preview_pdf", "preview_status"])
             if not doc.preview_status:
                 self._queue_office_preview(doc)
             doc.refresh_from_db()
@@ -1596,7 +1864,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             return Response({
                 "viewer": viewer,
                 "url": url,
-                "raw_url": raw_link("", False),
+                "raw_url": raw_link(
+                    "",
+                    str(getattr(doc.document_type, "code", "") or "").strip().upper() == "LPO"
+                    and bool(doc.preview_pdf),
+                ),
                 "signed_file_urls_enabled": signed_urls_enabled,
                 "preview_status": preview_status,
                 "preview_error": preview_error,
@@ -1702,6 +1974,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="file_print_event")
     def file_print_event(self, request, pk=None):
         doc = self.get_object()
+        if not user_can_download_document(request.user, doc):
+            return Response({"detail": "Download permission is required to print this document."}, status=403)
         self.record_audit(AuditEvent.DOCUMENT_PRINTED, doc, {})
         return Response({"ok": True})
 
@@ -2552,6 +2826,13 @@ echo "✓ DocVault LibreOffice integration installed."
             return response
 
         # Office documents: use the preview PDF.
+        if (
+            doc.is_office_doc()
+            and str(getattr(doc.document_type, "code", "") or "").strip().upper() == "LPO"
+            and not doc.preview_pdf
+        ):
+            self._render_legacy_lpo_preview(doc)
+            doc.refresh_from_db(fields=["preview_pdf", "preview_status"])
         if doc.is_office_doc() and doc.preview_pdf:
             try:
                 with doc.preview_pdf.open("rb") as fh:
@@ -2787,6 +3068,143 @@ echo "✓ DocVault LibreOffice integration installed."
             context={**self.get_serializer_context(), "document_id": str(doc.id)},
         )
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get", "post"], url_path="rfq")
+    def rfq(self, request, pk=None):
+        """Show RFQ response status or send the configured supplier invitation."""
+        doc = self.get_object()
+        meta = doc.metadata if isinstance(doc.metadata, dict) else {}
+        form = meta.get("form") if isinstance(meta.get("form"), dict) else {}
+        from apps.documents.rfq import (
+            all_supplier_responses_received,
+            multi_attachment_field,
+            rfq_state,
+            supplier_codes_from_values,
+        )
+
+        current = rfq_state(form)
+        if request.method == "GET":
+            return Response({
+                "sent_at": current.get("sent_at"),
+                "suppliers": current.get("suppliers") or [],
+                "all_received": all_supplier_responses_received(current),
+                "attachment_field": current.get("attachment_field") or multi_attachment_field(form),
+            })
+
+        if str(form.get("workflow_phase") or "").strip().lower() != "rfq":
+            return Response({"detail": "Supplier invitations can only be sent during the RFQ stage."}, status=400)
+        from apps.documents.access import user_has_active_approval_task
+        if not user_has_active_approval_task(request.user, doc):
+            return Response({"detail": "An active RFQ approver can send supplier invitations."}, status=403)
+
+        from apps.workflows.models import WorkflowInstance
+        instance = WorkflowInstance.objects.filter(
+            document=doc, status="in_progress",
+        ).select_related("template").order_by("-started_at").first()
+        if not instance:
+            return Response({"detail": "There is no active RFQ workflow."}, status=400)
+        step = instance.template.steps.filter(
+            step_type="notification",
+            notify_recipient_type="supplier",
+        ).exclude(notify_supplier_field__isnull=True).exclude(notify_supplier_field="").order_by("order").first()
+        if not step:
+            return Response({"detail": "Configure a supplier notification step in the workflow builder first."}, status=400)
+
+        values = form.get("values") if isinstance(form.get("values"), dict) else {}
+        supplier_codes = supplier_codes_from_values(values, step.notify_supplier_field)
+        if not supplier_codes:
+            return Response({"detail": "Select at least one supplier in the configured form field before sending the RFQ."}, status=400)
+        attachment_field = current.get("attachment_field") or multi_attachment_field(form)
+        if not attachment_field:
+            return Response({"detail": "Add a Multiple Attachments field to the form for supplier quotations and invoices."}, status=400)
+
+        from apps.workflows.services import WorkflowService
+        contacts = WorkflowService._resolve_supplier_contacts(doc, step.notify_supplier_field)
+        by_code = {str(contact.get("code") or "").strip().casefold(): contact for contact in contacts}
+        existing = {str(item.get("code") or "").strip().casefold(): item
+                    for item in (current.get("suppliers") or []) if isinstance(item, dict)}
+        tracking, send_to = [], []
+        for code in supplier_codes:
+            prior = existing.get(code.casefold(), {})
+            contact = by_code.get(code.casefold(), {})
+            email = str(contact.get("email") or prior.get("email") or "").strip()
+            item = {
+                "code": code,
+                "name": str(contact.get("name") or prior.get("name") or code),
+                "email": email,
+                "status": "received" if prior.get("status") == "received" else ("sent" if email else "awaiting_manual"),
+                "sent_at": prior.get("sent_at"),
+                "received_at": prior.get("received_at"),
+                "response_source": prior.get("response_source"),
+                "files": prior.get("files") or [],
+            }
+            if email and item["status"] != "received":
+                item["sent_at"] = timezone.now().isoformat()
+                send_to.append(email)
+            tracking.append(item)
+
+        reply_to = ""
+        if send_to:
+            reply_mailbox = Mailbox.objects.filter(is_active=True).order_by(
+                models.Case(
+                    models.When(name__icontains="supplier", then=0),
+                    default=1,
+                    output_field=models.IntegerField(),
+                ),
+                "created_at",
+            ).first()
+            if not reply_mailbox:
+                return Response({"detail": "Configure an active supplier invoice mailbox before sending RFQs."}, status=400)
+            if reply_mailbox.protocol == "graph":
+                from apps.documents.graph_client import merge_connection_with_defaults as merge_mail_connection
+                mail_config = merge_mail_connection(reply_mailbox.connection)
+                reply_to = str(mail_config.get("mailbox") or "").strip()
+            else:
+                from apps.documents.imap_client import merge_connection_with_defaults as merge_mail_connection
+                mail_config = merge_mail_connection(reply_mailbox.connection)
+                reply_to = str(mail_config.get("username") or "").strip()
+            if "@" not in reply_to:
+                return Response({"detail": "The supplier invoice mailbox needs a reply-to email address."}, status=400)
+
+        token = str(current.get("reply_token") or secrets.token_hex(20))
+        current.update({
+            "reply_token": token,
+            "supplier_field": step.notify_supplier_field,
+            "attachment_field": attachment_field,
+            "sent_at": timezone.now().isoformat(),
+            "suppliers": tracking,
+        })
+        form = dict(form)
+        form["rfq_response"] = current
+        meta = dict(meta)
+        meta["form"] = form
+        doc.metadata = meta
+        doc.save(update_fields=["metadata", "updated_at"])
+
+        from apps.notifications.tasks import send_workflow_notification_step_email
+        for email in send_to:
+            send_workflow_notification_step_email.delay(
+                recipient_user_id=None,
+                recipient_email=None,
+                recipient_emails=[email],
+                subject=step.notification_subject,
+                message=step.notification_message,
+                document_id=str(doc.pk),
+                step_name=step.name,
+                template_id=str(step.template_id),
+                include_items_table=bool(step.notify_include_items_table),
+                table_field_key=step.notify_table_field or None,
+                table_column_keys=step.notify_table_columns,
+                reply_to=reply_to,
+                rfq_reply_token=token,
+            )
+        return Response({
+            "sent_count": len(send_to),
+            "sent_at": current["sent_at"],
+            "suppliers": tracking,
+            "all_received": all_supplier_responses_received(current),
+            "attachment_field": attachment_field,
+        })
 
     @action(detail=True, methods=["delete"], url_path=r"relationships/(?P<relationship_id>[^/.]+)")
     def relationship_detail(self, request, pk=None, relationship_id=None):

@@ -112,6 +112,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                 target_type=source.target_type,
                 document_type=source.document_type,
                 is_active=True, created_by=request.user,
+                definition=source.definition,  # Preserve v2 workflow definition
             )
             for step in source.steps.order_by("order"):
                 WorkflowStep.objects.create(
@@ -120,8 +121,12 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                     assignee_type=step.assignee_type,
                     assignee_group=step.assignee_group, assignee_user=step.assignee_user,
                     assignee_user_auto=step.assignee_user_auto,
+                    assignee_user_field=step.assignee_user_field,
+                    post_lpo_after_approval=step.post_lpo_after_approval,
+                    post_imprest_request_after_approval=step.post_imprest_request_after_approval,
                     sla_hours=step.sla_hours, allow_resubmit=step.allow_resubmit,
                     allow_approve=step.allow_approve, allow_reject=step.allow_reject,
+                    approve_button_label=step.approve_button_label,
                     allow_return=step.allow_return,
                     requires_signature=step.requires_signature,
                     instructions=step.instructions,
@@ -155,49 +160,160 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                     s.save(update_fields=["order"])
         return Response(WorkflowTemplateSerializer(template, context={"request": request}).data)
 
+    @staticmethod
+    def _definition_step_phases(definition, default_phase):
+        """Yield ``(phase, step_label)`` for approval steps in a v2 definition.
+
+        V2 branched workflows nest blocks under ``switch`` cases whose ``label``
+        is the phase. Blocks outside a switch belong to ``default_phase``."""
+        out: list[tuple[str, str]] = []
+
+        def walk(blocks, phase):
+            for block in blocks or []:
+                if not isinstance(block, dict):
+                    continue
+                kind = block.get("kind")
+                if kind == "switch":
+                    for case in block.get("cases") or []:
+                        if not isinstance(case, dict):
+                            continue
+                        case_phase = str(case.get("label") or "").strip().lower() or phase
+                        walk(case.get("blocks"), case_phase)
+                    continue
+                if kind == "approval":
+                    step = block.get("step") or {}
+                    label = step.get("name") or step.get("status_label")
+                    if label:
+                        out.append((phase, str(label)))
+                    continue
+                nested = block.get("blocks")
+                if nested:
+                    walk(nested, phase)
+
+        walk((definition or {}).get("blocks"), default_phase)
+        return out
+
     @action(detail=False, methods=["get"], url_path="process-steps")
     def process_steps(self, request):
         """List the process steps (statuses) a document of a given type can be in.
 
-        Used by the form builder to populate "process step equals …" conditions
-        for section/field visibility. Combines the per-step ``status_label``s of
-        the active workflow template(s) routed to that document type with the
-        standard lifecycle statuses every document can reach. ``value`` is what a
-        document's ``status`` field actually holds at runtime; ``label`` is for
-        display. Pass ``?document_type=<id>``; without it, only the standard
-        statuses are returned."""
+        Used by the form builder to populate "process step equals ..." conditions
+        for section/field visibility.
+
+        Every option carries the ``value`` a document's ``builder_process_step``
+        actually returns at runtime. Procurement steps are STAGE-AWARE: each
+        stage (Requisition -> Request -> RFQ -> LPO) exposes one generic option per outcome
+        that covers EVERY approval step in that stage, regardless of the
+        step's ``status_label``. Individual workflow-builder step labels are
+        folded into their stage's generic "in progress" option and surfaced on
+        ``covered`` (a document never carries a raw ``status_label``, so those
+        were dead choices).
+
+        Shape: ``{value, label, stage, generic, group, covered}``.
+
+        Pass ``?document_type=<id>``; without it no workflow steps are folded.
+        Pass ``?workflow_type=imprest|requisition`` to pick the lifecycle.
+        """
         from apps.documents.models import DocumentStatus
+        from apps.documents.builder_workflow import PROCUREMENT_WORKFLOW_STAGES
 
         doc_type = request.query_params.get("document_type")
+        workflow_type = request.query_params.get("workflow_type", "imprest")
         steps: list[dict] = []
         seen: set = set()
+        stage_group_names = {
+            "requisition": "Requisition", "rfq": "RFQ", "lpo": "LPO",
+            "request": "Imprest Request", "retirement": "Retirement",
+        }
 
-        def add(value: str, label: str):
-            if value and value not in seen:
-                seen.add(value)
-                steps.append({"value": value, "label": label})
+        def add(value, label, *, stage=None, generic=False, group=None):
+            if not value or value in seen:
+                return
+            seen.add(value)
+            steps.append({
+                "value": value,
+                "label": label,
+                "stage": stage,
+                "generic": generic,
+                "group": group or (f"{stage_group_names.get(stage, stage.title())} stage" if stage else "Lifecycle"),
+                "covered": [],
+            })
 
         # Draft is the implicit starting state while a document is being created.
         add(DocumentStatus.DRAFT, DocumentStatus.DRAFT.label)
-        for value, label in (
-            ("request_pending", "Request approval in progress"),
-            ("request_approved", "Request approved (retirement open)"),
-            ("retirement_pending", "Retirement approval in progress"),
-            ("retirement_returned", "Retirement returned for rework"),
-            ("fully_approved", "Fully approved"),
-            ("retirement_rejected", "Retirement rejected"),
-        ):
-            add(value, label)
 
+        stage_names = {"requisition": "Requisition", "request": "Imprest Request", "rfq": "RFQ", "lpo": "LPO"}
+
+        if workflow_type == "requisition":
+            for stage in PROCUREMENT_WORKFLOW_STAGES:
+                stage_label = stage_names.get(stage, stage.title())
+                add(f"{stage}_pending", f"{stage_label} approval in progress",
+                    stage=stage, generic=True)
+                add(f"{stage}_approved", f"{stage_label} approved",
+                    stage=stage, generic=True)
+                add(f"{stage}_returned", f"{stage_label} returned for rework",
+                    stage=stage, generic=True)
+                add(f"{stage}_rejected", f"{stage_label} rejected",
+                    stage=stage, generic=True)
+            add("fully_approved", "Fully approved", stage="lpo", generic=True)
+            add("retirement_ready", "Retirement ready for submission", stage="retirement", generic=True)
+            add("retirement_pending", "Retirement approval in progress", stage="retirement", generic=True)
+            add("retirement_approved", "Retirement approved", stage="retirement", generic=True)
+            add("retirement_returned", "Retirement returned for rework", stage="retirement", generic=True)
+            add("retirement_rejected", "Retirement rejected", stage="retirement", generic=True)
+        else:
+            # Imprest workflow stages (default for backward compatibility)
+            add("request_pending", "Request approval in progress", stage="request", generic=True)
+            add("request_approved", "Request approved (retirement open)", stage="request", generic=True)
+            add("retirement_pending", "Retirement approval in progress", stage="retirement", generic=True)
+            add("retirement_returned", "Retirement returned for rework", stage="retirement", generic=True)
+            add("retirement_rejected", "Retirement rejected", stage="retirement", generic=True)
+            add("fully_approved", "Fully approved", stage="retirement", generic=True)
+
+        # Fold the workflow builder's per-step labels into their stage's generic
+        # "in progress" option so the builder shows which named steps are covered
+        # without offering values a document can never actually hold.
         if doc_type:
-            labels = (
-                WorkflowStep.objects
-                .filter(template__document_type_id=doc_type, template__is_active=True)
-                .order_by("template__id", "order")
-                .values_list("status_label", "name")
-            )
-            for status_label, name in labels:
-                add(status_label, f"{name} · {status_label}" if name and name != status_label else status_label)
+            covered: dict[str, list[str]] = {}
+
+            def note(phase, label):
+                value = f"{str(phase or '').strip().lower()}_pending"
+                display = str(label or "").strip()
+                if not display or not any(s["value"] == value for s in steps):
+                    return
+                bucket = covered.setdefault(value, [])
+                if display not in bucket:
+                    bucket.append(display)
+
+            # Legacy routing rules carry the phase directly on the rule.
+            try:
+                rows = (
+                    WorkflowStep.objects
+                    .filter(template__rules__document_type_id=doc_type,
+                            template__rules__is_active=True)
+                    .exclude(step_type="notification")
+                    .values_list("status_label", "name", "template__rules__phase")
+                    .distinct()
+                )
+                for status_label, name, phase in rows:
+                    if phase:
+                        note(phase, name or status_label)
+            except Exception:
+                pass
+
+            # V2 branched workflows nest approval steps under switch cases whose
+            # labels are the procurement phases (requisition / rfq / lpo).
+            default_phase = "requisition" if workflow_type == "requisition" else "request"
+            try:
+                for tpl in WorkflowTemplate.objects.filter(document_type_id=doc_type, is_active=True):
+                    for phase, label in self._definition_step_phases(tpl.definition, default_phase):
+                        note(phase, label)
+            except Exception:
+                pass
+
+            for opt in steps:
+                if opt["value"] in covered:
+                    opt["covered"] = covered[opt["value"]]
 
         # Standard terminal / lifecycle statuses a document can also carry.
         for st in (
@@ -207,6 +323,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
         ):
             add(st, st.label)
 
+        return Response(steps)
         return Response(steps)
 
 
@@ -301,6 +418,13 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             "workflow_instance__document__uploaded_by",
             "workflow_instance__document__uploaded_by__department",
         )
+        # The task disappears from a reviewer's active queue immediately after
+        # approval, but the action-history drawer can still be mounted during
+        # the handoff. The history action applies its own document-view check;
+        # it must be able to resolve a task from another step in the same
+        # document's workflow, even when this user was not that step's actor.
+        if self.action == "history" and not user.has_admin_access:
+            return qs
         if document_id := self.request.query_params.get("document") or self.request.query_params.get("document_id"):
             qs = qs.filter(workflow_instance__document_id=document_id)
             if user.has_admin_access:
@@ -359,6 +483,47 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": "Approve is not permitted for this step."}, status=403)
         self._check_permission(task, request.user)
 
+        # Supplier quotations must be collected before finance can advance the
+        # RFQ phase to LPO. The configured supplier notification step is sent
+        # manually from the form; every selected supplier must reply or have a
+        # response attached manually before approval succeeds.
+        document = task.workflow_instance.document
+        form = ((getattr(document, "metadata", None) or {}).get("form") or {}) if document else {}
+        if str(form.get("workflow_phase") or "").strip().lower() == "rfq":
+            supplier_step = task.workflow_instance.template.steps.filter(
+                step_type="notification", notify_recipient_type="supplier",
+            ).exclude(notify_supplier_field__isnull=True).exclude(notify_supplier_field="").exists()
+            if supplier_step:
+                from apps.documents.rfq import (
+                    all_supplier_responses_received,
+                    rfq_state,
+                    supplier_codes_from_values,
+                )
+
+                response_state = rfq_state(form)
+                if not response_state.get("suppliers"):
+                    return Response({"detail": "Send the RFQ to suppliers before approving this stage."}, status=400)
+                selected_codes = {code.casefold() for code in supplier_codes_from_values(
+                    form.get("values") if isinstance(form.get("values"), dict) else {},
+                    response_state.get("supplier_field") or "",
+                )}
+                tracked_codes = {
+                    str(item.get("code") or "").casefold()
+                    for item in response_state.get("suppliers", [])
+                    if isinstance(item, dict)
+                }
+                if selected_codes != tracked_codes:
+                    return Response({"detail": "The selected suppliers changed after the RFQ was sent. Send the RFQ again before approving."}, status=400)
+                if not all_supplier_responses_received(response_state):
+                    waiting = [
+                        str(item.get("name") or item.get("code") or "Supplier")
+                        for item in response_state.get("suppliers", [])
+                        if isinstance(item, dict) and item.get("status") != "received"
+                    ]
+                    return Response({
+                        "detail": "Waiting for supplier responses: " + ", ".join(waiting),
+                    }, status=400)
+
         # Sejda-style multi-item signing (signature + optional name/date/text),
         # shared with the signature-request flow. `items` is a JSON array; an
         # ad-hoc drawn signature arrives as use_new_signature + signature_image.
@@ -388,6 +553,16 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": str(exc)}, status=400)
         return Response({"status": "approved"})
 
+    @action(detail=True, methods=["post"], url_path="submit_lpo")
+    def submit_lpo(self, request, pk=None):
+        task = self.get_object()
+        self._check_permission(task, request.user)
+        try:
+            WorkflowService.submit_generated_lpo(task, request.user)
+        except WorkflowError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response({"status": "submitted", "detail": "Generated LPO submitted to the next workflow step."})
+
     # ── Reject ─────────────────────────────────────────────────────────────
 
     @action(detail=True, methods=["post"])
@@ -411,15 +586,35 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     def return_for_review(self, request, pk=None):
         task      = self.get_object()
         comment   = request.data.get("comment", "").strip()
-        return_to = request.data.get("return_to", "uploader")
+        return_to = (request.data.get("return_to") or "uploader").strip()
 
         if not comment:
             return Response(
                 {"detail": "A comment explaining what needs to be fixed is required."},
                 status=400,
             )
-        if not task.step.allow_return:
-            return Response({"detail": "Send back is not permitted for this step."}, status=403)
+        if return_to not in ("previous_step", "uploader", "same_step"):
+            return Response(
+                {"detail": "return_to must be previous_step, uploader, or same_step."},
+                status=400,
+            )
+
+        step = task.step
+        if return_to == "previous_step":
+            if not step.allow_return:
+                return Response(
+                    {"detail": "Return to previous step is not permitted for this step."},
+                    status=403,
+                )
+        elif return_to in ("uploader", "same_step"):
+            # Legacy templates only had allow_return; treat that as submitter return.
+            allow_submitter = getattr(step, "allow_return_submitter", False) or step.allow_return
+            if not allow_submitter:
+                return Response(
+                    {"detail": "Return to submitter is not permitted for this step."},
+                    status=403,
+                )
+
         self._check_permission(task, request.user)
         try:
             WorkflowService.return_for_review(task, request.user, comment, return_to)
@@ -474,6 +669,25 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=["get"])
     def history(self, request, pk=None):
         task    = self.get_object()
+        user = request.user
+        allowed = bool(
+            user.has_admin_access
+            or task.assigned_to_id == user.id
+            or task.actions.filter(actor=user).exists()
+            or user_can_action_task_via_delegation(user, task)
+        )
+        if not allowed and task.workflow_instance.document_id:
+            from apps.documents.file_streaming import user_can_view_document
+
+            allowed = user_can_view_document(user, task.workflow_instance.document)
+        if not allowed and task.workflow_instance.payment_run_id:
+            allowed = task.workflow_instance.payment_run.submitted_by_id == user.id
+        if not allowed:
+            # Match the normal object-permission behavior without revealing
+            # whether an unrelated task ID exists.
+            from rest_framework.exceptions import NotFound
+
+            raise NotFound()
         actions = task.actions.select_related("actor").all()
         return Response(WorkflowTaskActionSerializer(actions, many=True).data)
 

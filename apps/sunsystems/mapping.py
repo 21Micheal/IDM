@@ -79,6 +79,7 @@ configured data, not hard-coded here — see :func:`_expand_retirement_lines`.
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field as dc_field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterator
@@ -121,19 +122,54 @@ def resolve_value(spec: Any, values: dict, row: dict | None = None, *, default: 
     ``row`` when inside a ``repeat_over`` line)."""
     if spec is None:
         return default
+    if isinstance(spec, list):
+        for candidate in spec:
+            resolved = resolve_value(candidate, values, row)
+            if resolved:
+                return resolved
+        return default
     if not isinstance(spec, dict):
         return _to_str(spec)
 
+    if isinstance(spec.get("sources"), list):
+        for candidate in spec["sources"]:
+            resolved = resolve_value(candidate, values, row)
+            if resolved:
+                return resolved
+        return _to_str(spec.get("default") or default)
+
     if "const" in spec:
         raw = spec.get("const")
+    elif "table" in spec:
+        rows = (values or {}).get(spec["table"])
+        raw = None
+        if isinstance(rows, list):
+            for table_row in rows:
+                if not isinstance(table_row, dict):
+                    continue
+                candidate = table_row.get(spec.get("row_field"))
+                if candidate not in (None, "", [], {}):
+                    raw = candidate
+                    break
     elif "row_field" in spec:
         raw = (row or {}).get(spec["row_field"]) if row is not None else None
     elif "field" in spec:
         raw = (values or {}).get(spec["field"])
+    elif "source" in spec:
+        # System-generated values injected by the runtime before posting, e.g.
+        # the LPO number created when the LPO phase completes. Stored under a
+        # ``__``-prefixed key so it can never collide with a real form field.
+        raw = (values or {}).get(f"__{spec['source']}")
     else:
         raw = None
 
-    if raw in (None, ""):
+    # Optional sub-key: read one entry out of an object value. The ten-slot
+    # analysis panel stores {"1": "P01", "2": "CC-B", …}, so a PO/jour al line
+    # binds `{"field": "analysis_codes", "key": "3"}` for slot 3.
+    if spec.get("key") is not None and isinstance(raw, dict):
+        raw = raw.get(str(spec["key"]))
+
+    if raw in (None, "", [], {}):
         raw = spec.get("default", default)
 
     fmt = spec.get("format")
@@ -144,6 +180,36 @@ def resolve_value(spec: Any, values: dict, row: dict | None = None, *, default: 
 
 def resolve_amount(spec: Any, values: dict, row: dict | None = None) -> Decimal:
     """Resolve a ValueSpec to a Decimal amount (0 when blank/unparseable)."""
+    aggregate = spec.get("sum_rows") if isinstance(spec, dict) else None
+    if isinstance(aggregate, dict):
+        rows = (values or {}).get(aggregate.get("table"))
+        if not isinstance(rows, list):
+            return Decimal("0")
+        total = Decimal("0")
+        for table_row in rows:
+            if isinstance(table_row, dict):
+                total += resolve_amount({"row_field": aggregate.get("amount_column")}, values, table_row)
+        return total
+    aggregate = spec.get("sum_matching_rows") if isinstance(spec, dict) else None
+    if isinstance(aggregate, dict):
+        rows = (values or {}).get(aggregate.get("table"))
+        if not isinstance(rows, list):
+            return Decimal("0")
+        match_values = {
+            _to_str(value).strip().casefold()
+            for value in (aggregate.get("values") or [])
+            if _to_str(value).strip()
+        }
+        if not match_values:
+            return Decimal("0")
+        total = Decimal("0")
+        for table_row in rows:
+            if not isinstance(table_row, dict):
+                continue
+            item = _to_str(table_row.get(aggregate.get("match_column"))).strip().casefold()
+            if item in match_values:
+                total += resolve_amount({"row_field": aggregate.get("amount_column")}, values, table_row)
+        return total
     text = resolve_value(spec, values, row, default="0")
     text = re.sub(r"[,\s]", "", text)
     if text in ("", "-"):
@@ -217,7 +283,13 @@ def build_journal_ssc(
 
     method_ctx = ET.SubElement(ssc, "MethodContext")
     params_el = ET.SubElement(method_ctx, "LedgerPostingParameters")
-    for name, spec in (mapping.get("parameters") or {}).items():
+    posting_parameters = dict(mapping.get("parameters") or {})
+    # Ledger Import requires a posting choice. Keep older saved mappings that
+    # predate the Imprest parameter controls postable with SunSystems' standard
+    # post-if-no-errors behavior unless an administrator supplied a value.
+    if not resolve_value(posting_parameters.get("PostingType"), values).strip():
+        posting_parameters["PostingType"] = {"const": "2"}
+    for name, spec in posting_parameters.items():
         # Parameter keys are the literal SunSystems element names (e.g.
         # "JournalType"); their values resolve as ValueSpecs/literals.
         ET.SubElement(params_el, str(name)).text = resolve_value(spec, values)
@@ -265,6 +337,173 @@ def build_journal_ssc(
     return build
 
 
+def _po_line_specs(po: dict) -> list[dict]:
+    """Return the list of PurchaseOrder line specs.
+
+    New mappings carry an explicit ``purchase_order.lines`` list (each entry may
+    ``repeat_over`` a form table). Legacy mappings have no ``lines`` key and
+    describe a single line directly on ``purchase_order``; normalise that into a
+    one-element list, folding the legacy ``analysis10_*`` constants into slot 10.
+    """
+    specs = po.get("lines")
+    if isinstance(specs, list):
+        return [spec for spec in specs if isinstance(spec, dict)]
+
+    legacy = dict(po)
+    analysis = dict(po.get("analysis") or {})
+    analysis.setdefault("10", {
+        "category": po.get("analysis10_category", {"const": ""}),
+        "code": po.get("analysis10_code", {"const": ""}),
+    })
+    legacy["analysis"] = analysis
+    return [legacy]
+
+
+def _iter_po_lines(specs: list[dict], values: dict, warnings: list[str]) -> Iterator[tuple[dict, dict | None]]:
+    """Yield ``(line_spec, row)`` pairs, expanding ``repeat_over`` tables.
+
+    A spec without ``repeat_over`` is a header-scoped single line; a spec with it
+    emits one line per non-empty row of that table. Rows that are entirely blank
+    (every column empty) are skipped so trailing grid rows don't post.
+    """
+    for spec in specs:
+        repeat = spec.get("repeat_over")
+        if not repeat:
+            yield spec, None
+            continue
+        rows = values.get(repeat)
+        if not isinstance(rows, list):
+            warnings.append(f"Table '{repeat}' has no rows; its purchase-order lines were skipped.")
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if not any(value not in (None, "", [], {}) for value in row.values()):
+                continue
+            yield spec, row
+
+
+def expand_purchase_order_postings(
+    mapping: dict,
+    values: dict,
+    *,
+    lpo_documents: list[dict] | None = None,
+) -> list[dict]:
+    """Split a PO profile into deterministic table + transaction/product groups.
+
+    Every source table becomes its own PO posting. Within a table, lines sharing
+    PurchaseTransactionType and ProductGroup are included in one request.
+    SunSystems assigns each PurchaseOrderReference in its response.
+    """
+    po = (mapping or {}).get("purchase_order") or {}
+    specs = _po_line_specs(po)
+    grouped: dict[tuple[str, str, str], dict] = {}
+    for spec in specs:
+        table_key = str(spec.get("repeat_over") or "")
+        rows = values.get(table_key) if table_key else [None]
+        if table_key and not isinstance(rows, list):
+            continue
+        txn_spec = spec.get("purchase_transaction_type")
+        product_spec = spec.get("product_group") or po.get("product_group")
+        for row in rows or []:
+            if row is not None and not isinstance(row, dict):
+                continue
+            if row is not None and not any(value not in (None, "", [], {}) for value in row.values()):
+                continue
+            transaction_type = resolve_value(txn_spec, values, row) or resolve_value(po.get("transaction_type"), values, row)
+            product_group = resolve_value(product_spec, values, row)
+            key = (table_key, transaction_type.strip(), product_group.strip())
+            entry = grouped.setdefault(key, {"spec": spec, "rows": []})
+            entry["rows"].append(row)
+
+    expanded = []
+    multiple_orders = len(grouped) > 1
+    base_second_reference = resolve_value(
+        po.get("second_reference") or po.get("reference"), values
+    )
+    for posting_index, ((table_key, transaction_type, product_group), entry) in enumerate(grouped.items(), 1):
+        current = deepcopy(mapping)
+        current_po = current.setdefault("purchase_order", {})
+        spec = deepcopy(entry["spec"])
+        current_po["lines"] = [spec]
+        if transaction_type:
+            current_po["transaction_type"] = {"const": transaction_type}
+        if table_key:
+            current_values = dict(values)
+            for configured_spec in specs:
+                other_table = configured_spec.get("repeat_over")
+                if other_table and other_table != table_key:
+                    current_values[other_table] = []
+            current_values[table_key] = entry["rows"]
+        else:
+            current_values = dict(values)
+        # SunSystems assigns the PurchaseOrderReference. The response's
+        # PurchaseOrderReference is then used for the printable LPO, so never
+        # send the application's LPO document-type sequence as the PO number.
+        current_po.pop("reference", None)
+        # A requisition can expand into several independent PurchaseOrders
+        # (one per table / transaction type / product group). SunSystems
+        # requires SecondReference to be unique across those orders, so keep
+        # the requisition reference recognizable while giving each order a
+        # deterministic suffix. A single-order requisition keeps the original
+        # reference for backwards compatibility.
+        if multiple_orders and base_second_reference:
+            suffix = f"-{posting_index:02d}"
+            current_po["second_reference"] = {
+                "const": base_second_reference[: max(0, 30 - len(suffix))] + suffix
+            }
+        desc_spec = spec.get("description")
+        if desc_spec and table_key and isinstance(desc_spec, dict) and desc_spec.get("row_field"):
+            current_po["comment"] = {"table": table_key, "row_field": desc_spec["row_field"]}
+        current["_posting_values"] = current_values
+        current["_posting_label"] = " / ".join(
+            value for value in (str(spec.get("table_label") or table_key), transaction_type, product_group) if value
+        ) or "LPO"
+        current["label"] = current["_posting_label"]
+        expanded.append(current)
+    return expanded
+
+
+def _po_line_amount(spec: dict, values: dict, row: dict | None, quantity: Decimal, unit_price: Decimal) -> Decimal:
+    """The line's transaction value.
+
+    Priority: an explicit ``amount`` spec (the line total, e.g. Gross/Net value),
+    else ``quantity × unit_price``, else 0. Amounts are never taken from the PO
+    header so each repeated line stands on its own.
+    """
+    amount_spec = spec.get("amount")
+    if amount_spec is not None:
+        amount = resolve_amount(amount_spec, values, row)
+        if amount != 0:
+            return amount
+    if unit_price != 0:
+        return quantity * unit_price
+    return Decimal("0")
+
+
+def _po_analysis_children(parent: ET.Element, analysis: dict, values: dict, row: dict | None) -> None:
+    """Emit ``<Analysis1>…<Analysis10>`` children for a line.
+
+    Each slot's spec carries a ``category`` (AnalysisDimensionId) and ``code``;
+    either may be a ValueSpec, including a ``{"field": …, "key": "n"}`` lookup
+    into the ten-slot analysis panel. Slots where both resolve empty are omitted.
+    """
+    for n in _ANALYSIS_CODES:
+        spec = analysis.get(str(n), analysis.get(n)) or {}
+        if not isinstance(spec, dict):
+            spec = {"const": spec}
+        category = resolve_value(spec.get("category") or spec.get("cat") or spec.get("dimension"), values, row)
+        code = resolve_value(spec.get("code"), values, row)
+        # A slot is only emitted when it carries a code; an empty code means the
+        # operator picked nothing for that dimension, so the category alone has
+        # nothing to say.
+        if not code:
+            continue
+        analysis_el = ET.SubElement(parent, f"Analysis{n}")
+        ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCatId").text = category
+        ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCode").text = code
+
+
 def build_purchase_order_ssc(
     mapping: dict,
     values: dict,
@@ -273,11 +512,15 @@ def build_purchase_order_ssc(
     budget_code_default: str = "A",
     pretty: bool = False,
 ) -> JournalBuild:
-    """Compile a minimal PurchaseOrder/CreateOrAmend SSC payload.
+    """Compile a PurchaseOrder/CreateOrAmend SSC payload.
 
-    This mirrors the proven LPO test payload while keeping the real business
-    values mapped from the form. Constants can be promoted to builder controls
-    later as SunSystems confirms which fields should vary by template.
+    Header values (supplier, references, comment, transaction type, date) and
+    per-line values (account, item, quantity, currency, amount, analysis 1-10,
+    VLABs) are all declarative ValueSpecs, so the builder can bind any of them to
+    a form field, a table column (``row_field``), a constant, or a sub-key of an
+    object value (``{"field": "analysis_codes", "key": "3"}``). ``lines`` may
+    repeat over a table (General / Travel requisition), emitting one
+    ``<PurchaseOrderLine>`` per row with its own LineNumber/UserLineNumber.
     """
     if not isinstance(mapping, dict):
         raise MappingError("Purchase order mapping is missing or not an object.")
@@ -286,19 +529,23 @@ def build_purchase_order_ssc(
     context = mapping.get("context") or {}
     component = (mapping.get("component") or "PurchaseOrder").strip()
     method = (mapping.get("method") or "CreateOrAmend").strip()
+    warnings: list[str] = []
 
     reference = resolve_value(po.get("reference") or mapping.get("reference"), values)
-    amount = resolve_amount(po.get("amount"), values)
-    currency = resolve_value(po.get("currency") or mapping.get("currency"), values)
-    description = resolve_value(po.get("description"), values)
+    supplier_code = resolve_value(po.get("supplier_code"), values)
+    if not supplier_code:
+        supplier_code = resolve_value(po.get("supplier_code_fallback"), values)
+    second_reference = resolve_value(po.get("second_reference"), values)
+    comment = resolve_value(po.get("comment") or po.get("description") or mapping.get("description"), values)
+    transaction_type = resolve_value(po.get("transaction_type"), values)
+    invoice_address_code = resolve_value(po.get("invoice_address_code"), values, default="0000000000")
+    order_date = resolve_value(po.get("date") or mapping.get("date"), values)
+    header_currency = resolve_value(po.get("currency") or mapping.get("currency"), values)
+    header_analysis = dict(po.get("analysis") or {})
 
     missing = []
-    if not reference:
-        missing.append("reference")
-    if amount <= 0:
-        missing.append("amount")
-    if not currency:
-        missing.append("currency")
+    if not supplier_code:
+        missing.append("supplier_code")
     if missing:
         raise MappingError(f"Purchase order mapping produced missing/invalid fields: {', '.join(missing)}.")
 
@@ -312,55 +559,90 @@ def build_purchase_order_ssc(
 
     payload_el = ET.SubElement(ssc, "Payload")
     order_el = ET.SubElement(payload_el, "PurchaseOrder")
-    ET.SubElement(order_el, "Comment").text = description
-    ET.SubElement(order_el, "InvoiceAddressCode").text = resolve_value(po.get("invoice_address_code"), values, default="0000000000")
-    ET.SubElement(order_el, "PurchaseTransactionType").text = resolve_value(po.get("transaction_type"), values, default="ASSETS")
-    ET.SubElement(order_el, "PurchaseOrderReference").text = reference
-    ET.SubElement(order_el, "SecondReference").text = resolve_value(po.get("second_reference"), values)
-    ET.SubElement(order_el, "SupplierCode").text = resolve_value(po.get("supplier_code"), values, default="81105")
+    ET.SubElement(order_el, "Comment").text = comment
+    ET.SubElement(order_el, "InvoiceAddressCode").text = invoice_address_code
+    # Legacy/custom mappings may still specify a transaction type. Omit the
+    # element when the template leaves it unset (the requisition LPO flow does).
+    if transaction_type:
+        ET.SubElement(order_el, "PurchaseTransactionType").text = transaction_type
+    if reference:
+        ET.SubElement(order_el, "PurchaseOrderReference").text = reference
+    if second_reference:
+        ET.SubElement(order_el, "SecondReference").text = second_reference
+    ET.SubElement(order_el, "SupplierCode").text = supplier_code
 
-    # Resolve order quantity — defaults to "1" for non-inventory / service LPOs.
-    quantity_str = resolve_value(po.get("quantity"), values, default="1") or "1"
+    specs = _po_line_specs(po)
+    total_amount = Decimal("0")
+    line_count = 0
+    for spec, row in _iter_po_lines(specs, values, warnings):
+        line_count += 1
+        line_el = ET.SubElement(order_el, "PurchaseOrderLine")
 
-    line_el = ET.SubElement(order_el, "PurchaseOrderLine")
-    ET.SubElement(line_el, "AccountCode").text = resolve_value(po.get("account_code"), values)
-    ET.SubElement(line_el, "CurrencyCode").text = currency
-    ET.SubElement(line_el, "ItemCode").text = resolve_value(po.get("item_code"), values, default="ITM29")
-    ET.SubElement(line_el, "LineNumber").text = "1"
-    ET.SubElement(line_el, "OrderDate").text = resolve_value(po.get("date") or mapping.get("date"), values)
-    ET.SubElement(line_el, "UserLineNumber").text = "1"
+        currency = resolve_value(
+            spec.get("currency") or po.get("currency") or mapping.get("currency"),
+            values, row, default=header_currency,
+        )
+        ET.SubElement(line_el, "AccountCode").text = resolve_value(
+            spec.get("account_code") or spec.get("account") or po.get("account_code"), values, row
+        )
+        ET.SubElement(line_el, "CurrencyCode").text = currency
+        unit_of_measure = resolve_value(spec.get("uom") or spec.get("unit_of_measure"), values, row)
+        if unit_of_measure:
+            ET.SubElement(line_el, "UnitOfMeasure").text = unit_of_measure
+        ET.SubElement(line_el, "ItemCode").text = resolve_value(
+            spec.get("item_code") or po.get("item_code"), values, row,
+        )
+        product_group = resolve_value(
+            spec.get("product_group") or po.get("product_group"), values, row,
+        )
+        if product_group:
+            ET.SubElement(line_el, "ProductGroup").text = product_group
+        ET.SubElement(line_el, "LineNumber").text = str(line_count)
+        ET.SubElement(line_el, "OrderDate").text = resolve_value(
+            spec.get("date") or po.get("date") or mapping.get("date"),
+            values, row, default=order_date,
+        )
+        ET.SubElement(line_el, "UserLineNumber").text = str(line_count)
 
-    analysis_qty = ET.SubElement(line_el, "AnalysisQuantity")
-    ET.SubElement(analysis_qty, "Quantity").text = quantity_str
-    analysis = dict(po.get("analysis") or {})
-    analysis.setdefault("10", {
-        "category": po.get("analysis10_category", {"const": ""}),
-        "code": po.get("analysis10_code", {"const": ""}),
-    })
-    for n in _ANALYSIS_CODES:
-        spec = analysis.get(str(n)) or {}
-        category = resolve_value(spec.get("category"), values)
-        code = resolve_value(spec.get("code"), values)
-        # Skip entries where both category and code are empty.
-        if not category and not code:
-            continue
-        analysis_el = ET.SubElement(analysis_qty, f"Analysis{n}")
-        ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCatId").text = category
-        ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCode").text = code
+        # A mapped table cell takes precedence when populated. Empty cells fall
+        # through to a form-level quantity role, then the builder's configured
+        # default, and finally one unit for legacy templates.
+        quantity_str = resolve_value(spec.get("quantity"), values, row)
+        if not quantity_str:
+            quantity_str = resolve_value(po.get("quantity"), values, row)
+        if not quantity_str:
+            ui_config = mapping.get("ui") if isinstance(mapping.get("ui"), dict) else {}
+            quantity_str = resolve_value(ui_config.get("quantity"), values, row)
+        quantity_str = quantity_str or "1"
+        quantity = resolve_amount({"const": quantity_str}, values, row)
+        unit_price = (
+            resolve_amount(spec.get("unit_price"), values, row)
+            if spec.get("unit_price") is not None else Decimal("0")
+        )
+        amount = _po_line_amount(spec, values, row, quantity, unit_price)
 
-    # VLAB numbers vary by SunSystems transaction-type configuration (e.g. PK1
-    # uses VLAB1=base-quantity and VLAB2=transaction-value; other BUs may differ).
-    # Override via purchase_order.vlab_base_num / vlab_trans_num in the mapping.
-    vlab_base_num = resolve_value(po.get("vlab_base_num"), values, default="1") or "1"
-    vlab_trans_num = resolve_value(po.get("vlab_trans_num"), values, default="2") or "2"
+        analysis_qty = ET.SubElement(line_el, "AnalysisQuantity")
+        ET.SubElement(analysis_qty, "Quantity").text = quantity_str
+        analysis: dict = {}
+        analysis.update(header_analysis)
+        analysis.update(spec.get("analysis") or {})
+        _po_analysis_children(analysis_qty, analysis, values, row)
 
-    vlab_base_el = ET.SubElement(line_el, f"VLAB{vlab_base_num}")
-    base = ET.SubElement(vlab_base_el, "Base")
-    ET.SubElement(base, "VPolVlabEntry_Val").text = quantity_str
+        # Procurement LPO mappings use VLAB1 for base quantity and VLAB2 for
+        # transaction value. Ignore legacy template overrides (often 7/9) so
+        # retries emit the corrected SunSystems payload as well.
+        base_el = ET.SubElement(line_el, "VLAB1")
+        base = ET.SubElement(base_el, "Base")
+        ET.SubElement(base, "VPolVlabEntry_Val").text = quantity_str
 
-    vlab_trans_el = ET.SubElement(line_el, f"VLAB{vlab_trans_num}")
-    trans = ET.SubElement(vlab_trans_el, "Trans")
-    ET.SubElement(trans, "VPolVlabEntry_Val").text = _amount_str(amount)
+        trans_el = ET.SubElement(line_el, "VLAB2")
+        trans = ET.SubElement(trans_el, "Trans")
+        ET.SubElement(trans, "VPolVlabEntry_Val").text = _amount_str(amount)
+
+        total_amount += amount
+
+    if line_count == 0:
+        raise MappingError("Purchase order mapping produced no lines.")
 
     if pretty:
         try:
@@ -372,10 +654,10 @@ def build_purchase_order_ssc(
         component=component,
         method=method,
         ssc_xml=_serialize(ssc),
-        line_count=1,
-        debit_total=amount,
+        line_count=line_count,
+        debit_total=total_amount,
         credit_total=Decimal("0"),
-        warnings=[],
+        warnings=warnings,
     )
 
 
@@ -401,6 +683,8 @@ def classify_retirement(retirement: dict, values: dict, warnings: list[str] | No
     issued_spec = retirement.get("issued_amount") or {}
     issued = resolve_amount(issued_spec, values)
     issued_field_key = issued_spec.get("field") if isinstance(issued_spec, dict) else None
+    issued_sum_spec = issued_spec.get("sum_matching_rows") if isinstance(issued_spec, dict) else None
+    issued_rows_spec = issued_spec.get("sum_rows") if isinstance(issued_spec, dict) else None
     if issued_field_key and issued_field_key not in (values or {}):
         # The configured field key doesn't exist in the submitted values at
         # all — as opposed to existing with a blank/zero value. This is the
@@ -415,6 +699,25 @@ def classify_retirement(retirement: dict, values: dict, warnings: list[str] | No
             f"Retirement panel's 'Issued / requested amount field' still points at "
             f"a field that exists on this form (it may have been renamed)."
         )
+    elif isinstance(issued_sum_spec, dict):
+        table_key = issued_sum_spec.get("table")
+        amount_column = issued_sum_spec.get("amount_column")
+        match_column = issued_sum_spec.get("match_column")
+        rows = (values or {}).get(table_key)
+        if not table_key or not amount_column or not match_column or not isinstance(rows, list):
+            _warnings.append(
+                "Retirement's Imprest request amount source is incomplete or its source table is missing; "
+                "issued amount treated as 0. Check the General / Imprest table mappings."
+            )
+    elif isinstance(issued_rows_spec, dict):
+        table_key = issued_rows_spec.get("table")
+        amount_column = issued_rows_spec.get("amount_column")
+        rows = (values or {}).get(table_key)
+        if not table_key or not amount_column or not isinstance(rows, list):
+            _warnings.append(
+                "Retirement's Imprest request amount source is incomplete or its source table is missing; "
+                "issued amount treated as 0. Check the General / Imprest table mappings."
+            )
     elif not issued_field_key:
         # No field was ever selected in the Retirement panel — the mapping
         # compiled a bare {"const": "0"} fallback. Same silent-zero risk as
@@ -503,6 +806,8 @@ def _expand_retirement_lines(retirement: dict, values: dict, warnings: list[str]
             continue
         source = line.get("amount_source", "spent")
         amount_value = amounts.get(source, Decimal("0"))
+        if amount_value == 0:
+            continue
         if line.get("description"):
             description_spec = line["description"]
         elif source == "spent" and spent_description:
@@ -526,6 +831,12 @@ def _iter_lines(mapping: dict, values: dict, warnings: list[str]) -> Iterator[tu
         retirement = line_spec.get("retirement")
         if retirement:
             for expanded_spec in _expand_retirement_lines(retirement, values, warnings):
+                # Reconciliation lines share the surrounding line's common
+                # transaction attributes (date, currency, description, and
+                # analysis) just like ordinary journal lines do.
+                for attribute in ("currency", "date", "description", "analysis"):
+                    if attribute in line_spec:
+                        expanded_spec[attribute] = line_spec[attribute]
                 yield expanded_spec, None
             continue
         repeat = line_spec.get("repeat_over")
@@ -536,6 +847,14 @@ def _iter_lines(mapping: dict, values: dict, warnings: list[str]) -> Iterator[tu
                 continue
             for row in rows:
                 if isinstance(row, dict):
+                    where = line_spec.get("where")
+                    if where is not None:
+                        if not isinstance(where, dict) or not where.get("row_field"):
+                            continue
+                        actual = _to_str(row.get(where["row_field"])).strip().casefold()
+                        expected = _to_str(where.get("equals")).strip().casefold()
+                        if actual != expected:
+                            continue
                     yield line_spec, row
         else:
             yield line_spec, None
@@ -717,16 +1036,9 @@ _PO_SUCCESS_STATUSES = {"success", "ok", "accepted", "created", "amended"}
 _PO_ERROR_STATUSES = {"fail", "failed", "error", "rejected"}
 # Attribute names that may carry the PO reference on the <PurchaseOrder> element.
 _PO_REFERENCE_ATTRS = (
-    "Reference", "reference", "PurchaseOrderReference",
-    "purchaseorderreference", "OrderNo", "orderno",
+    "PurchaseOrderReference", "purchaseorderreference", "OrderNo", "orderno",
+    "Reference", "reference",
 )
-# Element local-names that may contain the PO reference as text content.
-_PO_REFERENCE_ELEMENTS = {
-    "purchaseordernumber", "purchaseorderreference",
-    "ordernumber", "ordreference", "reference",
-}
-
-
 def parse_posting_response(component: str, xml: str) -> JournalResult:
     """Parse a SunSystems Connect Execute response for the given component.
 
@@ -762,7 +1074,7 @@ def parse_posting_response(component: str, xml: str) -> JournalResult:
     has_error = False
     reference: str | None = None
 
-    # ── Pass 1: status + reference from <PurchaseOrder> element ────────────────
+    # ── Pass 1: posting status ─────────────────────────────────────────────────
     for el in root.iter():
         if _localname(el.tag) != "purchaseorder":
             continue
@@ -776,25 +1088,37 @@ def parse_posting_response(component: str, xml: str) -> JournalResult:
             has_success = True
         elif status_raw in _PO_ERROR_STATUSES or rejected == "true":
             has_error = True
-        if reference is None:
+    # ── Pass 2: assigned PO reference from child text elements ─────────────────
+    # Prefer the explicit PurchaseOrderReference element. Some SSC responses
+    # also include a generic Reference attribute containing a row index (for
+    # example Reference="1"), which is not the generated order number.
+    if reference is None:
+        elements = list(root.iter())
+        for wanted in ("purchaseorderreference", "purchaseordernumber", "ordernumber", "ordreference"):
+            for el in elements:
+                name = _localname(el.tag)
+                text = (el.text or "").strip()
+                if name == wanted and text:
+                    reference = text
+                    break
+            if reference:
+                break
+
+    # Fall back to explicit PO-reference attributes, then the tenant-specific
+    # generic Reference attribute when the response omits the named field.
+    if reference is None:
+        for el in root.iter():
+            if _localname(el.tag) != "purchaseorder":
+                continue
             for attr in _PO_REFERENCE_ATTRS:
                 val = (el.attrib.get(attr) or "").strip()
                 if val:
                     reference = val
                     break
-
-    # ── Pass 2: reference from child text elements ──────────────────────────────
-    if reference is None:
-        for el in root.iter():
-            name = _localname(el.tag)
-            text = (el.text or "").strip()
-            if text and name in _PO_REFERENCE_ELEMENTS:
-                # Don't pick up the *sent* reference — only the echoed/assigned one.
-                # Skip if the element is a direct child of the request payload.
-                reference = text
+            if reference:
                 break
 
-    # ── Pass 3: structured messages + derived error flag ───────────────────────
+    # ── Pass 3: structured messages + derived error flag ──────────────────────
     structured, msg_has_error = _extract_structured_messages(root)
     if msg_has_error:
         has_error = True
@@ -818,6 +1142,11 @@ def _to_str(value: Any) -> str:
     if isinstance(value, dict):
         # Structured reference/user values store {id, label, source}; post the label.
         return str(value.get("label", "")) if "label" in value else ""
+    if isinstance(value, (list, tuple)):
+        # Multi-select columns (e.g. the supplier account picker) post a single
+        # code; join multiples so nothing is silently dropped.
+        parts = [_to_str(v) for v in value if v not in (None, "")]
+        return parts[0] if len(parts) == 1 else ", ".join(parts)
     return str(value)
 
 

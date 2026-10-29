@@ -61,6 +61,15 @@ class WorkflowTemplate(models.Model):
             "Each value may contain 'subject' and 'body'. Leave blank to use defaults."
         ),
     )
+    definition = models.JSONField(
+        null=True,
+        blank=True,
+        help_text=(
+            "V2 branched workflow definition. When present, the workflow engine "
+            "follows this definition instead of legacy routing rules. Format: "
+            "{version: 2, blocks: [...]}. See workflowGraph.ts for schema."
+        ),
+    )
     created_by  = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL,
         related_name="created_workflow_templates",
@@ -115,6 +124,7 @@ class WorkflowStep(models.Model):
         ("group_any",      "Any member of group"),
         ("group_all",      "All members of group"),
         ("group_specific", "Specific member of group"),
+        ("form_user",      "User selected in form"),
     ]
 
     STEP_TYPES = [
@@ -127,6 +137,7 @@ class WorkflowStep(models.Model):
         WorkflowTemplate, on_delete=models.CASCADE, related_name="steps"
     )
     order         = models.PositiveSmallIntegerField(db_index=True)
+    node_id       = models.CharField(max_length=64, null=True, blank=True, db_index=True)
     name          = models.CharField(max_length=120)
     status_label  = models.CharField(max_length=80, default="Pending Approval")
 
@@ -139,6 +150,14 @@ class WorkflowStep(models.Model):
             "'approval' requires a human to act; "
             "'notification' fires an email and auto-advances immediately."
         ),
+    )
+    post_lpo_after_approval = models.BooleanField(
+        default=False,
+        help_text="After this approval, post configured purchase orders and generate their LPO documents before continuing.",
+    )
+    post_imprest_request_after_approval = models.BooleanField(
+        default=False,
+        help_text="After this approval in the Request phase, post the Imprest request before continuing.",
     )
 
     # ── Approval-step fields ──────────────────────────────────────────────────
@@ -154,6 +173,12 @@ class WorkflowStep(models.Model):
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name="assigned_steps",
     )
+    assignee_user_field = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        help_text="Form field key whose selected user receives this approval task.",
+    )
     # True when assignee_user was auto-filled from the group's designated approver
     # (head) rather than hand-picked. Such steps resolve the group's CURRENT head
     # at assignment time, so changing the group's approver propagates to them.
@@ -161,42 +186,26 @@ class WorkflowStep(models.Model):
     sla_hours      = models.PositiveSmallIntegerField(default=48)
     allow_resubmit = models.BooleanField(default=True)
     allow_approve  = models.BooleanField(default=True, help_text="Approver can approve at this step")
+    approve_button_label = models.CharField(
+        max_length=80,
+        blank=True,
+        default="",
+        help_text="Optional label for the approval action button. Leave blank to show Approve.",
+    )
     allow_reject   = models.BooleanField(default=True, help_text="Approver can reject at this step")
-    allow_return   = models.BooleanField(default=True, help_text="Approver can send back for review at this step")
-    allow_return_submitter = models.BooleanField(default=False, help_text="Allow returning directly to the document submitter")
+    allow_return   = models.BooleanField(
+        default=True,
+        help_text="Approver can send back to the previous approval step for review",
+    )
+    allow_return_submitter = models.BooleanField(
+        default=True,
+        help_text="Approver can send back to the document submitter for rework",
+    )
     requires_signature = models.BooleanField(
         default=False,
         help_text="Approving this step must stamp the approver's saved e-signature onto the document.",
     )
     instructions   = models.TextField(blank=True)
-    # Auto-approval and skip conditions
-    skip_when = models.JSONField(default=dict, blank=True, help_text="Conditions to skip this step")
-    auto_approve_when = models.JSONField(default=dict, blank=True, help_text="Conditions to auto-approve this step")
-    # Notification enhancements
-    notify_emails = models.JSONField(default=list, blank=True, help_text="Additional email recipients")
-    notify_recipient_type = models.CharField(
-        max_length=20,
-        blank=True,
-        help_text="Type of notification recipient (user, email, supplier, etc.)",
-    )
-    notify_supplier_field = models.CharField(
-        max_length=255,
-        blank=True,
-        null=True,
-        help_text="Field containing supplier email for notifications",
-    )
-    notify_table_columns = models.JSONField(default=list, blank=True, help_text="Table columns to include in notification")
-    # Form-specific fields
-    assignee_user_field = models.CharField(
-        max_length=120,
-        blank=True,
-        help_text="Form field to determine the assignee user",
-    )
-    # Post-approval actions
-    post_lpo_after_approval = models.BooleanField(
-        default=False,
-        help_text="Post LPO to SunSystems after approval",
-    )
 
     # ── Custom email for approvers (approval steps only) ──────────────────────
     # When set, these override the default hardcoded task-assignment email.
@@ -217,7 +226,7 @@ class WorkflowStep(models.Model):
     )
 
     # ── Notification-step fields ───────────────────────────────────────────────
-    # Exactly one of notify_user or notify_email must be set for notification steps.
+    # Exactly one of notify_user, notify_email, or supplier field must be set for notification steps.
     notify_user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -230,6 +239,12 @@ class WorkflowStep(models.Model):
         blank=True,
         help_text="External email address to notify (notification steps only).",
     )
+    # Multiple recipient email addresses (RFQ supplier emails, etc.)
+    notify_emails = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of email addresses for notification steps.",
+    )
     notification_subject = models.CharField(
         max_length=255,
         blank=True,
@@ -239,14 +254,36 @@ class WorkflowStep(models.Model):
         blank=True,
         help_text="Email body for notification steps.",
     )
+    # When true the backend appends / embeds the form items table in the email body
+    notify_include_items_table = models.BooleanField(
+        default=False,
+        help_text="Include a form table (quotation/items) in the notification email.",
+    )
+    # Which form table field to embed when notify_include_items_table is set
     notify_table_field = models.CharField(
         max_length=255,
         blank=True,
-        help_text="Table field to include in notification (for form document types).",
+        null=True,
+        help_text="Form table field key to render as the items table in the email.",
     )
-    notify_include_items_table = models.BooleanField(
-        default=False,
-        help_text="Include the items table in the notification email.",
+    notify_table_columns = models.JSONField(
+        default=None,
+        blank=True,
+        null=True,
+        help_text="Selected form table column keys to include in the notification email.",
+    )
+    # Recipient type: "user" | "email" | "supplier"
+    notify_recipient_type = models.CharField(
+        max_length=20,
+        blank=True,
+        help_text="Recipient type for notification steps.",
+    )
+    # Form field key containing supplier codes (when notify_recipient_type is "supplier")
+    notify_supplier_field = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Form field key for supplier codes (notification steps only).",
     )
 
     created_at     = models.DateTimeField(auto_now_add=True, null=True)
@@ -279,7 +316,12 @@ class WorkflowStep(models.Model):
                 raise ValidationError(
                     {"assignee_group": "Approval steps require an assignee group."}
                 )
-            if not any([self.allow_approve, self.allow_reject, self.allow_return]):
+            if not any([
+                self.allow_approve,
+                self.allow_reject,
+                self.allow_return,
+                self.allow_return_submitter,
+            ]):
                 raise ValidationError(
                     "At least one approver action (approve, reject, or return) must be enabled."
                 )
@@ -287,6 +329,7 @@ class WorkflowStep(models.Model):
 
 class WorkflowRule(models.Model):
     DEFAULT_PHASE = "request"
+    PROCUREMENT_PHASES = ("requisition", "request", "rfq", "lpo")
 
     id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     target_type      = models.CharField(max_length=30, choices=WorkflowTemplate.TARGET_TYPES, default="document", db_index=True)
@@ -315,6 +358,7 @@ class WorkflowRule(models.Model):
 
     def clean(self):
         super().clean()
+        self.phase = (self.phase or self.DEFAULT_PHASE).strip().lower()
         template_target = self.template.target_type if self.template_id else self.target_type
         if self.template_id and self.template.target_type != self.target_type:
             raise ValidationError(
@@ -347,6 +391,16 @@ class WorkflowRule(models.Model):
             raise ValidationError(
                 {"document_type": "Routing rules must use the same document type as their template."}
             )
+        document_type = self.document_type or (self.template.document_type if self.template_id else None)
+        if document_type:
+            haystack = " ".join(
+                str(value or "")
+                for value in (document_type.name, document_type.code, document_type.description)
+            ).lower()
+            if "requisition" in haystack and self.phase not in (*self.PROCUREMENT_PHASES, self.DEFAULT_PHASE):
+                raise ValidationError(
+                    {"phase": "Requisition workflows use the Requisition, RFQ, or LPO stage."}
+                )
 
     def save(self, *args, **kwargs):
         if self.template_id:
@@ -381,7 +435,14 @@ class WorkflowInstance(models.Model):
         WorkflowRule, null=True, on_delete=models.SET_NULL, related_name="instances"
     )
     status             = models.CharField(max_length=20, choices=STATUS_CHOICES, default="in_progress")
+    imprest_request_status = models.CharField(max_length=20, blank=True, default="")
+    imprest_request_current_step_order = models.PositiveSmallIntegerField(null=True, blank=True)
+    imprest_request_completed_at = models.DateTimeField(null=True, blank=True)
     current_step_order = models.PositiveSmallIntegerField(default=1)
+    # For v2 workflows: store the definition version/hash used for this instance
+    definition_version = models.PositiveSmallIntegerField(null=True, blank=True, help_text="Workflow definition version used for this instance")
+    # For v2 workflows: store the current node ID in the execution graph
+    current_node_id    = models.CharField(max_length=255, null=True, blank=True, help_text="Current node ID in v2 workflow graph")
     started_by         = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="started_workflows",
     )
@@ -399,6 +460,7 @@ class WorkflowTask(models.Model):
         ("pending",     "Pending"),
         ("in_progress", "In Progress"),
         ("approved",    "Approved"),
+        ("awaiting_posting", "Awaiting SunSystems posting"),
         ("rejected",    "Rejected"),
         ("returned",    "Returned for Review"),
         ("held",        "On Hold"),
@@ -414,6 +476,7 @@ class WorkflowTask(models.Model):
     ]
 
     id                = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    execution_lane    = models.CharField(max_length=32, default="main", db_index=True)
     workflow_instance = models.ForeignKey(
         WorkflowInstance, on_delete=models.CASCADE, related_name="tasks"
     )
@@ -459,6 +522,7 @@ class WorkflowTaskAction(models.Model):
     """
     ACTION_CHOICES = [
         ("approved",   "Approved"),
+        ("submitted_lpo", "LPO Submitted"),
         ("rejected",   "Rejected"),
         ("returned",   "Returned for Review"),
         ("held",       "Put on Hold"),

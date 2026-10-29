@@ -2,7 +2,6 @@
 apps/accounts/views.py
 """
 import logging
-import jwt as pyjwt
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
@@ -11,7 +10,6 @@ from django.utils.crypto import get_random_string
 from django.utils import timezone
 from django.db.models import Q
 from django.http import FileResponse, Http404
-from django.shortcuts import render
 
 from rest_framework import generics, status, permissions, viewsets, filters, exceptions
 from rest_framework.decorators import action
@@ -20,7 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership, UserDelegation, UserPreference, UserSignature
+from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership, UserDelegation, UserPreference, UserSignature, ClientDeployment
 from .serializers import (
     UserSerializer, UserCreateSerializer, UserUpdateSerializer,
     DepartmentSerializer, UserSummarySerializer,
@@ -35,7 +33,6 @@ from apps.notifications.tasks import (
 from apps.accounts.delegation import tasks_for_delegation
 from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
-from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -113,36 +110,6 @@ class SessionTokenRefreshView(TokenRefreshView):
         return response
 
 
-# ── Public Config ─────────────────────────────────────────────────────────────
-
-class ConfigView(APIView):
-    """
-    Public configuration endpoint for the frontend.
-    Returns deployment-time settings that control UI behavior.
-    """
-    permission_classes = [permissions.AllowAny]
-
-    def get(self, request):
-        return Response({
-            "auth_mode": getattr(settings, "AUTH_MODE", "native"),
-        })
-
-
-# ── Break-Glass Login Page ─────────────────────────────────────────────────────
-
-def break_glass_login(request):
-    """
-    Render the break-glass emergency login page.
-    This is a hidden route for platform admins to access native authentication
-    when Keycloak is unavailable. Not linked from the normal login UI.
-    """
-    from django.conf import settings
-    frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
-    return render(request, "accounts/admin.html", {
-        'frontend_url': frontend_url
-    })
-
-
 # ── Permission helpers ────────────────────────────────────────────────────────
 
 class IsGroupAdmin(permissions.BasePermission):
@@ -162,60 +129,27 @@ class LoginView(APIView):
     - Validates credentials.
     - Always requires MFA (email OTP) since it is now default.
     - Returns {mfa_required: True, user_id}
-
-    When AUTH_MODE=keycloak, native login is restricted to platform admins
-    (is_staff or is_superuser) for break-glass emergency access. Set
-    break_glass=true in request data to indicate a break-glass attempt.
     """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         email    = request.data.get("email", "").strip().lower()
         password = request.data.get("password", "").strip()
-        break_glass = request.data.get("break_glass", False)
 
         user = authenticate(request, username=email, password=password)
 
         if not user:
-            # Log break-glass failures distinctly
-            if break_glass and getattr(settings, "AUTH_MODE", "native") == "keycloak":
-                AuditLog.objects.create(
-                    event=AuditEvent.USER_BREAK_GLASS_LOGIN_FAILED,
-                    object_type="User",
-                    object_repr=email,
-                    ip_address=request.META.get("REMOTE_ADDR"),
-                    user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
-                )
-            else:
-                AuditLog.objects.create(
-                    event=AuditEvent.USER_LOGIN_FAILED,
-                    object_type="User",
-                    object_repr=email,
-                    ip_address=request.META.get("REMOTE_ADDR"),
-                    user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
-                )
+            AuditLog.objects.create(
+                event=AuditEvent.USER_LOGIN_FAILED,
+                object_type="User",
+                object_repr=email,
+                ip_address=request.META.get("REMOTE_ADDR"),
+                user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+            )
             return Response({"detail": "Invalid email or password."}, status=401)
 
         if not user.is_active:
             return Response({"detail": "This account has been deactivated."}, status=403)
-
-        # In keycloak mode, enforce break-glass eligibility
-        auth_mode = getattr(settings, "AUTH_MODE", "native")
-        if auth_mode == "keycloak" and not (user.is_staff or user.is_superuser):
-            # Non-admin users cannot use native login in keycloak mode
-            AuditLog.objects.create(
-                event=AuditEvent.USER_BREAK_GLASS_LOGIN_FAILED,
-                object_type="User",
-                object_id=str(user.id),
-                object_repr=user.email,
-                changes={"reason": "User not eligible for break-glass login (not platform admin)"},
-                ip_address=request.META.get("REMOTE_ADDR"),
-                user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
-            )
-            return Response(
-                {"detail": "Native login is not available. Please use Keycloak authentication."},
-                status=403,
-            )
 
         # Update login metadata
         user.last_login_ip = request.META.get("REMOTE_ADDR")
@@ -244,7 +178,6 @@ class VerifyOTPView(APIView):
     def post(self, request):
         user_id = request.data.get("user_id", "")
         code    = request.data.get("otp", "").strip()
-        break_glass = request.data.get("break_glass", False)
 
         try:
             user = User.objects.get(id=user_id, is_active=True)
@@ -272,104 +205,6 @@ class VerifyOTPView(APIView):
 
         refresh = issue_refresh_for_user(user)
 
-        # Log break-glass logins distinctly when in keycloak mode
-        auth_mode = getattr(settings, "AUTH_MODE", "native")
-        if break_glass and auth_mode == "keycloak":
-            AuditLog.objects.create(
-                event=AuditEvent.USER_BREAK_GLASS_LOGIN,
-                actor=user,
-                object_type="User",
-                object_id=str(user.id),
-                object_repr=user.email,
-                changes={"auth_mode": "keycloak"},
-                ip_address=request.META.get("REMOTE_ADDR"),
-                user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
-            )
-        else:
-            AuditLog.objects.create(
-                event=AuditEvent.USER_LOGIN,
-                actor=user,
-                object_type="User",
-                object_id=str(user.id),
-                object_repr=user.email,
-                ip_address=request.META.get("REMOTE_ADDR"),
-                user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
-            )
-
-        return Response({
-            "access":               str(refresh.access_token),
-            "refresh":              str(refresh),
-            "must_change_password": user.must_change_password,
-            "user":                 UserSerializer(user).data,
-            "session_policy":       get_session_policy(),
-        })
-
-
-class OIDCExchangeView(APIView):
-    """
-    POST /api/auth/oidc/exchange/
-
-    Token-exchange endpoint for the OIDC PKCE flow.
-
-    The React frontend completes the PKCE authorization code exchange with
-    Keycloak, then POSTs the resulting ``id_token`` here.  Django validates
-    the token, resolves the existing DMS user, and returns a simplejwt access
-    + refresh pair — identical in shape to the VerifyOTPView response so the
-    frontend can reuse the same post-login handler.
-
-    The endpoint is unauthenticated (AllowAny) because the id_token is
-    cryptographically self-validating via Keycloak's JWKS public keys.
-    """
-    permission_classes = [permissions.AllowAny]
-
-    def post(self, request):
-        from .oidc_auth import validate_id_token, provision_or_link_user
-
-        raw_token = request.data.get("id_token", "").strip()
-        if not raw_token:
-            return Response(
-                {"detail": "id_token is required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            claims = validate_id_token(raw_token)
-        except pyjwt.ExpiredSignatureError:
-            return Response(
-                {"detail": "The token has expired. Please sign in again."},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-        except pyjwt.PyJWTError as exc:
-            logger.warning("OIDC token validation failed: %s", exc)
-            return Response(
-                {"detail": "Invalid identity token."},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-        except Exception as exc:
-            logger.error("OIDC exchange unexpected error: %s", exc)
-            return Response(
-                {"detail": "Authentication service error. Please try again."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        try:
-            user = provision_or_link_user(claims)
-        except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        if not user.is_active:
-            return Response(
-                {"detail": "This account has been deactivated."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        # Update last-login metadata
-        user.last_login    = timezone.now()
-        user.last_login_ip = request.META.get("REMOTE_ADDR")
-        user.save(update_fields=["last_login", "last_login_ip"])
-
-        refresh = issue_refresh_for_user(user)
-
         AuditLog.objects.create(
             event=AuditEvent.USER_LOGIN,
             actor=user,
@@ -380,12 +215,22 @@ class OIDCExchangeView(APIView):
             user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
         )
 
+        deployment = ClientDeployment.get_or_create_singleton()
+        deployment_data = {
+            "mode": deployment.deployment_mode,
+            "enabled_modules": deployment.enabled_modules,
+            "product_name": deployment.product_name,
+            "primary_color": deployment.primary_color,
+            "logo_url": deployment.logo_url,
+        }
+
         return Response({
             "access":               str(refresh.access_token),
             "refresh":              str(refresh),
-            "must_change_password": False,   # password managed by Keycloak
+            "must_change_password": user.must_change_password,
             "user":                 UserSerializer(user).data,
             "session_policy":       get_session_policy(),
+            "deployment":           deployment_data,
         })
 
 
@@ -425,6 +270,21 @@ class MeView(generics.RetrieveUpdateAPIView):
         response = super().retrieve(request, *args, **kwargs)
         response.data["session_policy"] = get_session_policy()
         return response
+
+
+class DeploymentView(generics.RetrieveAPIView):
+    """Return the current deployment configuration."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        deployment = ClientDeployment.get_or_create_singleton()
+        return Response({
+            "mode": deployment.deployment_mode,
+            "enabled_modules": deployment.enabled_modules,
+            "product_name": deployment.product_name,
+            "primary_color": deployment.primary_color,
+            "logo_url": deployment.logo_url,
+        })
 
 
 class ChangePasswordView(APIView):
@@ -1047,12 +907,31 @@ class UserGroupViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy",
-                           "add_member", "remove_member", "set_permissions", "duplicate"):
+                           "add_member", "remove_member", "set_permissions", "set_requisition_templates", "duplicate"):
             return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        group = self.get_object()
+        old_system_audit_access = group.can_view_system_audit
+        group = serializer.save()
+        if old_system_audit_access != group.can_view_system_audit:
+            from apps.audit.utils import record_audit_event
+            record_audit_event(
+                AuditEvent.GROUP_PERMISSION_UPDATED,
+                actor=self.request.user,
+                obj=group,
+                changes={
+                    "can_view_system_audit": {
+                        "previous": old_system_audit_access,
+                        "new": group.can_view_system_audit,
+                    }
+                },
+                request=self.request,
+            )
 
     def destroy(self, request, *args, **kwargs):
         group = self.get_object()
@@ -1226,6 +1105,23 @@ class UserGroupViewSet(viewsets.ModelViewSet):
         return Response(GroupPermissionSerializer(created, many=True).data)
 
     @action(detail=True, methods=["post"])
+    def set_requisition_templates(self, request, pk=None):
+        """Set the requisition forms that members of this group may start."""
+        from apps.templates_engine.models import DocumentTemplate
+
+        group = self.get_object()
+        ids = request.data.get("template_ids", [])
+        if not isinstance(ids, list):
+            return Response({"detail": "template_ids must be a list."}, status=400)
+        templates = DocumentTemplate.objects.filter(
+            id__in=ids, is_active=True, type="built", kind="form", workflow_type="requisition"
+        )
+        if templates.count() != len({str(value) for value in ids}):
+            return Response({"detail": "One or more selected forms are invalid or inactive."}, status=400)
+        group.requisition_templates.set(templates)
+        return Response({"template_ids": [str(value) for value in group.requisition_templates.values_list("id", flat=True)]})
+
+    @action(detail=True, methods=["post"])
     def set_admin_access(self, request, pk=None):
         return Response(
             {"detail": "Administrator access is managed on user accounts, not groups."},
@@ -1236,6 +1132,10 @@ class UserGroupViewSet(viewsets.ModelViewSet):
     def members(self, request, pk=None):
         group       = self.get_object()
         memberships = group.memberships.select_related("user", "added_by").all()
+        if request.query_params.get("active_only", "").lower() in {"1", "true", "yes"}:
+            memberships = memberships.filter(user__is_active=True).filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+            )
         return Response(UserGroupMembershipSerializer(memberships, many=True).data)
 
     @action(detail=True, methods=["post"])
@@ -1271,6 +1171,7 @@ class UserGroupViewSet(viewsets.ModelViewSet):
                 for p in original.permissions.all()
             ]
             GroupPermission.objects.bulk_create(perms)
+            copy.requisition_templates.set(original.requisition_templates.all())
 
         AuditLog.objects.create(
             event=AuditEvent.PERMISSION_CHANGED,

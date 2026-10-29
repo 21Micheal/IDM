@@ -57,6 +57,8 @@ def post_journal_for_document(
     posting, _ = JournalPosting.objects.get_or_create(document=document, stage=stage)
 
     if posting.status == JournalPostingStatus.POSTED:
+        _maybe_generate_lpo_after_posting(document, posting, actor)
+        _resume_lpo_workflow_after_posting(document)
         return posting
 
     mapping = get_journal_mapping(document, stage=stage)
@@ -77,7 +79,7 @@ def post_journal_for_document(
     if stage_label and not posting.stage_label:
         posting.stage_label = stage_label
 
-    values = get_form_values(document)
+    values = mapping.get("_posting_values") if isinstance(mapping.get("_posting_values"), dict) else get_form_values(document)
     conn = effective_connection(get_connection_override(document))
     config = SunSystemsConfig.from_mapping(conn)
 
@@ -98,6 +100,13 @@ def post_journal_for_document(
             budget_code_default=config.budget_code,
         )
     except MappingError as exc:
+        if str(exc) == "Journal mapping produced no ledger lines.":
+            _mark(
+                posting,
+                JournalPostingStatus.SKIPPED,
+                message="No form rows matched this posting configuration; nothing was sent to SunSystems.",
+            )
+            return posting
         _mark(posting, JournalPostingStatus.FAILED, error=f"Mapping error: {exc}")
         return posting
 
@@ -134,6 +143,13 @@ def post_journal_for_document(
     message_text = result.message
     if warning_prefix:
         message_text = f"{warning_prefix} | {message_text}" if message_text else warning_prefix
+    if (
+        result.ok
+        and str(build.component or "").strip().lower() == "purchaseorder"
+        and not result.journal_number
+    ):
+        missing_reference = "SunSystems accepted the PurchaseOrder but returned no PO reference; the LPO PDF could not be generated."
+        message_text = f"{message_text} | {missing_reference}" if message_text else missing_reference
     posting.message = message_text
     if result.ok:
         posting.journal_number = result.journal_number or ""
@@ -147,6 +163,8 @@ def post_journal_for_document(
             message=message_text,
         )
         _write_back_to_document(document, posting)
+        _maybe_generate_lpo_after_posting(document, posting, actor)
+        _resume_lpo_workflow_after_posting(document)
         try:
             from apps.documents.builder_workflow import sync_retirement_variance
 
@@ -165,7 +183,38 @@ def post_journal_for_document(
             response_xml=result.raw,
             message=message_text,
         )
+    _resume_lpo_workflow_after_posting(document)
     return posting
+
+
+def _resume_lpo_workflow_after_posting(document) -> None:
+    """Release procurement approval gates after their required postings finish."""
+    try:
+        from apps.workflows.services import WorkflowService
+        WorkflowService._resume_imprest_request_workflow_if_ready(document)
+        WorkflowService._resume_lpo_workflow_if_ready(document)
+    except Exception:
+        logger.exception("Could not resume the LPO workflow for %s after posting", document.pk)
+
+
+def _maybe_generate_lpo_after_posting(document, posting, actor=None) -> None:
+    """Create the printable LPO only after SSC returns its assigned PO number."""
+    if not (1000 <= int(posting.stage) < 20000):
+        return
+    if str(posting.component or "").strip().lower() != "purchaseorder":
+        return
+    try:
+        from apps.documents.lpo import generate_lpo_for_posting
+
+        generate_lpo_for_posting(document, posting, actor=actor or posting.posted_by)
+    except Exception:
+        # The external PO is already committed. Keep the posting successful and
+        # log PDF generation separately so it can be recovered without reposting.
+        logger.exception(
+            "SunSystems PO %s was posted, but its LPO PDF could not be generated for %s",
+            posting.journal_number,
+            document.pk,
+        )
 
 
 def _mark(posting: JournalPosting, status: str, **fields) -> None:
@@ -185,21 +234,29 @@ def _mark(posting: JournalPosting, status: str, **fields) -> None:
 def _write_back_to_document(document, posting: JournalPosting) -> None:
     """Mirror the posting result onto metadata.sunsystems.postings[stage] for the UI."""
     try:
-        meta = dict(document.metadata or {})
-        ss = dict(meta.get("sunsystems") or {})
-        postings = dict(ss.get("postings") or {})
-        postings[str(posting.stage)] = {
-            "status": posting.status,
-            "journal_number": posting.journal_number,
-            "message": posting.message,
-            "posted_at": posting.posted_at.isoformat() if posting.posted_at else None,
-        }
-        ss["postings"] = postings
-        # Legacy single-posting compat: also write to ss["posting"] for stage 1.
-        if posting.stage == 1:
-            ss["posting"] = postings["1"]
-        meta["sunsystems"] = ss
-        document.metadata = meta
-        type(document).objects.filter(pk=document.pk).update(metadata=meta)
+        from django.db import transaction
+
+        # Posting stages can complete concurrently. Always merge into the latest
+        # locked metadata so an SSC status write cannot erase an LPO link (or a
+        # different posting stage) written by another worker.
+        with transaction.atomic():
+            latest = type(document).objects.select_for_update().get(pk=document.pk)
+            meta = dict(latest.metadata or {})
+            ss = dict(meta.get("sunsystems") or {})
+            postings = dict(ss.get("postings") or {})
+            postings[str(posting.stage)] = {
+                "status": posting.status,
+                "journal_number": posting.journal_number,
+                "message": posting.message,
+                "posted_at": posting.posted_at.isoformat() if posting.posted_at else None,
+            }
+            ss["postings"] = postings
+            # Legacy single-posting compat: also write to ss["posting"] for stage 1.
+            if posting.stage == 1:
+                ss["posting"] = postings["1"]
+            meta["sunsystems"] = ss
+            latest.metadata = meta
+            latest.save(update_fields=["metadata", "updated_at"])
+            document.metadata = meta
     except Exception:  # pragma: no cover - best-effort UI mirror
         logger.exception("Failed to mirror journal posting onto document %s", document.pk)

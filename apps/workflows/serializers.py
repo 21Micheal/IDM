@@ -90,29 +90,23 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkflowStep
         fields = [
-            "id", "template", "order", "name", "status_label",
+            "id", "template", "order", "node_id", "name", "status_label",
             "step_type",
+            "post_lpo_after_approval",
+            "post_imprest_request_after_approval",
             # approval-step fields
             "assignee_type", "assignee_group", "assignee_group_name",
-            "assignee_user", "assignee_user_name", "assignee_user_auto",
+            "assignee_user", "assignee_user_name", "assignee_user_auto", "assignee_user_field",
             "sla_hours", "allow_resubmit",
-            "allow_approve", "allow_reject", "allow_return", "allow_return_submitter",
+            "allow_approve", "approve_button_label", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
             "instructions",
             # custom approver email
             "approver_email_subject", "approver_email_body",
             # notification-step fields
-            "notify_user", "notify_user_name", "notify_email",
+            "notify_user", "notify_user_name", "notify_email", "notify_emails",
             "notification_subject", "notification_message",
-            "notify_table_field", "notify_include_items_table",
-            "notify_emails", "notify_recipient_type", "notify_supplier_field",
-            "notify_table_columns",
-            # form-specific
-            "assignee_user_field",
-            # conditions
-            "skip_when", "auto_approve_when",
-            # post-approval actions
-            "post_lpo_after_approval",
+            "notify_include_items_table", "notify_table_field", "notify_table_columns", "notify_recipient_type", "notify_supplier_field",
         ]
 
     def get_assignee_type(self, obj):
@@ -175,47 +169,41 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkflowStep
         fields = [
-            "id", "name", "status_label",
+            "id", "node_id", "name", "status_label",
             "step_type",
+            "post_lpo_after_approval",
+            "post_imprest_request_after_approval",
             # approval-step
-            "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto",
+            "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto", "assignee_user_field",
             "sla_hours", "allow_resubmit",
-            "allow_approve", "allow_reject", "allow_return", "allow_return_submitter",
+            "allow_approve", "approve_button_label", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
             "instructions",
             # custom approver email
             "approver_email_subject", "approver_email_body",
             # notification-step
-            "notify_user", "notify_email",
+            "notify_user", "notify_email", "notify_emails",
             "notification_subject", "notification_message",
-            "notify_table_field", "notify_include_items_table",
-            "notify_emails", "notify_recipient_type", "notify_supplier_field",
-            "notify_table_columns",
-            # form-specific
-            "assignee_user_field",
-            # conditions
-            "skip_when", "auto_approve_when",
-            # post-approval actions
-            "post_lpo_after_approval",
+            "notify_include_items_table", "notify_table_field", "notify_table_columns", "notify_recipient_type", "notify_supplier_field",
         ]
         extra_kwargs = {
             "instructions":            {"required": False, "allow_blank": True},
             "step_type":               {"required": False},
+            "post_lpo_after_approval": {"required": False},
+            "post_imprest_request_after_approval": {"required": False},
+            "assignee_user_field":    {"required": False, "allow_blank": True},
             "approver_email_subject":  {"required": False, "allow_blank": True},
             "approver_email_body":     {"required": False, "allow_blank": True},
+            "approve_button_label":    {"required": False, "allow_blank": True, "trim_whitespace": True},
             "notify_email":            {"required": False, "allow_blank": True},
+            "notify_emails":           {"required": False},
             "notification_subject":    {"required": False, "allow_blank": True},
             "notification_message":    {"required": False, "allow_blank": True},
-            "notify_table_field":       {"required": False, "allow_blank": True},
             "notify_include_items_table": {"required": False},
-            "notify_emails":           {"required": False},
-            "notify_recipient_type":    {"required": False, "allow_blank": True},
-            "notify_supplier_field":    {"required": False, "allow_blank": True},
+            "notify_table_field":       {"required": False, "allow_null": True, "allow_blank": True},
             "notify_table_columns":     {"required": False},
-            "assignee_user_field":     {"required": False, "allow_blank": True},
-            "skip_when":               {"required": False},
-            "auto_approve_when":       {"required": False},
-            "post_lpo_after_approval":  {"required": False},
+            "notify_recipient_type":   {"required": False, "allow_blank": True},
+            "notify_supplier_field":   {"required": False, "allow_null": True, "allow_blank": True},
         }
 
     def to_internal_value(self, data):
@@ -231,12 +219,23 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         if step_type == "notification":
             notify_user  = attrs.get("notify_user",  getattr(self.instance, "notify_user",  None))
             notify_email = (attrs.get("notify_email", getattr(self.instance, "notify_email", "")) or "").strip()
+            notify_emails = attrs.get("notify_emails", getattr(self.instance, "notify_emails", [])) or []
+            recipient_type = (attrs.get("notify_recipient_type", getattr(self.instance, "notify_recipient_type", "email")) or "email").strip()
+            supplier_field = attrs.get("notify_supplier_field", getattr(self.instance, "notify_supplier_field", None))
             subject      = (attrs.get("notification_subject", getattr(self.instance, "notification_subject", "")) or "").strip()
             message      = (attrs.get("notification_message", getattr(self.instance, "notification_message", "")) or "").strip()
 
-            if not notify_user and not notify_email:
+            if recipient_type == "user" and not notify_user:
                 raise serializers.ValidationError(
-                    {"notify_user": "Notification steps require either a recipient user or an email address."}
+                    {"notify_user": "Notification steps with recipient type 'user' require a selected user."}
+                )
+            if recipient_type == "email" and not notify_user and not notify_email and not notify_emails:
+                raise serializers.ValidationError(
+                    {"notify_email": "Notification steps with recipient type 'email' require at least one email address."}
+                )
+            if recipient_type == "supplier" and not supplier_field:
+                raise serializers.ValidationError(
+                    {"notify_supplier_field": "Notification steps with recipient type 'supplier' require a supplier field selection."}
                 )
             if not subject:
                 raise serializers.ValidationError(
@@ -249,6 +248,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             # Notification steps don't need approval semantics — clear them
             attrs.setdefault("assignee_group", None)
             attrs.setdefault("assignee_user", None)
+            attrs.setdefault("assignee_user_field", "")
             attrs["allow_approve"]       = False
             attrs["allow_reject"]        = False
             attrs["allow_return"]        = False
@@ -256,17 +256,6 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             attrs["allow_resubmit"]      = False
             attrs["requires_signature"]  = False
             attrs["assignee_user_auto"]  = False
-            # Set defaults for notification fields
-            attrs.setdefault("notify_table_field", "")
-            attrs.setdefault("notify_include_items_table", False)
-            attrs.setdefault("notify_emails", [])
-            attrs.setdefault("notify_recipient_type", "")
-            attrs.setdefault("notify_supplier_field", None)
-            attrs.setdefault("notify_table_columns", [])
-            attrs.setdefault("assignee_user_field", "")
-            attrs.setdefault("skip_when", {})
-            attrs.setdefault("auto_approve_when", {})
-            attrs.setdefault("post_lpo_after_approval", False)
             return attrs
 
         # ── Approval step validation ──────────────────────────────────────────
@@ -274,7 +263,8 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         assignee_group = attrs.get("assignee_group", getattr(self.instance, "assignee_group", None))
         assignee_user  = attrs.get("assignee_user",  getattr(self.instance, "assignee_user",  None))
 
-        if assignee_type in ("group_any", "group_all", "group_specific"):
+        assignee_user_field = attrs.get("assignee_user_field", getattr(self.instance, "assignee_user_field", ""))
+        if assignee_type in ("group_any", "group_all", "group_specific", "form_user"):
             if assignee_group is None:
                 raise serializers.ValidationError(
                     {"assignee_group": "A group is required for group-based assignment."}
@@ -283,43 +273,52 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"assignee_user": "A specific member is required for this assignment mode."}
                 )
-            if assignee_type != "group_specific" and assignee_user is not None:
+            if assignee_type == "form_user" and not str(assignee_user_field or "").strip():
+                raise serializers.ValidationError(
+                    {"assignee_user_field": "Select the form field that contains the approver."}
+                )
+            if assignee_type == "form_user":
+                attrs["assignee_user"] = None
+                attrs["assignee_user_auto"] = False
+            if assignee_type not in ("group_specific", "form_user") and assignee_user is not None:
                 raise serializers.ValidationError(
                     {"assignee_user": "Only specific member assignments can set a user."}
                 )
+            if assignee_type != "form_user":
+                attrs["assignee_user_field"] = ""
         else:
             raise serializers.ValidationError({"assignee_type": "Invalid assignment mode."})
 
         if assignee_type == "group_specific" and assignee_group and assignee_user:
-            if not UserGroup.objects.filter(
+            active_member = UserGroup.objects.filter(
                 id=assignee_group.id,
                 memberships__user__id=assignee_user.id,
                 is_active=True,
             ).filter(
                 Q(memberships__expires_at__isnull=True) |
                 Q(memberships__expires_at__gt=timezone.now())
-            ).exists():
+            ).exists()
+            # A group's designated approver is a valid specific assignee even
+            # when the administrator has not also created a membership row.
+            designated_approver = (
+                assignee_group.is_active
+                and assignee_group.head_id == assignee_user.id
+                and assignee_user.is_active
+            )
+            if not active_member and not designated_approver:
+                step_name = str(attrs.get("name") or "Approval step").strip()
                 raise serializers.ValidationError(
-                    {"assignee_user": "The selected user is not an active member of the selected group."}
+                    {"assignee_user": f"{step_name}: {assignee_user.get_full_name() or assignee_user.email} is not an active member of {assignee_group.name} and is not its designated approver."}
                 )
 
         allow_approve      = attrs.get("allow_approve",      getattr(self.instance, "allow_approve",      True))
         allow_reject       = attrs.get("allow_reject",       getattr(self.instance, "allow_reject",       True))
         allow_return       = attrs.get("allow_return",       getattr(self.instance, "allow_return",       True))
-        allow_return_submitter = attrs.get("allow_return_submitter", getattr(self.instance, "allow_return_submitter", False))
+        allow_return_submitter = attrs.get(
+            "allow_return_submitter",
+            getattr(self.instance, "allow_return_submitter", True),
+        )
         requires_signature = attrs.get("requires_signature", getattr(self.instance, "requires_signature", False))
-        
-        # Set defaults for new fields
-        attrs.setdefault("notify_table_field", "")
-        attrs.setdefault("notify_include_items_table", False)
-        attrs.setdefault("notify_emails", [])
-        attrs.setdefault("notify_recipient_type", "")
-        attrs.setdefault("notify_supplier_field", None)
-        attrs.setdefault("notify_table_columns", [])
-        attrs.setdefault("assignee_user_field", "")
-        attrs.setdefault("skip_when", {})
-        attrs.setdefault("auto_approve_when", {})
-        attrs.setdefault("post_lpo_after_approval", False)
 
         if not any([allow_approve, allow_reject, allow_return, allow_return_submitter]):
             raise serializers.ValidationError(
@@ -343,7 +342,7 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
         model  = WorkflowTemplate
         fields = [
             "id", "name", "description", "target_type", "document_type", "document_type_name", "is_active",
-            "notify_uploader_on_approval", "email_templates",
+            "notify_uploader_on_approval", "email_templates", "definition",
             "steps", "step_count", "created_by", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "step_count", "created_by", "created_at", "updated_at"]
@@ -356,17 +355,33 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
 
 
 class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(read_only=True)
     steps = WorkflowStepWriteSerializer(many=True)
+    retire_siblings = serializers.BooleanField(
+        required=False,
+        write_only=True,
+        default=False,
+        help_text=(
+            "When saving a v2 branched definition, deactivate other templates for "
+            "the same document type, remove their routing rules, and point the "
+            "document type at this template."
+        ),
+    )
 
     class Meta:
         model  = WorkflowTemplate
-        fields = ["name", "description", "target_type", "document_type", "is_active", "notify_uploader_on_approval", "email_templates", "steps"]
+        fields = [
+            "id", "name", "description", "target_type", "document_type", "is_active",
+            "notify_uploader_on_approval", "email_templates", "definition", "steps",
+            "retire_siblings",
+        ]
         extra_kwargs = {
             "is_active":                    {"required": False},
             "target_type":                  {"required": False},
             "document_type":                {"required": False, "allow_null": True},
             "notify_uploader_on_approval":  {"required": False},
             "email_templates":              {"required": False},
+            "definition":                   {"required": False, "allow_null": True},
         }
 
     def validate_name(self, value):
@@ -402,9 +417,70 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                 {"email_templates": "Email templates must be a JSON object."}
             )
 
+        # Validate v2 workflow definition if present
+        definition = attrs.get("definition")
+        if definition is not None:
+            if not isinstance(definition, dict):
+                raise serializers.ValidationError(
+                    {"definition": "Workflow definition must be a JSON object."}
+                )
+            if definition.get("version") != 2:
+                raise serializers.ValidationError(
+                    {"definition": "Workflow definition must have version 2."}
+                )
+
+            try:
+                from .engine import validate_definition, build_field_map_from_document_type
+
+                field_map = {}
+                doc_type_obj = None
+                if document_type is not None:
+                    if hasattr(document_type, "pk"):
+                        doc_type_obj = document_type
+                    else:
+                        from apps.documents.models import DocumentType
+                        try:
+                            doc_type_obj = DocumentType.objects.get(pk=document_type)
+                        except (DocumentType.DoesNotExist, ValueError, TypeError):
+                            try:
+                                doc_type_obj = DocumentType.objects.get(name=document_type)
+                            except DocumentType.DoesNotExist:
+                                doc_type_obj = None
+
+                if doc_type_obj is not None:
+                    field_map = build_field_map_from_document_type(doc_type_obj)
+
+                validation_errors = validate_definition(definition, field_map)
+                if validation_errors:
+                    error_messages = [e.message for e in validation_errors if e.severity == "error"]
+                    if error_messages:
+                        raise serializers.ValidationError(
+                            {"definition": f"Workflow definition validation failed: {', '.join(error_messages)}"}
+                        )
+            except serializers.ValidationError:
+                raise
+            except Exception as e:
+                # If validation fails for any reason (e.g. import error, database error),
+                # log it but don't block the save — the definition may still be valid.
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Workflow definition validation skipped due to error: {e}")
+
         # Require at least one approval step (notification-only templates make no sense)
         steps_data = attrs.get("steps")
         if steps_data is not None:
+            imprest_checkpoints = [
+                step for step in steps_data
+                if step.get("post_imprest_request_after_approval")
+            ]
+            if len(imprest_checkpoints) > 1:
+                raise serializers.ValidationError({
+                    "steps": "Choose one approval step to post the Imprest request after."
+                })
+            if any((step.get("step_type") or "approval") != "approval" for step in imprest_checkpoints):
+                raise serializers.ValidationError({
+                    "steps": "The Imprest request posting checkpoint must be an approval step."
+                })
             has_approval = any(
                 (s.get("step_type") or "approval") == "approval"
                 for s in steps_data
@@ -421,8 +497,22 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
         return attrs
 
     def _upsert_steps(self, template, steps_data):
+        # Serialize template edits with approval actions so a live task cannot
+        # advance against half-reordered mirror rows.
+        live_instances = list(
+            WorkflowInstance.objects.select_for_update()
+            .filter(Q(template=template) & (Q(status="in_progress") | Q(imprest_request_status="in_progress")))
+            .order_by("pk")
+        )
         existing_steps = list(template.steps.all())
         existing_by_id = {str(step.id): step for step in existing_steps}
+        existing_by_node_id = {step.node_id: step for step in existing_steps if step.node_id}
+        # The v2 editor's block IDs are stable, but the flat compatibility
+        # mirror does not carry WorkflowStep UUIDs. Reuse the existing row at
+        # the same flattened position when no valid UUID was submitted. Without
+        # this, every save parks task-linked rows as orphans; their order then
+        # no longer agrees with WorkflowInstance.current_step_order.
+        existing_by_order = {step.order: step for step in existing_steps if step.order < 20000}
         incoming_ids = []
         incoming_existing_ids = set()
 
@@ -441,13 +531,69 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                 else:
                     incoming_existing_ids.add(step_id)
 
+        if template.definition and template.definition.get("version") == 2:
+            used_ids = set(incoming_existing_ids)
+            seen_node_ids = set()
+            for position, raw in enumerate(steps_data, start=1):
+                node_id = str(raw.get("node_id") or "").strip()
+                if node_id:
+                    if node_id in seen_node_ids:
+                        raise serializers.ValidationError({"steps": "Each workflow graph node can appear only once."})
+                    seen_node_ids.add(node_id)
+                    node_match = existing_by_node_id.get(node_id)
+                    if node_match and str(node_match.id) not in used_ids:
+                        raw["id"] = str(node_match.id)
+                        used_ids.add(str(node_match.id))
+                        incoming_existing_ids.add(str(node_match.id))
+                        continue
+                step_id = raw.get("id")
+                if step_id and str(step_id) in existing_by_id:
+                    continue
+                name = str(raw.get("name") or "").strip().casefold()
+                step_type = raw.get("step_type") or "approval"
+                candidates = [
+                    step for step in existing_steps
+                    if step.order < 20000
+                    and str(step.id) not in used_ids
+                    and step.name.strip().casefold() == name
+                    and step.step_type == step_type
+                ]
+                # Prefer the same logical step even if its position changed;
+                # ties (for repeated labels) resolve to the closest old order.
+                matched = min(candidates, key=lambda step: abs(step.order - (position or step.order)), default=None)
+                positional = existing_by_order.get(position)
+                if matched is None and positional and str(positional.id) not in used_ids:
+                    matched = positional
+                if matched:
+                    raw["id"] = str(matched.id)
+                    used_ids.add(str(matched.id))
+                    incoming_existing_ids.add(str(matched.id))
+
         removed_steps = [
             step for step in existing_steps
             if str(step.id) not in incoming_existing_ids
         ]
         removed_step_ids = [step.id for step in removed_steps]
 
-        if removed_step_ids:
+        # For v2 workflows, steps are a flat mirror of the definition. Relax deletion
+        # protection so templates with live tasks can still be edited; only orphans
+        # without tasks are removed.
+        is_v2 = bool(template.definition and template.definition.get("version") == 2)
+
+        if is_v2 and removed_step_ids:
+            active_removed = WorkflowTask.objects.filter(
+                step_id__in=removed_step_ids,
+                status__in=["in_progress", "held"],
+            ).values_list("step__name", flat=True).distinct()
+            active_names = sorted(active_removed)
+            if active_names:
+                raise serializers.ValidationError({
+                    "steps": "Resolve active approval tasks before removing these workflow steps: "
+                    + ", ".join(active_names)
+                    + ". You can still add steps or reorder existing steps."
+                })
+
+        if removed_step_ids and not is_v2:
             protected_step_names = list(
                 WorkflowStep.objects.filter(
                     id__in=removed_step_ids,
@@ -462,18 +608,15 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                     {"steps": f"Cannot remove steps that already have workflow tasks: {names}."}
                 )
 
-        # Move surviving steps out of the way first so order reassignments do not
-        # collide with the template's unique (template, order) constraint.
-        order_offset = max(len(existing_steps), len(steps_data)) + 1000
-        for idx, step in enumerate(existing_steps, start=1):
-            if step.id in removed_step_ids:
-                continue
-            temp_order = order_offset + idx
-            if step.order != temp_order:
-                step.order = temp_order
-                step.save(update_fields=["order"])
+        # Always park existing rows on temporary high orders first. Skipping this
+        # for v2 caused IntegrityError on (template_id, order) when importing rules
+        # (new steps written as order=1..n while old rows still held those orders).
+        # Must stay non-negative: order is a PositiveSmallIntegerField.
+        for idx, step in enumerate(existing_steps):
+            WorkflowStep.objects.filter(pk=step.pk).update(order=20000 + idx)
+            step.order = 20000 + idx
 
-        if removed_step_ids:
+        if removed_step_ids and not is_v2:
             WorkflowStep.objects.filter(id__in=removed_step_ids).delete()
 
         for order, raw in enumerate(steps_data, start=1):
@@ -489,21 +632,113 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
             else:
                 WorkflowStep.objects.create(template=template, **step_data)
 
+        if is_v2 and removed_step_ids:
+            deletable_ids = list(
+                WorkflowStep.objects.filter(
+                    id__in=removed_step_ids,
+                    workflowtask__isnull=True,
+                ).values_list("id", flat=True)
+            )
+            if deletable_ids:
+                WorkflowStep.objects.filter(id__in=deletable_ids).delete()
+
+            # Protected orphans keep their FK history but must leave the temp
+            # park zone so future upserts stay collision-free.
+            leftover = list(
+                WorkflowStep.objects.filter(template=template, order__gte=20000).order_by("order")
+            )
+            if leftover:
+                for offset, step in enumerate(leftover, start=1):
+                    step.order = 25000 + offset
+                    step.save(update_fields=["order"])
+
+        # Keep persisted numeric cursors aligned with their active tasks after
+        # insertions and reorders. Each lane has its own cursor.
+        active_tasks = WorkflowTask.objects.filter(
+            workflow_instance__in=live_instances,
+            status__in=["in_progress", "held"],
+        ).values_list("workflow_instance_id", "execution_lane", "step__order")
+        cursors = {}
+        for instance_id, lane, order in active_tasks:
+            cursors.setdefault(instance_id, {})[lane or "main"] = order
+        for workflow_instance in live_instances:
+            lane_cursors = cursors.get(workflow_instance.id, {})
+            update_fields = []
+            if "main" in lane_cursors and workflow_instance.current_step_order != lane_cursors["main"]:
+                workflow_instance.current_step_order = lane_cursors["main"]
+                update_fields.append("current_step_order")
+            if "imprest_request" in lane_cursors and workflow_instance.imprest_request_current_step_order != lane_cursors["imprest_request"]:
+                workflow_instance.imprest_request_current_step_order = lane_cursors["imprest_request"]
+                update_fields.append("imprest_request_current_step_order")
+            if update_fields:
+                workflow_instance.save(update_fields=update_fields)
+
+    @staticmethod
+    def _retire_sibling_templates(template: WorkflowTemplate) -> int:
+        """
+        Make *template* the sole active workflow for its document type (or for
+        payment_run target). Deactivates siblings, deletes their routing rules
+        and this template's legacy rules, and points the document type here.
+        Returns how many sibling templates were retired.
+        """
+        # Branched definitions replace amount/phase routing rules.
+        template.rules.all().delete()
+
+        if template.target_type == "payment_run":
+            siblings = (
+                WorkflowTemplate.objects
+                .filter(target_type="payment_run", is_active=True)
+                .exclude(pk=template.pk)
+            )
+        elif template.document_type_id:
+            siblings = (
+                WorkflowTemplate.objects
+                .filter(
+                    target_type="document",
+                    document_type_id=template.document_type_id,
+                    is_active=True,
+                )
+                .exclude(pk=template.pk)
+            )
+        else:
+            siblings = WorkflowTemplate.objects.none()
+
+        retired = 0
+        for sibling in siblings:
+            sibling.rules.all().delete()
+            sibling.is_active = False
+            sibling.save(update_fields=["is_active", "updated_at"])
+            retired += 1
+
+        if template.document_type_id:
+            from apps.documents.models import DocumentType
+            DocumentType.objects.filter(pk=template.document_type_id).update(
+                workflow_template_id=template.pk,
+            )
+
+        return retired
+
     @transaction.atomic
     def create(self, validated_data):
         steps_data = validated_data.pop("steps", [])
-        template   = WorkflowTemplate.objects.create(**validated_data)
+        retire_siblings = validated_data.pop("retire_siblings", False)
+        template = WorkflowTemplate.objects.create(**validated_data)
         self._upsert_steps(template, steps_data)
+        if retire_siblings and template.definition and template.definition.get("version") == 2:
+            self._retire_sibling_templates(template)
         return template
 
     @transaction.atomic
     def update(self, instance, validated_data):
         steps_data = validated_data.pop("steps", None)
+        retire_siblings = validated_data.pop("retire_siblings", False)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
         if steps_data is not None:
             self._upsert_steps(instance, steps_data)
+        if retire_siblings and instance.definition and instance.definition.get("version") == 2:
+            self._retire_sibling_templates(instance)
         return instance
 
 
@@ -600,13 +835,39 @@ class DocumentSignatureSerializer(serializers.ModelSerializer):
     signer = UserSummarySerializer(read_only=True)
     step_name = serializers.CharField(source="task.step.name", read_only=True)
     signed_version_number = serializers.IntegerField(source="signed_version.version_number", read_only=True)
+    signature_data = serializers.SerializerMethodField()
 
     class Meta:
         model = DocumentSignature
         fields = [
             "id", "signer", "step_name", "signed_version", "signed_version_number",
-            "page_number", "checksum", "signed_at",
+            "page_number", "checksum", "signed_at", "signature_data",
         ]
+
+    def get_signature_data(self, obj):
+        """Include the signer image with the authorized document detail response.
+
+        This endpoint has already enforced document-view access. Embedding the
+        small signature image lets the travel authorization print reproduce the
+        approval marks without relying on an <img> request that cannot attach
+        the API authorization header.
+        """
+        signature = obj.source_signature
+        if not signature:
+            return None
+        try:
+            signature.image.open("rb")
+            raw = signature.image.read()
+        except Exception:
+            return None
+        finally:
+            try:
+                signature.image.close()
+            except Exception:
+                pass
+        import base64
+        content_type = "image/jpeg" if signature.image.name.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 class WorkflowTaskSerializer(serializers.ModelSerializer):
@@ -628,7 +889,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     uploader_department_name = serializers.SerializerMethodField()
     file_name = serializers.SerializerMethodField()
     file_mime_type = serializers.SerializerMethodField()
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    status_display = serializers.SerializerMethodField()
     requires_signature = serializers.SerializerMethodField()
     is_delegated = serializers.SerializerMethodField()
     delegated_from = serializers.SerializerMethodField()
@@ -642,6 +903,17 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     def get_document_id(self, obj):
         doc = self._document(obj)
         return str(doc.id) if doc else None
+
+    def get_status_display(self, obj):
+        document = self._document(obj)
+        form = ((getattr(document, "metadata", None) or {}).get("form") or {}) if document else {}
+        if (
+            obj.status == "awaiting_posting"
+            and getattr(obj.step, "post_lpo_after_approval", False)
+            and form.get("lpo_generation_ready")
+        ):
+            return "Awaiting LPO submission"
+        return obj.get_status_display()
 
     def get_document_ref(self, obj):
         doc = self._document(obj)
@@ -757,6 +1029,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
         fields = [
             "id", "step", "assigned_to",
             "status", "status_display",
+            "execution_lane",
             "requires_signature",
             "comment", "held_until",
             "due_at", "acted_at",
@@ -768,6 +1041,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
             "file_name", "file_mime_type",
             "is_delegated", "delegated_from",
         ]
+        read_only_fields = ["execution_lane"]
 
 
 class WorkflowInstanceSerializer(serializers.ModelSerializer):
@@ -781,7 +1055,9 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
         fields = [
             "id", "target_type", "document", "payment_run", "template", "rule", "rule_label",
             "phase",
-            "status", "current_step_order",
+            "status", "current_step_order", "imprest_request_status",
+            "imprest_request_current_step_order", "imprest_request_completed_at",
+            "definition_version", "current_node_id",
             "started_by", "started_at", "completed_at", "tasks",
         ]
 
@@ -790,4 +1066,17 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
             return obj.rule.phase
         if obj.target_type == "payment_run":
             return "payment_run"
+        # V2 templates carry no routing rule, so derive the phase from the
+        # document's builder metadata (requisition / rfq / lpo / retirement …).
+        # Without this every branched workflow reported "request", which made
+        # completed stages read as generic "Approved" instead of e.g.
+        # "Requisition Approved".
+        if obj.document_id:
+            try:
+                from apps.documents.builder_workflow import infer_builder_workflow_phase
+                phase = infer_builder_workflow_phase(obj.document)
+                if phase:
+                    return phase
+            except Exception:
+                pass
         return "request"

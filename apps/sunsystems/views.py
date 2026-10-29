@@ -46,6 +46,10 @@ from .config import (
     get_budget_mapping,
     get_connection_override,
     get_form_values,
+    get_all_stages,
+    get_purchase_order_postings,
+    get_imprest_request_postings,
+    get_imprest_retirement_postings,
     get_journal_mapping,
     redact_connection,
 )
@@ -150,7 +154,9 @@ def _journal_mapping_and_values(data: dict):
             if mapping is None:
                 mapping = get_journal_mapping(doc, stage=stage)
             if not values:
-                values = get_form_values(doc)
+                # A dynamic LPO posting is expanded to one table/type group.
+                # Use its grouped values so the preview matches that exact PO.
+                values = (mapping or {}).get("_posting_values") or get_form_values(doc)
             if not connection:
                 connection = get_connection_override(doc)
 
@@ -170,27 +176,69 @@ class JournalPreviewView(APIView):
         serializer.is_valid(raise_exception=True)
         mapping, values, connection = _journal_mapping_and_values(serializer.validated_data)
 
-        if not mapping or not mapping.get("enabled"):
+        # Return the document's real posting choices with every preview. PO
+        # stages are expanded dynamically (one per table/transaction group), so
+        # the client cannot reliably infer them from the template metadata.
+        payload_options = []
+        document_id = serializer.validated_data.get("document_id")
+        if document_id:
+            from apps.documents.models import Document
+            document = Document.objects.filter(pk=document_id).first()
+            if document:
+                payload_options.extend(
+                    {"stage": int(item.get("stage", 1)), "label": item.get("label") or f"Stage {item.get('stage', 1)}", "component": (get_journal_mapping(document, int(item.get("stage", 1))) or {}).get("component") or "Journal"}
+                    for item in get_all_stages(document)
+                    if (
+                        (stage_mapping := get_journal_mapping(document, int(item.get("stage", 1))))
+                        and (
+                            stage_mapping.get("enabled")
+                            or any(isinstance(line, dict) and line.get("retirement") for line in stage_mapping.get("lines", []))
+                        )
+                    )
+                )
+                payload_options.extend(
+                    {"stage": int(item["stage"]), "label": item["label"], "component": "PurchaseOrder"}
+                    for item in get_purchase_order_postings(document)
+                )
+                payload_options.extend(
+                    {"stage": int(item["stage"]), "label": item["label"], "component": "Journal"}
+                    for item in get_imprest_request_postings(document)
+                )
+                payload_options.extend(
+                    {"stage": int(item["stage"]), "label": item["label"], "component": "Journal"}
+                    for item in get_imprest_retirement_postings(document)
+                )
+                payload_options.sort(key=lambda item: item["stage"])
+
+        retirement_preview = bool(
+            mapping
+            and any(isinstance(line, dict) and line.get("retirement") for line in mapping.get("lines", []))
+        )
+        if not mapping or (not mapping.get("enabled") and not retirement_preview):
             return Response({
                 "ok": False, "enabled": False,
                 "error": "Journal posting is not configured for this form.",
+                "payload_options": payload_options,
             })
 
         config = SunSystemsConfig.from_mapping(effective_connection(connection))
         try:
             build = build_sunsystems_ssc(
-                {**mapping, "validate_balance": False},  # preview always renders
+                {**mapping, "enabled": True, "validate_balance": False},  # preview renders configured retirement lines even when the parent journal switch is off
                 values,
                 business_unit_default=config.business_unit,
                 budget_code_default=config.budget_code,
                 pretty=True,
             )
         except MappingError as exc:
-            return Response({"ok": False, "enabled": True, "error": str(exc)})
+            return Response({"ok": False, "enabled": True, "error": str(exc), "payload_options": payload_options})
 
         soap_xml = build_executor_envelope(
             "{{SECURITY_TOKEN}}", build.component, build.method, build.ssc_xml, config=config
         )
+        warnings = list(build.warnings)
+        if retirement_preview and not mapping.get("enabled"):
+            warnings.insert(0, "This retirement mapping is present but disabled in the journal settings; it may not be posted until that stage is enabled.")
         return Response({
             "ok": True,
             "enabled": True,
@@ -203,7 +251,8 @@ class JournalPreviewView(APIView):
             "debit_total": str(build.debit_total),
             "credit_total": str(build.credit_total),
             "balanced": build.balanced,
-            "warnings": build.warnings,
+            "payload_options": payload_options,
+            "warnings": warnings,
             "error": None,
         })
 
@@ -910,7 +959,7 @@ class PaymentRunProcessView(APIView):
 
 
 class AccountsQueryView(APIView):
-    """Return supplier accounts from SunSystems (Accounts/Query, AccountType=1).
+    """Return supplier accounts from SunSystems (Supplier/Query).
 
     GET /api/v1/sunsystems/accounts/?business_unit=PK1
 
@@ -919,7 +968,7 @@ class AccountsQueryView(APIView):
         account_type    default 1 (Creditors/Suppliers); pass 0 for all
 
     Response:
-        { accounts: [{ account_code, account_type, description }] }
+        { accounts: [{ account_code, account_type, description, email }] }
     """
 
     permission_classes = [IsAuthenticated]
@@ -935,15 +984,8 @@ class AccountsQueryView(APIView):
         )
         account_type = str(request.query_params.get("account_type", "1")).strip()
 
-        # Build filter — omit if account_type is blank (return all)
-        if account_type:
-            filter_xml = (
-                f'<Filter>'
-                f'<Item name="/Accounts/AccountType" operator="EQU" value="{account_type}"/>'
-                f'</Filter>'
-            )
-        else:
-            filter_xml = ""
+        # No filter needed for Supplier/Query - get all suppliers
+        filter_xml = ""
 
         ssc_payload = (
             "<SSC>\n"
@@ -955,11 +997,23 @@ class AccountsQueryView(APIView):
             "  <Payload>\n"
             f"    {filter_xml}\n"
             "    <Select>\n"
-            "      <Accounts>\n"
-            "        <AccountCode>.</AccountCode>\n"
-            "        <AccountType>.</AccountType>\n"
+            "      <Supplier>\n"
             "        <Description>.</Description>\n"
-            "      </Accounts>\n"
+            "        <EMailAddress>.</EMailAddress>\n"
+            "        <SupplierCode>.</SupplierCode>\n"
+            "        <SupplierName>.</SupplierName>\n"
+            "        <SupplierAddress>\n"
+            "          <AddressLine1>.</AddressLine1>\n"
+            "          <AddressLine2>.</AddressLine2>\n"
+            "          <AddressLine3>.</AddressLine3>\n"
+            "          <AddressLine4>.</AddressLine4>\n"
+            "          <AddressLine5>.</AddressLine5>\n"
+            "          <Country>.</Country>\n"
+            "          <PostalCode>.</PostalCode>\n"
+            "          <TelephoneNumber>.</TelephoneNumber>\n"
+            "          <TownCity>.</TownCity>\n"
+            "        </SupplierAddress>\n"
+            "      </Supplier>\n"
             "    </Select>\n"
             "  </Payload>\n"
             "</SSC>"
@@ -967,7 +1021,7 @@ class AccountsQueryView(APIView):
 
         try:
             client = SunSystemsClient(config)
-            response_xml = client.execute("Accounts", "Query", ssc_payload)
+            response_xml = client.execute("Supplier", "Query", ssc_payload)
         except SunSystemsError as exc:
             return Response(
                 {"ok": False, "error": str(exc)},
@@ -977,19 +1031,291 @@ class AccountsQueryView(APIView):
         accounts = []
         try:
             root = ET.fromstring(response_xml or "<SSC/>")
-            for acct in root.findall(".//Accounts"):
-                code = (acct.findtext("AccountCode") or "").strip()
+            for supplier in root.findall(".//Supplier"):
+                code = (supplier.findtext("SupplierCode") or "").strip()
                 if not code:
                     continue
+                description = (supplier.findtext("SupplierName") or supplier.findtext("Description") or "").strip()
+                email = (supplier.findtext("EMailAddress") or "").strip()
+                address_node = supplier.find("SupplierAddress")
+                address_lines = [
+                    (address_node.findtext(f"AddressLine{i}") or "").strip()
+                    for i in range(1, 6)
+                ] if address_node is not None else []
+                address = " ".join(filter(None, address_lines))
+                if address_node is not None:
+                    address = ", ".join(filter(None, (
+                        address,
+                        (address_node.findtext("TownCity") or "").strip(),
+                        (address_node.findtext("PostalCode") or "").strip(),
+                        (address_node.findtext("Country") or "").strip(),
+                    )))
+                phone = (address_node.findtext("TelephoneNumber") or "").strip() if address_node is not None else ""
                 accounts.append({
                     "account_code":  code,
-                    "account_type":  (acct.findtext("AccountType") or "").strip(),
-                    "description":   (acct.findtext("Description") or "").strip(),
+                    "account_type":  account_type,  # Preserve backward compatibility
+                    "description":   description,
+                    "email":        email,
+                    "phone":        phone,
+                    "address":      address,
                 })
         except ET.ParseError as exc:
             return Response(
                 {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+        except Exception as exc:
+            return Response(
+                {"ok": False, "error": f"Unexpected error processing SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         return Response({"ok": True, "accounts": accounts, "count": len(accounts)})
+
+
+class ItemsQueryView(APIView):
+    """Return item records from SunSystems (Item/Query).
+
+    GET /api/v1/sunsystems/items/?business_unit=PK1
+
+    Optional query params:
+        business_unit   override the configured default
+
+    Response:
+        { items: [{ item_code, description, item_type, base_item_unit }] }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        import xml.etree.ElementTree as ET
+
+        conn = effective_connection()
+        config = SunSystemsConfig.from_mapping(conn)
+
+        business_unit = str(
+            request.query_params.get("business_unit") or config.business_unit or "PK1"
+        )
+
+        ssc_payload = (
+            "<SSC>\n"
+            "  <ErrorContext/>\n"
+            "  <User/>\n"
+            "  <SunSystemsContext>\n"
+            f"    <BusinessUnit>{business_unit}</BusinessUnit>\n"
+            "  </SunSystemsContext>\n"
+            "  <Payload>\n"
+            "    <Select>\n"
+            "      <Item>\n"
+            "        <BaseItemUnit>.</BaseItemUnit>\n"
+            "        <Description>.</Description>\n"
+            "        <ItemCode>.</ItemCode>\n"
+            "        <ItemType>.</ItemType>\n"
+            "      </Item>\n"
+            "    </Select>\n"
+            "  </Payload>\n"
+            "</SSC>"
+        )
+
+        try:
+            client = SunSystemsClient(config)
+            response_xml = client.execute("Item", "Query", ssc_payload)
+        except SunSystemsError as exc:
+            return Response(
+                {"ok": False, "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        items = []
+        try:
+            root = ET.fromstring(response_xml or "<SSC/>")
+            for item in root.findall(".//Item"):
+                code = (item.findtext("ItemCode") or "").strip()
+                if not code:
+                    continue
+                items.append({
+                    "item_code": code,
+                    "description": (item.findtext("Description") or "").strip(),
+                    "item_type": (item.findtext("ItemType") or "").strip(),
+                    "base_item_unit": (item.findtext("BaseItemUnit") or "").strip(),
+                })
+        except ET.ParseError as exc:
+            return Response(
+                {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception as exc:
+            return Response(
+                {"ok": False, "error": f"Unexpected error processing SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"ok": True, "items": items, "count": len(items)})
+
+
+class ProductGroupsQueryView(APIView):
+    """Return product groups from SunSystems (Item/Query).
+
+    GET /api/v1/sunsystems/product-groups/?business_unit=PK1
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        import xml.etree.ElementTree as ET
+
+        config = SunSystemsConfig.from_mapping(effective_connection())
+        business_unit = str(
+            request.query_params.get("business_unit") or config.business_unit or "PK1"
+        )
+        ssc_payload = (
+            "<SSC>\n"
+            "  <ErrorContext/>\n"
+            "  <User/>\n"
+            "  <SunSystemsContext>\n"
+            f"    <BusinessUnit>{business_unit}</BusinessUnit>\n"
+            "  </SunSystemsContext>\n"
+            "  <Payload>\n"
+            "    <Select>\n"
+            "      <Item>\n"
+            "        <BaseItemUnit>.</BaseItemUnit>\n"
+            "        <Description>.</Description>\n"
+            "        <ProductGroup>.</ProductGroup>\n"
+            "        <ItemType>.</ItemType>\n"
+            "      </Item>\n"
+            "    </Select>\n"
+            "  </Payload>\n"
+            "</SSC>"
+        )
+
+        try:
+            client = SunSystemsClient(config)
+            response_xml = client.execute("Item", "Query", ssc_payload)
+        except SunSystemsError as exc:
+            return Response(
+                {"ok": False, "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        product_groups = []
+        try:
+            root = ET.fromstring(response_xml or "<SSC/>")
+            seen = set()
+            for item in root.findall(".//Item"):
+                code = (item.findtext("ProductGroup") or "").strip()
+                if not code or code in seen:
+                    continue
+                seen.add(code)
+                product_groups.append({
+                    "product_group": code,
+                    "description": (item.findtext("Description") or "").strip(),
+                    "item_type": (item.findtext("ItemType") or "").strip(),
+                    "base_item_unit": (item.findtext("BaseItemUnit") or "").strip(),
+                })
+        except ET.ParseError as exc:
+            return Response(
+                {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception as exc:
+            return Response(
+                {"ok": False, "error": f"Unexpected error processing SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"ok": True, "product_groups": product_groups, "count": len(product_groups)})
+
+
+class AnalysisCodesQueryView(APIView):
+    """Return analysis codes for ONE SunSystems dimension (AnalysisCodes/Query).
+
+    GET /api/v1/sunsystems/analysis-codes/?dimension=04&business_unit=PK1
+
+    ``dimension`` is the AnalysisDimensionId the codes belong to (e.g. "04"
+    Project, "05" Cost Centre). The SunSystems query requires it as a filter,
+    so it is mandatory here.
+
+    Response:
+        { analysis_codes: [{ analysis_code, analysis_dimension_id, name }] }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        import xml.etree.ElementTree as ET
+
+        conn = effective_connection()
+        config = SunSystemsConfig.from_mapping(conn)
+
+        business_unit = str(
+            request.query_params.get("business_unit") or config.business_unit or "PK1"
+        )
+        dimension = str(request.query_params.get("dimension") or "").strip()
+        if not dimension:
+            return Response(
+                {"ok": False, "error": "A dimension id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        safe_dimension = (
+            dimension.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+        ssc_payload = (
+            "<SSC>\n"
+            "  <ErrorContext/>\n"
+            "  <User/>\n"
+            "  <SunSystemsContext>\n"
+            f"    <BusinessUnit>{business_unit}</BusinessUnit>\n"
+            "  </SunSystemsContext>\n"
+            "  <Payload>\n"
+            "    <Filter>\n"
+            f'      <Item name="/AnalysisCodes/AnalysisDimensionId" operator="EQU" value="{safe_dimension}"/>\n'
+            "    </Filter>\n"
+            "    <Select>\n"
+            "      <AnalysisCodes>\n"
+            "        <AnalysisCode>.</AnalysisCode>\n"
+            "        <AnalysisDimensionId>.</AnalysisDimensionId>\n"
+            "        <Name>.</Name>\n"
+            "      </AnalysisCodes>\n"
+            "    </Select>\n"
+            "  </Payload>\n"
+            "</SSC>"
+        )
+
+        try:
+            client = SunSystemsClient(config)
+            response_xml = client.execute("AnalysisCodes", "Query", ssc_payload)
+        except SunSystemsError as exc:
+            return Response(
+                {"ok": False, "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        analysis_codes = []
+        try:
+            root = ET.fromstring(response_xml or "<SSC/>")
+            for node in root.findall(".//AnalysisCodes"):
+                code = (node.findtext("AnalysisCode") or "").strip()
+                if not code:
+                    continue
+                analysis_codes.append({
+                    "analysis_code": code,
+                    "analysis_dimension_id": (node.findtext("AnalysisDimensionId") or dimension).strip(),
+                    "name": (node.findtext("Name") or "").strip(),
+                })
+        except ET.ParseError as exc:
+            return Response(
+                {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception as exc:
+            return Response(
+                {"ok": False, "error": f"Unexpected error processing SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"ok": True, "analysis_codes": analysis_codes, "count": len(analysis_codes)})

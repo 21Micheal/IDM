@@ -51,13 +51,45 @@ class AuditLogSerializer(serializers.ModelSerializer):
             return f"{actor} deactivated {obj.object_repr}".strip()
 
         object_label = self._get_document_label(obj)
+        label_upper = object_label.upper()
+        document_kind = (
+            "requisition" if label_upper.startswith("REQ-")
+            else "LPO" if label_upper.startswith("LPO-")
+            else "document"
+        )
+
+        if event == "document.viewed":
+            target = f"{document_kind} {object_label}" if object_label else f"the {document_kind}"
+            return f"{actor} viewed {target}"
+
+        if event == "document.updated":
+            changes = obj.changes if isinstance(obj.changes, dict) else {}
+            target = f"{document_kind} {object_label}" if object_label else f"the {document_kind}"
+
+            if changes.get("form"):
+                changed_fields = changes.get("changed_fields")
+                if isinstance(changed_fields, list) and changed_fields:
+                    return f"{actor} amended {target}: {', '.join(str(field) for field in changed_fields)}"
+                if isinstance(changed_fields, list):
+                    return f"{actor} saved a new version of {target}; no form fields changed"
+                return f"{actor} saved a new version of {target}; field changes were not recorded"
+
+            metadata_edits = changes.get("metadata_edits")
+            if isinstance(metadata_edits, list) and metadata_edits:
+                fields = [
+                    str(edit.get("field") or edit.get("key") or "Field")
+                    for edit in metadata_edits if isinstance(edit, dict)
+                ]
+                if fields:
+                    return f"{actor} updated {target}: {', '.join(fields)}"
+
+            return f"{actor} updated {target}"
+
         if obj.object_type == "Document" or event.startswith("document.") or event.startswith("workflow."):
             event_verb = self._get_verb(event)
             if object_label:
-                if event == "document.version_uploaded":
-                    return f"{actor} {event_verb} document {object_label}"
-                return f"{actor} {event_verb} document {object_label}"
-            return f"{actor} {event_verb} the document"
+                return f"{actor} {event_verb} {document_kind} {object_label}"
+            return f"{actor} {event_verb} the {document_kind}"
 
         if event == "permission.changed":
             return f"{actor} changed permissions"

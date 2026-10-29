@@ -1495,3 +1495,89 @@ def poll_active_mailboxes():
     for mailbox_id in due_ids:
         poll_mailbox.delay(mailbox_id)
     return len(due_ids)
+
+
+@shared_task(bind=True, max_retries=3, queue="default")
+def email_generated_lpo_to_supplier(self, lpo_id: str, supplier_email: str, requisition_id: str, lpo_reference: str):
+    """Email a generated LPO PDF to its selected supplier, once per LPO."""
+    from django.conf import settings
+    from django.core.mail import EmailMultiAlternatives
+    from django.db import transaction
+    from django.utils import timezone
+
+    from .models import Document
+
+    recipient = str(supplier_email or "").strip()
+    if not recipient or "@" not in recipient:
+        logger.warning("Skipping LPO supplier email %s: invalid recipient", lpo_id)
+        return
+
+    try:
+        with transaction.atomic():
+            lpo = Document.objects.select_for_update().get(pk=lpo_id)
+            metadata = dict(lpo.metadata or {})
+            state = dict(metadata.get("supplier_email") or {})
+            if state.get("status") == "sent":
+                return
+            # The row lock also prevents duplicate sends when a successful PO
+            # posting is revisited while another email task is already running.
+            if state.get("status") == "sending":
+                return
+            state.update({
+                "status": "sending",
+                "recipient": recipient,
+                "started_at": timezone.now().isoformat(),
+            })
+            metadata["supplier_email"] = state
+            lpo.metadata = metadata
+            lpo.save(update_fields=["metadata", "updated_at"])
+
+        with lpo.file.open("rb") as pdf_file:
+            attachment = pdf_file.read()
+        if not attachment:
+            raise ValueError(f"Generated LPO {lpo_id} has an empty file")
+
+        requisition_reference = ""
+        if requisition_id:
+            requisition_reference = (
+                Document.objects.filter(pk=requisition_id)
+                .values_list("reference_number", flat=True)
+                .first()
+                or ""
+            )
+        subject = f"Purchase Order {lpo_reference}"
+        body = f"Please find attached Purchase Order {lpo_reference}."
+        if requisition_reference:
+            body += f"\nRequisition reference: {requisition_reference}."
+
+        email = EmailMultiAlternatives(
+            subject=subject,
+            body=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[recipient],
+        )
+        email.attach(lpo.file_name or f"Purchase Order {lpo_reference}.pdf", attachment, "application/pdf")
+        email.send(fail_silently=False)
+
+        with transaction.atomic():
+            lpo = Document.objects.select_for_update().get(pk=lpo_id)
+            metadata = dict(lpo.metadata or {})
+            state = dict(metadata.get("supplier_email") or {})
+            state.update({"status": "sent", "sent_at": timezone.now().isoformat()})
+            metadata["supplier_email"] = state
+            lpo.metadata = metadata
+            lpo.save(update_fields=["metadata", "updated_at"])
+    except Exception as exc:
+        logger.exception("Failed to email LPO %s to supplier %s", lpo_id, recipient)
+        try:
+            with transaction.atomic():
+                lpo = Document.objects.select_for_update().get(pk=lpo_id)
+                metadata = dict(lpo.metadata or {})
+                state = dict(metadata.get("supplier_email") or {})
+                state.update({"status": "failed", "error": str(exc)[:500]})
+                metadata["supplier_email"] = state
+                lpo.metadata = metadata
+                lpo.save(update_fields=["metadata", "updated_at"])
+        except Exception:
+            logger.exception("Could not record supplier email failure for LPO %s", lpo_id)
+        raise self.retry(exc=exc, countdown=min(300, 30 * (2 ** self.request.retries)))

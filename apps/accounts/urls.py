@@ -3,15 +3,8 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     LoginView, VerifyOTPView, ResendOTPView,
     MeView, ChangePasswordView, EnableMFAView, UserPreferencesView, UserSignatureView, UserSignatureImageView,
-    PasswordResetRequestView, PasswordResetConfirmView,
-    OIDCExchangeView, ConfigView,
+    PasswordResetRequestView, PasswordResetConfirmView, DeploymentView,
     UserViewSet, DepartmentViewSet, UserGroupViewSet, UserDelegationViewSet,
-)
-from .internal_idp import (
-    InternalIdpUserAuthorizationView,
-    InternalIdpUserLookupView,
-    InternalIdpUserSearchView,
-    InternalIdpBackchannelLogoutView,
 )
 
 router = DefaultRouter()
@@ -21,13 +14,12 @@ router.register(r"groups",      UserGroupViewSet,     basename="group")
 router.register(r"delegations", UserDelegationViewSet, basename="delegation")
 
 urlpatterns = [
-    # Public config
-    path("config/",               ConfigView.as_view(),        name="config"),
     # Auth
     path("auth/login/",           LoginView.as_view(),         name="login"),
     path("auth/verify-otp/",      VerifyOTPView.as_view(),     name="verify-otp"),
     path("auth/resend-otp/",      ResendOTPView.as_view(),     name="resend-otp"),
     path("auth/me/",              MeView.as_view(),            name="me"),
+    path("auth/deployment/",      DeploymentView.as_view(),    name="deployment"),
     path("auth/change-password/", ChangePasswordView.as_view(), name="change-password"),
     path("auth/mfa/",             EnableMFAView.as_view(),     name="toggle-mfa"),
     path("auth/preferences/",     UserPreferencesView.as_view(), name="preferences"),
@@ -36,18 +28,6 @@ urlpatterns = [
     # Password reset
     path("auth/password-reset/request/",  PasswordResetRequestView.as_view(),  name="password-reset-request"),
     path("auth/password-reset/confirm/", PasswordResetConfirmView.as_view(), name="password-reset-confirm"),
-    # OIDC token exchange — receives Keycloak id_token, returns simplejwt pair
-    path("auth/oidc/exchange/", OIDCExchangeView.as_view(), name="oidc-exchange"),
-    # OIDC back-channel logout (Keycloak single sign-out)
-    path("auth/oidc/backchannel-logout/", InternalIdpBackchannelLogoutView.as_view(), name="oidc-backchannel-logout"),
-    # Role-only Keycloak mapper / financial launcher API. Protected by DMS_INTERNAL_IDP_API_KEY.
-    path("internal/idp/users/lookup/", InternalIdpUserLookupView.as_view(), name="internal-idp-user-lookup"),
-    path("internal/idp/users/lookup", InternalIdpUserLookupView.as_view(), name="internal-idp-user-lookup-noslash"),
-    path("internal/idp/users/search/", InternalIdpUserSearchView.as_view(), name="internal-idp-user-search"),
-    path("internal/idp/users/authorization/", InternalIdpUserAuthorizationView.as_view(), name="internal-idp-user-authorization-email"),
-    path("internal/idp/users/authorization", InternalIdpUserAuthorizationView.as_view(), name="internal-idp-user-authorization-email-noslash"),
-    path("internal/idp/users/<uuid:user_id>/authorization/", InternalIdpUserAuthorizationView.as_view(), name="internal-idp-user-authorization"),
-    path("internal/idp/users/<uuid:user_id>/authorization", InternalIdpUserAuthorizationView.as_view(), name="internal-idp-user-authorization-noslash"),
     # User, department & group management
     path("", include(router.urls)),
 ]

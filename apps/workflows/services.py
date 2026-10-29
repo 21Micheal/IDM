@@ -13,11 +13,17 @@ Changes in this version:
   - _activate_step for approval steps now passes the step's custom email
     fields (approver_email_subject / approver_email_body) through to the
     notify_task_assigned Celery task so the notifications app can render them.
+  - Added support for v2 branched workflow definitions:
+      • is_v2_workflow() checks if a template uses the new branched workflow format
+      • build_evaluation_context() builds the context for evaluating workflow conditions
+      • When definition is present, the workflow engine will follow it instead of legacy rules
 
 New methods:
   WorkflowService.return_for_review(task, actor, comment)
   WorkflowService.hold(task, actor, comment, hold_hours)
   WorkflowService.release_hold(task, actor, *, auto=False)
+  WorkflowService.is_v2_workflow(template)
+  WorkflowService.build_evaluation_context(document, payment_run)
 """
 import logging
 
@@ -27,7 +33,6 @@ from django.utils import timezone
 from django.conf import settings
 from django.core.files.base import ContentFile
 from datetime import timedelta
-from random import choice
 import hashlib
 import mimetypes
 import os
@@ -61,24 +66,78 @@ class WorkflowService:
 
     @staticmethod
     def _document_workflow_phase(document):
+        # Delegate to the canonical phase-inference helper which handles
+        # procurement forms (defaults to "requisition" when no explicit phase
+        # is written into metadata), retirement detection, and the general
+        # "request" case.  Using this avoids the previous gap where a plain
+        # metadata.form.workflow_phase read fell back to DEFAULT_PHASE="request"
+        # even for procurement documents, causing routing rules stored under
+        # phase="requisition" to be skipped.
+        try:
+            from apps.documents.builder_workflow import (
+                infer_builder_workflow_phase,
+                is_built_form_document,
+            )
+            if is_built_form_document(document):
+                inferred = infer_builder_workflow_phase(document)
+                if inferred:
+                    return inferred
+        except Exception:
+            pass
+        # Fallback for non-builder documents: read from metadata directly
         metadata = document.metadata if isinstance(document.metadata, dict) else {}
         form = metadata.get("form") if isinstance(metadata.get("form"), dict) else None
-        if not form:
-            return WorkflowRule.DEFAULT_PHASE
-        phase = (
-            form.get("workflow_phase")
-            or metadata.get("workflow_phase")
-            or WorkflowRule.DEFAULT_PHASE
-        )
-        return (str(phase).strip().lower() or WorkflowRule.DEFAULT_PHASE)
+        if form:
+            phase = form.get("workflow_phase") or metadata.get("workflow_phase")
+            if phase:
+                return str(phase).strip().lower()
+        return WorkflowRule.DEFAULT_PHASE
 
     @staticmethod
     def _resolve_routing(document):
         """Pick the (rule, template) for a document by builder phase and amount threshold."""
         doc_type = document.document_type
-        amount   = document.amount or 0
         currency = (document.currency or "").upper()
         phase = WorkflowService._document_workflow_phase(document)
+
+        # Check if the primary template uses v2 branched workflow
+        # If so, skip legacy rule-based routing entirely
+        primary = doc_type.workflow_template
+        if (
+            primary
+            and primary.is_active
+            and primary.target_type == "document"
+            and primary.document_type_id == doc_type.id
+            and WorkflowService.is_v2_workflow(primary)
+        ):
+            # V2 workflow: routing is inside the definition, no legacy rules needed
+            return None, primary
+
+        # Use document.amount when set; otherwise try to derive it from form values.
+        # Builder-form requisitions never populate document.amount directly — the
+        # total lives inside metadata.form.values as computed fields (e.g.
+        # "total_gross_copy", "total_net_price_*").  Scan those fields and take the
+        # largest numeric value whose key contains a common total-related keyword.
+        amount = document.amount
+        if not amount:
+            try:
+                form_values = (
+                    ((document.metadata or {}).get("form") or {}).get("values") or {}
+                )
+                AMOUNT_KEYWORDS = ("total", "amount", "gross", "net", "cost", "price", "sum")
+                candidates = []
+                for key, val in form_values.items():
+                    key_lower = key.lower()
+                    if any(kw in key_lower for kw in AMOUNT_KEYWORDS):
+                        try:
+                            candidates.append(float(val))
+                        except (TypeError, ValueError):
+                            pass
+                if candidates:
+                    amount = max(candidates)
+            except Exception:
+                pass
+        amount = amount or 0
 
         base_rules = WorkflowRule.objects.filter(
             target_type="document",
@@ -111,7 +170,6 @@ class WorkflowService:
         if rule:
             return rule, rule.template
 
-        primary = doc_type.workflow_template
         if (
             primary
             and primary.is_active
@@ -133,6 +191,18 @@ class WorkflowService:
         currencies = payment_run.currency_codes if isinstance(payment_run.currency_codes, list) else []
         currency = (currencies[0] if len(currencies) == 1 else "").upper()
         phase = "payment_run"
+
+        # Check if there's a v2 workflow template for payment runs
+        template = (
+            WorkflowTemplate.objects
+            .filter(target_type="payment_run", is_active=True)
+            .order_by("name")
+            .first()
+        )
+        
+        if template and WorkflowService.is_v2_workflow(template):
+            # V2 workflow: routing is inside the definition
+            return None, template
 
         base_rules = WorkflowRule.objects.filter(
             target_type="payment_run",
@@ -164,12 +234,6 @@ class WorkflowService:
         if rule:
             return rule, rule.template
 
-        template = (
-            WorkflowTemplate.objects
-            .filter(target_type="payment_run", is_active=True)
-            .order_by("name")
-            .first()
-        )
         if template:
             return None, template
 
@@ -182,6 +246,118 @@ class WorkflowService:
     def resolve_template(document) -> WorkflowTemplate:
         return WorkflowService._resolve_routing(document)[1]
 
+    # ── V2 Workflow Support ──────────────────────────────────────────────────
+
+    @staticmethod
+    def is_v2_workflow(template: WorkflowTemplate) -> bool:
+        """Check if a template uses the v2 branched workflow definition."""
+        return bool(template.definition and template.definition.get("version") == 2)
+
+    @staticmethod
+    def build_evaluation_context(document=None, payment_run=None) -> dict:
+        """
+        Build the evaluation context for workflow conditions.
+        
+        This context provides all the fields that conditions can reference:
+        - Document metadata (title, amount, currency, etc.)
+        - System fields (phase, uploader info, etc.)
+        - Form field values (extracted from document metadata)
+        
+        Args:
+            document: Optional Document instance
+            payment_run: Optional PaymentRun instance
+        
+        Returns:
+            Dict with field_id -> value mappings
+        """
+        context = {}
+        
+        if document:
+            # Document-level fields
+            context["document.title"] = document.title or ""
+            context["document.created_at"] = document.created_at.isoformat() if document.created_at else ""
+            
+            # Amount with currency
+            if document.amount:
+                context["amount"] = {
+                    "amount": float(document.amount),
+                    "currency": document.currency or "USD",
+                }
+            else:
+                context["amount"] = None
+            
+            # Uploader information
+            if document.uploaded_by:
+                uploader = document.uploaded_by
+                context["uploader.department"] = (
+                    uploader.department.name if uploader.department else ""
+                )
+                now = timezone.now()
+                context["uploader.groups"] = list(
+                    uploader.group_memberships.filter(
+                        group__is_active=True,
+                    ).filter(
+                        Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+                    ).values_list("group_id", flat=True)
+                )
+            else:
+                context["uploader.department"] = ""
+                context["uploader.groups"] = []
+            
+            # Workflow phase
+            try:
+                from apps.documents.builder_workflow import infer_builder_workflow_phase, is_built_form_document
+                if is_built_form_document(document):
+                    phase = infer_builder_workflow_phase(document)
+                    if phase:
+                        context["context.phase"] = phase
+            except Exception:
+                pass
+            
+            # Fallback to metadata for phase
+            if "context.phase" not in context:
+                metadata = document.metadata if isinstance(document.metadata, dict) else {}
+                form = metadata.get("form") if isinstance(metadata.get("form"), dict) else None
+                if form:
+                    phase = form.get("workflow_phase") or metadata.get("workflow_phase")
+                    if phase:
+                        context["context.phase"] = str(phase).strip().lower()
+            
+            # Extract form field values
+            metadata = document.metadata if isinstance(document.metadata, dict) else {}
+            form_values = metadata.get("form", {}).get("values") or {}
+            if isinstance(form_values, dict):
+                for field_id, value in form_values.items():
+                    context[field_id] = value
+        
+        elif payment_run:
+            # Payment run fields
+            context["payment_run.line_count"] = len(payment_run.lines) if payment_run.lines else 0
+            context["payment_run.total"] = {
+                "amount": float(payment_run.total_amount) if payment_run.total_amount else 0,
+                "currency": payment_run.currency_codes[0] if payment_run.currency_codes else "USD",
+            }
+            context["context.phase"] = "payment_run"
+            
+            if payment_run.submitted_by:
+                uploader = payment_run.submitted_by
+                context["uploader.department"] = (
+                    uploader.department.name if uploader.department else ""
+                )
+                now = timezone.now()
+                context["uploader.groups"] = list(
+                    uploader.group_memberships.filter(
+                        group__is_active=True,
+                    ).filter(
+                        Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+                    ).values_list("group_id", flat=True)
+                )
+            else:
+                context["uploader.department"] = ""
+                context["uploader.groups"] = []
+        
+        return context
+
     # ── Start ──────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -192,13 +368,41 @@ class WorkflowService:
         ).first()
         if existing:
             if not WorkflowService._has_active_step_tasks(existing, existing.current_step_order):
-                WorkflowService._activate_step(existing, order=existing.current_step_order)
+                # Use v2 activation if applicable
+                if WorkflowService.is_v2_workflow(existing.template):
+                    WorkflowService._activate_v2_step(existing)
+                else:
+                    WorkflowService._activate_step(existing, order=existing.current_step_order)
+            if document is not None:
+                metadata = dict(document.metadata or {})
+                form = dict(metadata.get("form") or {})
+                handoff = form.pop("return_for_rework", None)
+                if handoff is not None:
+                    form["last_return_for_rework"] = handoff
+                    if form.get("imprest_request_workflow_status") == "returned":
+                        form["imprest_request_workflow_status"] = "in_progress"
+                    metadata["form"] = form
+                    document.metadata = metadata
+                    WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
             return existing
 
         rule, template = WorkflowService._resolve_routing(document)
         phase = WorkflowService._document_workflow_phase(document)
         reusable = None
-        if phase != WorkflowRule.DEFAULT_PHASE:
+        reuse_completed_instance = phase != WorkflowRule.DEFAULT_PHASE
+        if document is not None:
+            try:
+                from apps.documents.builder_workflow import (
+                    PROCUREMENT_WORKFLOW_STAGES,
+                    is_procurement_document,
+                )
+                reuse_completed_instance = reuse_completed_instance or (
+                    is_procurement_document(document)
+                    and phase in PROCUREMENT_WORKFLOW_STAGES
+                )
+            except Exception:
+                pass
+        if reuse_completed_instance:
             reusable = (
                 WorkflowInstance.objects
                 .filter(document=document)
@@ -213,11 +417,22 @@ class WorkflowService:
             reusable.status = "in_progress"
             reusable.current_step_order = 1
             reusable.completed_at = None
+            if phase == "request":
+                # Request is now the ordinary main workflow phase. Clear any
+                # detached-lane cursor/status left by earlier template runs.
+                reusable.imprest_request_status = ""
+                reusable.imprest_request_current_step_order = None
+                reusable.imprest_request_completed_at = None
             reusable.save(update_fields=[
                 "template", "rule", "started_by", "status",
                 "current_step_order", "completed_at", "updated_at",
+                *(["imprest_request_status", "imprest_request_current_step_order", "imprest_request_completed_at"] if phase == "request" else []),
             ])
-            WorkflowService._activate_step(reusable, order=1)
+            # Use v2 activation if applicable
+            if WorkflowService.is_v2_workflow(reusable.template):
+                WorkflowService._activate_v2_step(reusable)
+            else:
+                WorkflowService._activate_step(reusable, order=1)
             return reusable
 
         instance = WorkflowInstance.objects.create(
@@ -229,7 +444,11 @@ class WorkflowService:
             status="in_progress",
             current_step_order=1,
         )
-        WorkflowService._activate_step(instance, order=1)
+        # Use v2 activation if applicable
+        if WorkflowService.is_v2_workflow(instance.template):
+            WorkflowService._activate_v2_step(instance)
+        else:
+            WorkflowService._activate_step(instance, order=1)
         return instance
 
     @staticmethod
@@ -240,7 +459,11 @@ class WorkflowService:
         ).first()
         if existing:
             if not WorkflowService._has_active_step_tasks(existing, existing.current_step_order):
-                WorkflowService._activate_step(existing, order=existing.current_step_order)
+                # Use v2 activation if applicable
+                if WorkflowService.is_v2_workflow(existing.template):
+                    WorkflowService._activate_v2_step(existing)
+                else:
+                    WorkflowService._activate_step(existing, order=existing.current_step_order)
             return existing
 
         rule, template = WorkflowService._resolve_payment_run_routing(payment_run)
@@ -253,7 +476,11 @@ class WorkflowService:
             status="in_progress",
             current_step_order=1,
         )
-        WorkflowService._activate_step(instance, order=1)
+        # Use v2 activation if applicable
+        if WorkflowService.is_v2_workflow(instance.template):
+            WorkflowService._activate_v2_step(instance)
+        else:
+            WorkflowService._activate_step(instance, order=1)
         return instance
 
     # ── Approve ────────────────────────────────────────────────────────────
@@ -262,7 +489,12 @@ class WorkflowService:
     @transaction.atomic
     def approve(task: WorkflowTask, actor, comment: str = "", request=None, signature_placement=None,
                 items=None, use_new_signature: bool = False, signature_image=None) -> None:
-        WorkflowService._assert_actionable(task)
+        # Lock the workflow instance before the task. ``group_any`` creates a
+        # task for every eligible member; locking only a task would let two
+        # members approve different sibling tasks at the same time and advance
+        # the same lane twice.
+        task, instance = WorkflowService._lock_action_task(task)
+        WorkflowService._assert_actionable(task, instance=instance)
 
         task.status   = "approved"
         task.comment  = comment
@@ -271,9 +503,34 @@ class WorkflowService:
 
         action = WorkflowTaskAction.objects.create(task=task, actor=actor, action="approved", comment=comment)
 
-        instance   = task.workflow_instance
+        # Use the task's current mirrored order. The graph node keeps the same
+        # row when steps move, while the instance cursor is repaired on save.
         step       = task.step
         doc        = instance.document
+        execution_lane = task.execution_lane or "main"
+        advance_order = step.order
+        task_step_order = step.order
+        cursor_order = instance.imprest_request_current_step_order if execution_lane == "imprest_request" else instance.current_step_order
+        if WorkflowService.is_v2_workflow(instance.template) and cursor_order:
+            current_step = instance.template.steps.filter(order=cursor_order).first()
+            same_node = bool(
+                current_step and step.node_id and current_step.node_id
+                and current_step.node_id == step.node_id
+            )
+            same_legacy_step = bool(
+                current_step
+                and not (step.node_id and current_step.node_id)
+                and current_step.name.strip() == step.name.strip()
+                and current_step.step_type == step.step_type
+            )
+            if current_step and not (same_node or same_legacy_step):
+                raise WorkflowError(
+                    "This approval task no longer matches the workflow's active step. "
+                    "Refresh the task and contact an administrator if it remains available."
+                )
+            # Reorder-safe cursor correction: if the same graph node has moved,
+            # advance from its new position rather than the stale numeric cursor.
+            advance_order = step.order
 
         if step.requires_signature and doc is None:
             raise WorkflowError("Payment run workflow steps cannot require document signatures.")
@@ -314,17 +571,37 @@ class WorkflowService:
             # Payment runs also need action notifications
             WorkflowService._notify_action(action, None)
 
-        if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, step.order):
+        if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, task_step_order, execution_lane):
             return
 
-        WorkflowService._advance_step(instance, step.order)
+        if (
+            execution_lane == "main"
+            and step.post_imprest_request_after_approval
+            and doc is not None
+            and WorkflowService._start_imprest_request_step_posting_gate(
+                instance, step, doc, actor=actor,
+            )
+        ):
+            return
+
+        if execution_lane == "main" and step.post_lpo_after_approval and doc is not None:
+            if WorkflowService._start_lpo_posting_gate(instance, step, doc, actor=actor):
+                return
+
+        WorkflowService._advance_step(
+            instance,
+            advance_order,
+            task_step_order=task_step_order if advance_order != task_step_order else None,
+            execution_lane=execution_lane,
+        )
 
     # ── Reject ─────────────────────────────────────────────────────────────
 
     @staticmethod
     @transaction.atomic
     def reject(task: WorkflowTask, actor, comment: str = "") -> None:
-        WorkflowService._assert_actionable(task)
+        task, instance = WorkflowService._lock_action_task(task)
+        WorkflowService._assert_actionable(task, instance=instance)
 
         task.status   = "rejected"
         task.comment  = comment
@@ -333,7 +610,6 @@ class WorkflowService:
 
         action = WorkflowTaskAction.objects.create(task=task, actor=actor, action="rejected", comment=comment)
 
-        instance = task.workflow_instance
         doc      = instance.document
 
         # Handle audit log and notifications for both documents and payment runs
@@ -358,7 +634,7 @@ class WorkflowService:
             )
             WorkflowService._notify_action(action, None)
 
-        WorkflowService._complete(instance, "rejected")
+        WorkflowService._complete(instance, "rejected", execution_lane=task.execution_lane or "main")
 
     # ── Return for review ──────────────────────────────────────────────────
 
@@ -367,12 +643,29 @@ class WorkflowService:
     def return_for_review(
         task: WorkflowTask, actor, comment: str, return_to: str = "uploader"
     ) -> None:
-        WorkflowService._assert_actionable(task)
+        task, instance = WorkflowService._lock_action_task(task)
+        WorkflowService._assert_actionable(task, instance=instance)
         if not comment.strip():
             raise WorkflowError("A comment explaining what needs fixing is required.")
 
         if return_to not in ["previous_step", "uploader", "same_step"]:
             raise WorkflowError(f"Invalid return_to value: {return_to}")
+
+        previous_approval_action = None
+        if return_to == "previous_step":
+            # CASE branches can have unrelated numeric step orders. The actual
+            # previous approver is the last approval action completed before
+            # this task was created, regardless of phase or branch.
+            previous_approval_action = WorkflowTaskAction.objects.filter(
+                task__workflow_instance=instance,
+                task__execution_lane=task.execution_lane or "main",
+                task__step__step_type="approval",
+                action="approved",
+                actor__isnull=False,
+                created_at__lt=task.created_at,
+            ).select_related("task__step__template", "actor").order_by("-created_at").first()
+            if previous_approval_action is None:
+                raise WorkflowError("There is no previous approval step to return to.")
 
         task.status     = "returned"
         task.comment    = comment
@@ -384,8 +677,8 @@ class WorkflowService:
             task=task, actor=actor, action="returned", comment=comment, return_to=return_to
         )
 
-        instance       = task.workflow_instance
         current_order  = task.step.order
+        execution_lane = task.execution_lane or "main"
         doc            = instance.document
 
         # Payment runs cannot be returned - treat as rejection
@@ -400,7 +693,7 @@ class WorkflowService:
                     changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "return_to": return_to},
                 )
                 WorkflowService._notify_action(action, None)
-            WorkflowService._complete(instance, "rejected")
+            WorkflowService._complete(instance, "rejected", execution_lane=execution_lane)
             return
 
         AuditLog.objects.create(
@@ -412,30 +705,99 @@ class WorkflowService:
             changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "return_to": return_to},
         )
 
-        WorkflowService._skip_active_tasks(instance, step_order=current_order)
+        WorkflowService._skip_active_tasks(instance, step_order=current_order, execution_lane=execution_lane)
 
-        if return_to == "previous_step" and current_order > 1:
-            prev_order = current_order - 1
-            doc.status = f"Returned to Step {prev_order}"
-            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+        rework_editor = previous_approval_action.actor_id if previous_approval_action else None
 
-            instance.current_step_order = prev_order
-            instance.save(update_fields=["current_step_order"])
-
-            WorkflowService._activate_step(instance, order=prev_order)
-
+        # A returned document is a rework handoff. The previous approver gets
+        # edit access and a notification, but no approval task controls. On
+        # resubmission the active workflow cursor reactivates the step that
+        # requested the changes.
+        if execution_lane != "main":
+            instance.imprest_request_status = "returned"
+            instance.imprest_request_completed_at = timezone.now()
+            instance.save(update_fields=["imprest_request_status", "imprest_request_completed_at", "updated_at"])
+        doc.status = DocumentStatus.RETURNED
+        metadata = dict(doc.metadata or {})
+        form = dict(metadata.get("form") or {})
+        if return_to == "previous_step":
+            document_phase = (
+                WorkflowService._phase_for_step(previous_approval_action.task.step)
+                or WorkflowService._document_workflow_phase(doc)
+            )
+            form["return_for_rework"] = {
+                "editor_id": str(rework_editor),
+                "returned_by_task_id": str(task.id),
+                "resume_step_id": str(task.step_id),
+                "execution_lane": execution_lane,
+                "editor_process_step": f"{document_phase}_pending",
+            }
         else:
-            doc.status = DocumentStatus.RETURNED
-            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+            form.pop("return_for_rework", None)
+        if WorkflowService._document_workflow_phase(doc) == "request":
+            form["imprest_request_workflow_status"] = "returned"
+        metadata["form"] = form
+        doc.metadata = metadata
+        WorkflowService._save_document(doc, update_fields=["status", "metadata", "updated_at"])
 
-        WorkflowService._notify_action(action, doc)
+        WorkflowService._notify_action(
+            action, doc,
+            extra_recipients=[rework_editor] if rework_editor else [],
+            exclude_recipients=(
+                [
+                    value for value in (doc.uploaded_by_id, doc.owned_by_id)
+                    if value and str(value) != str(rework_editor)
+                ]
+                if return_to == "previous_step" else []
+            ),
+        )
+
+    @staticmethod
+    def _phase_for_step(step: WorkflowStep) -> str | None:
+        """Resolve the context.phase CASE containing a step in a v2 graph."""
+        definition = getattr(step.template, "definition", None) or {}
+        target_id = str(step.node_id or "")
+        if not target_id:
+            return None
+
+        def visit(blocks, phase=None):
+            if not isinstance(blocks, list):
+                return None
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if str(block.get("id") or "") == target_id:
+                    return phase
+                if block.get("kind") == "switch":
+                    phase_switch = str(block.get("field_id") or "").strip() == "context.phase"
+                    for case in block.get("cases") or []:
+                        if not isinstance(case, dict):
+                            continue
+                        case_values = case.get("values") or []
+                        case_phase_value = case.get("label") or (case_values[0] if case_values else "")
+                        case_phase = str(case_phase_value).strip().lower() if phase_switch else phase
+                        found = visit(case.get("blocks") or [], case_phase)
+                        if found:
+                            return found
+                    found = visit(block.get("default_blocks") or [], phase)
+                    if found:
+                        return found
+                else:
+                    for key in ("blocks", "then_blocks", "else_blocks", "true_blocks", "false_blocks"):
+                        found = visit(block.get(key) or [], phase)
+                        if found:
+                            return found
+            return None
+
+        return visit(definition.get("blocks") or [])
 
     # ── Hold ───────────────────────────────────────────────────────────────
 
     @staticmethod
     @transaction.atomic
     def hold(task: WorkflowTask, actor, comment: str, hold_hours: int = None) -> None:
-        WorkflowService._assert_actionable(task)
+        task, instance = WorkflowService._lock_action_task(task)
+        WorkflowService._assert_actionable(task, instance=instance)
 
         held_until = timezone.now() + timedelta(hours=hold_hours or 24)
 
@@ -450,10 +812,12 @@ class WorkflowService:
             comment=comment, hold_hours=hold_hours,
         )
 
-        doc        = task.workflow_instance.document
+        doc        = instance.document
+        execution_lane = task.execution_lane or "main"
         if doc is not None:
-            doc.status = "On Hold"
-            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+            if execution_lane == "main":
+                doc.status = "On Hold"
+                WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
             AuditLog.objects.create(
                 event=AuditEvent.WORKFLOW_HELD,
@@ -464,13 +828,13 @@ class WorkflowService:
                 changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "hold_hours": hold_hours},
             )
             WorkflowService._notify_action(action, doc)
-        elif task.workflow_instance.payment_run:
+        elif instance.payment_run:
             AuditLog.objects.create(
                 event=AuditEvent.WORKFLOW_HELD,
                 actor=actor,
                 object_type="PaymentRun",
-                object_id=str(task.workflow_instance.payment_run.pk),
-                object_repr=str(task.workflow_instance.payment_run.payment_reference)[:255],
+                object_id=str(instance.payment_run.pk),
+                object_repr=str(instance.payment_run.payment_reference)[:255],
                 changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "hold_hours": hold_hours},
             )
             WorkflowService._notify_action(action, None)
@@ -482,6 +846,7 @@ class WorkflowService:
     @staticmethod
     @transaction.atomic
     def release_hold(task: WorkflowTask, actor=None, *, auto: bool = False) -> None:
+        task, instance = WorkflowService._lock_action_task(task)
         if task.status != "held":
             raise WorkflowError("This task is not currently on hold.")
 
@@ -499,9 +864,9 @@ class WorkflowService:
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_RELEASED,
             actor=actor,
-            object_type=task.workflow_instance.document.__class__.__name__ if task.workflow_instance.document else "PaymentRun",
-            object_id=str(task.workflow_instance.document.pk) if task.workflow_instance.document else str(task.workflow_instance.payment_run_id),
-            object_repr=str(task.workflow_instance.document)[:255] if task.workflow_instance.document else str(task.workflow_instance.payment_run),
+            object_type=instance.document.__class__.__name__ if instance.document else "PaymentRun",
+            object_id=str(instance.document.pk) if instance.document else str(instance.payment_run_id),
+            object_repr=str(instance.document)[:255] if instance.document else str(instance.payment_run),
             changes={
                 "task_id": str(task.id),
                 "action": "released",
@@ -509,11 +874,11 @@ class WorkflowService:
             },
         )
 
-        doc  = task.workflow_instance.document
+        doc  = instance.document
         if doc is not None:
             WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
             WorkflowService._notify_action(action, doc)
-        elif task.workflow_instance.payment_run:
+        elif instance.payment_run:
             WorkflowService._notify_action(action, None)
 
     # ── Cancel ─────────────────────────────────────────────────────────────
@@ -525,9 +890,15 @@ class WorkflowService:
             raise WorkflowError("Only in-progress workflows can be cancelled.")
 
         WorkflowService._skip_active_tasks(instance)
+        WorkflowService._skip_active_tasks(instance, execution_lane="imprest_request")
         instance.status       = "cancelled"
         instance.completed_at = timezone.now()
-        instance.save(update_fields=["status", "completed_at"])
+        if instance.imprest_request_status == "in_progress":
+            instance.imprest_request_status = "cancelled"
+            instance.imprest_request_completed_at = timezone.now()
+        instance.save(update_fields=[
+            "status", "completed_at", "imprest_request_status", "imprest_request_completed_at",
+        ])
 
         doc        = instance.document
         if doc is None:
@@ -552,16 +923,114 @@ class WorkflowService:
     # ── Internals ──────────────────────────────────────────────────────────
 
     @staticmethod
-    def _activate_step(instance: WorkflowInstance, order: int) -> None:
+    def _v2_active_step_orders(instance: WorkflowInstance, execution_lane: str = "main"):
+        """Return ``(orders, end_outcome)`` for the v2 branch this instance is on.
+
+        ``orders`` are ``WorkflowStep.order`` values (1-based positions in the
+        flat mirror) for the approval/notification steps on the branch selected
+        by the evaluation context — e.g. the ``requisition`` case of a switch on
+        ``context.phase``.  Non-matching branches are skipped, so a fresh
+        requisition no longer starts at whatever case happened to be flattened
+        first (the bug that made new requisitions jump into LPO).
+        """
+        from apps.workflows.engine import (
+            build_field_map_from_document_type,
+            resolve_active_path,
+        )
+
+        definition = instance.template.definition or {}
+        document = instance.document
+        payment_run = instance.payment_run
+        context = WorkflowService.build_evaluation_context(
+            document=document, payment_run=payment_run
+        )
+        document_type = document.document_type if document is not None else None
+        field_map = (
+            build_field_map_from_document_type(document_type)
+            if document_type is not None else {}
+        )
+        lane_orders = []
+        counter = [0]
+
+        def collect_parallel(blocks):
+            for block in blocks or []:
+                kind = block.get("kind")
+                if kind in ("approval", "notification"):
+                    counter[0] += 1
+                    if kind == "approval" and (block.get("step") or {}).get("parallel_lane") == "imprest_request":
+                        lane_orders.append(counter[0])
+                elif kind == "if_else":
+                    for branch in block.get("branches") or []:
+                        collect_parallel(branch.get("blocks"))
+                    collect_parallel(block.get("else_blocks"))
+                elif kind == "switch":
+                    for case in block.get("cases") or []:
+                        collect_parallel(case.get("blocks"))
+                    collect_parallel(block.get("default_blocks"))
+
+        collect_parallel(definition.get("blocks"))
+        if execution_lane == "imprest_request":
+            return lane_orders, None
+
+        active_orders, end_outcome = resolve_active_path(definition, field_map, context)
+        procurement_request_phase = False
+        if document is not None:
+            try:
+                from apps.documents.builder_workflow import is_procurement_document
+                procurement_request_phase = (
+                    is_procurement_document(document)
+                    and str(context.get("context.phase") or "").strip().lower() == "request"
+                )
+            except Exception:
+                pass
+        # Older definitions may still carry the detached-lane marker on their
+        # Request CASE steps. During the new sequential Request phase, include
+        # those steps in the ordinary ordered path instead of hiding them in a
+        # separate lane.
+        if lane_orders and not procurement_request_phase:
+            active_orders = [order for order in active_orders if order not in set(lane_orders)]
+        return active_orders, end_outcome
+
+    @staticmethod
+    def _activate_v2_step(instance: WorkflowInstance, execution_lane: str = "main") -> None:
+        """Activate the first/next step on the branch of a v2 definition.
+
+        The definition decides which branch is live (switch on ``context.phase``
+        for procurement, if/else for other forms).  The flat ``WorkflowStep``
+        mirror just supplies the task/step rows, so activation resolves the
+        branch once and picks the matching order instead of trusting
+        ``current_step_order`` blindly.
+        """
+        orders, end_outcome = WorkflowService._v2_active_step_orders(instance, execution_lane)
+        if not orders:
+            WorkflowService._complete(instance, end_outcome or "approved", execution_lane=execution_lane)
+            return
+
+        order = (
+            instance.imprest_request_current_step_order
+            if execution_lane == "imprest_request" else instance.current_step_order
+        )
+        if order not in orders:
+            order = orders[0]
+            if execution_lane == "imprest_request":
+                instance.imprest_request_current_step_order = order
+                instance.save(update_fields=["imprest_request_current_step_order"])
+            else:
+                instance.current_step_order = order
+                instance.save(update_fields=["current_step_order"])
+        WorkflowService._activate_step(instance, order, execution_lane=execution_lane)
+
+    @staticmethod
+    def _activate_step(instance: WorkflowInstance, order: int, execution_lane: str = "main") -> None:
         try:
             step = instance.template.steps.get(order=order)
         except WorkflowStep.DoesNotExist:
-            WorkflowService._complete(instance, "approved")
+            WorkflowService._complete(instance, "approved", execution_lane=execution_lane)
             return
 
         # ── Notification step: fire-and-forget, then immediately advance ──────
         if step.step_type == "notification":
-            WorkflowService._execute_notification_step(instance, step, order)
+            WorkflowService._execute_notification_step(instance, step, order, execution_lane=execution_lane)
             return
 
         # ── Approval step: create tasks and wait for human action ─────────────
@@ -580,16 +1049,21 @@ class WorkflowService:
                     assigned_to=assigned,
                     status="in_progress",
                     due_at=due,
+                    execution_lane=execution_lane,
                 )
             )
 
         doc = instance.document
-        if doc is not None:
+        if doc is not None and execution_lane == "main":
             doc.status = step.status_label
             WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
-        instance.current_step_order = order
-        instance.save(update_fields=["current_step_order"])
+        if execution_lane == "imprest_request":
+            instance.imprest_request_current_step_order = order
+            instance.save(update_fields=["imprest_request_current_step_order"])
+        else:
+            instance.current_step_order = order
+            instance.save(update_fields=["current_step_order"])
 
         try:
             from apps.notifications.tasks import notify_task_assigned
@@ -605,10 +1079,14 @@ class WorkflowService:
                 # Schedule SLA notifications for both documents and payment runs
                 WorkflowService._schedule_task_sla_notifications(task)
         except Exception:
-            pass
+            logger.exception(
+                "Could not queue notifications for workflow step %s (order=%s)",
+                step.name,
+                order,
+            )
 
     @staticmethod
-    def _execute_notification_step(instance: WorkflowInstance, step: WorkflowStep, order: int) -> None:
+    def _execute_notification_step(instance: WorkflowInstance, step: WorkflowStep, order: int, execution_lane: str = "main") -> None:
         """
         Handle a notification step (informational blast to people outside the
         approval chain). Does not replace per-stage action/completion notifies:
@@ -619,12 +1097,16 @@ class WorkflowService:
           5. Auto-advance to the next step.
         """
         doc = instance.document
-        if doc is not None:
+        if doc is not None and execution_lane == "main":
             doc.status = step.status_label
             WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
-        instance.current_step_order = order
-        instance.save(update_fields=["current_step_order"])
+        if execution_lane == "imprest_request":
+            instance.imprest_request_current_step_order = order
+            instance.save(update_fields=["imprest_request_current_step_order"])
+        else:
+            instance.current_step_order = order
+            instance.save(update_fields=["current_step_order"])
 
         # Create a task record for auditability
         task = WorkflowTask.objects.create(
@@ -633,6 +1115,7 @@ class WorkflowService:
             assigned_to=None,
             status="notified",
             acted_at=timezone.now(),
+            execution_lane=execution_lane,
         )
 
         WorkflowTaskAction.objects.create(
@@ -672,14 +1155,23 @@ class WorkflowService:
                 },
             )
 
-        # Fire the notification email asynchronously for both documents and payment runs
-        if doc is not None:
-            WorkflowService._send_notification_step_email(step, document=doc)
-        elif instance.payment_run:
-            WorkflowService._send_notification_step_email(step, payment_run=instance.payment_run)
+        # During RFQ, suppliers are invited through the form's explicit Send RFQ
+        # action so finance can collect responses before approval. Supplier
+        # notifications in other workflow phases retain automatic dispatch.
+        doc_form = ((getattr(doc, "metadata", None) or {}).get("form") or {}) if doc else {}
+        is_rfq_supplier_notification = (
+            doc is not None
+            and (getattr(step, "notify_recipient_type", "") or "") == "supplier"
+            and str(doc_form.get("workflow_phase") or "").strip().lower() == "rfq"
+        )
+        if not is_rfq_supplier_notification:
+            if doc is not None:
+                WorkflowService._send_notification_step_email(step, document=doc)
+            elif instance.payment_run:
+                WorkflowService._send_notification_step_email(step, payment_run=instance.payment_run)
 
         # Immediately advance — notification steps never block
-        WorkflowService._advance_step(instance, order)
+        WorkflowService._advance_step(instance, order, execution_lane=execution_lane)
 
     @staticmethod
     def _send_notification_step_email(step: WorkflowStep, document=None, payment_run=None) -> None:
@@ -696,22 +1188,40 @@ class WorkflowService:
             from apps.notifications.tasks import send_workflow_notification_step_email
             recipient_user_id = str(step.notify_user_id) if step.notify_user_id else None
             recipient_email = step.notify_email or None
+            recipient_emails = step.notify_emails or []
             subject = step.notification_subject
             message = step.notification_message
             step_name = step.name
             document_id = str(document.pk) if document is not None else None
             payment_run_id = str(payment_run.pk) if payment_run is not None else None
             template_id = str(step.template_id) if step.template_id else None
+            include_items_table = bool(getattr(step, "notify_include_items_table", False))
+            table_field_key = (getattr(step, "notify_table_field", None) or "").strip() or None
+            table_column_keys = getattr(step, "notify_table_columns", None)
+
+            # Resolve supplier emails if recipient type is "supplier"
+            recipient_type = getattr(step, "notify_recipient_type", "email") or "email"
+            if recipient_type == "supplier" and document and step.notify_supplier_field:
+                supplier_emails = WorkflowService._resolve_supplier_emails(document, step.notify_supplier_field)
+                if supplier_emails:
+                    recipient_emails = supplier_emails
+                    recipient_email = None  # Use the email list instead
+                    recipient_user_id = None
+
             _queue_after_commit(
                 lambda: send_workflow_notification_step_email.delay(
                     recipient_user_id=recipient_user_id,
                     recipient_email=recipient_email,
+                    recipient_emails=recipient_emails,
                     subject=subject,
                     message=message,
                     document_id=document_id,
                     payment_run_id=payment_run_id,
                     step_name=step_name,
                     template_id=template_id,
+                    include_items_table=include_items_table,
+                    table_field_key=table_field_key,
+                    table_column_keys=table_column_keys,
                 )
             )
         except Exception:
@@ -723,7 +1233,149 @@ class WorkflowService:
             )
 
     @staticmethod
+    def _resolve_supplier_emails(document, supplier_field_key: str) -> list[str]:
+        """
+        Resolve supplier emails from form data + SunSystems Supplier/Query.
+        Returns unique email addresses for the selected supplier codes.
+        """
+        contacts = WorkflowService._resolve_supplier_contacts(document, supplier_field_key)
+        return list(dict.fromkeys(
+            str(item.get("email") or "").strip()
+            for item in contacts
+            if str(item.get("email") or "").strip()
+        ))
+
+    @staticmethod
+    def _resolve_supplier_contacts(document, supplier_field_key: str) -> list[dict]:
+        """Resolve selected top-level or table suppliers to SSC code/name/email."""
+        try:
+            metadata = document.metadata if isinstance(document.metadata, dict) else {}
+            form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+            form_values = form.get("values") if isinstance(form.get("values"), dict) else {}
+            if "." in str(supplier_field_key or ""):
+                table_key, column_key = str(supplier_field_key).split(".", 1)
+                rows = form_values.get(table_key)
+                raw = [row.get(column_key) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+            else:
+                raw = form_values.get(supplier_field_key)
+
+            # Normalize stored value → list of supplier codes.
+            # AccountMultiSelect stores string[] (or a single string when multi=false).
+            codes: list[str] = []
+            raw_values = raw if isinstance(raw, list) else [raw]
+            for item in raw_values:
+                if isinstance(item, str) and item.strip():
+                    codes.append(item.strip())
+                elif isinstance(item, dict):
+                    code = (
+                        item.get("account_code")
+                        or item.get("SupplierCode")
+                        or item.get("code")
+                        or item.get("value")
+                        or item.get("id")
+                    )
+                    if code:
+                        codes.append(str(code).strip())
+
+            codes = [c for c in codes if c]
+            if not codes:
+                logger.info(
+                    "No supplier codes on document %s for field %s",
+                    getattr(document, "pk", None),
+                    supplier_field_key,
+                )
+                return []
+
+            from apps.sunsystems.client import SunSystemsClient, SunSystemsConfig
+            from apps.sunsystems.models import effective_connection
+            import xml.etree.ElementTree as ET
+            from xml.sax.saxutils import escape
+
+            conn = effective_connection()
+            config = SunSystemsConfig.from_mapping(conn)
+            business_unit = config.business_unit or "PK1"
+
+            filter_parts = [
+                f'<Item name="/Supplier/SupplierCode" operator="EQU" value="{escape(code)}"/>'
+                for code in codes
+            ]
+            # OR semantics: SSC Filter items at the same level are typically OR'd
+            # for EQU on the same path across vendors; if the connector ANDs them,
+            # fall back to unfiltered query + local filter below.
+            filter_xml = f"<Filter>{''.join(filter_parts)}</Filter>"
+
+            ssc_payload = (
+                "<SSC>\n"
+                "  <ErrorContext/>\n"
+                "  <User/>\n"
+                f"  <SunSystemsContext>\n"
+                f"    <BusinessUnit>{escape(business_unit)}</BusinessUnit>\n"
+                "  </SunSystemsContext>\n"
+                "  <Payload>\n"
+                f"    {filter_xml}\n"
+                "    <Select>\n"
+                "      <Supplier>\n"
+                "        <Description>.</Description>\n"
+                "        <EMailAddress>.</EMailAddress>\n"
+                "        <SupplierCode>.</SupplierCode>\n"
+                "        <SupplierName>.</SupplierName>\n"
+                "      </Supplier>\n"
+                "    </Select>\n"
+                "  </Payload>\n"
+                "</SSC>"
+            )
+
+            client = SunSystemsClient(config)
+            response_xml = client.execute("Supplier", "Query", ssc_payload)
+
+            wanted = {c.upper() for c in codes}
+            contacts: list[dict] = []
+            seen: set[str] = set()
+            root = ET.fromstring(response_xml or "<SSC/>")
+            for supplier in root.findall(".//Supplier"):
+                code = (supplier.findtext("SupplierCode") or "").strip()
+                if wanted and code.upper() not in wanted:
+                    continue
+                email = (supplier.findtext("EMailAddress") or "").strip()
+                if code and code.upper() not in seen:
+                    seen.add(code.upper())
+                    contacts.append({
+                        "code": code,
+                        "name": (supplier.findtext("SupplierName") or supplier.findtext("Description") or "").strip(),
+                        "email": email,
+                    })
+
+            if not contacts:
+                logger.warning(
+                    "SunSystems returned no supplier contacts for %s on document %s",
+                    codes,
+                    getattr(document, "pk", None),
+                )
+            return contacts
+        except Exception:
+            logger.exception("Failed to resolve supplier contacts for field %s", supplier_field_key)
+            return []
+
+    @staticmethod
     def _resolve_assignees(step: WorkflowStep, document=None):
+        if step.assignee_type == "form_user":
+            if not step.assignee_group_id:
+                raise WorkflowError(f"Step '{step.name}' is missing its approver group.")
+            field_key = str(step.assignee_user_field or "").strip()
+            form_values = ((getattr(document, "metadata", None) or {}).get("form") or {}).get("values") or {}
+            selected = form_values.get(field_key) if field_key else None
+            user_id = selected.get("id") if isinstance(selected, dict) else selected
+            user = User.objects.filter(pk=user_id, is_active=True).first() if user_id else None
+            if not user:
+                raise WorkflowError(
+                    f"Step '{step.name}' needs a user selected in the '{field_key or 'approver'}' form field."
+                )
+            if not WorkflowService._is_active_group_member(step.assignee_group, user):
+                raise WorkflowError(
+                    f"The user selected for '{step.name}' is not an active member of '{step.assignee_group.name}'."
+                )
+            return [user]
+
         if step.assignee_type == "specific_user":
             if not step.assignee_user_id:
                 raise WorkflowError(f"Step '{step.name}' is missing its assigned user.")
@@ -787,7 +1439,12 @@ class WorkflowService:
                 raise WorkflowError(
                     f"Group '{step.assignee_group.name if step.assignee_group else step.name}' has no active members."
                 )
-            return [choice(members)]
+            # Make the task visible and actionable to every eligible member.
+            # The first approval advances the step and _advance_step marks the
+            # remaining sibling tasks as skipped, preserving any-member
+            # approval semantics while ensuring at least one group member is
+            # available to act.
+            return members
 
         if step.assignee_type == "group_all":
             members = WorkflowService._active_group_members(step.assignee_group)
@@ -800,11 +1457,29 @@ class WorkflowService:
         raise WorkflowError(f"Unsupported assignee type: {step.assignee_type}")
 
     @staticmethod
-    def _assert_actionable(task: WorkflowTask) -> None:
+    def _lock_action_task(task: WorkflowTask) -> tuple[WorkflowTask, WorkflowInstance]:
+        """Serialize every decision in a workflow lane and refresh stale tasks."""
+        instance = WorkflowInstance.objects.select_for_update().get(
+            pk=task.workflow_instance_id
+        )
+        locked_task = WorkflowTask.objects.select_for_update().get(pk=task.pk)
+        return locked_task, instance
+
+    @staticmethod
+    def _assert_actionable(task: WorkflowTask, instance: WorkflowInstance | None = None) -> None:
+        if task.status == "awaiting_posting":
+            raise WorkflowError(
+                "This approval is complete and is waiting for the SunSystems posting to succeed."
+            )
         if task.status not in ("in_progress", "held"):
             raise WorkflowError(
                 f"This task is '{task.get_status_display()}' and cannot be actioned."
             )
+        if (
+            task.execution_lane == "imprest_request"
+            and (instance or task.workflow_instance).imprest_request_status != "in_progress"
+        ):
+            raise WorkflowError("The Imprest request approval lane is no longer active.")
 
     @staticmethod
     def _save_document(document: Document, update_fields=None) -> None:
@@ -829,15 +1504,16 @@ class WorkflowService:
                 )
 
     @staticmethod
-    def _has_active_step_tasks(instance: WorkflowInstance, order: int) -> bool:
+    def _has_active_step_tasks(instance: WorkflowInstance, order: int, execution_lane: str = "main") -> bool:
         return instance.tasks.filter(
             step__order=order,
+            execution_lane=execution_lane,
             status__in=["in_progress", "held"],
         ).exists()
 
     @staticmethod
-    def _skip_active_tasks(instance: WorkflowInstance, step_order: int | None = None) -> None:
-        qs = instance.tasks.filter(status__in=["in_progress", "held"])
+    def _skip_active_tasks(instance: WorkflowInstance, step_order: int | None = None, execution_lane: str = "main") -> None:
+        qs = instance.tasks.filter(execution_lane=execution_lane, status__in=["in_progress", "held"])
         if step_order is not None:
             qs = qs.filter(step__order=step_order)
         skipped_ids = list(qs.values_list("id", flat=True))
@@ -851,13 +1527,229 @@ class WorkflowService:
                 pass
 
     @staticmethod
-    def _advance_step(instance: WorkflowInstance, order: int) -> None:
-        WorkflowService._skip_active_tasks(instance, step_order=order)
+    def _advance_step(instance: WorkflowInstance, order: int, task_step_order: int | None = None, execution_lane: str = "main") -> None:
+        # Skip sibling tasks by their persisted FK order, then navigate by the
+        # logical order in the active v2 definition.
+        WorkflowService._skip_active_tasks(instance, step_order=task_step_order if task_step_order is not None else order, execution_lane=execution_lane)
+        if WorkflowService.is_v2_workflow(instance.template):
+            # Stay within the active branch: the next order is the smallest
+            # active order greater than this step, not necessarily order + 1.
+            orders, end_outcome = WorkflowService._v2_active_step_orders(instance, execution_lane)
+            later = [candidate for candidate in orders if candidate > order]
+            if later:
+                WorkflowService._activate_step(instance, order=later[0], execution_lane=execution_lane)
+            else:
+                WorkflowService._complete(instance, end_outcome or "approved", execution_lane=execution_lane)
+            return
         next_order = order + 1
         if instance.template.steps.filter(order=next_order).exists():
-            WorkflowService._activate_step(instance, order=next_order)
+            WorkflowService._activate_step(instance, order=next_order, execution_lane=execution_lane)
         else:
-            WorkflowService._complete(instance, "approved")
+            WorkflowService._complete(instance, "approved", execution_lane=execution_lane)
+
+    @staticmethod
+    def _start_lpo_posting_gate(instance: WorkflowInstance, step: WorkflowStep, document, actor=None) -> bool:
+        """Post configured POs after a marked approval and hold the workflow here.
+
+        Returns True when the configured PO postings are gated. If there are no
+        PO mappings, normal approval flow continues.
+        """
+        try:
+            from apps.documents.builder_workflow import is_procurement_document
+            from apps.sunsystems.config import get_purchase_order_postings
+            if (
+                not is_procurement_document(document)
+                or WorkflowService._document_workflow_phase(document) != "lpo"
+            ):
+                return False
+            requested = get_purchase_order_postings(document)
+            if not requested:
+                return False
+            from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+            from apps.sunsystems.tasks import post_journal_for_document
+
+            metadata = document.metadata if isinstance(document.metadata, dict) else {}
+            form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+            form["lpo_generation_ready"] = False
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata"])
+
+            # Keep the approving task in the actor's queue while the PO is
+            # posted and generated. It becomes the explicit Submit LPO action
+            # once every configured purchase order and PDF is ready.
+            gate_task = instance.tasks.filter(
+                step=step,
+                execution_lane="main",
+                status="approved",
+                actions__action="approved",
+            ).order_by("-acted_at").first()
+            if gate_task:
+                gate_task.status = "awaiting_posting"
+                gate_task.save(update_fields=["status", "updated_at"])
+                WorkflowService._skip_active_tasks(instance, step_order=step.order)
+
+            for item in requested:
+                stage = int(item["stage"])
+                posting, created = JournalPosting.objects.get_or_create(
+                    document=document,
+                    stage=stage,
+                    defaults={"status": JournalPostingStatus.PENDING},
+                )
+                if posting.status == JournalPostingStatus.POSTED:
+                    continue
+                posting.status = JournalPostingStatus.PENDING
+                posting.stage_label = str(item.get("label") or f"LPO {stage - 999}")[:64]
+                posting.message = "Queued after the configured LPO approval; later approvals are waiting for generation."
+                posting.error = ""
+                posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
+                document_id = str(document.pk)
+                actor_id = str(actor.pk) if actor and getattr(actor, "pk", None) else (
+                    str(instance.started_by_id) if instance.started_by_id else None
+                )
+                _queue_after_commit(
+                    lambda did=document_id, current_stage=stage, aid=actor_id: post_journal_for_document.delay(did, current_stage, aid)
+                )
+
+            # If every posting was already successful (e.g. an approval is
+            # replayed after a prior successful post), resume without waiting
+            # for a task that will not be queued.
+            WorkflowService._resume_lpo_workflow_if_ready(document)
+            return True
+        except Exception:
+            logger.exception("Could not start the LPO posting gate for document %s", document.pk)
+            # Keep later approvers blocked if dispatch fails; the failed
+            # posting remains visible and can be retried by an administrator.
+            return True
+
+    @staticmethod
+    def _resume_lpo_workflow_if_ready(document) -> bool:
+        """Mark a configured LPO approval ready for its actor to submit."""
+        try:
+            from apps.documents.builder_workflow import is_procurement_document
+            from apps.sunsystems.config import get_purchase_order_postings
+            from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+            if (
+                not is_procurement_document(document)
+                or WorkflowService._document_workflow_phase(document) != "lpo"
+            ):
+                return False
+            requested = get_purchase_order_postings(document)
+            if not requested:
+                return False
+            stages = [int(item["stage"]) for item in requested]
+            posted = dict(
+                JournalPosting.objects.filter(document=document, stage__in=stages)
+                .values_list("stage", "status")
+            )
+            if any(posted.get(stage) != JournalPostingStatus.POSTED for stage in stages):
+                return False
+            form = ((document.metadata or {}).get("form") or {})
+            generated = {
+                int(row.get("posting_stage"))
+                for row in (form.get("lpo_documents") or [])
+                if isinstance(row, dict) and str(row.get("posting_stage", "")).isdigit()
+            }
+            if not set(stages).issubset(generated):
+                return False
+
+            instances = WorkflowInstance.objects.filter(document=document, status="in_progress").select_related("template")
+            for instance in instances:
+                try:
+                    step = instance.template.steps.get(order=instance.current_step_order)
+                except WorkflowStep.DoesNotExist:
+                    continue
+                if not step.post_lpo_after_approval:
+                    continue
+                # A periodic recovery may revisit a gate after a transient
+                # posting/resume failure. Never let ready posting records
+                # advance a step before its approval action has been recorded.
+                gate_task = instance.tasks.filter(
+                    step=step,
+                    execution_lane="main",
+                    status__in=["approved", "awaiting_posting"],
+                    actions__action="approved",
+                ).order_by("-acted_at").first()
+                if not gate_task:
+                    continue
+                with transaction.atomic():
+                    locked = WorkflowInstance.objects.select_for_update().get(pk=instance.pk)
+                    if locked.status != "in_progress" or locked.current_step_order != step.order:
+                        continue
+                    if gate_task.status == "approved":
+                        gate_task.status = "awaiting_posting"
+                        gate_task.save(update_fields=["status", "updated_at"])
+                    metadata = document.metadata if isinstance(document.metadata, dict) else {}
+                    form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+                    if form.get("lpo_generation_ready"):
+                        return False
+                    form["lpo_generation_ready"] = True
+                    metadata["form"] = form
+                    document.metadata = metadata
+                    WorkflowService._save_document(document, update_fields=["metadata"])
+                return True
+        except Exception:
+            logger.exception("Could not resume LPO workflow after generation for %s", document.pk)
+        return False
+
+    @staticmethod
+    @transaction.atomic
+    def submit_generated_lpo(task: WorkflowTask, actor) -> None:
+        """Advance from the configured LPO generation step after an explicit submit."""
+        task, instance = WorkflowService._lock_action_task(task)
+        if task.status != "awaiting_posting":
+            raise WorkflowError("This LPO is not waiting for submission.")
+        if not task.step.post_lpo_after_approval:
+            raise WorkflowError("This step is not configured to generate an LPO.")
+        if instance.status != "in_progress" or instance.current_step_order != task.step.order:
+            raise WorkflowError("The workflow has moved on from this LPO approval step.")
+        if not task.actions.filter(action="approved").exists():
+            raise WorkflowError("Approve this step before submitting its generated LPO.")
+
+        document = instance.document
+        if not document:
+            raise WorkflowError("The LPO approval is not attached to a requisition.")
+        from apps.documents.builder_workflow import is_procurement_document
+        from apps.sunsystems.config import get_purchase_order_postings
+        from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+        if not is_procurement_document(document) or WorkflowService._document_workflow_phase(document) != "lpo":
+            raise WorkflowError("The requisition is no longer in its LPO phase.")
+        requested = get_purchase_order_postings(document)
+        stages = [int(item["stage"]) for item in requested]
+        if not stages:
+            raise WorkflowError("No LPO purchase order postings are configured.")
+        posted = dict(
+            JournalPosting.objects.filter(document=document, stage__in=stages)
+            .values_list("stage", "status")
+        )
+        if any(posted.get(stage) != JournalPostingStatus.POSTED for stage in stages):
+            raise WorkflowError("Wait for every configured LPO posting to succeed before submitting.")
+
+        metadata = document.metadata if isinstance(document.metadata, dict) else {}
+        form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+        generated = {
+            int(row.get("posting_stage"))
+            for row in (form.get("lpo_documents") or [])
+            if isinstance(row, dict) and str(row.get("posting_stage", "")).isdigit()
+        }
+        if not set(stages).issubset(generated) or not form.get("lpo_generation_ready"):
+            raise WorkflowError("Wait until all generated LPO documents are ready before submitting.")
+
+        form["lpo_generation_ready"] = False
+        metadata["form"] = form
+        document.metadata = metadata
+        WorkflowService._save_document(document, update_fields=["metadata"])
+
+        task.status = "approved"
+        task.save(update_fields=["status", "updated_at"])
+        WorkflowTaskAction.objects.create(
+            task=task,
+            actor=actor,
+            action="submitted_lpo",
+            comment="Submitted the generated LPO to the next workflow step.",
+        )
+        WorkflowService._advance_step(instance, task.step.order, task_step_order=task.step.order)
 
     @staticmethod
     def _active_group_members(group):
@@ -879,6 +1771,14 @@ class WorkflowService:
     def _is_active_group_member(group, user):
         if not group or not user:
             return False
+        if not group.is_active or not user.is_active:
+            return False
+        # Some groups designate an approver without adding a matching
+        # UserGroupMembership row. Treat the active group head as eligible for
+        # group-specific assignment; ordinary group assignments still use the
+        # explicit membership query below.
+        if group.head_id == user.id:
+            return True
         now = timezone.now()
         return User.objects.filter(
             id=user.id,
@@ -890,8 +1790,28 @@ class WorkflowService:
         ).exists()
 
     @staticmethod
-    def _complete(instance: WorkflowInstance, outcome: str) -> None:
-        WorkflowService._skip_active_tasks(instance)
+    def _complete(instance: WorkflowInstance, outcome: str, *, execution_lane: str = "main") -> None:
+        WorkflowService._skip_active_tasks(instance, execution_lane=execution_lane)
+        if execution_lane == "imprest_request":
+            # Detached Imprest approval lanes belonged to the former parallel
+            # design. They must never post a request journal now: the Request
+            # CASE is the sole approval path and its configured checkpoint
+            # controls when posting occurs.
+            instance.imprest_request_status = "cancelled"
+            instance.imprest_request_completed_at = timezone.now()
+            instance.save(update_fields=[
+                "imprest_request_status", "imprest_request_completed_at", "updated_at",
+            ])
+            doc = instance.document
+            if doc is not None:
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["imprest_request_workflow_status"] = "cancelled"
+                metadata["form"] = form
+                doc.metadata = metadata
+                WorkflowService._save_document(doc, update_fields=["metadata", "updated_at"])
+            return
+
         instance.status       = outcome
         instance.completed_at = timezone.now()
         instance.save(update_fields=["status", "completed_at"])
@@ -899,20 +1819,130 @@ class WorkflowService:
         from apps.documents.access import outcome_status_for
 
         doc = instance.document
+        # Resolve the main approval actor before updating stage state; the
+        # Request phase also uses that actor to audit its advance posting.
+        last_approver_action = None
         if doc is not None:
-            doc.status = outcome_status_for(doc.document_type, outcome)
-            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
-
-            try:
-                from apps.notifications.tasks import notify_workflow_complete
-                instance_id = str(instance.id)
-                _queue_after_commit(
-                    lambda iid=instance_id, oc=outcome: notify_workflow_complete.delay(iid, oc)
+            last_approver_action = (
+                WorkflowTaskAction.objects.filter(
+                    task__workflow_instance=instance,
+                    task__execution_lane="main",
+                    action="approved",
+                    actor__isnull=False,
                 )
+                .select_related("actor")
+                .order_by("-created_at")
+                .first()
+            )
+        if doc is not None:
+            completion_phase = WorkflowService._document_workflow_phase(doc)
+            if completion_phase == "requisition":
+                # Clean up live tasks created by the old detached Imprest lane.
+                # Leaving them actionable can post the advance during the
+                # Requisition phase and strand the sequential Request CASE.
+                WorkflowService._skip_active_tasks(instance, execution_lane="imprest_request")
+                if instance.imprest_request_status == "in_progress":
+                    instance.imprest_request_status = "cancelled"
+                    instance.imprest_request_completed_at = timezone.now()
+                    instance.save(update_fields=[
+                        "imprest_request_status", "imprest_request_completed_at", "updated_at",
+                    ])
+                    metadata = dict(doc.metadata or {})
+                    form = dict(metadata.get("form") or {})
+                    form["imprest_request_workflow_status"] = "cancelled"
+                    metadata["form"] = form
+                    doc.metadata = metadata
+            imprest_posting_gate_started = False
+            doc.status = outcome_status_for(doc.document_type, outcome)
+            update_fields = ["status", "updated_at"]
+            try:
+                from apps.documents.builder_workflow import record_procurement_stage_completion
+                if record_procurement_stage_completion(doc, outcome):
+                    update_fields.append("metadata")
             except Exception:
-                pass
+                logger.exception("Could not record procurement workflow completion for %s", doc.id)
+            if completion_phase == "retirement" and outcome in {"approved", "rejected"}:
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["retirement_workflow_status"] = outcome
+                metadata["form"] = form
+                doc.metadata = metadata
+                update_fields.append("metadata")
+            if completion_phase == "request" and outcome in {"approved", "rejected", "returned"}:
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["imprest_request_workflow_status"] = outcome
+                metadata["form"] = form
+                doc.metadata = metadata
+                update_fields.append("metadata")
+            if completion_phase == "lpo" and outcome == "approved" and last_approver_action:
+                metadata = dict(doc.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["lpo_final_approver_id"] = str(last_approver_action.actor_id)
+                metadata["form"] = form
+                doc.metadata = metadata
+                update_fields.append("metadata")
+            WorkflowService._save_document(doc, update_fields=update_fields)
 
-            WorkflowService._maybe_post_sunsystems_journal(doc, outcome)
+            if completion_phase == "request" and outcome == "approved":
+                imprest_posting_gate_started = WorkflowService._start_imprest_request_posting_gate(
+                    doc,
+                    actor=last_approver_action.actor if last_approver_action else instance.started_by,
+                )
+
+            if completion_phase == "lpo" and outcome == "approved":
+                try:
+                    from apps.documents.lpo import queue_pending_lpo_supplier_emails
+                    queue_pending_lpo_supplier_emails(doc)
+                except Exception:
+                    logger.exception("Could not queue pending supplier LPO emails for %s", doc.pk)
+
+            # Does an intermediate procurement stage follow this approval?
+            advances = bool(imprest_posting_gate_started)
+            if outcome == "approved":
+                try:
+                    from apps.documents.builder_workflow import next_procurement_stage
+                    advances = advances or bool(next_procurement_stage(doc))
+                except Exception:
+                    advances = False
+
+            # Only the final procurement stage (or a non-procurement form)
+            # announces "document approved". Intermediate stages continue into
+            # the next stage below, so a "workflow complete" email here would be
+            # premature and would repeat at every stage.
+            if not advances:
+                try:
+                    from apps.notifications.tasks import notify_workflow_complete
+                    instance_id = str(instance.id)
+                    _queue_after_commit(
+                        lambda iid=instance_id, oc=outcome: notify_workflow_complete.delay(iid, oc)
+                    )
+                except Exception:
+                    pass
+
+            lpo_actor = last_approver_action.actor if last_approver_action else instance.started_by
+            WorkflowService._maybe_post_sunsystems_journal(doc, outcome, actor=lpo_actor)
+
+            # A fully-approved procurement stage opens the next stage on its
+            # own. The Request posting gate releases RFQ/LPO only after the
+            # advance journal succeeds.
+            if advances and not imprest_posting_gate_started:
+                try:
+                    WorkflowService._maybe_advance_procurement_stage(
+                        doc, actor=instance.started_by
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not auto-advance procurement stage for %s", doc.id
+                    )
+            elif not advances:
+                try:
+                    from apps.documents.builder_workflow import open_travel_retirement_phase
+                    open_travel_retirement_phase(doc)
+                except Exception:
+                    logger.exception(
+                        "Could not open travel retirement phase for %s", doc.id
+                    )
             return
 
         if instance.payment_run_id:
@@ -925,6 +1955,296 @@ class WorkflowService:
             except Exception:
                 pass
             WorkflowService._complete_payment_run(instance, outcome)
+
+    @staticmethod
+    def _start_parallel_imprest_request(instance: WorkflowInstance, document) -> bool:
+        """Start marked Imprest approval steps as an independent workflow lane."""
+        try:
+            from apps.documents.builder_workflow import is_procurement_document
+            from apps.sunsystems.config import has_imprest_request_lines
+
+            if not is_procurement_document(document) or not WorkflowService.is_v2_workflow(instance.template):
+                return False
+            lane_orders, _ = WorkflowService._v2_active_step_orders(instance, "imprest_request")
+            if not lane_orders:
+                return False
+
+            if instance.imprest_request_status == "in_progress":
+                return True
+            if instance.imprest_request_status in {"approved", "rejected", "returned", "cancelled"}:
+                return False
+
+            if not has_imprest_request_lines(document):
+                instance.imprest_request_status = "not_required"
+                instance.imprest_request_completed_at = timezone.now()
+                instance.save(update_fields=[
+                    "imprest_request_status", "imprest_request_completed_at", "updated_at",
+                ])
+                metadata = dict(document.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form["imprest_request_workflow_status"] = "not_required"
+                metadata["form"] = form
+                document.metadata = metadata
+                WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+                return False
+
+            instance.imprest_request_status = "in_progress"
+            instance.imprest_request_current_step_order = lane_orders[0]
+            instance.imprest_request_completed_at = None
+            instance.save(update_fields=[
+                "imprest_request_status", "imprest_request_current_step_order",
+                "imprest_request_completed_at", "updated_at",
+            ])
+            WorkflowService._activate_v2_step(instance, execution_lane="imprest_request")
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "in_progress"
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+            return True
+        except WorkflowError:
+            # Do not silently complete the requisition stage with an
+            # in-progress Imprest lane that has no actionable tasks. Let the
+            # approval transaction roll back and surface the approver setup
+            # error to the user.
+            raise
+        except Exception as exc:
+            logger.exception("Could not start parallel Imprest request approvals for %s", document.pk)
+            raise WorkflowError(
+                "Could not start the independent Imprest request approvals. "
+                "Please check the lane approvers and try again."
+            ) from exc
+
+    @staticmethod
+    def _queue_imprest_request_postings(document, *, actor=None, message="Queued for Imprest request approval.") -> None:
+        from apps.sunsystems.config import get_imprest_request_postings
+        from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+        from apps.sunsystems.tasks import post_journal_for_document
+
+        items = get_imprest_request_postings(document)
+        if not items:
+            raise WorkflowError(
+                "The Imprest request cannot be approved because its General / Imprest table "
+                "has no positive mapped Line amount. Check the itinerary rows and mappings."
+            )
+
+        actor_id = str(actor.pk) if actor and getattr(actor, "pk", None) else None
+        for item in items:
+            stage = int(item["stage"])
+            posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
+            if not created and posting.status == JournalPostingStatus.POSTED:
+                continue
+            if not created and posting.status == JournalPostingStatus.POSTING:
+                continue
+            posting.status = JournalPostingStatus.PENDING
+            posting.stage_label = str(item.get("label") or "Imprest request")[:64]
+            posting.message = message
+            posting.error = ""
+            posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
+            document_id = str(document.pk)
+            _queue_after_commit(
+                lambda did=document_id, current_stage=stage, aid=actor_id: post_journal_for_document.delay(did, current_stage, aid)
+            )
+
+    @staticmethod
+    def _start_imprest_request_posting_gate(document, *, actor=None) -> bool:
+        """Queue a final-step fallback journal before RFQ/LPO.
+
+        New workflows can mark a Request approval as the checkpoint. This is
+        retained for templates that do not yet have a selected checkpoint.
+        """
+        try:
+            from apps.documents.builder_workflow import (
+                imprest_request_postings_complete,
+                is_procurement_document,
+            )
+            if (
+                not is_procurement_document(document)
+                or WorkflowService._document_workflow_phase(document) != "request"
+            ):
+                return False
+            WorkflowService._queue_imprest_request_postings(
+                document,
+                actor=actor,
+                message="Queued after the final Imprest Request approval; the next procurement phase is waiting for posting.",
+            )
+            if imprest_request_postings_complete(document):
+                return False
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "posting"
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+            return True
+        except WorkflowError:
+            raise
+        except Exception as exc:
+            logger.exception("Could not start the Imprest request posting gate for %s", document.pk)
+            raise WorkflowError(
+                "Could not queue the Imprest request posting. The Request approval was not completed; please retry."
+            ) from exc
+
+    @staticmethod
+    def _start_imprest_request_step_posting_gate(instance, step, document, *, actor=None) -> bool:
+        """Post at a marked Request approval and pause its chain."""
+        try:
+            from apps.documents.builder_workflow import (
+                imprest_request_postings_complete,
+                is_procurement_document,
+            )
+            if (
+                not is_procurement_document(document)
+                or WorkflowService._document_workflow_phase(document) != "request"
+            ):
+                return False
+            WorkflowService._queue_imprest_request_postings(
+                document,
+                actor=actor,
+                message=f"Queued after {step.name}; later Request approvals are waiting for posting.",
+            )
+            if imprest_request_postings_complete(document):
+                return False
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "posting"
+            form["imprest_request_posting_gate_step_id"] = str(step.pk)
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+            # Keep the checkpoint visible in the approver's queue while the
+            # posting runs. Its recorded approval cannot be actioned twice.
+            instance.tasks.filter(
+                step=step,
+                execution_lane="main",
+                status="approved",
+                actions__action="approved",
+            ).update(status="awaiting_posting", updated_at=timezone.now())
+            WorkflowService._skip_active_tasks(
+                instance, step_order=step.order, execution_lane="main",
+            )
+            return True
+        except WorkflowError:
+            raise
+        except Exception as exc:
+            logger.exception("Could not start the Imprest Request step posting gate for %s", document.pk)
+            raise WorkflowError(
+                "Could not queue the Imprest request posting. This approval has not advanced; please retry."
+            ) from exc
+
+    @staticmethod
+    def _resume_imprest_request_workflow_if_ready(document) -> bool:
+        """Resume a marked Request step, or open RFQ/LPO after final posting."""
+        try:
+            from apps.documents.builder_workflow import (
+                completed_procurement_stages,
+                imprest_request_postings_complete,
+                is_procurement_document,
+            )
+            if (
+                not is_procurement_document(document)
+                or WorkflowService._document_workflow_phase(document) != "request"
+                or not imprest_request_postings_complete(document)
+            ):
+                return False
+
+            form = ((document.metadata or {}).get("form") or {})
+            gate_step_id = str(form.get("imprest_request_posting_gate_step_id") or "").strip()
+            if gate_step_id:
+                instance = WorkflowInstance.objects.filter(
+                    document=document, status="in_progress",
+                ).select_related("template").first()
+                if not instance:
+                    return False
+                step = instance.template.steps.filter(pk=gate_step_id).first()
+                if not step:
+                    logger.error(
+                        "Imprest posting gate step %s no longer exists for document %s",
+                        gate_step_id, document.pk,
+                    )
+                    return False
+                with transaction.atomic():
+                    locked = WorkflowInstance.objects.select_for_update().get(pk=instance.pk)
+                    if locked.status != "in_progress" or not locked.tasks.filter(
+                        step=step,
+                        execution_lane="main",
+                        status__in=["approved", "awaiting_posting"],
+                        actions__action="approved",
+                    ).exists():
+                        return False
+                    active_orders, _ = WorkflowService._v2_active_step_orders(locked)
+                    if WorkflowService.is_v2_workflow(locked.template) and step.order not in active_orders:
+                        logger.error(
+                            "Imprest posting gate step %s is not on the active Request path for document %s",
+                            gate_step_id, document.pk,
+                        )
+                        return False
+                    metadata = dict(document.metadata or {})
+                    form = dict(metadata.get("form") or {})
+                    form.pop("imprest_request_posting_gate_step_id", None)
+                    form["imprest_request_workflow_status"] = "in_progress"
+                    metadata["form"] = form
+                    document.metadata = metadata
+                    WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+                    locked.tasks.filter(
+                        step=step,
+                        execution_lane="main",
+                        status="awaiting_posting",
+                        actions__action="approved",
+                    ).update(status="approved", updated_at=timezone.now())
+                    WorkflowService._advance_step(locked, step.order, task_step_order=step.order)
+                return True
+
+            if "request" not in completed_procurement_stages(document):
+                return False
+            if WorkflowInstance.objects.filter(document=document, status="in_progress").exists():
+                return False
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "approved"
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+            return WorkflowService._maybe_advance_procurement_stage(document, actor=document.uploaded_by)
+        except Exception:
+            logger.exception("Could not resume procurement after Imprest request posting for %s", document.pk)
+            return False
+
+    @staticmethod
+    def _maybe_advance_procurement_stage(document, actor=None) -> bool:
+        """Open the next procurement stage automatically after full approval.
+
+        Called when a stage's workflow completes as approved. Uses the same
+        ``next_procurement_stage`` gate as the manual submit button, so a stage
+        can only open once the previous one is complete and the document has no
+        live workflow. Travel requisitions jump straight from Requisition to LPO.
+        Emails for the new stage's first approver go out via the normal
+        ``_activate_step`` -> ``notify_task_assigned`` path.
+        """
+        from apps.documents.builder_workflow import (
+            is_procurement_document,
+            next_procurement_stage,
+            set_procurement_workflow_stage,
+        )
+
+        if not is_procurement_document(document):
+            return False
+        next_stage = next_procurement_stage(document)
+        if not next_stage:
+            return False
+
+        set_procurement_workflow_stage(document, next_stage)
+        if next_stage == "request":
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_request_workflow_status"] = "in_progress"
+            form.pop("imprest_request_posting_gate_step_id", None)
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+        WorkflowService.start(document, actor or document.uploaded_by)
+        return True
 
     @staticmethod
     def _complete_payment_run(instance: WorkflowInstance, outcome: str) -> None:
@@ -952,7 +2272,33 @@ class WorkflowService:
             run.save(update_fields=["status", "error", "updated_at"])
 
     @staticmethod
-    def _maybe_post_sunsystems_journal(document, outcome: str) -> None:
+    def _maybe_generate_lpo_document(document, *, outcome: str = "approved", actor=None):
+        """Legacy compatibility helper for explicit/manual LPO generation.
+
+        The approval path does not call this: normal LPO PDFs are rendered by
+        the SunSystems posting handler after it receives the assigned PO number.
+        """
+        try:
+            from apps.documents.builder_workflow import (
+                completed_procurement_stages,
+                is_procurement_document,
+            )
+
+            if outcome != "approved" or not is_procurement_document(document):
+                return None
+            phase = WorkflowService._document_workflow_phase(document)
+            if phase != "lpo" or "lpo" not in completed_procurement_stages(document):
+                return None
+
+            from apps.documents.lpo import generate_lpo_for_document
+
+            return generate_lpo_for_document(document, actor=actor)
+        except Exception:
+            logger.exception("Could not generate LPO document for %s", document.id)
+            return None
+
+    @staticmethod
+    def _maybe_post_sunsystems_journal(document, outcome: str, actor=None, *, defer_imprest_request=False) -> None:
         """Post any journal stages whose ``post_on`` trigger matches this outcome.
 
         Supports multi-stage imprest flows: stage 1 fires on "approved", stage 2
@@ -962,40 +2308,111 @@ class WorkflowService:
         idempotent — a stage that is already POSTED is never re-posted.
         """
         try:
-            from apps.sunsystems.config import find_stage_to_post, get_journal_mapping, journal_posting_enabled
-            if not journal_posting_enabled(document):
-                return
-
+            # These are used by the procurement-specific dispatch blocks
+            # below even when there are no ordinary journal stages to post.
+            # Importing them only inside the loop makes them local variables
+            # that remain unbound when ``outcomes`` is empty (the normal case
+            # for legacy PurchaseOrder mappings).
+            from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+            from apps.sunsystems.tasks import post_journal_for_document
+            from apps.sunsystems.config import (
+                find_stages_to_post,
+                get_journal_mapping,
+                get_purchase_order_postings,
+                get_imprest_retirement_postings,
+                get_sunsystems_config,
+            )
+            phase = WorkflowService._document_workflow_phase(document)
+            posting_actor_id = str(actor.pk) if actor and getattr(actor, "pk", None) else None
             outcomes = [outcome]
-            if (
-                WorkflowService._document_workflow_phase(document) == "retirement"
-                and outcome == "approved"
-            ):
-                # Retirement-cycle completion may use a dedicated trigger name.
+            from apps.documents.builder_workflow import completed_procurement_stages, is_procurement_document
+            if is_procurement_document(document):
+                sunsystems = get_sunsystems_config(document)
+                legacy_journal = sunsystems.get("journal") or {}
+                is_legacy_po = str(legacy_journal.get("component") or "").lower() == "purchaseorder"
+                # Intermediate approvals never post. At final LPO approval,
+                # legacy PO mappings are dispatched below through the grouped
+                # PurchaseOrder path, while non-PO journal stages may still use
+                # their configured full-approval trigger.
+                if outcome == "approved" and phase == "retirement":
+                    outcomes = ["retirement_approved", "approved"]
+                else:
+                    outcomes = ["fully_approved"] if outcome == "approved" and phase == "lpo" and "lpo" in completed_procurement_stages(document) else []
+                if is_legacy_po and phase != "retirement":
+                    outcomes = []
+            elif phase == "retirement" and outcome == "approved":
                 outcomes = ["retirement_approved", "approved"]
 
-            for trigger in outcomes:
-                stage = find_stage_to_post(document, trigger)
-                if stage is None:
-                    continue
-                from apps.sunsystems.models import JournalPosting, JournalPostingStatus
-
+            for stage in find_stages_to_post(document, outcomes):
                 posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
                 if not created:
-                    return
+                    continue
                 mapping = get_journal_mapping(document, stage=stage) or {}
                 posting.status = JournalPostingStatus.PENDING
                 posting.stage_label = str(mapping.get("label") or posting.stage_label or "").strip()
                 posting.message = "Queued for SunSystems posting."
                 posting.error = ""
                 posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
-                from apps.sunsystems.tasks import post_journal_for_document
-
                 doc_id = str(document.id)
                 _queue_after_commit(
-                    lambda did=doc_id, s=stage: post_journal_for_document.delay(did, s)
+                    lambda did=doc_id, s=stage, aid=posting_actor_id: post_journal_for_document.delay(did, s, aid)
                 )
-                return
+
+            procurement_document = is_procurement_document(document)
+            sunsystems = get_sunsystems_config(document) if procurement_document else {}
+            po_profile = sunsystems.get("purchase_order") or {}
+            imprest_profile = sunsystems.get("imprest_request") or {}
+            legacy_journal = sunsystems.get("journal") or {}
+            is_legacy_po = str(legacy_journal.get("component") or "").lower() == "purchaseorder"
+            has_po_mapping = (
+                (isinstance(po_profile, dict) and po_profile.get("enabled"))
+                or (isinstance(imprest_profile, dict) and imprest_profile.get("enabled"))
+                or is_legacy_po
+            )
+
+            # Retirement reconciliations are compiled from the retirement
+            # table's exact/under/over rules, independently of the ordinary
+            # journal profile. They post only after the retirement workflow is
+            # approved and do not affect the LPO lifecycle.
+            if procurement_document and outcome == "approved" and phase == "retirement":
+                for item in get_imprest_retirement_postings(document):
+                    stage = int(item["stage"])
+                    posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
+                    if not created:
+                        continue
+                    posting.status = JournalPostingStatus.PENDING
+                    posting.stage_label = str(item.get("label") or "Imprest retirement")[:64]
+                    posting.message = "Queued for retirement reconciliation posting."
+                    posting.error = ""
+                    posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
+                    doc_id = str(document.id)
+                    _queue_after_commit(
+                        lambda did=doc_id, current_stage=stage, aid=posting_actor_id: post_journal_for_document.delay(did, current_stage, aid)
+                    )
+
+            # The LPO approval may advance the persisted form phase to
+            # retirement before this hook runs (for example, when the
+            # workflow completion handler or another signal has already
+            # opened the retirement phase). Completion of the LPO stage is
+            # the durable signal; relying on the current phase can silently
+            # skip the posting after the final approver approves.
+            lpo_stage_completed = "lpo" in completed_procurement_stages(document)
+            if is_procurement_document(document) and outcome == "approved" and phase == "lpo" and lpo_stage_completed:
+                if has_po_mapping:
+                    for item in get_purchase_order_postings(document):
+                        stage = int(item["stage"])
+                        posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
+                        if not created:
+                            continue
+                        posting.status = JournalPostingStatus.PENDING
+                        posting.stage_label = str(item.get("label") or f"LPO {stage - 999}")[:64]
+                        posting.message = "Queued for SunSystems posting."
+                        posting.error = ""
+                        posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
+                        doc_id = str(document.id)
+                        _queue_after_commit(
+                            lambda did=doc_id, current_stage=stage, aid=posting_actor_id: post_journal_for_document.delay(did, current_stage, aid)
+                        )
         except Exception:
             logger.exception(
                 "Failed to enqueue SunSystems journal for document %s (outcome=%s)",
@@ -1157,7 +2574,12 @@ class WorkflowService:
     # ── Notifications ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _notify_action(action: WorkflowTaskAction, document) -> None:
+    def _notify_action(
+        action: WorkflowTaskAction,
+        document,
+        extra_recipients=None,
+        exclude_recipients=None,
+    ) -> None:
         from apps.workflows.models import WorkflowTaskActionNotification
 
         template = action.task.workflow_instance.template
@@ -1179,6 +2601,16 @@ class WorkflowService:
             )
         except Exception:
             notify_users = set()
+        if extra_recipients:
+            from django.contrib.auth import get_user_model
+            notify_users.update(
+                get_user_model().objects.filter(
+                    id__in=extra_recipients, is_active=True,
+                )
+            )
+        excluded_ids = {str(user_id) for user_id in (exclude_recipients or [])}
+        if excluded_ids:
+            notify_users = {user for user in notify_users if str(user.id) not in excluded_ids}
 
         if not notify_users:
             if action.action in ("approved", "rejected", "returned"):
@@ -1201,8 +2633,11 @@ class WorkflowService:
             from apps.notifications.tasks import notify_workflow_action
             action_id = str(action.id)
             user_id_list = [str(u.id) for u in notify_users]
+            excluded_user_ids = list(excluded_ids)
             _queue_after_commit(
-                lambda aid=action_id, uids=user_id_list: notify_workflow_action.delay(aid, uids)
+                lambda aid=action_id, uids=user_id_list, xids=excluded_user_ids: notify_workflow_action.delay(
+                    aid, uids, xids,
+                )
             )
         except Exception:
             pass

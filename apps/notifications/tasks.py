@@ -3,21 +3,78 @@ apps/notifications/tasks.py
 All notification tasks — in-app + email for every workflow event.
 """
 from celery import shared_task
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives, send_mail
 from django.conf import settings
 from django.db import IntegrityError
 import logging
+import html
 
 logger = logging.getLogger(__name__)
 
 
 def _email_footer(link: str = "") -> str:
     base = settings.FRONTEND_URL.rstrip("/")
-    footer = "\n\n"
+    footer = "\n\nSystem Access\n"
     if link:
-        footer += f"Open it directly: {base}{link}\n"
-    footer += f"Log in to DMS: {base}\n"
+        footer += f"{base}{link}\n"
+    else:
+        footer += f"{base}\n"
+    footer += "\nKind regards,\nProcurement Department\n\nThis is an automated email. Please do not reply directly to this message.\n"
     return footer
+
+
+def _structured_email_html(body: str, link: str = "", *, include_footer: bool = True) -> str:
+    """Render notification text in a consistent, readable email layout."""
+    lines = (body or "").splitlines()
+    blocks = []
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line:
+            index += 1
+            continue
+        if line.lower().startswith("hello ") or line.lower().startswith("dear "):
+            blocks.append(f'<h2 style="margin:0 0 20px;color:#243247;font-size:20px">{html.escape(line.rstrip(","))},</h2>')
+            index += 1
+            continue
+        if line in {"Reference Details", "Action Required"}:
+            blocks.append(f'<h3 style="margin:22px 0 8px;color:#243247">{html.escape(line)}</h3>')
+            index += 1
+            continue
+        # Indented "Label: Value" lines become a compact reference-details table.
+        if lines[index].startswith(("  ", "\t")) and ":" in line:
+            rows = []
+            while index < len(lines):
+                candidate = lines[index].strip()
+                if not lines[index].startswith(("  ", "\t")) or ":" not in candidate:
+                    break
+                label, value = candidate.split(":", 1)
+                rows.append(
+                    '<tr><th style="width:34%;padding:10px 12px;text-align:left;background:#f5f7f9;'
+                    'border:1px solid #d9dee3;color:#243247">{}</th><td style="padding:10px 12px;'
+                    'border:1px solid #d9dee3">{}</td></tr>'.format(
+                        html.escape(label.strip()), html.escape(value.strip())
+                    )
+                )
+                index += 1
+            blocks.append('<table role="presentation" style="width:100%;border-collapse:collapse;margin:12px 0 20px"><tbody>{}</tbody></table>'.format("".join(rows)))
+            continue
+        blocks.append(f'<p style="margin:0 0 14px;line-height:1.55">{html.escape(line)}</p>')
+        index += 1
+
+    footer = ""
+    if include_footer:
+        base = settings.FRONTEND_URL.rstrip("/")
+        access_url = f"{base}{link}" if link else base
+        footer = (
+            '<h3 style="margin:22px 0 8px;color:#243247">System Access</h3>'
+            f'<p style="margin:0 0 20px"><a href="{html.escape(access_url, quote=True)}">'
+            f'{html.escape(access_url)}</a></p>'
+            '<p style="margin:0 0 14px;line-height:1.55">Kind regards,<br>Procurement Department</p>'
+            '<p style="margin:0;color:#5e6870"><em>This is an automated email. Please do not reply directly to this message.</em></p>'
+        )
+    return ('<div style="font-family:Arial,sans-serif;font-size:15px;color:#243247;max-width:800px;'
+            'margin:0 auto;padding:20px 16px">' + "".join(blocks) + footer + '</div>')
 
 
 def _send_email_to_address(
@@ -27,19 +84,38 @@ def _send_email_to_address(
     link: str = "",
     *,
     include_footer: bool = True,
+    html_message: str | None = None,
+    reply_to: str | None = None,
 ) -> None:
     """Send email to a raw address (no User record required)."""
     if not email:
         return
     try:
         message = body + (_email_footer(link) if include_footer else "")
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
+        html = _structured_email_html(body, link, include_footer=include_footer) if not html_message else html_message
+        if html_message and include_footer:
+            footer_html = _structured_email_html("", link, include_footer=True)
+            html += footer_html[footer_html.index("<h3"):footer_html.rindex("</div>")]
+        if reply_to:
+            outgoing = EmailMultiAlternatives(
+                subject=subject,
+                body=message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[email],
+                reply_to=[reply_to],
+            )
+            if html:
+                outgoing.attach_alternative(html, "text/html")
+            outgoing.send(fail_silently=False)
+        else:
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                fail_silently=False,
+                html_message=html,
+            )
     except Exception as exc:
         logger.warning("Email send failed to %s: %s", email, exc)
 
@@ -51,6 +127,7 @@ def _send_email(
     link: str = "",
     *,
     include_footer: bool = True,
+    html_message: str | None = None,
 ) -> None:
     """Fire-and-forget email. Logs on failure, never raises.
 
@@ -63,12 +140,17 @@ def _send_email(
 
     try:
         message = body + (_email_footer(link) if include_footer else "")
+        html = _structured_email_html(body, link, include_footer=include_footer) if not html_message else html_message
+        if html_message and include_footer:
+            footer_html = _structured_email_html("", link, include_footer=True)
+            html += footer_html[footer_html.index("<h3"):footer_html.rindex("</div>")]
         send_mail(
             subject=subject,
             message=message,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[recipient.email],
             fail_silently=False,
+            html_message=html,
         )
     except Exception as exc:
         logger.warning("Email send failed to %s: %s", recipient.email, exc)
@@ -164,14 +246,17 @@ def _resolve_email(
 
 
 def _document_url(document_id) -> str:
-    return f"{settings.FRONTEND_URL.rstrip('/')}/documents/{document_id}"
+    # The SPA serves documents at /{id}, not /documents/{id}.
+    return f"{settings.FRONTEND_URL.rstrip('/')}/{document_id}"
 
 
 def _payment_run_task_context(task):
     """Return common notification fields for document and payment-run tasks."""
     doc = task.workflow_instance.document
     if doc is not None:
-        link = f"/documents/{doc.id}"
+        # Link directly to the document, with the task pre-selected so the
+        # recipient lands on their approval action rather than the dashboard.
+        link = f"/{doc.id}?task={task.id}"
         return {
             "link": link,
             "title": doc.title,
@@ -190,7 +275,7 @@ def _payment_run_task_context(task):
 
     run = task.workflow_instance.payment_run
     if run is not None:
-        link = f"/workflow?task={task.id}"
+        link = f"/approvals?task={task.id}"
         currencies = ", ".join(run.currency_codes or []) or "N/A"
         total = f"{run.total_amount} {currencies}".strip()
         if run.submitted_by_id and run.submitted_by:
@@ -216,12 +301,12 @@ def _payment_run_task_context(task):
         }
 
     return {
-        "link": "/workflow",
+        "link": "/approvals",
         "title": "Workflow task",
         "reference": str(task.id),
         "target_label": "workflow item",
         "target_label_title": "Workflow item",
-        "direct_url": f"{settings.FRONTEND_URL.rstrip('/')}/workflow",
+        "direct_url": f"{settings.FRONTEND_URL.rstrip('/')}/approvals",
         "detail_lines": ["  Workflow task"],
         "scope": "unknown",
         "document_id": None,
@@ -291,7 +376,6 @@ def _notify_delegates_of_task(task, *, only_delegation=None) -> None:
         f"  Step: {task.step.name}\n"
         f"  Instructions: {task.step.instructions or 'None'}\n"
         + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
-        + f"\nPlease log in to DMS to action this request.\n"
     )
 
     if only_delegation is not None:
@@ -353,27 +437,29 @@ def notify_task_assigned(
 
     if custom_subject or custom_body:
         subject = _render_approver_email_template(custom_subject or "", **render_ctx) or (
-            f"DMS — Approval required: {render_ctx['document_ref']}"
+            f"EAC Travel REQ — Approval required: {render_ctx['document_ref']}"
         )
         body = _render_approver_email_template(custom_body or "", **render_ctx) or (
             f"Hello {task.assigned_to.first_name},\n\n"
             f"A {target_ctx['target_label']} requires your approval.\n\n"
+            "Reference Details\n"
             f"{details}\n"
+            "Action Required\n"
             f"  Step: {task.step.name}\n"
             f"  Instructions: {task.step.instructions or 'None'}\n"
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
-            + f"\nPlease log in to DMS to action this request.\n"
         )
     else:
-        subject = f"DMS — Approval required: {render_ctx['document_ref']}"
+        subject = f"EAC Travel REQ — Approval required: {render_ctx['document_ref']}"
         body = (
             f"Hello {task.assigned_to.first_name},\n\n"
             f"A {target_ctx['target_label']} requires your approval.\n\n"
+            "Reference Details\n"
             f"{details}\n"
+            "Action Required\n"
             f"  Step: {task.step.name}\n"
             f"  Instructions: {task.step.instructions or 'None'}\n"
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
-            + f"\nPlease log in to DMS to action this request.\n"
         )
 
     _send_email(task.assigned_to, subject=subject, body=body, link=link)
@@ -434,22 +520,61 @@ def notify_delegation_activated(delegation_id: str) -> None:
 def send_workflow_notification_step_email(
     recipient_user_id: str | None,
     recipient_email: str | None,
-    subject: str,
-    message: str,
+    recipient_emails: list[str] | None = None,
+    subject: str = "",
+    message: str = "",
     document_id: str | None = None,
     payment_run_id: str | None = None,
     step_name: str = "",
     template_id: str | None = None,
+    include_items_table: bool = False,
+    table_field_key: str | None = None,
+    table_column_keys: list[str] | None = None,
+    reply_to: str | None = None,
+    rfq_reply_token: str | None = None,
 ) -> None:
     """
     Send the email configured on a workflow notification step.
 
-    These steps target people outside the approval chain. Emails contain only the
-    configured subject/body — no login or document deep-links. In-app notices
-    (when the recipient is a system user) also omit a deep-link.
+    Renders `{placeholder}` tokens from document/form values and optionally
+    embeds a styled HTML items table. External recipients get HTML + plain text.
     """
     from django.contrib.auth import get_user_model
     from apps.workflows.models import WorkflowTemplate
+    from apps.workflows.notification_content import (
+        build_notification_context,
+        plain_text_from_htmlish,
+        render_placeholders,
+        text_to_html_body,
+    )
+
+    document = None
+    payment_run = None
+    if document_id:
+        try:
+            from apps.documents.models import Document
+            document = Document.objects.get(id=document_id)
+        except Exception:
+            logger.warning("Notification step: document %s not found", document_id)
+    if payment_run_id:
+        try:
+            from apps.sunsystems.models import PaymentRun
+            payment_run = PaymentRun.objects.get(id=payment_run_id)
+        except Exception:
+            logger.warning("Notification step: payment run %s not found", payment_run_id)
+
+    # Prefer an explicit `{items_table}` in the body; otherwise append when toggled on.
+    body_wants_table = "{items_table}" in (message or "")
+    include_table = bool(include_items_table or body_wants_table)
+
+    ctx = build_notification_context(
+        document=document,
+        payment_run=payment_run,
+        step_name=step_name,
+        include_items_table=include_table,
+        table_field_key=table_field_key or None,
+        table_column_keys=table_column_keys,
+    )
 
     # Optional template-level override (step subject/body remain the default).
     if template_id:
@@ -457,43 +582,45 @@ def send_workflow_notification_step_email(
             template = WorkflowTemplate.objects.get(id=template_id)
         except WorkflowTemplate.DoesNotExist:
             template = None
-        if template:
-            ctx = {"step_name": step_name}
-            if payment_run_id:
-                try:
-                    from apps.sunsystems.models import PaymentRun
-                    run = PaymentRun.objects.get(id=payment_run_id)
-                    ctx.update(
-                        payment_reference=run.payment_reference,
-                        line_count=run.line_count,
-                        total_amount=str(run.total_amount),
-                        currencies=", ".join(run.currency_codes or []),
-                        document_title=f"Payment Run {run.payment_reference}",
-                        document_ref=run.payment_reference,
-                    )
-                except Exception:
-                    pass
-            elif document_id:
-                try:
-                    from apps.documents.models import Document
-                    doc = Document.objects.get(id=document_id)
-                    ctx.update(
-                        document_title=doc.title,
-                        document_ref=doc.reference_number,
-                        payment_reference=doc.reference_number,
-                    )
-                except Exception:
-                    pass
+        else:
             custom_subject, custom_body = _template_email_parts(template, "workflow_notification")
             if custom_subject:
-                subject = _render_email_template(custom_subject, **ctx) or subject
+                subject = custom_subject
             if custom_body:
-                message = _render_email_template(custom_body, **ctx) or message
+                message = custom_body
+                body_wants_table = "{items_table}" in (message or "")
+                include_table = bool(include_items_table or body_wants_table)
+                ctx = build_notification_context(
+                    document=document,
+                    payment_run=payment_run,
+                    step_name=step_name,
+                    include_items_table=include_table,
+                    table_field_key=table_field_key or None,
+                    table_column_keys=table_column_keys,
+                )
 
-    in_app_message = (message or "").strip() or (
+    subject = render_placeholders(subject or "", ctx)
+    message = render_placeholders(message or "", ctx)
+    if rfq_reply_token:
+        subject = f"[RFQ-REPLY:{rfq_reply_token}] {subject}".strip()
+
+    # If the toggle is on but the body never referenced {items_table}, append it.
+    if include_table and ctx.get("items_table") and "{items_table}" not in (message or ""):
+        # After render, items_table content is already expanded if the token was present.
+        # Here we append the raw HTML table for toggle-only mode.
+        from apps.workflows.notification_content import build_items_table_html
+        table_html = ctx.get("items_table") or (
+            build_items_table_html(document, table_field_key, table_column_keys) if document else ""
+        )
+        if table_html and table_html not in message:
+            message = f"{message.rstrip()}\n\n{table_html}"
+
+    html_body = text_to_html_body(message)
+    plain_body = plain_text_from_htmlish(message)
+
+    in_app_message = plain_body.strip() or (
         f"Workflow notification: '{step_name}'" if step_name else "Workflow notification"
     )
-    # Keep tray rows compact; full text remains in the email body.
     if len(in_app_message) > 280:
         in_app_message = in_app_message[:277].rstrip() + "..."
 
@@ -510,19 +637,35 @@ def send_workflow_notification_step_email(
         _send_email(
             recipient,
             subject=subject,
-            body=message,
+            body=plain_body,
             link="",
             include_footer=False,
+            html_message=html_body,
         )
+        return
+
+    if recipient_emails and isinstance(recipient_emails, list):
+        for email in recipient_emails:
+            if email and isinstance(email, str) and "@" in email:
+                _send_email_to_address(
+                    email,
+                    subject=subject,
+                    body=plain_body,
+                    link="",
+                    include_footer=False,
+                    html_message=html_body,
+                    reply_to=reply_to,
+                )
         return
 
     if recipient_email:
         _send_email_to_address(
             recipient_email,
             subject=subject,
-            body=message,
+            body=plain_body,
             link="",
             include_footer=False,
+            html_message=html_body,
         )
         return
 
@@ -600,7 +743,7 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
     if doc is None:
         return
 
-    link = f"/documents/{doc.id}"
+    link = f"/{doc.id}"
     msg = f"Your document '{doc.title}' ({doc.reference_number}) has been {verb}."
     for recipient in recipients:
         ctx = dict(
@@ -648,7 +791,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
     doc      = task.workflow_instance.document
     uploader = doc.uploaded_by
     approver = task.assigned_to
-    link     = f"/documents/{doc.id}"
+    link     = f"/{doc.id}"
 
     message = (
         f"Your document '{doc.title}' ({doc.reference_number}) "
@@ -695,7 +838,7 @@ def notify_document_held(task_id: str, comment: str, hold_hours: int) -> None:
     doc      = task.workflow_instance.document
     uploader = doc.uploaded_by
     approver = task.assigned_to
-    link     = f"/documents/{doc.id}"
+    link     = f"/{doc.id}"
 
     # Human-readable duration
     if hold_hours < 24:
@@ -749,7 +892,7 @@ def notify_hold_released(task_id: str) -> None:
     doc      = task.workflow_instance.document
     uploader = doc.uploaded_by
     approver = task.assigned_to
-    link     = f"/documents/{doc.id}"
+    link     = f"/{doc.id}"
 
     # Notify uploader
     msg_uploader = (
@@ -1055,7 +1198,7 @@ def clear_resolved_task_notifications_now(task_id: str) -> int:
     if document_id:
         scope_filter = {"workflow_instance__document_id": document_id}
         # Documents share one inbox link per document.
-        links = [f"/documents/{document_id}"]
+        links = [f"/{document_id}"]
     elif payment_run_id:
         scope_filter = {"workflow_instance__payment_run_id": payment_run_id}
         # Payment-run assignment notices are per-task; also clear the run-level link.
@@ -1082,8 +1225,12 @@ def clear_resolved_task_notifications_now(task_id: str) -> int:
     # Clear for delegates who have no other delegated tasks on this target
     for delegation in active_delegations_qs(delegator=task.assigned_to):
         delegate_id = delegation.delegate_id
+        # `delegated_tasks_q()` returns a Q expression over WorkflowTask,
+        # not a queryset of IDs. Passing it to `pk__in` produces SQL that
+        # compares a UUID to a boolean on PostgreSQL and aborts the enclosing
+        # workflow approval transaction.
         delegated_still_active = WorkflowTask.objects.filter(
-            pk__in=delegated_tasks_q(delegation.delegate),
+            delegated_tasks_q(delegation.delegate),
             status__in=["in_progress", "held"],
             **scope_filter,
         ).exists()
@@ -1101,7 +1248,11 @@ def clear_resolved_task_notifications(task_id: str) -> None:
 # ── Workflow action (approve, reject, held, released, returned) ────────────────
 
 @shared_task(queue="notifications")
-def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
+def notify_workflow_action(
+    action_id: str,
+    user_ids: list[str] = None,
+    exclude_user_ids: list[str] = None,
+) -> None:
     """
     Notify users of any workflow action: approve, reject, hold, release, return.
     Sends both in-app and email notifications with context-specific messages.
@@ -1141,6 +1292,9 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
         for user in User.objects.filter(id__in=user_ids, is_active=True):
             if _is_notifiable_user(user) and all(user.id != r.id for r in recipients):
                 recipients.append(user)
+    if exclude_user_ids:
+        excluded = {str(user_id) for user_id in exclude_user_ids}
+        recipients = [recipient for recipient in recipients if str(recipient.id) not in excluded]
 
     if not recipients:
         logger.warning(
@@ -1155,7 +1309,7 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
     reason_line = f"  Reason: {action.comment}\n" if action.comment else ""
 
     if doc is not None:
-        link = f"/documents/{doc.id}"
+        link = f"/{doc.id}"
         title = doc.title
         reference = doc.reference_number
         target_type = "document"
@@ -1282,9 +1436,44 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
         f"{action.hold_hours} hour{'s' if action.hold_hours != 1 else ''}"
         if action.hold_hours else "indefinitely"
     )
+    rework_editor_id = None
+    if action_type == "returned" and action.return_to == "previous_step":
+        previous_approval = WorkflowTaskAction.objects.filter(
+            task__workflow_instance=instance,
+            task__execution_lane=task.execution_lane or "main",
+            task__step__step_type="approval",
+            action="approved",
+            actor__isnull=False,
+            created_at__lt=task.created_at,
+        ).order_by("-created_at").first()
+        if previous_approval:
+            rework_editor_id = str(previous_approval.actor_id)
 
     for recipient in recipients:
-        default_body = f"Hello {recipient.first_name},\n\n{body_tail}"
+        is_rework_editor = (
+            action_type == "returned"
+            and action.return_to == "previous_step"
+            and rework_editor_id == str(recipient.id)
+        )
+        recipient_msg = msg
+        recipient_body_tail = body_tail
+        recipient_subject = default_subject
+        if is_rework_editor:
+            recipient_msg = (
+                f"✎ Action required: Please amend {target_type} '{title}' ({reference}) and resubmit it."
+            )
+            recipient_subject = f"DMS — Amend and resubmit: {reference}"
+            recipient_body_tail = (
+                f"You have been asked to amend and resubmit this {target_type}.\n\n"
+                f"  {target_type.capitalize()}: {title}\n"
+                f"  Reference: {reference}\n"
+                f"  Sent back by: {actor_name}\n"
+                f"  Step: {step_name}\n"
+                + reason_line
+                + "\nOpen the form, make the required changes, and select Resubmit. "
+                  "It will return to the step that requested these changes.\n"
+            )
+        default_body = f"Hello {recipient.first_name},\n\n{recipient_body_tail}"
         ctx = dict(
             uploader_name=recipient.first_name,
             document_title=title,
@@ -1299,19 +1488,19 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
         if template_key != "action_other":
             subject, body = _resolve_email(
                 workflow_template, template_key,
-                default_subject, default_body, **ctx,
+                recipient_subject, default_body, **ctx,
             )
         else:
-            subject, body = default_subject, default_body
+            subject, body = recipient_subject, default_body
 
-        _create_notification(recipient, msg, link, "workflow_action")
+        _create_notification(recipient, recipient_msg, link, "workflow_action")
         _send_email(recipient, subject, body, link=link)
 
 
 # ── Ad-hoc signature requests ──────────────────────────────────────────────────
 
 def _signature_link(doc_id) -> str:
-    return f"/documents/{doc_id}"
+    return f"/{doc_id}"
 
 
 @shared_task(queue="notifications")

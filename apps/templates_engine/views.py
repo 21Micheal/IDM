@@ -3,7 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
-from django.db.models import F
+from django.db.models import F, Q
 from rest_framework import permissions
 import json
 from .models import DocumentTemplate, TemplateUsage
@@ -21,25 +21,24 @@ def _request_bool(value) -> bool:
 
 
 from apps.templates_engine.conditions import (  # noqa: E402
-    is_visible as _eval_visible, is_editable, compute_calculated_values,
+    is_visible as _eval_visible, is_editable, compute_calculated_values, build_viewer,
 )
 
 
 def _section_visible_to_user(section: dict, group_ids: set, group_names: set, is_admin: bool) -> bool:
-    """Role-restricted sections (``visibleToGroups``) are visible only to members
-    of the listed groups and to admins. Matched by id first (canonical), then by
-    name (the stored label / what the client matches on). Empty = everyone."""
+    """Legacy ``visibleToGroups`` sections follow the same membership rule as
+    the builder preview. Admin permissions do not bypass section visibility."""
     groups = section.get("visibleToGroups") or []
     if not groups:
         return True
-    if is_admin:
-        return True
+    normalized_ids = {str(value).strip().lower() for value in group_ids}
+    normalized_names = {str(value).strip().lower() for value in group_names}
     for g in groups:
         if not isinstance(g, dict):
             continue
-        if g.get("id") and str(g["id"]) in group_ids:
+        if g.get("id") and str(g["id"]).strip().lower() in normalized_ids:
             return True
-        if g.get("name") and g["name"] in group_names:
+        if g.get("name") and str(g["name"]).strip().lower() in normalized_names:
             return True
     return False
 
@@ -129,6 +128,14 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 queryset = queryset.filter(type=type_)
             if search:
                 queryset = queryset.filter(name__icontains=search)
+            if _request_bool(self.request.query_params.get("requisition_forms")):
+                queryset = queryset.filter(type="built", kind="form", workflow_type="requisition")
+                user = self.request.user
+                from django.utils import timezone
+                group_ids = user.group_memberships.filter(
+                    Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+                ).values_list("group_id", flat=True)
+                queryset = queryset.filter(available_to_groups__in=group_ids).distinct()
         return queryset.select_related("created_by", "document_type")
 
     def perform_create(self, serializer):
@@ -185,8 +192,16 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             placeholders=original.placeholders,
             file=original.file,
             file_name=original.file_name,
+            sunsystems=original.sunsystems,
+            workflow_type=original.workflow_type,
+            requisition_type_field=original.requisition_type_field,
+            travel_type_value=original.travel_type_value,
+            skip_rfq=original.skip_rfq,
+            requisition_category=original.requisition_category,
+            travel_retirement=original.travel_retirement,
             created_by=request.user,
         )
+        copy.available_to_groups.set(original.available_to_groups.all())
         serializer = self.get_serializer(copy)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -198,6 +213,17 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def fill(self, request, pk=None):
         template = self.get_object()
+        if _request_bool(request.data.get("requisition_submission")):
+            if template.workflow_type != "requisition" or template.type != "built" or template.kind != "form":
+                raise ValidationError({"template_id": "Select a requisition form."})
+            from django.utils import timezone
+            from django.db.models import Q
+            member_group_ids = request.user.group_memberships.filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+            ).values_list("group_id", flat=True)
+            if not template.available_to_groups.filter(id__in=member_group_ids).exists():
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied("You are not assigned to use this requisition form.")
         values = request.data.get("values", {})
         if isinstance(values, str):
             try:
@@ -208,6 +234,15 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             values = {}
         if not isinstance(values, dict):
             raise ValidationError({"values": "values must be an object."})
+
+        # Only the sections actually part of this form drive reconciliation,
+        # calculation and validation: normal sections plus the on-demand blocks
+        # the client recorded in `__sections_added`. Forged values for a block
+        # that was never added are dropped here; linked tables are materialised
+        # from their snapshots so no downstream code sees `source="table"`.
+        from apps.templates_engine.blocks import effective_sections, prune_inactive_values
+        values = prune_inactive_values(template.sections, values)
+        eff = effective_sections(template.sections, values)
 
         from apps.documents.form_attachments import (
             apply_form_attachments,
@@ -220,14 +255,14 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
 
         # Re-derive picked reference/user labels server-side from their ids so the
         # stored values are trustworthy (a stale/spoofed client label can't persist).
-        values = reconcile_references(values, template.sections, default_reference_resolver)
+        values = reconcile_references(values, eff, default_reference_resolver)
 
         # Recompute every `calc`-bearing field (e.g. "total_days * daily_rate")
         # authoritatively from the raw values — never trust a client-submitted
         # calculated figure. Must run before `generation_values` is derived so
         # both the required-field check and the stored usage snapshot see the
         # server-computed numbers.
-        values = compute_calculated_values(template.sections, values)
+        values = compute_calculated_values(eff, values)
 
         # `values` already carries filename placeholders for any file fields
         # (simple fields or file columns inside a table); the actual files arrive
@@ -270,21 +305,26 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 .values_list("group__name", flat=True)
             )
             is_admin = bool(getattr(request.user, "has_admin_access", False))
+            # Viewer context for "user_group" visibility rules.
+            viewer = build_viewer(group_ids, group_names, is_admin)
 
+            # On-demand sections ("Add on demand" blocks revealed by a Button)
+            # are not part of the form until the user clicks their button, so
+            # their fields can't be required up-front. Mirrors TemplateForm.tsx.
             visible_editable_sections = [
-                section for section in template.sections
-                if _eval_visible(section, generation_values)
+                section for section in eff
+                if _eval_visible(section, generation_values, viewer=viewer)
                 and _section_visible_to_user(section, group_ids, group_names, is_admin)
-                and is_editable(section, generation_values)
+                and is_editable(section, generation_values, viewer=viewer)
             ]
 
             all_fields = [
                 f for section in visible_editable_sections
                 for f in section.get("fields", [])
-                if f.get("required") and f.get("type") not in ("divider", "heading")
+                if f.get("required") and f.get("type") not in ("divider", "heading", "button")
                 and not f.get("formula") and not f.get("calc")
-                and _eval_visible(f, generation_values)
-                and is_editable(f, generation_values)
+                and _eval_visible(f, generation_values, viewer=viewer)
+                and is_editable(f, generation_values, viewer=viewer)
             ]
             missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]
 
@@ -300,9 +340,32 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 f for section in visible_editable_sections
                 for f in section.get("fields", [])
                 if f.get("type") == "table"
-                and _eval_visible(f, generation_values)
-                and is_editable(f, generation_values)
+                and _eval_visible(f, generation_values, viewer=viewer)
+                and is_editable(f, generation_values, viewer=viewer)
             ]
+            def _cell_missing(value, col_type=None) -> bool:
+                """Mirror TemplateForm.hasFieldValue / isMissingRequiredValue."""
+                if value is None or value == "":
+                    return True
+                if isinstance(value, str):
+                    if not value.strip():
+                        return True
+                    if col_type == "boolean" and value.strip().lower() in {"false", "0"}:
+                        return True
+                    return False
+                if isinstance(value, bool):
+                    return not value
+                if isinstance(value, (list, tuple)):
+                    return len(value) == 0
+                if isinstance(value, dict):
+                    if col_type == "budget_line":
+                        return not str(value.get("account_code") or "").strip()
+                    return not any(
+                        item not in (None, "", [], {})
+                        for item in value.values()
+                    )
+                return False
+
             for f in table_fields:
                 rows = generation_values.get(f.get("key")) or []
                 if not isinstance(rows, list):
@@ -311,17 +374,19 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                     col_key = col.get("key")
                     if not col.get("required") or not col_key:
                         continue
-                    if not _eval_visible(col, generation_values) or not is_editable(col, generation_values):
+                    if col.get("calc") and (col.get("calc") or {}).get("expression"):
                         continue
-                    missing_in_any_row = (
-                        len(rows) == 0
-                        or any(
-                            not isinstance(row, dict) or str(row.get(col_key, "")).strip() == ""
-                            for row in rows
-                        )
-                    )
-                    if missing_in_any_row:
-                        missing.append(f"{f.get('label', f.get('key'))} — {col.get('label', col_key)}")
+                    if not _eval_visible(col, generation_values, viewer=viewer) or not is_editable(col, generation_values, viewer=viewer):
+                        continue
+                    label = f"{f.get('label', f.get('key'))} — {col.get('label', col_key)}"
+                    if len(rows) == 0:
+                        missing.append(label)
+                        continue
+                    if any(
+                        not isinstance(row, dict) or _cell_missing(row.get(col_key), col.get("type"))
+                        for row in rows
+                    ):
+                        missing.append(label)
 
             if missing:
                 raise ValidationError(

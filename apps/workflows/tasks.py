@@ -3,9 +3,52 @@ apps/workflows/tasks.py
 Celery tasks for the workflow engine.
 """
 from celery import shared_task
+from django.db import models
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@shared_task(queue="default")
+def resume_ready_lpo_gates() -> int:
+    """Mark LPO approval gates ready when their posting callback was missed.
+
+    The service rechecks approval, posting, and generated-document state. It
+    leaves the assigned approver's task waiting until they explicitly submit
+    the generated LPOs to the next step.
+    """
+    from .models import WorkflowInstance
+    from .services import WorkflowService
+
+    candidates = (
+        WorkflowInstance.objects
+        .filter(
+            status="in_progress",
+            tasks__status__in=["approved", "awaiting_posting"],
+            tasks__actions__action="approved",
+        )
+        .filter(
+            models.Q(tasks__step__post_lpo_after_approval=True)
+            | models.Q(tasks__step__post_imprest_request_after_approval=True)
+        )
+        .select_related("document")
+        .distinct()
+    )
+    resumed = 0
+    for instance in candidates.iterator():
+        if not instance.document_id:
+            continue
+        try:
+            resumed_imprest = WorkflowService._resume_imprest_request_workflow_if_ready(instance.document)
+            resumed_lpo = WorkflowService._resume_lpo_workflow_if_ready(instance.document)
+            if resumed_imprest or resumed_lpo:
+                resumed += 1
+        except Exception:
+            logger.exception(
+                "Failed to recover ready LPO approval gate for workflow %s",
+                instance.pk,
+            )
+    return resumed
 
 
 @shared_task(bind=True, max_retries=3, queue="default")

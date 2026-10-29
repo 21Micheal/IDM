@@ -114,24 +114,10 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Password reset token fields for self-service password reset
     password_reset_token = models.CharField(max_length=255, null=True, blank=True)
     password_reset_token_expires_at = models.DateTimeField(null=True, blank=True)
-    # Microsoft-only users have no usable password; this prevents forced password change
-    has_usable_password = models.BooleanField(default=True)
 
     last_login_ip = models.GenericIPAddressField(null=True, blank=True)
     created_at    = models.DateTimeField(auto_now_add=True)
     updated_at    = models.DateTimeField(auto_now=True)
-
-    # ── OIDC identity link ────────────────────────────────────────────────────
-    # Populated on first Keycloak login. Used as the primary lookup key so that
-    # renaming a user's email in Keycloak does not break the link.
-    oidc_sub = models.CharField(
-        max_length=255,
-        null=True,
-        blank=True,
-        unique=True,
-        db_index=True,
-        help_text="Keycloak subject (sub) UUID — stable OIDC identity link.",
-    )
 
     objects = UserManager()
 
@@ -232,6 +218,19 @@ class User(AbstractBaseUser, PermissionsMixin):
         return self.group_memberships.filter(
             group__is_active=True,
             group__sees_all_documents=True,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+        ).exists()
+
+    @cached_property
+    def can_view_system_audit(self) -> bool:
+        """Whether this user can inspect the complete system audit log."""
+        if self.has_admin_access:
+            return True
+        now = timezone.now()
+        return self.group_memberships.filter(
+            group__is_active=True,
+            group__can_view_system_audit=True,
         ).filter(
             Q(expires_at__isnull=True) | Q(expires_at__gt=now)
         ).exists()
@@ -452,6 +451,7 @@ class UserGroup(models.Model):
     # document — full visibility/view across all types (e.g. auditors). What they
     # can DO is still governed by this group's per-type permissions.
     sees_all_documents = models.BooleanField(default=False)
+    can_view_system_audit = models.BooleanField(default=False)
     created_by  = models.ForeignKey(
         User, null=True, on_delete=models.SET_NULL, related_name="created_groups"
     )
@@ -506,6 +506,7 @@ class UserGroup(models.Model):
             UserGroupMembership.objects.get_or_create(
                 user=user,
                 group=group,
+                defaults={"added_by": created_by},
             )
 
         return group
@@ -548,7 +549,7 @@ class UserGroup(models.Model):
             UserGroupMembership.objects.update_or_create(
                 user_id=head_id,
                 group=group,
-                defaults={"expires_at": None},
+                defaults={"added_by": added_by, "expires_at": None},
             )
 
         group.memberships.exclude(user_id__in=head_ids).delete()
@@ -666,3 +667,43 @@ class UserPreference(models.Model):
 
     def __str__(self):
         return f"Preferences for {self.user.email}"
+
+
+# ── Client Deployment ───────────────────────────────────────────────────────────
+
+class ClientDeployment(models.Model):
+    """
+    Singleton model representing a client deployment configuration.
+    Each client has their own database, so this is always a single row (pk=1).
+    Controls which product modules are visible to this deployment.
+    """
+    class DeploymentMode(models.TextChoices):
+        FULL = "full", "Full"
+        PROCUREMENT = "procurement", "Procurement"
+        FORMS_ONLY = "forms_only", "Forms Only"
+        CUSTOM = "custom", "Custom"
+
+    deployment_mode = models.CharField(
+        max_length=20,
+        choices=DeploymentMode.choices,
+        default=DeploymentMode.FULL,
+    )
+    enabled_modules = models.JSONField(default=list)
+    product_name = models.CharField(max_length=100, default="FlaxemDMS")
+    primary_color = models.CharField(max_length=7, default="#1e40af")
+    logo_url = models.CharField(max_length=500, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Client Deployment"
+        verbose_name_plural = "Client Deployments"
+
+    def __str__(self):
+        return f"{self.product_name} ({self.deployment_mode})"
+
+    @classmethod
+    def get_or_create_singleton(cls):
+        """Get or create the singleton deployment record (pk=1)."""
+        return cls.objects.get_or_create(pk=1)[0]

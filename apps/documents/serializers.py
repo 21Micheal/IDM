@@ -19,6 +19,7 @@ No other changes to this file.
 """
 from rest_framework import serializers
 import logging
+from django.core.exceptions import ObjectDoesNotExist
 from .models import (
     Document, DocumentType, MetadataField,
     DocumentVersion, DocumentComment, Tag, OCRStatus,
@@ -28,7 +29,7 @@ from .models import (
 )
 from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
-from apps.workflows.models import WorkflowTemplate, WorkflowTask
+from apps.workflows.models import WorkflowTemplate, WorkflowTask, WorkflowTaskAction
 from apps.workflows.serializers import DocumentSignatureSerializer
 from django.db import transaction, IntegrityError
 from django.db.models import Q
@@ -691,7 +692,23 @@ class DocumentListSerializer(serializers.ModelSerializer):
                     variance = compute_retirement_variance(obj)
                 except Exception:
                     variance = None
-        return {"values": values, "retirement_variance": variance}
+        retirement = None
+        try:
+            from apps.documents.builder_workflow import _retirement_workflow_statuses, retirement_status
+            cache_key = "_retirement_workflow_statuses"
+            statuses = self.context.get(cache_key)
+            if statuses is None:
+                root_instance = getattr(self.root, "instance", None)
+                if root_instance is not None and hasattr(root_instance, "__iter__") and not isinstance(root_instance, Document):
+                    document_ids = [item.id for item in root_instance if getattr(item, "id", None)]
+                else:
+                    document_ids = [obj.id]
+                statuses = _retirement_workflow_statuses(document_ids)
+                self.context[cache_key] = statuses
+            retirement = retirement_status(obj, workflow_status=statuses.get(obj.id))
+        except Exception:
+            retirement = None
+        return {"values": values, "retirement_variance": variance, "retirement": retirement}
 
     def get_relationship_count(self, obj):
         outgoing = getattr(obj, "visible_outgoing_relationship_count", None)
@@ -735,6 +752,92 @@ class DocumentListSerializer(serializers.ModelSerializer):
         return self.get_relationship_count(obj) > 0 or self.get_relationship_suggestion_count(obj) > 0
 
 
+class RequisitionSummaryListSerializer(DocumentListSerializer):
+    """Compact list representation for the two procurement requisition tables.
+
+    Those pages need the form's field keys and values for amount/supplier
+    display, but not the full template schema or per-document permission,
+    preview, relationship, and bulk-action calculations from the general list.
+    """
+    metadata = serializers.SerializerMethodField()
+    has_pending_approval = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Document
+        fields = [
+            "id", "title", "reference_number", "document_type_name", "status",
+            "supplier", "amount", "currency", "uploaded_by", "department_name",
+            "uploaded_by_department_name", "created_at", "updated_at", "metadata",
+            "form_summary", "has_pending_approval",
+        ]
+
+    def get_has_pending_approval(self, obj):
+        """Whether either the main workflow or detached Imprest lane is active."""
+        try:
+            workflow = obj.workflow_instance
+        except ObjectDoesNotExist:
+            workflow = None
+        return bool(
+            workflow
+            and (
+                workflow.status == "in_progress"
+                or workflow.imprest_request_status == "in_progress"
+            )
+        )
+
+    def get_metadata(self, obj):
+        metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+        form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+        values = form.get("values") if isinstance(form.get("values"), dict) else {}
+        sections = []
+        for section in form.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            fields = []
+            for field in section.get("fields") or []:
+                if not isinstance(field, dict):
+                    continue
+                sunsystems = field.get("sunsystems")
+                compact_field = {
+                    key: field[key] for key in ("key", "type", "label") if key in field
+                }
+                if isinstance(sunsystems, dict) and sunsystems.get("role"):
+                    compact_field["sunsystems"] = {"role": sunsystems["role"]}
+                columns = []
+                for column in field.get("columns") or []:
+                    if not isinstance(column, dict):
+                        continue
+                    compact_column = {
+                        key: column[key] for key in ("key", "type", "label") if key in column
+                    }
+                    column_sunsystems = column.get("sunsystems")
+                    if isinstance(column_sunsystems, dict) and column_sunsystems.get("role"):
+                        compact_column["sunsystems"] = {"role": column_sunsystems["role"]}
+                    columns.append(compact_column)
+                if columns:
+                    compact_field["columns"] = columns
+                fields.append(compact_field)
+            sections.append({"fields": fields})
+
+        compact_form = {
+            "sections": sections,
+            "values": values,
+        }
+        for key in (
+            "lpo_documents", "lpo_document_id", "lpo_reference",
+            "retirement_variance", "workflow_type", "workflow_phase", "print_config",
+        ):
+            if key in form:
+                compact_form[key] = form[key]
+        return {"form": compact_form}
+
+    def get_form_summary(self, obj):
+        summary = super().get_form_summary(obj)
+        if isinstance(summary, dict):
+            summary.pop("values", None)
+        return summary
+
+
 class DocumentDetailSerializer(serializers.ModelSerializer):
     document_type    = DocumentTypeSerializer(read_only=True)
     document_type_id = serializers.PrimaryKeyRelatedField(
@@ -758,11 +861,13 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     edit_locked_by_name = serializers.SerializerMethodField()
     builder_workflow_phase = serializers.SerializerMethodField()
     builder_process_step = serializers.SerializerMethodField()
+    builder_next_stage = serializers.SerializerMethodField()
     can_submit_retirement = serializers.SerializerMethodField()
     ocr_suggestions = serializers.SerializerMethodField()
     shared_with_me = serializers.SerializerMethodField()
     share_access_level = serializers.SerializerMethodField()
     signatures = serializers.SerializerMethodField()
+    approval_signatures = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -780,9 +885,10 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
-            "builder_workflow_phase", "builder_process_step", "can_submit_retirement",
+            "builder_workflow_phase", "builder_process_step", "builder_next_stage", "can_submit_retirement",
             "current_version", "versions", "comments", "permissions",
             "created_at", "updated_at", "shared_with_me", "share_access_level", "signatures",
+            "approval_signatures",
         ]
         read_only_fields = [
             "id", "reference_number", "file", "file_name", "file_size", "file_mime_type",
@@ -798,6 +904,59 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         metadata = data.get("metadata")
+        # Recover LPO links for older requisitions where concurrent posting
+        # updates replaced one another's JSON metadata. The generated documents
+        # and their source relationships remain authoritative; expose any missing
+        # links in this response so approvers can open every posted LPO.
+        if (
+            isinstance(metadata, dict)
+            and isinstance(metadata.get("form"), dict)
+            and str(getattr(getattr(instance, "document_type", None), "code", "")).upper() != "LPO"
+        ):
+            metadata = dict(metadata)
+            form = dict(metadata["form"])
+            lpo_records = [dict(item) for item in (form.get("lpo_documents") or []) if isinstance(item, dict)]
+            known_ids = {str(item.get("id")) for item in lpo_records if item.get("id")}
+            postings = {
+                str(posting.journal_number): posting
+                for posting in instance.journal_postings.filter(component__iexact="PurchaseOrder").only(
+                    "stage", "stage_label", "journal_number"
+                )
+                if posting.journal_number
+            }
+            links = instance.outgoing_relationships.filter(
+                relation_type=DocumentRelationship.RelationType.REFERENCES,
+                target_document__document_type__code="LPO",
+            ).select_related("target_document")
+            for link in links:
+                lpo = link.target_document
+                if str(lpo.id) in known_ids:
+                    continue
+                lpo_meta = lpo.metadata if isinstance(lpo.metadata, dict) else {}
+                reference = str(lpo_meta.get("lpo.number") or "").strip()
+                if not reference:
+                    continue
+                posting = postings.get(reference)
+                stage_label = str(getattr(posting, "stage_label", "") or "")
+                label_parts = [part.strip() for part in stage_label.split("/")]
+                record = {
+                    "id": str(lpo.id),
+                    "reference": reference,
+                    "document_reference": lpo.reference_number,
+                    "table_label": label_parts[1] if len(label_parts) > 1 else "Purchase Order",
+                }
+                if posting:
+                    record["posting_stage"] = int(posting.stage)
+                lpo_records.append(record)
+                known_ids.add(str(lpo.id))
+            if lpo_records:
+                lpo_records.sort(key=lambda item: int(item.get("posting_stage") or 0))
+                form["lpo_documents"] = lpo_records
+                form["lpo_document_ids"] = [item["id"] for item in lpo_records]
+                form["lpo_document_id"] = lpo_records[0].get("id")
+                form["lpo_reference"] = lpo_records[0].get("reference")
+                metadata["form"] = form
+                data["metadata"] = metadata
         suggestions = metadata.get("relationship_suggestions") if isinstance(metadata, dict) else None
         if (
             user
@@ -824,10 +983,55 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
 
     def get_signatures(self, obj):
         return DocumentSignatureSerializer(
-            obj.signatures.select_related("signer", "task__step", "signed_version").all(),
+            obj.signatures.select_related("signer", "task__step", "signed_version", "source_signature").all(),
             many=True,
             context=self.context,
         ).data
+
+    def get_approval_signatures(self, obj):
+        """Resolve saved user signatures for approved workflow actions.
+
+        Some requisition approval steps record the approver on the workflow
+        action without requiring a PDF signature-placement action. For the
+        authorization print, use the approver's saved signature and the action
+        timestamp as its signed mark. Explicit document signature records still
+        take precedence in the renderer when available.
+        """
+        actions = WorkflowTaskAction.objects.filter(
+            task__workflow_instance__document=obj,
+            action="approved",
+            actor__isnull=False,
+        ).select_related("actor", "task__step").order_by("created_at")
+        results = []
+        signature_cache = {}
+        for action in actions:
+            actor = action.actor
+            if actor.pk not in signature_cache:
+                signature_cache[actor.pk] = actor.signatures.filter(is_active=True).order_by("-created_at").first()
+            signature = signature_cache[actor.pk]
+            image_data = None
+            if signature:
+                try:
+                    signature.image.open("rb")
+                    raw = signature.image.read()
+                    import base64
+                    content_type = "image/jpeg" if signature.image.name.lower().endswith((".jpg", ".jpeg")) else "image/png"
+                    image_data = f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
+                except Exception:
+                    image_data = None
+                finally:
+                    try:
+                        signature.image.close()
+                    except Exception:
+                        pass
+            results.append({
+                "step_name": action.task.step.name,
+                "step_order": action.task.step.order,
+                "signer": {"id": str(actor.pk), "full_name": actor.get_full_name() or actor.email},
+                "signed_at": action.created_at,
+                "signature_data": image_data,
+            })
+        return results
 
     def get_comments(self, obj):
         request = self.context.get("request")
@@ -921,6 +1125,11 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     def get_builder_process_step(self, obj):
         from apps.documents.builder_workflow import builder_process_step
         return builder_process_step(obj)
+
+    def get_builder_next_stage(self, obj):
+        # Travel-aware: requisition -> (rfq | lpo for Travel) -> lpo.
+        from apps.documents.builder_workflow import next_procurement_stage
+        return next_procurement_stage(obj)
 
     def get_can_submit_retirement(self, obj):
         from apps.documents.builder_workflow import can_submit_retirement_workflow

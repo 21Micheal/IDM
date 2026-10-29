@@ -4,6 +4,7 @@ Document lifecycle access: stage resolution and editability policies.
 from __future__ import annotations
 
 from typing import Any
+from django.db import models
 
 from apps.documents.models import DMSSettings, Document, DocumentStatus
 
@@ -81,28 +82,43 @@ def _document_has_active_workflow(document: Document) -> bool:
         instance = document.workflow_instance
     except Exception:
         return False
-    return getattr(instance, "status", None) == "in_progress"
+    return (
+        getattr(instance, "status", None) == "in_progress"
+        or getattr(instance, "imprest_request_status", None) == "in_progress"
+    )
+
+
+def returned_rework_editor_id(document: Document):
+    """Return the user id assigned to amend a form sent back for rework."""
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    handoff = form.get("return_for_rework") or {}
+    editor_id = handoff.get("editor_id")
+    return str(editor_id) if editor_id else None
 
 
 def resolve_access_stage(document: Document) -> str:
     """
     Map a document to a lifecycle stage for permission checks.
-    Strictly follows admin-configured access stage mappings, with a critical safety check:
-    returned documents default to CREATION stage unless explicitly configured otherwise.
-    This ensures returned documents can be edited by uploaders but NOT approvers.
+    Follows admin-configured access stage mappings. A returned document is the
+    exception: it always re-enters CREATION so the submitter can amend it using
+    draft permissions and form rules. Non-submitters remain view-only below.
     """
     status = (document.status or "").strip()
     status_lower = status.lower()
 
-    # Use admin-configured mapping for this status
+    # A return is always sent back to the submitter for amendment, regardless
+    # of a custom status-to-stage mapping. effective_permissions_for_user()
+    # separately keeps every non-uploader view-only while the document is
+    # returned.
+    if status_lower == "returned":
+        return ACCESS_STAGE_CREATION
+
+    # Use admin-configured mapping for all other statuses.
     stage = _status_to_stage_map().get(status_lower)
     if stage is not None:
         return stage
 
-    # Safety check: returned documents should be CREATION (editable by uploader)
-    # unless explicitly configured otherwise by admin.
-    # This prevents approvers from being able to edit returned documents.
-    if status_lower in ("returned",) or status in LEGACY_EDITABLE_STATUSES:
+    if status in LEGACY_EDITABLE_STATUSES:
         return ACCESS_STAGE_CREATION
 
     # If no explicit mapping exists and document has active workflow, use approval stage
@@ -184,7 +200,22 @@ def is_built_form_document(document: Document) -> bool:
     return isinstance(form, dict) and bool(form.get("sections"))
 
 
-def form_has_editable_fields(document: Document) -> bool:
+def viewer_for_user(user):
+    """Build the ``user_group`` condition context (group ids/names + admin) for a
+    request user. Returns ``None`` for an anonymous/missing user, which makes
+    group rules non-restrictive (they are a convenience, not access control)."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return None
+    from apps.templates_engine.conditions import build_viewer
+    memberships = getattr(user, "group_memberships", None)
+    ids, names = set(), set()
+    if memberships is not None:
+        ids = {str(v) for v in memberships.values_list("group_id", flat=True)}
+        names = set(memberships.select_related("group").values_list("group__name", flat=True))
+    return build_viewer(ids, names, bool(getattr(user, "has_admin_access", False)))
+
+
+def form_has_editable_fields(document: Document, user=None) -> bool:
     """True when the built form exposes at least one visible, editable field at
     the document's current process step (``status``)."""
     form = (document.metadata or {}).get("form")
@@ -198,25 +229,75 @@ def form_has_editable_fields(document: Document) -> bool:
     values = form.get("values") if isinstance(form.get("values"), dict) else {}
     process_step = builder_process_step(document)
     render_values = descriptors_to_names(values)
+    viewer = viewer_for_user(user)
 
     for section in sections:
         if not isinstance(section, dict):
             continue
-        if not is_visible(section, render_values, process_step):
+        if not is_visible(section, render_values, process_step, viewer):
             continue
-        section_editable = is_editable(section, render_values, process_step)
+        section_editable = is_editable(section, render_values, process_step, viewer)
         for field in section.get("fields") or []:
             if not isinstance(field, dict):
                 continue
             if not field.get("key"):
                 continue
             if (
-                is_visible(field, render_values, process_step)
+                is_visible(field, render_values, process_step, viewer)
                 and section_editable
-                and is_editable(field, render_values, process_step)
+                and is_editable(field, render_values, process_step, viewer)
             ):
                 return True
     return False
+
+
+def retirement_editable_section_ids(document: Document, user=None) -> set[str]:
+    """Return visible retirement-expense sections editable after LPO approval.
+
+    The retirement expense table is a sub-process of a requisition and must stay
+    locked while the LPO workflow is active. Once LPO is approved, its
+    section-level group visibility rule is the access boundary for scoped edits.
+    """
+    if user is None or not getattr(user, "is_authenticated", False):
+        return set()
+    try:
+        from apps.documents.builder_workflow import builder_process_step, completed_procurement_stages
+        if "requisition" not in completed_procurement_stages(document):
+            return set()
+        if builder_process_step(document) != "lpo_approved":
+            return set()
+        form = (document.metadata or {}).get("form")
+        if not isinstance(form, dict):
+            return set()
+        from apps.documents.form_attachments import descriptors_to_names
+        from apps.templates_engine.conditions import is_editable, is_visible
+        values = form.get("values") if isinstance(form.get("values"), dict) else {}
+        rendered = descriptors_to_names(values)
+        process_step = builder_process_step(document)
+        viewer = viewer_for_user(user)
+        result = set()
+        for section in form.get("sections") or []:
+            if not isinstance(section, dict) or section.get("hidden") or section.get("readonly"):
+                continue
+            fields = section.get("fields") or []
+            if not any(isinstance(field, dict) and field.get("workflowRole") == "retirement_expenses" for field in fields):
+                continue
+            if not is_visible(section, rendered, process_step, viewer) or not is_editable(section, rendered, process_step, viewer):
+                continue
+            if not any(
+                isinstance(field, dict)
+                and field.get("key")
+                and not field.get("hidden")
+                and not field.get("readonly")
+                and is_visible(field, rendered, process_step, viewer)
+                and is_editable(field, rendered, process_step, viewer)
+                for field in fields
+            ):
+                continue
+            result.add(str(section.get("id") or section.get("key") or ""))
+        return result
+    except Exception:
+        return set()
 
 
 def user_owns_document(user, document: Document) -> bool:
@@ -229,18 +310,41 @@ def user_owns_document(user, document: Document) -> bool:
     )
 
 
+def user_has_active_approval_task(user, document: Document) -> bool:
+    """Whether the user can act on an active approval task for this document."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    try:
+        from apps.accounts.delegation import tasks_visible_to_user
+        return tasks_visible_to_user(user).filter(
+            workflow_instance__document_id=document.id,
+            status="in_progress",
+        ).filter(
+            models.Q(workflow_instance__status="in_progress")
+            | models.Q(
+                execution_lane="imprest_request",
+                workflow_instance__imprest_request_status="in_progress",
+            )
+        ).exists()
+    except Exception:
+        return False
+
+
 def document_allows_form_edit(document: Document, *, user=None) -> bool:
     """Whether an in-app built-template form may be edited (stage-aware).
 
     Creation-stage rules mirror ``document_allows_edit`` (workflow task gates).
-    Later lifecycle stages allow owner-only edits when the form schema exposes
-    editable fields at the document's current process step — e.g. imprest
-    retirement sections that unlock after the first approval. Pending approval
-    remains locked; approvers act through workflow actions, not form edits.
+    Later lifecycle stages allow owner edits when the form schema exposes
+    editable fields at the current process step. During approval, only a user
+    with an active assigned task may edit; section and field rules still control
+    which inputs are enabled.
     """
     if not is_built_form_document(document):
         return False
     if user is not None and getattr(user, "has_admin_access", False):
+        return True
+
+    if retirement_editable_section_ids(document, user=user):
         return True
 
     stage = resolve_access_stage(document)
@@ -250,12 +354,18 @@ def document_allows_form_edit(document: Document, *, user=None) -> bool:
 
     try:
         from apps.documents.builder_workflow import builder_process_step
-        if builder_process_step(document) in {"fully_approved", "retirement_rejected"}:
+        if builder_process_step(document) in {"retirement_approved", "fully_approved", "retirement_rejected"}:
             return False
     except Exception:
         pass
 
-    if not form_has_editable_fields(document):
+    if not form_has_editable_fields(document, user=user):
+        return False
+
+    if user_has_active_approval_task(user, document):
+        return True
+
+    if stage == ACCESS_STAGE_APPROVAL:
         return False
 
     if stage == ACCESS_STAGE_AFTER_APPROVAL:
@@ -288,6 +398,16 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
 
     if not user or not getattr(user, "is_authenticated", False):
         return []
+    status_lower = (document.status or "").strip().lower()
+    assigned_editor_id = returned_rework_editor_id(document)
+    if (
+        status_lower == "returned"
+        and assigned_editor_id
+        and assigned_editor_id != str(user.id)
+    ):
+        # A previous-approver handoff is exclusive, including when the
+        # submitter has administrator access. Admins can still view the form.
+        return [GroupAction.VIEW.value]
     if user.has_admin_access:
         return [
             choice[0]
@@ -311,13 +431,16 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
     if not user_is_involved_with_document(user, document):
         return []
 
-    # CRITICAL FIX: When a document is returned for review, only the uploader
-    # should have creation-stage permissions. Approvers who returned it should
-    # not retain creation rights even if their group grants them.
-    status_lower = (document.status or "").strip().lower()
-    if status_lower == "returned" and document.uploaded_by_id != user.id:
-        # Non-uploaders only get VIEW permission on returned documents
-        # They cannot edit, upload, submit, or delete
+    # A previous-approver return is assigned to one approver only. The uploader
+    # must not inherit edit rights just because they created the document.
+    if status_lower == "returned" and assigned_editor_id:
+        if assigned_editor_id != str(user.id):
+            return [GroupAction.VIEW.value]
+        rework_editor = True
+    else:
+        rework_editor = False
+    if status_lower == "returned" and not assigned_editor_id and document.uploaded_by_id != user.id:
+        # Submitter returns remain limited to the uploader.
         return [GroupAction.VIEW.value]
 
     perms = user.get_all_permissions_for_doctype(
@@ -325,6 +448,18 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
         document=document,
     )
     perms = filter_permissions_for_document(user, document, perms)
+    if rework_editor:
+        perms.update({
+            GroupAction.EDIT.value,
+            GroupAction.APPROVE.value,
+            GroupAction.SUBMIT.value,
+        })
+    if (
+        is_built_form_document(document)
+        and GroupAction.APPROVE.value in perms
+        and user_has_active_approval_task(user, document)
+    ):
+        perms.add(GroupAction.EDIT.value)
     # Involvement implies the ability to view (the access gates allow it), even
     # if the group's action set doesn't explicitly include VIEW.
     perms = set(perms) | {GroupAction.VIEW.value}

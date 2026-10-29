@@ -74,6 +74,68 @@ class DocumentTemplate(models.Model):
     # "connection": {...} }. Empty = no SunSystems integration for this template.
     sunsystems = models.JSONField(default=dict, blank=True)
 
+    # Workflow type: determines which workflow stages and process steps are
+    # available for visibility conditions in the form builder.
+    WORKFLOW_TYPE_CHOICES = [
+        ("imprest", "Imprest (Request → Retirement)"),
+        ("requisition", "Requisition (Requisition → RFQ → LPO)"),
+    ]
+    workflow_type = models.CharField(
+        max_length=20,
+        choices=WORKFLOW_TYPE_CHOICES,
+        default="requisition",
+        help_text="Workflow type for this template: determines available process steps.",
+    )
+
+    # Procurement stage gating. A requisition form carries a dropdown whose
+    # value is the requisition type; one value (default "Travel") may skip the
+    # RFQ stage entirely and move straight from Requisition to LPO approval.
+    requisition_type_field = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text="Key of the form dropdown field that holds the requisition type.",
+    )
+    travel_type_value = models.CharField(
+        max_length=120,
+        blank=True,
+        default="Travel",
+        help_text="Requisition-type value that skips the RFQ stage (Requisition → LPO).",
+    )
+    skip_rfq = models.BooleanField(
+        default=False,
+        help_text="Skip the RFQ stage for this requisition form and continue directly to LPO.",
+    )
+    REQUISITION_CATEGORY_CHOICES = [
+        ("standard", "Standard requisition"),
+        ("travel", "Travel requisition"),
+    ]
+    requisition_category = models.CharField(
+        max_length=20,
+        choices=REQUISITION_CATEGORY_CHOICES,
+        default="standard",
+        help_text="Identifies the requisition lifecycle without asking the requester to choose a type on the form.",
+    )
+    available_to_groups = models.ManyToManyField(
+        "accounts.UserGroup",
+        blank=True,
+        related_name="requisition_templates",
+        help_text="Groups whose members may start requisitions with this form.",
+    )
+    # Optional travel retirement lifecycle layered onto a requisition. Kept
+    # separate from `workflow_type`: requisitions retain their procurement
+    # path and may open a retirement phase after LPO approval.
+    travel_retirement = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Optional travel retirement settings (return-date field and policy deadline).",
+    )
+    print_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Print layout settings, including the workflow approval assigned to each signature slot.",
+    )
+
     # How many times this template has been used to create a document
     use_count = models.PositiveIntegerField(default=0)
 
