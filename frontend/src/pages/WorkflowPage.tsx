@@ -210,7 +210,7 @@ export default function WorkflowPage() {
       return;
     }
     const documentId = getTaskDocumentId(task);
-    if (documentId) navigate(`/${documentId}`);
+    if (documentId) navigate(`/documents/${documentId}?task=${task.id}`);
   };
   const filterOptions = useMemo(() => buildWorkflowTaskFilterOptions(allTasks), [allTasks]);
   const filteredTasks = useMemo(

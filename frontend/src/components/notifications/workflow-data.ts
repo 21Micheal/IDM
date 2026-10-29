@@ -19,7 +19,6 @@ export interface WorkflowNotificationContext {
   priority: "high" | "medium" | "low";
   viewDocumentLink?: string;
   documentId?: string;
-  taskId?: string;
 }
 
 type WorkflowTaskRecord = {
@@ -189,7 +188,6 @@ type TaskHistoryRecord = {
 export async function loadWorkflowData(
   documentId: string,
   workflowPhase?: WorkflowPhase | null,
-  taskId?: string | null,
 ): Promise<{
   steps: WorkflowStep[];
   currentStep: number;
@@ -264,19 +262,22 @@ export async function loadWorkflowData(
     template?.definition,
   );
 
-  // If a specific taskId is provided, filter steps to show only the path
-  // relevant to that task. This prevents showing all steps when a task
-  // only follows one or two specific steps.
+  // Filter steps to show only those that have tasks for this document instance.
+  // This prevents showing all template steps when a document only follows
+  // a specific path (e.g., only 1 or 2 steps instead of the full workflow).
+  const ordersWithTasks = new Set(orderedTasks.map((t) => t.step?.order).filter(Boolean));
   let filteredSteps = steps;
-  if (taskId) {
-    const taskStep = steps.find((step) => step.id === taskId || step.name.includes(taskId));
-    if (taskStep) {
-      // Find the index of this task step
-      const taskIndex = steps.findIndex((s) => s.id === taskStep.id);
-      // Show steps from start up to and including this task step
-      // plus a few steps after to show context
-      filteredSteps = steps.slice(0, taskIndex + 2);
-    }
+
+  // If there are fewer than 5 steps with tasks, this is likely a simple workflow
+  // or a document following a specific path. Show only the steps that have tasks.
+  // Always keep start and end nodes as visual indicators.
+  if (ordersWithTasks.size > 0 && ordersWithTasks.size < 5) {
+    filteredSteps = steps.filter((step) => {
+      // Always keep start and end nodes regardless of filter
+      if (step.kind === "start" || step.kind === "end") return true;
+      // Keep steps that have tasks
+      return ordersWithTasks.has(step.order);
+    });
   }
 
   // The workflow is still "live" (worth polling) while at least one stage is

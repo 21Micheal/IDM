@@ -362,10 +362,3 @@ export function getDocumentIdFromLink(link?: string): string | undefined {
   const match = link.match(/\/(?:documents|tasks)\/([0-9a-fA-F-]{36}|[0-9]+)/);
   return match ? match[1] : undefined;
 }
-
-export function getTaskIdFromLink(link?: string): string | undefined {
-  if (!link) return undefined;
-  // Extract task ID from /tasks/ patterns
-  const match = link.match(/\/tasks\/([0-9a-fA-F-]{36}|[0-9]+)/);
-  return match ? match[1] : undefined;
-}
