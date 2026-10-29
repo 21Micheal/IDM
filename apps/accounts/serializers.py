@@ -102,7 +102,7 @@ class UserSerializer(serializers.ModelSerializer):
             "is_superuser",
             "has_admin_access", "can_view_system_audit", "admin_source",
             "department", "department_name",
-            "mfa_enabled", "must_change_password",
+            "mfa_enabled", "must_change_password", "has_usable_password",
             "is_active", "last_login_ip", "last_login",
             "group_names", "created_at", "updated_at",
         ]
@@ -110,7 +110,7 @@ class UserSerializer(serializers.ModelSerializer):
             "id", "full_name", "department_name",
             "is_staff", "is_superuser",
             "has_admin_access", "can_view_system_audit", "admin_source",
-            "must_change_password", "last_login_ip", "last_login",
+            "must_change_password", "has_usable_password", "last_login_ip", "last_login",
             "group_names", "created_at", "updated_at",
         ]
 
