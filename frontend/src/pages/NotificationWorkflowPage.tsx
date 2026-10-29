@@ -15,6 +15,7 @@ import { notificationsAPI, normalizeListResponse, documentsAPI, signatureRequest
 import type { Notification } from "@/types";
 import {
   getDocumentIdFromLink,
+  getTaskIdFromLink,
   getNotificationConfig,
   inferNotificationPriority,
 } from "@/components/notifications/notifications-list";
@@ -51,6 +52,7 @@ export default function NotificationWorkflowPage() {
     );
     if (!notification) return null;
     const config = getNotificationConfig(notification.type, notification.message);
+    const taskId = getTaskIdFromLink(notification.link);
     return {
       id: notification.id,
       title: config.label,
@@ -60,6 +62,7 @@ export default function NotificationWorkflowPage() {
       priority: inferNotificationPriority(notification),
       viewDocumentLink: notification.link,
       documentId,
+      taskId,
     } satisfies WorkflowNotificationContext;
   }, [documentId, notifications, state?.notification]);
 
@@ -70,8 +73,8 @@ export default function NotificationWorkflowPage() {
 
   // ── Workflow data (for approval-chain notifications) ──────────────────────
   const { data: workflowData, isLoading: workflowLoading } = useQuery({
-    queryKey: ["notification-workflow", documentId],
-    queryFn: () => loadWorkflowData(documentId),
+    queryKey: ["notification-workflow", documentId, notificationContext?.taskId],
+    queryFn: () => loadWorkflowData(documentId, undefined, notificationContext?.taskId),
     enabled: !!documentId && !isSignatureNotification,
     staleTime: 10_000,
     refetchInterval: (query) => (query.state.data?.isActive ? 15_000 : false),
@@ -108,6 +111,10 @@ export default function NotificationWorkflowPage() {
     ? `/${documentId}`
     : notificationContext?.viewDocumentLink || `/documents/${documentId}`;
 
+  // If notification has a specific task, append task query parameter
+  const taskParam = notificationContext?.taskId ? `?task=${notificationContext.taskId}` : "";
+  const finalDocumentLink = taskParam ? `${viewDocumentLink}${taskParam}` : viewDocumentLink;
+
   const isLoading = isSignatureNotification ? sigLoading : workflowLoading;
 
   // Derive a meaningful page title from whichever data source is active.
@@ -134,7 +141,7 @@ export default function NotificationWorkflowPage() {
           {documentId && (
             <button
               type="button"
-              onClick={() => navigate(viewDocumentLink)}
+              onClick={() => navigate(finalDocumentLink)}
               className="ml-auto inline-flex items-center gap-2 text-sm text-[#287EAD] hover:text-[#206D99] transition-colors"
             >
               <ExternalLink className="h-4 w-4" />

@@ -19,6 +19,7 @@ export interface WorkflowNotificationContext {
   priority: "high" | "medium" | "low";
   viewDocumentLink?: string;
   documentId?: string;
+  taskId?: string;
 }
 
 type WorkflowTaskRecord = {
@@ -185,7 +186,11 @@ type TaskHistoryRecord = {
   created_at?: string;
 };
 
-export async function loadWorkflowData(documentId: string, workflowPhase?: WorkflowPhase | null): Promise<{
+export async function loadWorkflowData(
+  documentId: string,
+  workflowPhase?: WorkflowPhase | null,
+  taskId?: string | null,
+): Promise<{
   steps: WorkflowStep[];
   currentStep: number;
   isActive: boolean;
@@ -259,9 +264,24 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
     template?.definition,
   );
 
+  // If a specific taskId is provided, filter steps to show only the path
+  // relevant to that task. This prevents showing all steps when a task
+  // only follows one or two specific steps.
+  let filteredSteps = steps;
+  if (taskId) {
+    const taskStep = steps.find((step) => step.id === taskId || step.name.includes(taskId));
+    if (taskStep) {
+      // Find the index of this task step
+      const taskIndex = steps.findIndex((s) => s.id === taskStep.id);
+      // Show steps from start up to and including this task step
+      // plus a few steps after to show context
+      filteredSteps = steps.slice(0, taskIndex + 2);
+    }
+  }
+
   // The workflow is still "live" (worth polling) while at least one stage is
   // running or yet to be reached, and it hasn't ended in a rejection.
-  const taskSteps = steps.filter((step) => !step.kind || step.kind === "task");
+  const taskSteps = filteredSteps.filter((step) => !step.kind || step.kind === "task");
   const isActive = orderedTasks.length > 0
     && taskSteps.some((step) =>
       step.status === "in-progress" ||
@@ -271,8 +291,8 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
     );
 
   return {
-    steps,
-    currentStep: steps.findIndex((step) => step.status === "in-progress" || step.status === "on-hold"),
+    steps: filteredSteps,
+    currentStep: filteredSteps.findIndex((step) => step.status === "in-progress" || step.status === "on-hold"),
     isActive,
     ...meta,
   };
