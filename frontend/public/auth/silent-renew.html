@@ -1,17 +1,26 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
-  <head><title>Silent OIDC renew</title></head>
-  <body>
-    <!--
-      This page is loaded in a hidden iframe by oidc-client-ts to silently
-      renew the Keycloak session without user interaction (SSO detection).
-      It MUST be served at the URL matching `silent_redirect_uri` in oidcClient.ts.
-      Using the CDN UMD build so this static page has no Vite build dependency.
-    -->
-    <script src="https://cdn.jsdelivr.net/npm/oidc-client-ts@3/dist/browser/oidc-client-ts.min.js"></script>
-    <script>
-      new oidc.UserManager({}).signinSilentCallback()
-        .catch(function(err) { console.warn("Silent renew callback error:", err); });
-    </script>
-  </body>
+<head>
+  <title>Silent Renew</title>
+</head>
+<body>
+  <script src="https://cdn.jsdelivr.net/npm/oidc-client-ts@2.2.0/dist/oidc-client-ts.min.js"></script>
+  <script>
+    var userManager = new Oidc.UserManager({
+      authority: 'http://localhost:8080/realms/idp-dev',
+      client_id: 'dms-client',
+      redirect_uri: window.location.origin + '/auth/callback',
+      silent_redirect_uri: window.location.origin + '/auth/silent-renew.html',
+      post_logout_redirect_uri: window.location.origin + '/login',
+      response_type: 'code',
+      scope: 'openid profile email roles',
+      automaticSilentRenew: false,
+    });
+    userManager.signinSilentCallback().then(function () {
+      console.log('Silent renew successful');
+    }).catch(function (err) {
+      console.error('Silent renew failed', err);
+    });
+  </script>
+</body>
 </html>

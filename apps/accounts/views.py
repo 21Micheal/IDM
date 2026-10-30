@@ -33,7 +33,6 @@ from apps.notifications.tasks import (
 )
 from apps.accounts.delegation import tasks_for_delegation
 from .email_otp import send_otp_email
-from apps.audit.models import AuditLog, AuditEvent
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -65,6 +64,59 @@ class ConfigView(APIView):
     def get(self, request):
         return Response({
             "auth_mode": getattr(settings, "AUTH_MODE", "native"),
+            "keycloak_url": getattr(settings, "KEYCLOAK_URL", "http://localhost:8080"),
+            "keycloak_realm": getattr(settings, "KEYCLOAK_REALM", "idp-dev"),
+            "oidc_client_id": getattr(settings, "OIDC_CLIENT_ID", "dms-client"),
+        })
+
+
+# ── OIDC Exchange (Keycloak SSO) ───────────────────────────────────────────────
+
+class OIDCExchangeView(APIView):
+    """
+    SPA PKCE completed against Keycloak; exchange a validated id_token for hub JWTs.
+    """
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        import jwt as pyjwt
+        from .oidc_auth import resolve_dms_user, validate_id_token
+
+        raw_token = (request.data.get("id_token") or "").strip()
+        if not raw_token:
+            return Response({"detail": "id_token is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            claims = validate_id_token(raw_token)
+            user = resolve_dms_user(claims)
+        except pyjwt.ExpiredSignatureError:
+            return Response({"detail": "The token has expired. Please sign in again."}, status=status.HTTP_401_UNAUTHORIZED)
+        except pyjwt.PyJWTError:
+            return Response({"detail": "Invalid identity token."}, status=status.HTTP_401_UNAUTHORIZED)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except Exception:
+            return Response({"detail": "Unable to complete sign-in."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if not user.is_active:
+            return Response({"detail": "Account is inactive."}, status=status.HTTP_403_FORBIDDEN)
+
+        user.last_login = timezone.now()
+        user.save(update_fields=["last_login"])
+        refresh = issue_refresh_for_user(user)
+        AuditLog.objects.create(event=AuditEvent.USER_LOGIN, actor=user, changes={"auth_mode": "keycloak"})
+        return Response({
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "has_admin_access": user.has_admin_access,
+            },
+            "session_policy": get_session_policy(),
         })
 
 

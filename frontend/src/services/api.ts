@@ -277,6 +277,9 @@ export const authAPI = {
       ? { headers: { Authorization: `Bearer ${token}` } }
       : undefined),
 
+  oidcExchange: (data: { id_token: string }) =>
+    api.post("/auth/oidc/exchange/", data),
+
   requestPasswordReset: (data: { email: string }) =>
     api.post("/auth/password-reset/request/", data),
 

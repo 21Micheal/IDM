@@ -274,6 +274,8 @@ OIDC_OP_ISSUER = env(
     default="http://localhost:8080/realms/idp-dev",
 )
 OIDC_CLIENT_ID = env("OIDC_CLIENT_ID", default="dms-client")
+KEYCLOAK_URL = env("KEYCLOAK_URL", default="http://localhost:8080")
+KEYCLOAK_REALM = env("KEYCLOAK_REALM", default="idp-dev")
 # Cache JWKS public keys for this many seconds. On a key-ID miss (Keycloak
 # rotated its signing key) the cache is bypassed automatically.
 OIDC_JWKS_CACHE_TTL = env.int("OIDC_JWKS_CACHE_TTL", default=3600)

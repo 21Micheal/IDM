@@ -10,6 +10,7 @@ import SessionDialogs from "@/components/shared/SessionDialogs";
 
 const Layout = lazy(() => import("@/components/shared/Layout"));
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
+const OIDCCallbackPage = lazy(() => import("@/pages/OIDCCallbackPage"));
 const PasswordResetConfirmPage = lazy(() => import("@/pages/PasswordResetConfirmPage"));
 const ForceChangePasswordPage = lazy(() => import("@/pages/ForceChangePasswordPage"));
 const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
@@ -362,6 +363,7 @@ export default function App() {
           <Routes>
             {/* Public */}
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/auth/callback" element={<OIDCCallbackPage />} />
             <Route path="/reset-password" element={<PasswordResetConfirmPage />} />
 
             {/* First-login password wall — requires auth but bypasses the layout */}

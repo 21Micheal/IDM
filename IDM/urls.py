@@ -3,6 +3,7 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from apps.accounts.views import SessionTokenRefreshView, break_glass_login
+from apps.accounts import internal_urls
 from apps.documents.storage_views import StorageStatsView
 from apps.documents.views import DocumentVolumeView, TopUploadersView
 from apps.workflows.views import ApprovalTurnaroundView, SlaBreachRateView
@@ -16,6 +17,9 @@ urlpatterns = [
 
     # Auth + user management + departments (all from accounts app)
     path("api/v1/",             include("apps.accounts.urls")),
+
+    # Internal IDP endpoints for Keycloak federation
+    path("api/v1/internal/idp/", include(internal_urls)),
 
     # Documents, types, tags
     path("api/v1/documents/",   include("apps.documents.urls")),

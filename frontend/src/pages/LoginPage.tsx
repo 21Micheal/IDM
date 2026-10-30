@@ -11,7 +11,7 @@ import { Loader2, RefreshCw, ArrowLeft, CheckCircle2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 import { authAPI } from "@/services/api";
-
+import { oidcLogin, trySilentRenew } from "@/lib/oidcClient";
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import type { AuthUser, ServerSessionPolicy, DeploymentConfig } from "@/store/authStore";
@@ -152,21 +152,14 @@ function ForgotPasswordPanel({ onBack }: { onBack: () => void }) {
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { setTokens, setUser, deployment } = useAuthStore();
+  const { setTokens, setUser, isAuthenticated, deployment } = useAuthStore();
 
   // Check deployment config for Keycloak auth mode
-  const { data: deploymentConfig } = useQuery({
+  const { data: deploymentConfig, isLoading: configLoading } = useQuery({
     queryKey: ["deployment"],
     queryFn: () => authAPI.getDeployment().then((r) => r.data),
     staleTime: 5 * 60 * 1000, // 5 minutes
   });
-
-  // Redirect to Keycloak if auth mode is keycloak
-  useEffect(() => {
-    if (deploymentConfig?.auth_mode === "keycloak") {
-      window.location.href = deploymentConfig.keycloak_url || "/oauth2/authorization";
-    }
-  }, [deploymentConfig]);
 
   const [step, setStep] = useState<"credentials" | "otp" | "forgot">(
     "credentials"
@@ -180,6 +173,31 @@ export default function LoginPage() {
 
   const credForm = useForm<CredForm>({ resolver: zodResolver(credSchema) });
   const otpForm = useForm<OTPForm>({ resolver: zodResolver(otpSchema) });
+
+  // Redirect to Keycloak if auth mode is keycloak
+  useEffect(() => {
+    if (deploymentConfig?.auth_mode === "keycloak") {
+      // If already authenticated locally, redirect to home
+      if (isAuthenticated) {
+        navigate("/", { replace: true });
+        return;
+      }
+      // Redirect to Keycloak login using OIDC
+      oidcLogin();
+    }
+  }, [deploymentConfig, isAuthenticated, navigate]);
+
+  // Show loading while checking config or if in Keycloak mode
+  if (configLoading || deploymentConfig?.auth_mode === "keycloak") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200">
+        <div className="flex items-center gap-3">
+          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+          <p className="text-sm text-gray-600">Checking authentication configuration...</p>
+        </div>
+      </div>
+    );
+  }
 
   const completeLogin = async (tokenData: {
     access: string;
