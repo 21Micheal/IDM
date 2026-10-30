@@ -21,8 +21,21 @@ function firstMessage(value: unknown): string | null {
     const str = value.trim();
     if (!str) return null;
     
+    // Check if this is an HTML error page (Django debug page)
+    if (str.includes("<!DOCTYPE html>") || str.includes("<html>")) {
+      // Try to extract the error title from the HTML
+      const titleMatch = str.match(/<title>([^<]+)<\/title>/);
+      if (titleMatch) {
+        const title = titleMatch[1].trim();
+        // Extract the error type (e.g., "Page not found", "Internal Server Error")
+        const errorType = title.split('|')[0].trim();
+        return errorType || "Server error occurred";
+      }
+      return "Server error occurred";
+    }
+    
     // Handle database errors (IntegrityError, OperationalError, etc.)
-    if (str.includes("IntegrityError") || str.includes("OperationalError") || str.includes("DatabaseError")) {
+    if (str.includes("IntegrityError") || str.includes("OperationalError") || str.includes("DatabaseError") || str.includes("ProgrammingError")) {
       // Extract MySQL error code and message
       const match = str.match(/\((\d+),\s*"([^"]+)"\)/);
       if (match) {
@@ -39,7 +52,7 @@ function firstMessage(value: unknown): string | null {
           case "1050":
             return `Table already exists: ${message}`;
           case "1146":
-            return `Table not found: ${message}`;
+            return `Database table not found: ${message}`;
           default:
             return `Database error: ${message}`;
         }

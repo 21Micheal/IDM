@@ -296,34 +296,39 @@ export default function AuditPage() {
   return (
     <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
       {/* ── Command bar ─────────────────────────────────────────────────────── */}
-      <WorkspaceCommandBar>
-        <div className="min-w-0">
-          <div className="flex items-center gap-3">
-            <ShieldCheck className="h-5 w-5" />
-            <div className="flex min-w-0 items-center gap-2">
-              <h1 className="truncate text-lg font-semibold tracking-tight">
-                {canViewSystemAudit ? "Audit Trail" : "Document Activity"}
-              </h1>
-              <span title={canViewSystemAudit ? "Full system audit log." : "Recent actions on documents you own."}>
-                <Info className="h-4 w-4 text-white/75" />
-              </span>
-            </div>
-            {!isLoading && data?.count !== undefined && (
-              <span className="ml-1 inline-flex items-center gap-1.5 border border-white/30 px-2.5 py-1 text-xs font-medium text-white/85">
-                <Activity className="h-3 w-3" />
-                {data.count.toLocaleString()} {data.count === 1 ? "event" : "events"}
-              </span>
-            )}
-          </div>
-          <p className="mt-0.5 max-w-2xl text-xs text-white/75">
-            {canViewSystemAudit
-              ? "Immutable record of all system activities and changes."
-              : "A simple feed of recent actions on your documents — approvals, views, and uploads."}
-          </p>
-        </div>
-      </WorkspaceCommandBar>
+      <WorkspaceCommandBar />
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-5">
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5">
+        {/* Page heading */}
+        <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center bg-[#287EAD]">
+              <ShieldCheck className="h-5 w-5 text-white" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-xl font-semibold tracking-tight text-[#1F2933]">
+                  {canViewSystemAudit ? "Audit Trail" : "Document Activity"}
+                </h1>
+                <span title={canViewSystemAudit ? "Full system audit log." : "Recent actions on documents you own."}>
+                  <Info className="h-4 w-4 text-[#5E6870]" />
+                </span>
+                {!isLoading && data?.count !== undefined && (
+                  <span className="ml-1 inline-flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-2.5 py-0.5 text-xs font-medium text-[#5E6870]">
+                    <Activity className="h-3 w-3 text-[#287EAD]" />
+                    {data.count.toLocaleString()} {data.count === 1 ? "event" : "events"}
+                  </span>
+                )}
+              </div>
+              <p className="mt-0.5 max-w-2xl text-xs text-[#5E6870]">
+                {canViewSystemAudit
+                  ? "Immutable record of all system activities and changes."
+                  : "A simple feed of recent actions on your documents — approvals, views, and uploads."}
+              </p>
+            </div>
+          </div>
+        </div>
+
         {/* ── Admin view ────────────────────────────────────────────────────── */}
         {canViewSystemAudit ? (
           <>
