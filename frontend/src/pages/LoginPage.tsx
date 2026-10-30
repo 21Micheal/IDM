@@ -8,6 +8,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Loader2, RefreshCw, ArrowLeft, CheckCircle2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 
 import { authAPI } from "@/services/api";
 
@@ -151,7 +152,21 @@ function ForgotPasswordPanel({ onBack }: { onBack: () => void }) {
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { setTokens, setUser } = useAuthStore();
+  const { setTokens, setUser, deployment } = useAuthStore();
+
+  // Check deployment config for Keycloak auth mode
+  const { data: deploymentConfig } = useQuery({
+    queryKey: ["deployment"],
+    queryFn: () => authAPI.getDeployment().then((r) => r.data),
+    staleTime: 5 * 60 * 1000, // 5 minutes
+  });
+
+  // Redirect to Keycloak if auth mode is keycloak
+  useEffect(() => {
+    if (deploymentConfig?.auth_mode === "keycloak") {
+      window.location.href = deploymentConfig.keycloak_url || "/oauth2/authorization";
+    }
+  }, [deploymentConfig]);
 
   const [step, setStep] = useState<"credentials" | "otp" | "forgot">(
     "credentials"

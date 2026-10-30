@@ -45,6 +45,8 @@ export interface DeploymentConfig {
   product_name: string;
   primary_color: string;
   logo_url: string;
+  auth_mode: "native" | "keycloak";
+  keycloak_url?: string;
 }
 
 export interface AuthState {

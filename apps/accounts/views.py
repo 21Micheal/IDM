@@ -315,6 +315,8 @@ class DeploymentView(generics.RetrieveAPIView):
             "product_name": deployment.product_name,
             "primary_color": deployment.primary_color,
             "logo_url": deployment.logo_url,
+            "auth_mode": getattr(settings, "AUTH_MODE", "native"),
+            "keycloak_url": getattr(settings, "KEYCLOAK_URL", ""),
         })
 
 

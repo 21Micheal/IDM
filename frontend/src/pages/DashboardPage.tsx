@@ -390,18 +390,18 @@ function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
     return { actor, verb, target };
   }
 
-  if (code === "signature.request_created" || code === "signature.request_signed" || 
-      code === "signature.request_completed" || code === "signature.request_declined" || 
-      code === "signature.request_cancelled") {
+  if (code === "signature.request_created" || code === "signature.request_signed" ||
+    code === "signature.request_completed" || code === "signature.request_declined" ||
+    code === "signature.request_cancelled") {
     const changes = (event.changes ?? {}) as Record<string, unknown>;
     const documentTitle = typeof changes.document_title === "string" ? changes.document_title : "";
     const target = cleanAuditTitle(documentTitle);
-    
+
     const mappedVerb = EVENT_VERB_MAP[code];
     if (mappedVerb) {
       return { actor, verb: mappedVerb, target };
     }
-    
+
     return { actor, verb: code.replace("signature.request_", ""), target };
   }
 
@@ -410,49 +410,49 @@ function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
     const grantedCount = typeof changes.granted_count === "number" ? changes.granted_count : 0;
     const revokedCount = typeof changes.revoked_count === "number" ? changes.revoked_count : 0;
     const totalPermissions = typeof changes.total_permissions === "number" ? changes.total_permissions : 0;
-    
+
     // Build detailed description from granted/revoked details
     const grantedDetails = Array.isArray(changes.granted_details) ? changes.granted_details : [];
     const revokedDetails = Array.isArray(changes.revoked_details) ? changes.revoked_details : [];
-    
+
     let verb = "updated permissions for";
     if (grantedDetails.length > 0 || revokedDetails.length > 0) {
       const parts: string[] = [];
-      
+
       for (const detail of grantedDetails) {
         const action = detail.action || "";
         const documentTypeName = detail.document_type_name;
         const documentTypeId = detail.document_type_id;
         const stage = detail.stage;
-        
+
         const actionDisplay = String(action || "").replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
-        const docTypePart = documentTypeName 
-          ? ` for ${documentTypeName}` 
-          : documentTypeId 
-            ? ` for document type ${documentTypeId}` 
+        const docTypePart = documentTypeName
+          ? ` for ${documentTypeName}`
+          : documentTypeId
+            ? ` for document type ${documentTypeId}`
             : "";
         const stagePart = stage && stage !== "any" ? ` in ${stage} stage` : "";
-        
+
         parts.push(`granted ${actionDisplay}${docTypePart}${stagePart}`);
       }
-      
+
       for (const detail of revokedDetails) {
         const action = detail.action || "";
         const documentTypeName = detail.document_type_name;
         const documentTypeId = detail.document_type_id;
         const stage = detail.stage;
-        
+
         const actionDisplay = String(action || "").replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
-        const docTypePart = documentTypeName 
-          ? ` for ${documentTypeName}` 
-          : documentTypeId 
-            ? ` for document type ${documentTypeId}` 
+        const docTypePart = documentTypeName
+          ? ` for ${documentTypeName}`
+          : documentTypeId
+            ? ` for document type ${documentTypeId}`
             : "";
         const stagePart = stage && stage !== "any" ? ` in ${stage} stage` : "";
-        
+
         parts.push(`revoked ${actionDisplay}${docTypePart}${stagePart}`);
       }
-      
+
       if (parts.length > 0) {
         verb = parts.join(", ");
       }
@@ -466,7 +466,7 @@ function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
         verb = `revoked ${revokedCount} permission${revokedCount === 1 ? "" : "s"} from`;
       }
     }
-    
+
     return { actor, verb, target: objectTitle };
   }
 
