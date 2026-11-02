@@ -8,6 +8,8 @@ x-procurement-app: &procurement-app
   build:
     context: .
     dockerfile: Dockerfile
+    args:
+      PRELOAD_OCR_MODELS: "0"
   image: requisition-procurement:prod
   restart: unless-stopped
   environment:

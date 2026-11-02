@@ -92,10 +92,10 @@ ENV PATH="/opt/venv/bin:$PATH" \
 # Pre-download PaddleOCR PP-OCRv4 models (~8 MB) so the first OCR job doesn't
 # incur a download delay. Written to /root/.paddleocr; at runtime the compose
 # volume (paddle_models:/root/.paddleocr) takes precedence and persists them.
-RUN python -c "\
-import cv2; \
-from paddleocr import PaddleOCR; \
-PaddleOCR(lang='en', use_angle_cls=True, use_gpu=False, show_log=False)"
+ARG PRELOAD_OCR_MODELS=1
+RUN if [ "$PRELOAD_OCR_MODELS" = "1" ]; then \
+      python -c "import cv2; from paddleocr import PaddleOCR; PaddleOCR(lang='en', use_angle_cls=True, use_gpu=False, show_log=False)"; \
+    fi
 
 # Verify the spaCy NER model is importable from the copied venv.
 RUN python -c "import spacy; spacy.load('en_core_web_sm')"
