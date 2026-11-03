@@ -286,10 +286,11 @@ DMS_INTERNAL_IDP_API_KEY = env("DMS_INTERNAL_IDP_API_KEY", default="")
 
 # ── Auth Mode ────────────────────────────────────────────────────────────────
 # Controls which authentication method the login page displays:
-#   keycloak  — Show only "Sign in with Keycloak" button (IdP-connected deployments)
-#   native    — Show native username/password form (standalone on-prem deployments)
+#   keycloak  — Enterprise SSO via Keycloak (spoke/service-provider deployments)
+#   native    — Standalone email/password + OTP (SSO endpoints are disabled)
 # This is a deployment-time configuration, not a runtime user toggle.
-# POST /api/v1/auth/login remains functional in both modes for break-glass access.
+# In keycloak mode, POST /api/v1/auth/login remains available only with
+# break_glass=true for the hidden /admin/admin/ emergency page.
 AUTH_MODE = env("AUTH_MODE", default="native")
 
 # Switch to S3 by setting USE_S3=True in env

@@ -49,6 +49,8 @@ export interface DeploymentConfig {
   keycloak_url?: string;
 }
 
+export type AuthMode = "native" | "keycloak";
+
 export interface AuthState {
   user: AuthUser | null;
   accessToken: string | null;
@@ -59,10 +61,16 @@ export interface AuthState {
   lastActivityAt: number | null;
   sessionPolicy: SessionPolicy;
   deployment: DeploymentConfig | null;
+  /**
+   * Deployment auth mode from /config/. Persists across logout so sign-out
+   * can choose native redirect vs Keycloak end-session without re-fetching.
+   */
+  authMode: AuthMode | null;
   isAuthenticated: boolean;
   setTokens: (access: string, refresh: string) => void;
   setUser: (user: AuthUser) => void;
   setDeployment: (deployment: DeploymentConfig) => void;
+  setAuthMode: (mode: AuthMode) => void;
   setSessionPolicy: (policy: Partial<SessionPolicy>) => void;
   recordActivity: () => void;
   logout: () => void;
@@ -79,6 +87,7 @@ export const useAuthStore = create<AuthState>()(
       lastActivityAt: null,
       sessionPolicy: DEFAULT_POLICY,
       deployment: null,
+      authMode: null,
       isAuthenticated: false,
       setTokens: (access, refresh) =>
         set((state) => {
@@ -99,7 +108,12 @@ export const useAuthStore = create<AuthState>()(
           };
         }),
       setUser: (user) => set({ user }),
-      setDeployment: (deployment) => set({ deployment }),
+      setDeployment: (deployment) =>
+        set({
+          deployment,
+          ...(deployment.auth_mode ? { authMode: deployment.auth_mode } : {}),
+        }),
+      setAuthMode: (authMode) => set({ authMode }),
       setSessionPolicy: (policy) =>
         set((state) => ({
           sessionPolicy: { ...state.sessionPolicy, ...policy },
@@ -114,6 +128,7 @@ export const useAuthStore = create<AuthState>()(
           lastActivityAt: null,
           deployment: null,
           isAuthenticated: false,
+          // Keep authMode so logout routing (native vs Keycloak) still works.
         }),
       isSessionExpired: (): boolean => {
         const { sessionExpiresAt, sessionPolicy, lastActivityAt } = get();

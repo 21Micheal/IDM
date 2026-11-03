@@ -262,7 +262,17 @@ api.interceptors.response.use(
 
 // ── Typed API helpers ─────────────────────────────────────────────────────────
 
+export type AuthModeConfig = {
+  auth_mode: "native" | "keycloak";
+  keycloak_url?: string;
+  keycloak_realm?: string;
+  oidc_client_id?: string;
+};
+
 export const authAPI = {
+  /** Public deployment auth config (no auth required). */
+  getConfig: () => api.get<AuthModeConfig>("/config/"),
+
   login: (email: string, password: string) =>
     api.post("/auth/login/", { email, password }),
 

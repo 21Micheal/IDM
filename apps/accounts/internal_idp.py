@@ -168,7 +168,6 @@ class InternalIdpBackchannelLogoutView(InternalIdpAPIView):
     """Keycloak back-channel logout endpoint for DMS."""
     def post(self, request):
         import jwt as pyjwt
-        from auditlog.models import AuditLog
 
         logout_token = request.data.get('logout_token')
         if not logout_token:
@@ -187,9 +186,8 @@ class InternalIdpBackchannelLogoutView(InternalIdpAPIView):
             if not (sid or sub):
                 return Response({"detail": "Invalid logout token"}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Log the back-channel logout
-            # DMS uses Django session auth, so we just log it
-            # The actual session cleanup would be handled by Django's session middleware
+            # DMS issues its own JWTs after OIDC exchange; clients clear local
+            # state on logout. Acknowledge the back-channel notification.
             return Response({"detail": "Logout processed"}, status=status.HTTP_200_OK)
 
         except pyjwt.PyJWTError as exc:

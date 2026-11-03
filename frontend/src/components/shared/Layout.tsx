@@ -274,8 +274,19 @@ function SidebarGroup({
 
 // ── ProfileMenu (unchanged) ───────────────────────────────────────────────────
 
+async function signOut() {
+  const { authMode, logout } = useAuthStore.getState();
+  logout();
+  if (authMode === "keycloak") {
+    const { oidcLogout } = await import("@/lib/oidcClient");
+    await oidcLogout();
+    return;
+  }
+  window.location.replace("/login");
+}
+
 function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
-  const { user, logout } = useAuthStore();
+  const { user } = useAuthStore();
   const _navigate = useNavigate();
   void _navigate;
   const [open, setOpen] = useState(false);
@@ -330,7 +341,7 @@ function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
               My profile
             </button>
             <button
-              onClick={() => { logout(); _navigate("/login"); }}
+              onClick={() => { setOpen(false); void signOut(); }}
               className="flex w-full items-center gap-2 px-4 py-2 text-sm text-red-700 transition-colors hover:bg-red-50"
             >
               <LogOut className="w-4 h-4" />

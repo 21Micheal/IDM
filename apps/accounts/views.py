@@ -34,8 +34,96 @@ from apps.notifications.tasks import (
 from apps.accounts.delegation import tasks_for_delegation
 from .email_otp import send_otp_email
 from django.conf import settings
+from apps.audit.models import AuditEvent, AuditLog
 
 logger = logging.getLogger(__name__)
+
+
+# ── Auth mode helpers ─────────────────────────────────────────────────────────
+# AUTH_MODE is a deployment-time switch:
+#   native    — standalone DMS; email/password + OTP only (SSO endpoints reject)
+#   keycloak  — spoke/SSO via Keycloak; native login UI is hidden; native API
+#               remains available only for break-glass (/admin/admin/)
+
+def get_auth_mode() -> str:
+    mode = (getattr(settings, "AUTH_MODE", "native") or "native").strip().lower()
+    return mode if mode in ("native", "keycloak") else "native"
+
+
+def is_keycloak_mode() -> bool:
+    return get_auth_mode() == "keycloak"
+
+
+def is_native_mode() -> bool:
+    return get_auth_mode() == "native"
+
+
+def _wants_break_glass(request) -> bool:
+    raw = request.data.get("break_glass", False)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _reject_native_auth_unless_break_glass(request):
+    """In keycloak mode, native credential endpoints are break-glass only."""
+    if is_keycloak_mode() and not _wants_break_glass(request):
+        return Response(
+            {"detail": "Native sign-in is disabled. Use enterprise SSO."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    return None
+
+
+def _reject_sso_unless_keycloak():
+    if not is_keycloak_mode():
+        return Response(
+            {"detail": "Enterprise SSO is not enabled for this deployment."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    return None
+
+
+def _deployment_payload() -> dict:
+    deployment = ClientDeployment.get_or_create_singleton()
+    return {
+        "mode": deployment.deployment_mode,
+        "enabled_modules": deployment.enabled_modules,
+        "product_name": deployment.product_name,
+        "primary_color": deployment.primary_color,
+        "logo_url": deployment.logo_url,
+        "auth_mode": get_auth_mode(),
+        "keycloak_url": getattr(settings, "KEYCLOAK_URL", ""),
+    }
+
+
+def _auth_tokens_response(user, request, *, auth_via: str, break_glass: bool = False):
+    """Issue JWTs + shared login payload used by native OTP and Keycloak exchange."""
+    refresh = issue_refresh_for_user(user)
+    if break_glass:
+        event = AuditEvent.USER_BREAK_GLASS_LOGIN
+    else:
+        event = AuditEvent.USER_LOGIN
+    AuditLog.objects.create(
+        event=event,
+        actor=user,
+        object_type="User",
+        object_id=str(user.id),
+        object_repr=user.email,
+        changes={"auth_mode": auth_via, "break_glass": break_glass},
+        ip_address=request.META.get("REMOTE_ADDR"),
+        user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+    )
+    return Response({
+        "access": str(refresh.access_token),
+        "refresh": str(refresh),
+        "must_change_password": user.must_change_password,
+        "user": UserSerializer(user).data,
+        "session_policy": get_session_policy(),
+        "deployment": _deployment_payload(),
+    })
 
 
 # ── Break-Glass Login Page ─────────────────────────────────────────────────────
@@ -63,7 +151,7 @@ class ConfigView(APIView):
 
     def get(self, request):
         return Response({
-            "auth_mode": getattr(settings, "AUTH_MODE", "native"),
+            "auth_mode": get_auth_mode(),
             "keycloak_url": getattr(settings, "KEYCLOAK_URL", "http://localhost:8080"),
             "keycloak_realm": getattr(settings, "KEYCLOAK_REALM", "idp-dev"),
             "oidc_client_id": getattr(settings, "OIDC_CLIENT_ID", "dms-client"),
@@ -75,11 +163,16 @@ class ConfigView(APIView):
 class OIDCExchangeView(APIView):
     """
     SPA PKCE completed against Keycloak; exchange a validated id_token for hub JWTs.
+    Only available when AUTH_MODE=keycloak.
     """
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        blocked = _reject_sso_unless_keycloak()
+        if blocked is not None:
+            return blocked
+
         import jwt as pyjwt
         from .oidc_auth import resolve_dms_user, validate_id_token
 
@@ -102,22 +195,10 @@ class OIDCExchangeView(APIView):
         if not user.is_active:
             return Response({"detail": "Account is inactive."}, status=status.HTTP_403_FORBIDDEN)
 
+        user.last_login_ip = request.META.get("REMOTE_ADDR")
         user.last_login = timezone.now()
-        user.save(update_fields=["last_login"])
-        refresh = issue_refresh_for_user(user)
-        AuditLog.objects.create(event=AuditEvent.USER_LOGIN, actor=user, changes={"auth_mode": "keycloak"})
-        return Response({
-            "access": str(refresh.access_token),
-            "refresh": str(refresh),
-            "user": {
-                "id": str(user.id),
-                "email": user.email,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "has_admin_access": user.has_admin_access,
-            },
-            "session_policy": get_session_policy(),
-        })
+        user.save(update_fields=["last_login_ip", "last_login"])
+        return _auth_tokens_response(user, request, auth_via="keycloak")
 
 
 # ── Session policy ────────────────────────────────────────────────────────────
@@ -208,14 +289,20 @@ class IsGroupAdmin(permissions.BasePermission):
 
 class LoginView(APIView):
     """
-    Step 1 of login.
+    Step 1 of native login.
     - Validates credentials.
-    - Always requires MFA (email OTP) since it is now default.
+    - Always requires MFA (email OTP).
     - Returns {mfa_required: True, user_id}
+    - In keycloak mode: only accepted with break_glass=true (emergency admin page).
     """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        blocked = _reject_native_auth_unless_break_glass(request)
+        if blocked is not None:
+            return blocked
+
+        break_glass = _wants_break_glass(request)
         email    = request.data.get("email", "").strip().lower()
         password = request.data.get("password", "").strip()
 
@@ -223,9 +310,14 @@ class LoginView(APIView):
 
         if not user:
             AuditLog.objects.create(
-                event=AuditEvent.USER_LOGIN_FAILED,
+                event=(
+                    AuditEvent.USER_BREAK_GLASS_LOGIN_FAILED
+                    if break_glass
+                    else AuditEvent.USER_LOGIN_FAILED
+                ),
                 object_type="User",
                 object_repr=email,
+                changes={"auth_mode": "native", "break_glass": break_glass},
                 ip_address=request.META.get("REMOTE_ADDR"),
                 user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
             )
@@ -249,25 +341,33 @@ class LoginView(APIView):
                 status=503,
             )
 
-        return Response({"mfa_required": True, "user_id": str(user.id)}, status=200)
+        return Response({
+            "mfa_required": True,
+            "user_id": str(user.id),
+            "break_glass": break_glass,
+        }, status=200)
 
 
 class VerifyOTPView(APIView):
     """
-    Step 2 of login - verifies the emailed OTP and issues JWT tokens.
+    Step 2 of native login - verifies the emailed OTP and issues JWT tokens.
+    In keycloak mode: only accepted with break_glass=true.
     """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        blocked = _reject_native_auth_unless_break_glass(request)
+        if blocked is not None:
+            return blocked
+
+        break_glass = _wants_break_glass(request)
         user_id = request.data.get("user_id", "")
         code    = request.data.get("otp", "").strip()
 
         try:
             user = User.objects.get(id=user_id, is_active=True)
-        except (User.DoesNotExist, DjangoValidationError):
+        except (User.DoesNotExist, DjangoValidationError, ValueError):
             return Response({"detail": "Invalid request parameters."}, status=400)
-        except User.DoesNotExist:
-            return Response({"detail": "Invalid request."}, status=400)
 
         otp = (
             EmailOTP.objects
@@ -286,35 +386,12 @@ class VerifyOTPView(APIView):
         user.last_login = timezone.now()
         user.save(update_fields=["last_login"])
 
-        refresh = issue_refresh_for_user(user)
-
-        AuditLog.objects.create(
-            event=AuditEvent.USER_LOGIN,
-            actor=user,
-            object_type="User",
-            object_id=str(user.id),
-            object_repr=user.email,
-            ip_address=request.META.get("REMOTE_ADDR"),
-            user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+        return _auth_tokens_response(
+            user,
+            request,
+            auth_via="native",
+            break_glass=break_glass,
         )
-
-        deployment = ClientDeployment.get_or_create_singleton()
-        deployment_data = {
-            "mode": deployment.deployment_mode,
-            "enabled_modules": deployment.enabled_modules,
-            "product_name": deployment.product_name,
-            "primary_color": deployment.primary_color,
-            "logo_url": deployment.logo_url,
-        }
-
-        return Response({
-            "access":               str(refresh.access_token),
-            "refresh":              str(refresh),
-            "must_change_password": user.must_change_password,
-            "user":                 UserSerializer(user).data,
-            "session_policy":       get_session_policy(),
-            "deployment":           deployment_data,
-        })
 
 
 class ResendOTPView(APIView):
@@ -322,10 +399,14 @@ class ResendOTPView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        blocked = _reject_native_auth_unless_break_glass(request)
+        if blocked is not None:
+            return blocked
+
         user_id = request.data.get("user_id", "")
         try:
             user = User.objects.get(id=user_id, is_active=True)
-        except User.DoesNotExist:
+        except (User.DoesNotExist, DjangoValidationError, ValueError):
             return Response({"detail": "If that account exists, a new code has been sent."})
 
         try:
@@ -356,20 +437,11 @@ class MeView(generics.RetrieveUpdateAPIView):
 
 
 class DeploymentView(generics.RetrieveAPIView):
-    """Return the current deployment configuration."""
+    """Return the current deployment configuration (authenticated)."""
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        deployment = ClientDeployment.get_or_create_singleton()
-        return Response({
-            "mode": deployment.deployment_mode,
-            "enabled_modules": deployment.enabled_modules,
-            "product_name": deployment.product_name,
-            "primary_color": deployment.primary_color,
-            "logo_url": deployment.logo_url,
-            "auth_mode": getattr(settings, "AUTH_MODE", "native"),
-            "keycloak_url": getattr(settings, "KEYCLOAK_URL", ""),
-        })
+        return Response(_deployment_payload())
 
 
 class ChangePasswordView(APIView):
@@ -494,10 +566,15 @@ class UserSignatureView(APIView):
 
 
 class PasswordResetRequestView(APIView):
-    """Request a password reset email with a token."""
+    """Request a password reset email with a token. Native auth mode only."""
     permission_classes = []
 
     def post(self, request):
+        if is_keycloak_mode():
+            return Response(
+                {"detail": "Password reset is managed by your identity provider."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         email = request.data.get("email", "").strip().lower()
         if not email:
             return Response({"detail": "Email is required."}, status=400)
@@ -550,10 +627,15 @@ If you did not request this reset, please ignore this email.
 
 
 class PasswordResetConfirmView(APIView):
-    """Confirm password reset using the token from the email."""
+    """Confirm password reset using the token from the email. Native auth mode only."""
     permission_classes = []
 
     def post(self, request):
+        if is_keycloak_mode():
+            return Response(
+                {"detail": "Password reset is managed by your identity provider."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         token = request.data.get("token", "")
         new_password = request.data.get("new_password", "")
 

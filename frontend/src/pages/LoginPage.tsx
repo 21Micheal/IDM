@@ -11,8 +11,11 @@ import { Loader2, RefreshCw, ArrowLeft, CheckCircle2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 import { authAPI } from "@/services/api";
-import { oidcLogin, trySilentRenew } from "@/lib/oidcClient";
-import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
+import { oidcLogin } from "@/lib/oidcClient";
+import {
+  useAuthStore,
+  applyServerSessionPolicy,
+} from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import type { AuthUser, ServerSessionPolicy, DeploymentConfig } from "@/store/authStore";
 
@@ -147,19 +150,53 @@ function ForgotPasswordPanel({ onBack }: { onBack: () => void }) {
   );
 }
 
+// ── Break-glass session handoff from /admin/admin/ ────────────────────────────
+
+function consumeBreakGlassSession(): {
+  access: string;
+  refresh: string;
+  user: AuthUser;
+} | null {
+  const access = sessionStorage.getItem("break_glass_access");
+  const refresh = sessionStorage.getItem("break_glass_refresh");
+  const rawUser = sessionStorage.getItem("break_glass_user");
+  sessionStorage.removeItem("break_glass_access");
+  sessionStorage.removeItem("break_glass_refresh");
+  sessionStorage.removeItem("break_glass_user");
+  sessionStorage.removeItem("break_glass_user_id");
+  if (!access || !refresh || !rawUser) return null;
+  try {
+    return { access, refresh, user: JSON.parse(rawUser) as AuthUser };
+  } catch {
+    return null;
+  }
+}
+
 // ── Main LoginPage ────────────────────────────────────────────────────────────
 
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { setTokens, setUser, isAuthenticated, deployment } = useAuthStore();
+  const {
+    setTokens,
+    setUser,
+    setAuthMode,
+    isAuthenticated,
+  } = useAuthStore();
 
-  // Check deployment config for Keycloak auth mode
-  const { data: deploymentConfig, isLoading: configLoading } = useQuery({
-    queryKey: ["deployment"],
-    queryFn: () => authAPI.getDeployment().then((r) => r.data),
-    staleTime: 5 * 60 * 1000, // 5 minutes
+  // Public config — determines native form vs Keycloak redirect.
+  const {
+    data: authConfig,
+    isLoading: configLoading,
+    isError: configError,
+  } = useQuery({
+    queryKey: ["auth-config"],
+    queryFn: () => authAPI.getConfig().then((r) => r.data),
+    staleTime: 5 * 60 * 1000,
+    retry: 2,
   });
+
+  const authMode = authConfig?.auth_mode === "keycloak" ? "keycloak" : "native";
 
   const [step, setStep] = useState<"credentials" | "otp" | "forgot">(
     "credentials"
@@ -170,34 +207,10 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
+  const [ssoRedirecting, setSsoRedirecting] = useState(false);
 
   const credForm = useForm<CredForm>({ resolver: zodResolver(credSchema) });
   const otpForm = useForm<OTPForm>({ resolver: zodResolver(otpSchema) });
-
-  // Redirect to Keycloak if auth mode is keycloak
-  useEffect(() => {
-    if (deploymentConfig?.auth_mode === "keycloak") {
-      // If already authenticated locally, redirect to home
-      if (isAuthenticated) {
-        navigate("/", { replace: true });
-        return;
-      }
-      // Redirect to Keycloak login using OIDC
-      oidcLogin();
-    }
-  }, [deploymentConfig, isAuthenticated, navigate]);
-
-  // Show loading while checking config or if in Keycloak mode
-  if (configLoading || deploymentConfig?.auth_mode === "keycloak") {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200">
-        <div className="flex items-center gap-3">
-          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
-          <p className="text-sm text-gray-600">Checking authentication configuration...</p>
-        </div>
-      </div>
-    );
-  }
 
   const completeLogin = async (tokenData: {
     access: string;
@@ -207,8 +220,6 @@ export default function LoginPage() {
     session_policy?: ServerSessionPolicy;
     deployment?: DeploymentConfig;
   }) => {
-    // Apply the configured session policy before starting the session clock so
-    // the absolute deadline uses the admin-defined lifetime, not the fallback.
     applyServerSessionPolicy(tokenData.session_policy);
     setTokens(tokenData.access, tokenData.refresh);
 
@@ -235,6 +246,73 @@ export default function LoginPage() {
       navigate(redirectTo, { replace: true });
     }
   };
+
+  // Persist auth mode + handle break-glass handoff / already-authenticated.
+  useEffect(() => {
+    if (authConfig?.auth_mode) {
+      setAuthMode(authConfig.auth_mode);
+    }
+  }, [authConfig, setAuthMode]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get("break_glass") === "true") {
+      const handoff = consumeBreakGlassSession();
+      if (handoff) {
+        void (async () => {
+          try {
+            applyServerSessionPolicy(undefined);
+            setTokens(handoff.access, handoff.refresh);
+            setUser(handoff.user);
+            // Refresh profile + session policy from the API.
+            try {
+              const { data: me } = await authAPI.me(handoff.access);
+              applyServerSessionPolicy(me.session_policy);
+              setUser(me);
+            } catch {
+              /* tokens are enough to enter the app */
+            }
+            navigate("/", { replace: true });
+          } catch {
+            toast.error("Break-glass session handoff failed. Please try again.");
+          }
+        })();
+        return;
+      }
+    }
+
+    if (isAuthenticated && authMode === "native") {
+      navigate("/", { replace: true });
+    }
+  }, [
+    location.search,
+    isAuthenticated,
+    authMode,
+    navigate,
+    setTokens,
+    setUser,
+  ]);
+
+  // Keycloak mode: redirect to IdP (unless already signed in locally).
+  useEffect(() => {
+    if (configLoading || configError) return;
+    if (authMode !== "keycloak") return;
+    if (isAuthenticated) {
+      navigate("/", { replace: true });
+      return;
+    }
+    let cancelled = false;
+    setSsoRedirecting(true);
+    oidcLogin().catch(() => {
+      if (!cancelled) {
+        setSsoRedirecting(false);
+        toast.error("Unable to reach the identity provider. Try again shortly.");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [authMode, configLoading, configError, isAuthenticated, navigate]);
 
   const onCredentials = async (values: CredForm) => {
     setLoading(true);
@@ -289,6 +367,54 @@ export default function LoginPage() {
       setResending(false);
     }
   };
+
+  // Loading / Keycloak redirect chrome — never fall through to the native form
+  // while AUTH_MODE=keycloak (that form is break-glass only via /admin/admin/).
+  if (configLoading || (authMode === "keycloak" && ssoRedirecting)) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200">
+        <div className="flex items-center gap-3">
+          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+          <p className="text-sm text-gray-600">
+            {authMode === "keycloak"
+              ? "Redirecting to enterprise sign-in…"
+              : "Checking authentication configuration…"}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (configError || authMode === "keycloak") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 p-4">
+        <div className="max-w-sm text-center">
+          <p className="text-sm text-gray-700">
+            {configError
+              ? "Could not load authentication configuration. Check that the API is reachable, then refresh."
+              : "Unable to reach the identity provider. Retry to continue with enterprise sign-in."}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              if (authMode === "keycloak") {
+                setSsoRedirecting(true);
+                oidcLogin().catch(() => {
+                  setSsoRedirecting(false);
+                  toast.error("Unable to reach the identity provider. Try again shortly.");
+                });
+              } else {
+                window.location.reload();
+              }
+            }}
+            className="mt-4 inline-flex h-9 items-center justify-center bg-[#155a86] px-5 text-sm text-white"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
