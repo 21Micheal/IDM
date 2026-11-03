@@ -97,6 +97,9 @@ export function getTaskDocumentId(task: WorkflowTask) {
 }
 
 export function getTaskIsForm(task: WorkflowTask) {
+  if (typeof (task as { is_form?: boolean }).is_form === "boolean") {
+    return Boolean((task as { is_form?: boolean }).is_form);
+  }
   const doc = getTaskDocument(task);
   const d = doc as any;
   return Boolean(d?.metadata?.form?.sections || d?.is_form);

@@ -43,6 +43,7 @@ const FormsPage = lazy(() => import("@/pages/FormsPage"));
 const FormUploadPage = lazy(() => import("@/components/templates/FormUploadPage"));
 const FormDetailPage = lazy(() => import("@/pages/FormDetailPage"));
 const PaymentRunPage = lazy(() => import("@/pages/PaymentRunPage"));
+const OpenDocumentRedirect = lazy(() => import("@/pages/OpenDocumentRedirect"));
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -441,6 +442,10 @@ export default function App() {
               <Route path="admin/migration"       element={<RequireAdmin><AdminMigrationPage /></RequireAdmin>} />
               <Route path="admin/mailboxes"       element={<RequireAdmin><AdminMailboxPage /></RequireAdmin>} />
               <Route path="admin/sunsystems"      element={<RequireAdmin><AdminSunSystemsPage /></RequireAdmin>} />
+
+              {/* Legacy /{uuid} and /open/{uuid} → /forms/:id or /documents/:id */}
+              <Route path="open/:id" element={<OpenDocumentRedirect />} />
+              <Route path=":id" element={<OpenDocumentRedirect />} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />

@@ -20,6 +20,7 @@ import {
   hasWorkflowTaskFilters,
   type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
+import { getTaskWorkspacePath, rewriteWorkspaceLink } from "@/lib/documentWorkspace";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import CustomListbox from "@/components/ui/CustomListbox";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
@@ -209,8 +210,8 @@ export default function WorkflowPage() {
       setSelectedPaymentRunTask(task);
       return;
     }
-    const documentId = getTaskDocumentId(task);
-    if (documentId) navigate(`/documents/${documentId}?task=${task.id}`);
+    const path = getTaskWorkspacePath(task);
+    if (path) navigate(path);
   };
   const filterOptions = useMemo(() => buildWorkflowTaskFilterOptions(allTasks), [allTasks]);
   const filteredTasks = useMemo(
@@ -380,7 +381,7 @@ export default function WorkflowPage() {
                     const targetId = notificationTaskId(notification.link);
                     const task = allTasks.find((item) => item.id === targetId || getTaskDocumentId(item) === targetId);
                     if (task) openTask(task);
-                    else navigate(notification.link || "/approvals");
+                    else navigate(rewriteWorkspaceLink(notification.link) || "/workflow");
                   }}
                   className="block w-full border border-amber-200 bg-amber-50 px-3 py-2 text-left hover:bg-amber-100"
                 >

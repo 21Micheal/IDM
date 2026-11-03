@@ -245,18 +245,38 @@ def _resolve_email(
     return subject, body
 
 
-def _document_url(document_id) -> str:
-    # The SPA serves documents at /{id}, not /documents/{id}.
-    return f"{settings.FRONTEND_URL.rstrip('/')}/{document_id}"
+def _document_is_form(doc) -> bool:
+    form = (getattr(doc, "metadata", None) or {}).get("form")
+    return bool(isinstance(form, dict) and form.get("sections"))
+
+
+def _document_workspace_path(doc, *, task_id=None) -> str:
+    """SPA path for a document: /forms/:id for built forms, else /documents/:id."""
+    base = f"/forms/{doc.id}" if _document_is_form(doc) else f"/documents/{doc.id}"
+    if task_id:
+        return f"{base}?task={task_id}"
+    return base
+
+
+def _document_url(doc_or_id, *, task_id=None) -> str:
+    """Absolute frontend URL for a document workspace."""
+    if hasattr(doc_or_id, "id"):
+        path = _document_workspace_path(doc_or_id, task_id=task_id)
+    else:
+        # Legacy callers that only pass an id — prefer /open resolver.
+        path = f"/open/{doc_or_id}"
+        if task_id:
+            path = f"{path}?task={task_id}"
+    return f"{settings.FRONTEND_URL.rstrip('/')}{path}"
 
 
 def _payment_run_task_context(task):
     """Return common notification fields for document and payment-run tasks."""
     doc = task.workflow_instance.document
     if doc is not None:
-        # Link directly to the document, with the task pre-selected so the
-        # recipient lands on their approval action rather than the dashboard.
-        link = f"/{doc.id}?task={task.id}"
+        # Link directly to the document workspace, with the task pre-selected
+        # so the recipient lands on their approval action rather than dashboard.
+        link = _document_workspace_path(doc, task_id=task.id)
         return {
             "link": link,
             "title": doc.title,
@@ -743,7 +763,7 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
     if doc is None:
         return
 
-    link = f"/{doc.id}"
+    link = _document_workspace_path(doc)
     msg = f"Your document '{doc.title}' ({doc.reference_number}) has been {verb}."
     for recipient in recipients:
         ctx = dict(
@@ -752,7 +772,7 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
             document_ref=doc.reference_number,
             outcome=verb,
             outcome_label=verb.capitalize(),
-            document_url=_document_url(doc.id),
+            document_url=_document_url(doc),
         )
         default_subject = f"DMS — Document {verb}: {doc.reference_number}"
         default_body = (
@@ -791,7 +811,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
     doc      = task.workflow_instance.document
     uploader = doc.uploaded_by
     approver = task.assigned_to
-    link     = f"/{doc.id}"
+    link     = _document_workspace_path(doc)
 
     message = (
         f"Your document '{doc.title}' ({doc.reference_number}) "
@@ -838,7 +858,7 @@ def notify_document_held(task_id: str, comment: str, hold_hours: int) -> None:
     doc      = task.workflow_instance.document
     uploader = doc.uploaded_by
     approver = task.assigned_to
-    link     = f"/{doc.id}"
+    link     = _document_workspace_path(doc)
 
     # Human-readable duration
     if hold_hours < 24:
@@ -892,7 +912,7 @@ def notify_hold_released(task_id: str) -> None:
     doc      = task.workflow_instance.document
     uploader = doc.uploaded_by
     approver = task.assigned_to
-    link     = f"/{doc.id}"
+    link     = _document_workspace_path(doc)
 
     # Notify uploader
     msg_uploader = (
@@ -1197,8 +1217,10 @@ def clear_resolved_task_notifications_now(task_id: str) -> int:
 
     if document_id:
         scope_filter = {"workflow_instance__document_id": document_id}
-        # Documents share one inbox link per document.
-        links = [f"/{document_id}"]
+        # Clear both workspace paths and the legacy bare /{id} link.
+        doc = instance.document
+        workspace = _document_workspace_path(doc) if doc is not None else f"/open/{document_id}"
+        links = [workspace, f"/documents/{document_id}", f"/forms/{document_id}", f"/{document_id}"]
     elif payment_run_id:
         scope_filter = {"workflow_instance__payment_run_id": payment_run_id}
         # Payment-run assignment notices are per-task; also clear the run-level link.
@@ -1309,11 +1331,11 @@ def notify_workflow_action(
     reason_line = f"  Reason: {action.comment}\n" if action.comment else ""
 
     if doc is not None:
-        link = f"/{doc.id}"
+        link = _document_workspace_path(doc)
         title = doc.title
         reference = doc.reference_number
         target_type = "document"
-        document_url = _document_url(doc.id)
+        document_url = _document_url(doc)
     elif run is not None:
         link = f"/workflow?task={task.id}"
         title = f"Payment Run {run.payment_reference}"
@@ -1499,8 +1521,8 @@ def notify_workflow_action(
 
 # ── Ad-hoc signature requests ──────────────────────────────────────────────────
 
-def _signature_link(doc_id) -> str:
-    return f"/{doc_id}"
+def _signature_link(doc) -> str:
+    return _document_workspace_path(doc)
 
 
 @shared_task(queue="notifications")
@@ -1518,7 +1540,7 @@ def notify_signature_requested(signer_id: str, request_id: str) -> None:
 
     doc = req.document
     requester = req.requested_by.get_full_name() or req.requested_by.email
-    link = _signature_link(doc.id)
+    link = _signature_link(doc)
     msg = f"{requester} requested your signature on '{doc.title}'."
     _create_once(signer, msg, link, "signature_requested")
     _send_email(
@@ -1545,7 +1567,7 @@ def notify_signature_signed(request_id: str, signer_id: str) -> None:
     except SignatureRequest.DoesNotExist:
         return
     doc = req.document
-    link = _signature_link(doc.id)
+    link = _signature_link(doc)
 
     signed = req.signers.filter(status=SignatureRequestSigner.Status.SIGNED).count()
     total = req.signers.count()
@@ -1579,7 +1601,7 @@ def notify_signature_declined(request_id: str, signer_id: str) -> None:
     signer_row = req.signers.filter(signer=who).first()
     reason = (signer_row.decline_reason if signer_row else "") or "No reason provided."
     who_name = who.get_full_name() or who.email
-    link = _signature_link(doc.id)
+    link = _signature_link(doc)
     _create_notification(
         req.requested_by,
         f"{who_name} declined to sign '{doc.title}': {reason}",
@@ -1606,7 +1628,7 @@ def notify_signature_completed(request_id: str) -> None:
     except SignatureRequest.DoesNotExist:
         return
     doc = req.document
-    link = _signature_link(doc.id)
+    link = _signature_link(doc)
     _create_notification(
         req.requested_by,
         f"'{doc.title}' is fully signed and ready.",

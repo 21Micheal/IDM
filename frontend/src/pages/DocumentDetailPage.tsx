@@ -285,10 +285,10 @@ export default function DocumentDetailPage() {
     refetchInterval: LOCK_STATUS_POLL_MS,
   });
 
-  // Redirect form documents to the requisition form detail route.
+  // Redirect built forms to the Forms workspace (Imprest / Requisition / etc.).
   useEffect(() => {
     if (doc && (doc as any).metadata?.form?.sections) {
-      navigate(`/${doc.id}`, { replace: true });
+      navigate(`/forms/${doc.id}`, { replace: true });
     }
   }, [doc, navigate]);
 
@@ -1458,7 +1458,7 @@ export default function DocumentDetailPage() {
                               && order > 0
                               && lpoSteps.some((step) => step.id === `approver-${order}`)
                               && !laterLpoStepExists;
-                            navigate(`/${id}`, {
+                            navigate(`/forms/${id}`, {
                               replace: true,
                               state: {
                                 awaitLpo: isLastLpoApprover,

@@ -593,7 +593,7 @@ export default function SearchPage() {
                         )}
                       </div>
 
-                      <Link to={`/documents/${hit.id}`} className="group inline-block max-w-full">
+                      <Link to={`/open/${hit.id}`} className="group inline-block max-w-full">
                         <h3 className="truncate text-base font-semibold text-[#1F2933] group-hover:text-[#2B86C5]">
                           <span
                             dangerouslySetInnerHTML={{
@@ -635,7 +635,7 @@ export default function SearchPage() {
 
                     <div className="flex items-start justify-end">
                       <Link
-                        to={`/documents/${hit.id}`}
+                        to={`/open/${hit.id}`}
                         className="inline-flex h-8 items-center gap-2 border border-[#B7BEC5] bg-white px-3 text-sm text-[#2B86C5] hover:bg-[#EEF3F7]"
                       >
                         <Eye className="h-4 w-4" />

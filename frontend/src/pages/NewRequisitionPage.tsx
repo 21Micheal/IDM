@@ -444,6 +444,7 @@ export default function NewRequisitionPage() {
 
       {/* ── Main Document Area ── */}
       <div className="px-6 pt-6 pb-4">
+        <div className="mx-auto w-full max-w-[1100px]">
 
         {/* Missing fields banner */}
         {missingFields.length > 0 && (
@@ -462,7 +463,7 @@ export default function NewRequisitionPage() {
 
         {/* ── Document Card ── */}
         {loadingTemplate ? (
-          <div className="flex h-64 items-center justify-center border border-[#C8CDD2] bg-white shadow-sm">
+          <div className="flex h-64 items-center justify-center rounded-lg border border-[#D9DEE3] bg-white shadow-sm">
             <div className="flex flex-col items-center gap-3">
               <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
               <p className="text-xs text-[#5E6870]">Loading form template…</p>
@@ -489,13 +490,14 @@ export default function NewRequisitionPage() {
             />
           </>
         ) : (
-          <div className="flex h-64 items-center justify-center border border-[#C8CDD2] bg-white shadow-sm">
+          <div className="flex h-64 items-center justify-center rounded-lg border border-[#D9DEE3] bg-white shadow-sm">
             <div className="flex flex-col items-center gap-3">
               <FileText className="h-8 w-8 text-[#C1C7CD]" />
               <p className="text-sm text-[#5E6870]">Select a requisition template to begin</p>
             </div>
           </div>
         )}
+        </div>
       </div>
 
       {/* ── Floating Action Buttons (fixed bottom-right, no panel) ── */}

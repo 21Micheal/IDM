@@ -1124,83 +1124,81 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
           <span className="ml-2 font-normal text-muted-foreground">{field.helpText ?? field.help_text}</span>
         )}
       </div>
-      <div className="overflow-x-auto border border-border bg-white shadow-sm">
+      <div className="overflow-x-auto rounded-md border border-[#D9DEE3] bg-white">
         <div className="min-w-full">
-          <table className="w-full text-sm border-separate border-spacing-0">
+          <table className="w-full border-separate border-spacing-0 text-sm">
             <thead>
-              <tr className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                {cols.map((col, i) => {
-                  // Alternating column tint: even → faint blue-grey, odd → white.
-                  const colBg = i % 2 === 0 ? "bg-[#F4F7FA]" : "bg-white";
-                  return (
-                    <th key={col.id ?? i} title={col.tooltip}
-                        className={`w-[230px] flex-shrink-0 px-5 py-4 text-left font-semibold border-b border-r border-border/60 last:border-r-0 whitespace-nowrap ${colBg}`}>
-                      <div className="flex items-center gap-1">
-                        {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
-                        {col.calc?.expression && (
-                          <span className="text-[9px] font-semibold text-emerald-600 bg-emerald-50 px-1 rounded" title="Formula column">ƒx</span>
-                        )}
-                        {(col.readonly || col.editableWhen) && !col.calc?.expression && (
-                          <Lock className="h-3 w-3 text-muted-foreground/70" aria-label="Locked in some rows" />
-                        )}
+              <tr className="bg-[#EEF3F7] text-[11px] uppercase tracking-wide text-[#5E6870]">
+                {cols.map((col, i) => (
+                  <th
+                    key={col.id ?? i}
+                    title={col.tooltip}
+                    className="w-[200px] flex-shrink-0 whitespace-nowrap border-b border-r border-[#D9DEE3] px-3.5 py-3 text-left font-semibold last:border-r-0"
+                  >
+                    <div className="flex items-center gap-1">
+                      {col.label}{col.required && <span className="ml-0.5 text-red-400">*</span>}
+                      {col.calc?.expression && (
+                        <span className="rounded bg-emerald-50 px-1 text-[9px] font-semibold text-emerald-600" title="Formula column">ƒx</span>
+                      )}
+                      {(col.readonly || col.editableWhen) && !col.calc?.expression && (
+                        <Lock className="h-3 w-3 text-muted-foreground/70" aria-label="Locked in some rows" />
+                      )}
+                    </div>
+                    {col.additionalText && (
+                      <div className="mt-1 text-[10px] font-normal normal-case tracking-normal text-[#8C969E]">
+                        {col.additionalText}
                       </div>
-                      {col.additionalText && <div className="mt-1 text-[10px] font-normal text-muted-foreground/80">{col.additionalText}</div>}
-                    </th>
-                  );
-                })}
-                {!readOnly && <th className="w-8 flex-shrink-0 px-4 py-4 border-b border-border/60 bg-white" />}
+                    )}
+                  </th>
+                ))}
+                {!readOnly && <th className="w-8 flex-shrink-0 border-b border-[#D9DEE3] bg-[#EEF3F7] px-3 py-3" />}
               </tr>
             </thead>
             <tbody>
-              {computedRows.map((row, ri) => {
-                const isEvenRow = ri % 2 === 0;
-                return (
-                  <tr key={ri} className="border-b border-border/40 last:border-0 group/row">
-                    {cols.map((col, ci) => {
-                      const key = col.key ?? `col_${ci}`;
-                      const shown = colVisibleInRow(col, row);
-                      const cellLocked = readOnly || !colEditableInRow(col, row);
-                      // 4-shade checkerboard: row parity × col parity
-                      const isEvenCol = ci % 2 === 0;
-                      const cellBg =
-                        isEvenRow && isEvenCol  ? "bg-[#EBF1F7]" :   // darker blue-grey
-                        isEvenRow && !isEvenCol ? "bg-[#F3F5F7]" :   // faint warm-grey
-                        !isEvenRow && isEvenCol ? "bg-[#F4F7FA]" :   // base blue-grey
-                                                  "bg-white";         // plain white
-                      return (
-                        <td key={col.id ?? ci}
-                            className={`w-[230px] flex-shrink-0 px-5 py-4 align-top border-r border-border/25 last:border-r-0 ${cellBg} group-hover/row:brightness-[0.985] transition-[filter]`}>
-                          {shown ? (
-                            <TableColInput
-                              col={col}
-                              value={row[key] ?? ""}
-                              row={row}
-                              onChange={(v) => update(ri, key, v)}
-                              onChangeCell={(cellKey, cellVal) => update(ri, cellKey, cellVal)}
-                              readOnly={cellLocked}
-                              documentId={documentId}
-                              attachmentKey={`${tableKey}~${ri}~${key}`}
-                            />
-                          ) : (
-                            <span className="block text-sm italic text-muted-foreground/70" title="Not applicable for this row">—</span>
-                          )}
-                        </td>
-                      );
-                    })}
-                    {!readOnly && (
-                      <td className={`w-8 flex-shrink-0 px-3 py-4 text-center align-top ${isEvenRow ? "bg-[#F3F5F7]" : "bg-white"} group-hover/row:brightness-[0.985] transition-[filter]`}>
-                        {rows.length > 1 && (
-                          <button type="button" onClick={() => removeRow(ri)} className="inline-flex items-center justify-center rounded text-muted-foreground hover:text-red-500 transition-colors">
-                            <Trash2 className="h-4 w-4" />
-                          </button>
+              {computedRows.map((row, ri) => (
+                <tr key={ri} className="group/row border-b border-[#EEF0F2] last:border-0 hover:bg-[#F8FBFD]">
+                  {cols.map((col, ci) => {
+                    const key = col.key ?? `col_${ci}`;
+                    const shown = colVisibleInRow(col, row);
+                    const cellLocked = readOnly || !colEditableInRow(col, row);
+                    return (
+                      <td
+                        key={col.id ?? ci}
+                        className="w-[200px] flex-shrink-0 border-r border-[#EEF0F2] px-3.5 py-2.5 align-top last:border-r-0"
+                      >
+                        {shown ? (
+                          <TableColInput
+                            col={col}
+                            value={row[key] ?? ""}
+                            row={row}
+                            onChange={(v) => update(ri, key, v)}
+                            onChangeCell={(cellKey, cellVal) => update(ri, cellKey, cellVal)}
+                            readOnly={cellLocked}
+                            documentId={documentId}
+                            attachmentKey={`${tableKey}~${ri}~${key}`}
+                          />
+                        ) : (
+                          <span className="block text-sm italic text-muted-foreground/70" title="Not applicable for this row">—</span>
                         )}
                       </td>
-                    )}
-                  </tr>
-                );
-              })}
+                    );
+                  })}
+                  {!readOnly && (
+                    <td className="w-8 flex-shrink-0 px-2 py-2.5 text-center align-top">
+                      {rows.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => removeRow(ri)}
+                          className="inline-flex items-center justify-center rounded text-muted-foreground transition-colors hover:text-red-500"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              ))}
             </tbody>
-
           </table>
         </div>
       </div>
@@ -1408,7 +1406,7 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
   // ── Empty state — compact upload button ───────────────────────────────────
   return (
     <label
-      className={`inline-flex cursor-pointer items-center gap-2 border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-3 py-2 text-xs font-semibold text-[#5E6870] transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD] ${
+      className={`inline-flex cursor-pointer items-center gap-2 rounded-md border border-dashed border-[#D0D5DD] bg-[#F8FAFC] px-3 py-2 text-xs font-semibold text-[#5E6870] transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD] ${
         disabled ? "pointer-events-none opacity-50" : ""
       }`}
     >
@@ -1463,7 +1461,7 @@ function SignatureField({ fieldKey, disabled, value, onChangeCb, onLaunchSignatu
         type="button"
         onClick={() => onLaunchSignatureModal?.(fieldKey)}
         disabled={disabled}
-        className="w-full border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-4 py-5 text-center transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50 disabled:pointer-events-none"
+        className="w-full rounded-md border border-dashed border-[#D0D5DD] bg-[#F8FAFC] px-4 py-5 text-center transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] disabled:pointer-events-none disabled:opacity-50"
       >
         {hasSignature ? (
           <div className="space-y-2">
@@ -1553,7 +1551,7 @@ function MultiFileField({ fieldKey, label, disabled, allValues, documentId, onCh
           <button
             type="button"
             onClick={() => setSlots((prev) => [...prev, (prev[prev.length - 1] ?? -1) + 1])}
-            className="inline-flex items-center gap-1.5 self-center border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-3 py-2 text-xs font-semibold text-[#5E6870] hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD] transition-colors"
+            className="inline-flex items-center gap-1.5 self-center rounded-md border border-dashed border-[#D0D5DD] bg-[#F8FAFC] px-3 py-2 text-xs font-semibold text-[#5E6870] transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
           >
             <Plus className="h-3.5 w-3.5" /> Add file
           </button>
@@ -1570,9 +1568,11 @@ const errCls = "mt-1 flex items-center gap-1 text-xs text-red-500";
 
 function labelForAuto(label: string, field: Field) {
   return (
-    <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
+    <label className="mb-1.5 block text-[12px] font-semibold text-[#344054]">
       {label}
-      {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
+      {field.tooltip && (
+        <span className="ml-1 cursor-help text-[#8C969E]" title={field.tooltip}>(?)</span>
+      )}
     </label>
   );
 }
@@ -1896,16 +1896,16 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // the person WHY they can't type in it.
   const lockedAtStep = !readOnly && !editable && !field.readonly;
   const labelEl = (
-    <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
+    <label className="mb-1.5 block text-[12px] font-semibold text-[#344054]">
       {label}
-      {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
-      {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
+      {field.required && <span className="ml-1 text-[#D32F2F]">*</span>}
+      {field.tooltip && <span className="ml-1 cursor-help text-[#8C969E]" title={field.tooltip}>(?)</span>}
       {lockedAtStep && (
-        <span className="ml-2 inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground align-middle">
+        <span className="ml-2 inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 align-middle text-[10px] font-semibold text-muted-foreground">
           <Lock className="h-2.5 w-2.5" /> Locked at this step
         </span>
       )}
-      {help && <span style={{ marginLeft: "8px", fontWeight: "400", color: "#8C969E" }}>{help}</span>}
+      {help && <span className="ml-2 font-normal text-[#8C969E]">{help}</span>}
     </label>
   );
 
@@ -2437,7 +2437,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // NOT blanket the form in `pointer-events-none` — that would also block the
   // attachment download buttons (the approver needs to open attachments).
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {ordered.map((section, si) => {
         // Hidden / conditionally-hidden / role-restricted sections drop out
         // entirely. Whether the viewer is ALLOWED TO EDIT a conditionally-
@@ -2456,30 +2456,40 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
           && (!retirementOnlyEdit || isRetirementExpenseSection(section))
           && (!retirementSectionReadOnly || !isRetirementExpenseSection(section));
         const sectionLocked = !readOnly && !sectionEditable;
+        // Requisition-style section card: white rounded panel, title + subtitle
+        // (no tinted header strip). Tables/fields sit in the body with room to breathe.
         return (
-          <div key={section.id ?? si} className="overflow-hidden" style={{ border: "1px solid #C8CDD2", backgroundColor: "#FFFFFF" }}>
-            {/* Section header */}
-            <div style={{ borderBottom: "1px solid #C8CDD2", backgroundColor: "#EEF6FB", paddingLeft: "20px", paddingRight: "20px", paddingTop: "12px", paddingBottom: "12px" }}>
-              <h3 className="flex items-center gap-2 font-bold" style={{ fontSize: "14px", color: "#1F2933" }}>
-                {section.title ?? `Section ${si + 1}`}
-                {sectionLocked && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: "#F0F2F4", color: "#5E6870" }}>
-                    <Lock className="h-2.5 w-2.5" /> Read-only at this step
-                  </span>
+          <div
+            key={section.id ?? si}
+            className="overflow-hidden rounded-lg border border-[#D9DEE3] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)]"
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-[#EEF0F2] px-6 pb-3 pt-5">
+              <div className="min-w-0">
+                <h3 className="flex flex-wrap items-center gap-2 text-[15px] font-bold text-[#0F2740]">
+                  {section.title ?? `Section ${si + 1}`}
+                  {sectionLocked && (
+                    <span className="inline-flex items-center gap-1 rounded bg-[#F0F2F4] px-1.5 py-0.5 text-[10px] font-semibold text-[#5E6870]">
+                      <Lock className="h-2.5 w-2.5" /> Read-only at this step
+                    </span>
+                  )}
+                </h3>
+                {section.description && (
+                  <p className="mt-1 text-[12px] leading-snug text-[#6B7785]">
+                    {section.description}
+                  </p>
                 )}
-                {section.onDemand && section.removable && (
-                  <button type="button" onClick={() => removeSpawned(section)}
-                    className="ml-auto inline-flex items-center gap-1 text-xs font-semibold hover:text-red-600" style={{ color: "#5E6870" }}>
-                    <Trash2 className="h-3.5 w-3.5" /> Remove
-                  </button>
-                )}
-              </h3>
-              {section.description && (
-                <p className="mt-0.5 text-xs" style={{ color: "#8C969E" }}>{section.description}</p>
+              </div>
+              {section.onDemand && section.removable && (
+                <button
+                  type="button"
+                  onClick={() => removeSpawned(section)}
+                  className="inline-flex flex-shrink-0 items-center gap-1 text-xs font-semibold text-[#5E6870] hover:text-red-600"
+                >
+                  <Trash2 className="h-3.5 w-3.5" /> Remove
+                </button>
               )}
             </div>
-            {/* Fields — 12-column grid */}
-            <div className="p-5 grid grid-cols-12 gap-x-4 gap-y-5">
+            <div className="grid grid-cols-12 gap-x-5 gap-y-5 px-6 py-5">
               {visibleFields.map((f, fi) => (
                 <FormField
                   key={f.id ?? fi}
@@ -2499,7 +2509,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
                 />
               ))}
               {visibleFields.length === 0 && (
-                <p className="col-span-12 text-sm" style={{ color: "#8C969E" }}>No fields in this section.</p>
+                <p className="col-span-12 text-sm text-[#8C969E]">No fields in this section.</p>
               )}
             </div>
           </div>

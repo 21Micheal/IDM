@@ -23,9 +23,13 @@ import { preloadDocumentWorkspace } from "@/lib/routePreload";
 import statusUtils from "@/lib/status";
 import {
   getTaskDocumentFormat,
-  getTaskDocumentId,
   getTaskDocumentTitle,
 } from "@/lib/workflowTaskFilters";
+import {
+  getDocumentWorkspacePath,
+  getTaskWorkspacePath,
+  documentLooksLikeForm,
+} from "@/lib/documentWorkspace";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 const RECENT_DOCS_PAGE_SIZE = 5;
@@ -861,7 +865,13 @@ export default function DashboardPage() {
     preloadDocumentWorkspace();
     setIsDashboardSearchFocused(false);
     setActiveDashboardResultIndex(-1);
-    navigate(`/documents/${hit.id}`);
+    // Search hits rarely include form metadata — route via /open when unsure,
+    // or /forms when the document type name looks like a form.
+    if (documentLooksLikeForm({ id: hit.id, document_type_name: hit.document_type })) {
+      navigate(getDocumentWorkspacePath({ id: hit.id, document_type_name: hit.document_type }));
+    } else {
+      navigate(`/open/${hit.id}`);
+    }
   };
 
   useEffect(() => {
@@ -1205,7 +1215,10 @@ export default function DashboardPage() {
                           <tr
                             key={doc.id}
                             className="cursor-pointer border-t border-[#D3D7DA] transition hover:bg-[#F5F7F8]"
-                            onClick={() => { preloadDocumentWorkspace(); navigate(`/documents/${doc.id}`); }}
+                            onClick={() => {
+                              preloadDocumentWorkspace();
+                              navigate(getDocumentWorkspacePath(doc as any));
+                            }}
                             onMouseEnter={preloadDocumentWorkspace}
                           >
                             <td className="max-w-0 px-5 py-4">
@@ -1419,7 +1432,7 @@ export default function DashboardPage() {
               </div>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
                 {visibleTasks.map((task: WorkflowTask) => {
-                  const documentId = getTaskDocumentId(task);
+                  const workspacePath = getTaskWorkspacePath(task) || "/workflow";
                   const documentFormat = getTaskDocumentFormat(task);
                   const taskUrgency = getTaskUrgency(task.due_at);
                   const taskIconClass =
@@ -1431,7 +1444,7 @@ export default function DashboardPage() {
                   return (
                     <Link
                       key={task.id}
-                      to={documentId ? `/documents/${documentId}` : "/workflow"}
+                      to={workspacePath}
                       className={clsx(
                         "flex min-w-0 items-start gap-3 border bg-[#F9FAFB] p-3 transition-colors hover:border-[#287EAD]/50 hover:bg-[#EEF6FB]",
                         taskUrgency === "overdue" || taskUrgency === "urgent" ? "border-[#E7D0A8]" : "border-[#E2E5E8]",

@@ -16,11 +16,9 @@
  *    the hood, just presented through their own workspace. There's no
  *    "/forms/new" route — creating a form is a modal (NewFormModal) launched
  *    from FormsPage itself, not a separate page.
- * 5. `isFullWidthByDefaultRoute` now also recognises /forms/:id (a single
- *    form's workspace), mirroring exactly how /documents/:id is already
- *    handled — it opens with the sidebar collapsed by default, same as a
- *    single document's workspace does. /forms itself (the list/report page)
- *    is a normal page and does NOT get this treatment.
+ * 5. `isFullWidthByDefaultRoute` does NOT collapse the sidebar for /forms
+ *    or /forms/:id — form create/view keep the nav expanded (unlike
+ *    /documents/:id). Template builder and workflow builder still collapse.
  * 6. `usesWorkspaceCommandBar` no longer includes /forms — FormsPage builds
  *    its own regular in-page header instead of the app-wide blue command bar,
  *    so Layout renders its standard header (search/notifications/profile) for
@@ -97,8 +95,10 @@ const sidebarIconInactive = "text-[#6E767D] group-hover:text-[#0B3B60]";
 
 // Content-heavy routes that open with the sidebar collapsed (full-width canvas)
 // by default. The user can still toggle the sidebar back open on these pages.
+// Forms (/forms/new, /forms/:id) keep the sidebar expanded — they share the
+// requisition-style layout and need the nav visible while filling/reviewing.
 function isFullWidthByDefaultRoute(pathname: string): boolean {
-  if (pathname === "/admin/templates" || pathname === "/workflow/builder" || pathname === "/forms/new") return true;
+  if (pathname === "/admin/templates" || pathname === "/workflow/builder") return true;
 
   // Single-document workspace: /documents/:id (not the upload/scan/review/etc.)
   const docSeg = pathname.split("/")[2] ?? "";
@@ -108,15 +108,7 @@ function isFullWidthByDefaultRoute(pathname: string): boolean {
     !["upload", "scan", "review", "trash", "folders"].includes(docSeg) &&
     !pathname.slice("/documents/".length).includes("/");
 
-  // Single-form workspace: /forms/:id — same pattern as above. (There's no
-  // /forms/new route to exclude; creating a form is a modal on /forms itself.)
-  const formSeg = pathname.split("/")[2] ?? "";
-  const isFormWorkspace =
-    pathname.startsWith("/forms/") &&
-    Boolean(formSeg) &&
-    !pathname.slice("/forms/".length).includes("/");
-
-  return isDocumentWorkspace || isFormWorkspace;
+  return isDocumentWorkspace;
 }
 
 // ── Navigation structure (unchanged) ─────────────────────────────────────────
@@ -824,13 +816,10 @@ export default function Layout() {
       !["upload", "scan", "review", "trash", "folders"].includes(documentsRouteSegment) &&
       !location.pathname.slice("/documents/".length).includes("/")
     ) ||
-    // /forms/new — the template picker and fill experience both get the
-    // full-bleed treatment (same as /forms/:id — they both supply their own
-    // blue header).
+    // /forms/new and /forms/:id use NewRequisition-style sticky white headers
+    // inside a p-0 main (full-bleed gray canvas). They do not portal into the
+    // blue WorkspaceCommandBar — that bar only keeps global actions.
     location.pathname === "/forms/new" ||
-    // /forms (the list page) is intentionally NOT here — it uses Layout's
-    // normal header. Only a single form's workspace (/forms/:id) supplies
-    // its own header, same as /documents/:id does.
     (
       location.pathname.startsWith("/forms/") &&
       Boolean(formsRouteSegment) &&

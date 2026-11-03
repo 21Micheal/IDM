@@ -439,17 +439,17 @@ export default function FormsPage() {
   };
 
   return (
-    <div className="mx-auto max-w-[1400px] space-y-5 p-6">
-      {/* ── Header ── */}
+    <div className="mx-auto max-w-[1400px] space-y-4 p-6">
+      {/* ── Header (aligned with Requisitions Register) ── */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-[#1F2933]">Forms</h1>
-          <p className="mt-1 text-sm text-[#5E6870]">Imprest, retirement, and other in-app forms — separate from general documents.</p>
+          <h1 className="text-xl font-bold tracking-tight text-[#1F2933]">Forms Register</h1>
+          <p className="mt-0.5 text-xs text-[#5E6870]">Imprest, retirement, and other in-app forms.</p>
         </div>
         <button
           type="button"
           onClick={() => navigate('/forms/new')}
-          className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#1E6F99]"
+          className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#1E6F99]"
         >
           <Plus className="h-4 w-4" /> New Form
         </button>

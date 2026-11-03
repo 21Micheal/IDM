@@ -879,6 +879,8 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     document_title = serializers.SerializerMethodField()
     document_type_name = serializers.SerializerMethodField()
     document_department_name = serializers.SerializerMethodField()
+    is_form = serializers.SerializerMethodField()
+    form_workflow_type = serializers.SerializerMethodField()
     payment_run_id = serializers.SerializerMethodField()
     payment_reference = serializers.SerializerMethodField()
     payment_run_status = serializers.SerializerMethodField()
@@ -938,6 +940,23 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     def get_document_department_name(self, obj):
         doc = self._document(obj)
         return doc.department.name if doc and doc.department_id else None
+
+    def get_is_form(self, obj):
+        doc = self._document(obj)
+        if not doc:
+            return False
+        form = (getattr(doc, "metadata", None) or {}).get("form")
+        return bool(isinstance(form, dict) and form.get("sections"))
+
+    def get_form_workflow_type(self, obj):
+        doc = self._document(obj)
+        if not doc:
+            return None
+        form = (getattr(doc, "metadata", None) or {}).get("form")
+        if not isinstance(form, dict):
+            return None
+        workflow_type = form.get("workflow_type")
+        return str(workflow_type).strip().lower() if workflow_type else None
 
     def get_payment_run_id(self, obj):
         run = self._payment_run(obj)
@@ -1035,6 +1054,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
             "due_at", "acted_at",
             "target_type",
             "document_id", "document_ref", "document_title", "document_type_name",
+            "is_form", "form_workflow_type",
             "payment_run_id", "payment_reference", "payment_run_status", "payment_run_total",
             "payment_run_currency_codes", "payment_run_lines",
             "document_department_name", "uploaded_by_name", "uploader_department_name",

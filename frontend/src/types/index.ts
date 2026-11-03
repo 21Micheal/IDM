@@ -90,6 +90,8 @@ export interface Document {
   uploaded_by_department_name?: string | null;
   permissions?: string[];
   is_self_upload?: boolean;
+  /** True when metadata.form.sections is present (Imprest / Requisition / built forms). */
+  is_form?: boolean;
   is_scanned?: boolean;
   ocr_status?: "pending" | "processing" | "done" | "needs_manual" | "failed" | "";
   preview_pdf?: string | null;
@@ -240,6 +242,9 @@ export interface WorkflowTask {
   document_title?: string;
   document_ref?: string;
   document_type_name?: string;
+  /** True when the task targets a built form (Imprest / Requisition / etc.). */
+  is_form?: boolean;
+  form_workflow_type?: string | null;
   document_department_name?: string | null;
   payment_run_id?: string | null;
   payment_reference?: string | null;

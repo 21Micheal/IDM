@@ -145,11 +145,11 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
   };
 
   return (
-    <div className="border border-[#C8CDD2] bg-[#FAFAFA] shadow-sm">
-      {/* Title bar — clean, light */}
-      <div className="flex items-center justify-between gap-2 border-b border-[#C8CDD2] bg-white px-3 py-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <p className="text-xs font-bold text-[#1F2933] uppercase tracking-wide truncate">
+    <div className="overflow-hidden rounded-lg border border-[#D9DEE3] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
+      {/* Title bar — matches TemplateForm section cards */}
+      <div className="flex items-center justify-between gap-2 border-b border-[#EEF0F2] bg-white px-5 py-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <p className="truncate text-[13px] font-bold text-[#0F2740]">
             {(() => {
               switch (phase) {
                 case "requisition": return "Requisition Approval Stages";
@@ -161,7 +161,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
               }
             })()}
           </p>
-          <span className="rounded-full bg-[#F1F5F9] px-2 py-0.5 text-[10px] font-semibold text-[#475569] shrink-0">
+          <span className="shrink-0 rounded-full bg-[#F1F5F9] px-2 py-0.5 text-[10px] font-semibold text-[#475569]">
             {visibleSteps.length} stage{visibleSteps.length !== 1 ? "s" : ""}
           </span>
         </div>
@@ -196,20 +196,20 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
         <table className="w-full text-sm">
           {/* Medium gray header — matching the screenshot's softer tone */}
           <thead>
-            <tr className="bg-[#5D6369]">
-              <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-white">
+            <tr className="bg-[#EEF3F7] text-[11px] uppercase tracking-wide text-[#5E6870]">
+              <th className="border-b border-[#D9DEE3] px-3.5 py-2.5 text-left font-semibold">
                 Stage
               </th>
-              <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-white">
+              <th className="border-b border-[#D9DEE3] px-3.5 py-2.5 text-left font-semibold">
                 Approver
               </th>
-              <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-white">
+              <th className="border-b border-[#D9DEE3] px-3.5 py-2.5 text-left font-semibold">
                 Status
               </th>
-              <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-white">
+              <th className="border-b border-[#D9DEE3] px-3.5 py-2.5 text-left font-semibold">
                 Completed
               </th>
-              <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-white">
+              <th className="border-b border-[#D9DEE3] px-3.5 py-2.5 text-left font-semibold">
                 Comment
               </th>
             </tr>

@@ -7,6 +7,7 @@ import type { Notification } from "@/types";
 import { NotificationList, inferNotificationPriority } from "@/components/notifications/notifications-list";
 import clsx from "clsx";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import { rewriteWorkspaceLink } from "@/lib/documentWorkspace";
 
 type Filter = "unread" | "all" | "urgent";
 const TASK_NOTIFICATION_TYPES = new Set(["task_assigned", "task_sla_warning", "task_overdue"]);
@@ -159,16 +160,8 @@ export default function NotificationsPage() {
             isLoading={isLoading}
             onMarkRead={(id) => markReadMutation.mutate(id)}
             onOpenLink={(link) => {
-              // Navigate to the documents page
-              // If link is /documents/{uuid}, keep it as is
-              // If link is /{uuid}, convert to /documents/{uuid}
-              if (link.startsWith("/documents/")) {
-                navigate(link);
-              } else if (link.match(/^\/[0-9a-fA-F-]{36}$/)) {
-                navigate(`/documents${link}`);
-              } else {
-                navigate(link);
-              }
+              // Rewrite legacy /{uuid} links (and keep /forms|/documents|/workflow).
+              navigate(rewriteWorkspaceLink(link) || "/notifications");
             }}
             onOpenWorkflow={(detail) => {
               if (!detail.documentId) return;

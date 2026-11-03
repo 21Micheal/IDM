@@ -41,7 +41,6 @@ import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
 import { cn } from "@/lib/utils";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
-import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import SignaturePlacementModal, {
   FormTargetField,
   SignaturePlacementResult,
@@ -402,8 +401,8 @@ export default function FormDetailPage() {
             <p className="mt-2 text-sm text-[#5E6870]">This form is no longer available.</p>
           </div>
         </div>
-        <Link to="/list" className="mt-6 inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#246d9c]">
-          <ArrowLeft className="h-4 w-4" /> Back to Requisitions
+        <Link to="/forms" className="mt-6 inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#246d9c]">
+          <ArrowLeft className="h-4 w-4" /> Back to Forms
         </Link>
       </div>
     );
@@ -422,8 +421,8 @@ export default function FormDetailPage() {
           </div>
         </div>
         <div className="mt-6 flex gap-3">
-          <Link to="/list" className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
-            Back to Requisitions
+          <Link to="/forms" className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
+            Back to Forms
           </Link>
           <Link to={`/documents/${id}`} className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#246d9c]">
             Open in Documents
@@ -674,8 +673,16 @@ export default function FormDetailPage() {
     { id: "audit", label: "Audit trail" },
   ];
 
+  // Draft-only chrome (Edit / Save Draft / Save form). Approval tasks may still
+  // unlock TemplateForm fields via formEditing, but those edits save on Approve
+  // — never show draft save buttons while the form is already in workflow.
+  const showDraftSaveActions = formEditing && canEditForm;
+  const showDraftEditAction = !formEditing && canEditForm;
+  const showFloatingSubmit =
+    showRetirementSubmit || showDraftEditAction || showDraftSaveActions || canSubmit;
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
+    <div className="flex h-[calc(100vh-3.5rem)] min-h-0 flex-col bg-[#F0F2F5] text-[#1F2933]">
       <style>{`@page { size: A4 landscape; margin: 0; }
       @media print {
         body * { visibility: hidden !important; }
@@ -702,209 +709,162 @@ export default function FormDetailPage() {
         #requisition-print-root .grid { gap: 4mm !important; }
         #requisition-print-root .shadow-sm { box-shadow: none !important; }
       }`}</style>
-      <WorkspaceCommandBar>
-        <button
-          onClick={() => navigate("/list")}
-          className="flex h-8 items-center gap-1 border border-white/20 bg-white/10 px-3 text-xs text-white/85 hover:text-white"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" /> Requisitions
-        </button>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <h1 className="truncate text-base font-semibold">{doc.title}</h1>
-            <span className={cn(
-              "inline-flex items-center border px-2.5 py-0.5 text-xs font-bold shadow-sm",
-              getCommandStatusClass(doc.status),
-            )}>
-              {getCommandStatusLabel(doc.status)}
-            </span>
-            {isRetirementPhase && (() => {
-              const variance = (doc.metadata as any)?.form?.retirement_variance as RetirementVariance | undefined;
-              if (!variance) return null;
-              const amount = Number(variance.amount ?? 0);
-              if (!variance.kind || !Number.isFinite(amount) || amount === 0) return null;
-              const isOver = variance.kind === "over";
-              return (
+
+      {/* Sticky white header — same chrome as NewRequisitionPage */}
+      <div className="sticky top-0 z-20 border-b border-[#D9DDE2] bg-white shadow-sm">
+        <div className="flex w-full items-center justify-between gap-4 px-6 py-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <button
+              type="button"
+              onClick={() => navigate("/forms")}
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-[#E4E7EB] bg-white text-[#5E6870] transition-colors hover:bg-[#F5F7F8] hover:text-[#1F2933]"
+              title="Back to forms"
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </button>
+            <div className="h-5 w-px flex-shrink-0 bg-[#E4E7EB]" />
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="truncate text-sm font-bold text-[#1F2933]">{doc.title}</h1>
                 <span className={cn(
-                  "inline-flex items-center gap-1.5 border px-2.5 py-0.5 text-xs font-semibold shadow-sm",
-                  isOver ? "border-red-200 bg-red-50 text-red-800" : "border-amber-200 bg-amber-50 text-amber-900",
+                  "inline-flex items-center border px-2 py-0.5 text-[11px] font-bold",
+                  getCommandStatusClass(doc.status),
                 )}>
-                  {isOver ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
-                  {isOver ? "Overspent" : "Underspent"} {formatMoney(amount, doc.currency)}
+                  {getCommandStatusLabel(doc.status)}
                 </span>
-              );
-            })()}
+                {isRetirementPhase && (() => {
+                  const variance = (doc.metadata as any)?.form?.retirement_variance as RetirementVariance | undefined;
+                  if (!variance) return null;
+                  const amount = Number(variance.amount ?? 0);
+                  if (!variance.kind || !Number.isFinite(amount) || amount === 0) return null;
+                  const isOver = variance.kind === "over";
+                  return (
+                    <span className={cn(
+                      "inline-flex items-center gap-1 border px-2 py-0.5 text-[11px] font-semibold",
+                      isOver ? "border-red-200 bg-red-50 text-red-800" : "border-amber-200 bg-amber-50 text-amber-900",
+                    )}>
+                      {isOver ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                      {isOver ? "Overspent" : "Underspent"} {formatMoney(amount, doc.currency)}
+                    </span>
+                  );
+                })()}
+              </div>
+              <p className="mt-0.5 truncate text-[11px] text-[#8C969E]">
+                {doc.reference_number} · {doc.document_type?.name || "Form"}
+                {formEditing
+                  ? (formDirtyRef.current ? " · Editing — unsaved changes" : " · Editing")
+                  : canSubmitProcurementStage
+                    ? ` · ${procurementNextStage!.toUpperCase()} ready`
+                    : canSubmitRetirement
+                      ? " · Ready for retirement"
+                      : ""}
+              </p>
+            </div>
           </div>
-          <p className="mt-0.5 truncate text-[11px] text-white/75">
-            {doc.reference_number} · {doc.document_type?.name || "Form"}
-          </p>
+
+          <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-2">
+            {canPreviewSunSystemsPayload && (
+              <button type="button" onClick={() => setShowJournalXml((s) => !s)}
+                className={cn(
+                  "inline-flex h-8 items-center gap-1.5 border px-2.5 text-xs font-semibold",
+                  showJournalXml
+                    ? "border-[#287EAD]/50 bg-[#EEF6FB] text-[#287EAD]"
+                    : "border-[#C8CDD2] bg-white text-[#1F2933] hover:bg-[#F5F7F8]",
+                )}>
+                <FileCode className="h-3.5 w-3.5" /> {isRetirementSubmitted ? "Retirement XML" : purchaseOrderEnabled && isLpoWorkflowStep ? "LPO XML" : "Journal XML"}
+              </button>
+            )}
+            {canDownload && (
+              <button type="button" onClick={() => void handlePrintRequisition()}
+                className="inline-flex h-8 items-center gap-1.5 border border-[#C8CDD2] bg-white px-2.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
+                <Printer className="h-3.5 w-3.5" /> Print
+              </button>
+            )}
+            {generatedLpos.length > 1 && (
+              <CustomListbox
+                value={generatedLpoId ?? ""}
+                onChange={(val) => setSelectedLpoId(val)}
+                options={generatedLpos.map((lpo, index) => ({
+                  value: lpo.id,
+                  label: `${lpo.table_label || `LPO ${index + 1}`} · ${lpo.reference || index + 1}`,
+                }))}
+                buttonClassName="h-8 max-w-44 border border-[#C8CDD2] bg-white px-2 text-xs text-[#1F2933] text-left hover:border-[#287EAD]"
+                ariaLabel="Select LPO"
+              />
+            )}
+            {generatedLpoId && canDownloadLpo && (
+              <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex h-8 items-center gap-1.5 bg-[#287EAD] px-2.5 text-xs font-semibold text-white hover:bg-[#1E6F99]">
+                <Download className="h-3.5 w-3.5" /> Download LPO
+              </button>
+            )}
+            {generatedLpoId && (
+              <button type="button" onClick={() => { setLpoMinimized(false); setLpoModalOpen(true); }} className="inline-flex h-8 items-center gap-1.5 border border-[#C8CDD2] bg-white px-2.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
+                <Eye className="h-3.5 w-3.5" /> Open LPO
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setDetailsOpen((o) => !o)}
+              title={detailsOpen ? "Hide details panel" : "Show details panel"}
+              className="inline-flex h-8 w-8 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+            >
+              {detailsOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+            </button>
+          </div>
         </div>
-      </WorkspaceCommandBar>
+      </div>
 
       <div className={cn(
-        "scrollbar-minimal relative grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 lg:grid-cols-12",
-        detailsOpen ? "pr-8" : "pr-12",
+        "scrollbar-minimal relative grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto px-6 pb-8 pt-6 lg:grid-cols-12",
+        detailsOpen ? "pr-6" : "pr-6",
       )}>
 
-        {/* Details-panel toggle — pinned to the right edge */}
-        <button
-          type="button"
-          onClick={() => setDetailsOpen((o) => !o)}
-          title={detailsOpen ? "Hide details panel" : "Show details panel"}
-          className="absolute right-0 top-0 z-20 flex h-10 w-10 items-center justify-center border-l border-b border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#EEF6FB] hover:text-[#287EAD] transition-colors"
-        >
-          {detailsOpen
-            ? <PanelRightClose className="h-4 w-4" />
-            : <PanelRightOpen className="h-4 w-4" />}
-        </button>
-
-        {/* Form column */}
+        {/* Form column — detached TemplateForm section cards on gray canvas */}
         <div className={cn(
           "space-y-4",
           detailsOpen ? "lg:col-span-8" : "lg:col-span-12",
         )}>
-          <div className="border border-[#C8CDD2] bg-white shadow-sm">
-            <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
-              <div className="flex items-center gap-2 min-w-0">
-                <p className="text-sm font-bold text-[#1F2933]">Form</p>
-                <span className="text-xs text-[#5E6870]">
-                  {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
-                </span>
+          <div className={cn("mx-auto w-full space-y-5", detailsOpen ? "max-w-none" : "max-w-[1100px]")}>
+          {missingFields.length > 0 && formEditing && (
+            <div className="border border-amber-300 bg-amber-50 p-4">
+              <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
+                <AlertTriangle className="h-4 w-4 text-amber-600" />
+                Please complete the following required fields:
               </div>
-              <div className="flex items-center gap-2 flex-wrap justify-end">
-                {canSubmit && (
-                  <button
-                    type="button"
-                    onClick={() => submitMutation.mutate(procurementNextStage ?? undefined)}
-                    disabled={submitMutation.isPending}
-                    className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
-                  >
-                    {submitMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                    <Send className="h-3.5 w-3.5" /> {submitLabel}
-                  </button>
-                )}
-                {showRetirementSubmit && (
-                  <button
-                    type="button"
-                    onClick={() => submitMutation.mutate("retirement")}
-                    disabled={submitMutation.isPending || !canSubmitRetirement}
-                    title={canSubmitRetirement ? "Submit this form to the configured Retirement workflow case" : "Available after LPO approval and on or after the configured travel return date"}
-                    className={cn(
-                      "inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50",
-                      canSubmitRetirement ? "bg-[#287EAD] text-white hover:bg-[#1E6F99]" : "border border-[#AEB5BB] bg-[#F5F7F8] text-[#5E6870]",
-                    )}
-                  >
-                    {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                    Submit retirement
-                  </button>
-                )}
-                {canPreviewSunSystemsPayload && (
-                  <button type="button" onClick={() => setShowJournalXml((s) => !s)}
-                    className={cn(
-                      "inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]",
-                      showJournalXml && "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/50",
-                    )}>
-                    <FileCode className="h-3.5 w-3.5" /> {isRetirementSubmitted ? "Retirement XML" : purchaseOrderEnabled && isLpoWorkflowStep ? "LPO XML" : "Journal XML"}
-                  </button>
-                )}
-                {canDownload && (
-                  <button type="button" onClick={() => void handlePrintRequisition()}
-                    className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
-                    <Printer className="h-3.5 w-3.5" /> Print requisition
-                  </button>
-                )}
-                {generatedLpos.length > 1 && (
-                  <CustomListbox
-                    value={generatedLpoId ?? ""}
-                    onChange={(val) => setSelectedLpoId(val)}
-                    options={generatedLpos.map((lpo, index) => ({
-                      value: lpo.id,
-                      label: `${lpo.table_label || `LPO ${index + 1}`} · ${lpo.reference || index + 1}`,
-                    }))}
-                    buttonClassName="max-w-44 border border-[#C8CDD1] bg-white px-2 py-1.5 text-xs text-[#1F2933] text-left hover:border-[#287EAD] transition-colors"
-                    ariaLabel="Select LPO"
-                  />
-                )}
-                {generatedLpoId && canDownloadLpo && (
-                  <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99]">
-                    <Download className="h-3.5 w-3.5" /> Download LPO
-                  </button>
-                )}
-                {generatedLpoId && (
-                  <button type="button" onClick={() => { setLpoMinimized(false); setLpoModalOpen(true); }} className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
-                    <Eye className="h-3.5 w-3.5" /> Open LPO
-                  </button>
-                )}
-                {!formEditing && canEditForm && (
-                  <button type="button" onClick={startFormEdit}
-                    className="inline-flex items-center gap-1.5 border border-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]">
-                    <Edit2 className="h-3.5 w-3.5" /> Edit form
-                  </button>
-                )}
-                {formEditing && (
-                  <>
-                    <button type="button" onClick={cancelFormEdit}
-                      disabled={updateFormMutation.isPending || saveFormAsDraftMutation.isPending}
-                      className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6] disabled:opacity-50">
-                      <X className="h-3.5 w-3.5" /> Cancel
-                    </button>
-                    <button type="button" onClick={() => saveFormAsDraftMutation.mutate()} disabled={saveFormAsDraftMutation.isPending}
-                      className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6] disabled:opacity-50">
-                      {saveFormAsDraftMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                      Save draft
-                    </button>
-                    <button type="button" onClick={saveForm} disabled={updateFormMutation.isPending}
-                      className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50">
-                      {updateFormMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-                      Save form
-                    </button>
-                  </>
-                )}
-              </div>
+              <ul className="mt-2 list-inside list-disc space-y-0.5 text-xs text-amber-800">
+                {missingFields.map((m) => <li key={m}>{m}</li>)}
+              </ul>
             </div>
-            <div className="space-y-4 p-5">
-              {missingFields.length > 0 && formEditing && (
-                <div className="border border-red-200 bg-red-50 px-4 py-3">
-                  <p className="flex items-center gap-2 text-xs font-bold text-red-800">
-                    <AlertTriangle className="h-3.5 w-3.5" />
-                    {missingFields.length} required field{missingFields.length === 1 ? "" : "s"} to complete
-                  </p>
-                  <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-red-800">
-                    {missingFields.map((m) => <li key={m} className="list-inside list-disc">{m}</li>)}
-                  </ul>
-                </div>
-              )}
-              {budgetEnabled && formEditing && (() => {
-                const budgetMeta = doc.metadata?.sunsystems?.budget ?? {};
-                const amountField = budgetMeta.amount_field as string | undefined;
-                const amount = amountField ? (formValues[amountField] ?? doc.amount ?? 0) : (doc.amount ?? 0);
-                return (
-                  <BudgetBanner
-                    amount={amount as number | string}
-                    budget={budgetMeta.limit ?? budgetMeta.budget ?? null}
-                    currency={budgetMeta.currency ?? doc.currency ?? undefined}
-                    accountCode={budgetMeta.account_code ?? undefined}
-                  />
-                );
-              })()}
-              <div id="requisition-printable" className="bg-white">
-              <TemplateForm
-                sections={formData.sections ?? []}
-                values={formEditing ? formValues : (formData.values ?? {})}
-                onChange={(k, v) => { formDirtyRef.current = true; setFormValues((prev) => ({ ...prev, [k]: v })); }}
-                readOnly={!formEditing}
-                documentId={doc.id}
-                documentStatus={step}
-                canEditConditionalSections={canEditConditionalSections()}
-                retirementOnlyEdit={retirementOnlyEdit}
-                retirementSectionReadOnly={retirementSectionReadOnly}
-                onLaunchSignatureModal={(fieldKey?: string) => {
-                  setTargetSignatureField(fieldKey ?? null);
-                  setIsSigningOpen(true);
-                }}
-                />
-              </div>
-            </div>
+          )}
+          {budgetEnabled && formEditing && (() => {
+            const budgetMeta = doc.metadata?.sunsystems?.budget ?? {};
+            const amountField = budgetMeta.amount_field as string | undefined;
+            const amount = amountField ? (formValues[amountField] ?? doc.amount ?? 0) : (doc.amount ?? 0);
+            return (
+              <BudgetBanner
+                amount={amount as number | string}
+                budget={budgetMeta.limit ?? budgetMeta.budget ?? null}
+                currency={budgetMeta.currency ?? doc.currency ?? undefined}
+                accountCode={budgetMeta.account_code ?? undefined}
+              />
+            );
+          })()}
+          <div id="requisition-printable">
+            <TemplateForm
+              sections={formData.sections ?? []}
+              values={formEditing ? formValues : (formData.values ?? {})}
+              onChange={(k, v) => { formDirtyRef.current = true; setFormValues((prev) => ({ ...prev, [k]: v })); }}
+              readOnly={!formEditing}
+              documentId={doc.id}
+              documentStatus={step}
+              canEditConditionalSections={canEditConditionalSections()}
+              retirementOnlyEdit={retirementOnlyEdit}
+              retirementSectionReadOnly={retirementSectionReadOnly}
+              onLaunchSignatureModal={(fieldKey?: string) => {
+                setTargetSignatureField(fieldKey ?? null);
+                setIsSigningOpen(true);
+              }}
+            />
           </div>
 
           {showJournalXml && (
@@ -1001,14 +961,14 @@ export default function FormDetailPage() {
               />
             </div>
           )}
+          </div>
 
         </div>
-
 
         {/* Side column — tabs (only shown when detailsOpen is true) */}
         {detailsOpen && (
           <div className="space-y-3 lg:col-span-4">
-            <div className="border-b border-[#C8CDD2] bg-white px-3 pt-2">
+            <div className="border border-[#C8CDD2] bg-white px-3 pt-2 shadow-sm">
               <nav className="-mb-px flex flex-wrap gap-1">
                 {tabs.map((tab) => (
                   <button key={tab.id} onClick={() => setActiveTab(tab.id)}
@@ -1120,8 +1080,10 @@ export default function FormDetailPage() {
         )}
       </div>
 
-      {activeTask && (
-        <div ref={taskPanelRef} className="z-10 shrink-0 border-t border-[#C8CDD2] bg-white">
+      {/* Bottom action bar — pinned to viewport. Approval tasks own the bar;
+          draft edit/save/submit only appear while status is still draft. */}
+      {activeTask ? (
+        <div ref={taskPanelRef} className="z-20 shrink-0 border-t border-[#C8CDD2] bg-white shadow-[0_-4px_16px_rgba(16,24,40,0.06)]">
           <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
             <WorkflowActionPanel
               task={activeTask}
@@ -1163,7 +1125,77 @@ export default function FormDetailPage() {
             />
           </Suspense>
         </div>
-      )}
+      ) : showFloatingSubmit ? (
+        <div className="z-20 flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-[#C8CDD2] bg-white px-6 py-3 shadow-[0_-4px_16px_rgba(16,24,40,0.06)]">
+          {showRetirementSubmit && (
+            <button
+              type="button"
+              onClick={() => submitMutation.mutate("retirement")}
+              disabled={submitMutation.isPending || !canSubmitRetirement}
+              title={canSubmitRetirement ? "Submit this form to the configured Retirement workflow case" : "Available after LPO approval and on or after the configured travel return date"}
+              className={cn(
+                "inline-flex h-9 items-center gap-1.5 px-4 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50",
+                canSubmitRetirement
+                  ? "bg-[#287EAD] text-white hover:bg-[#1E6F99]"
+                  : "border border-[#AEB5BB] bg-[#F5F7F8] text-[#5E6870]",
+              )}
+            >
+              {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+              Submit retirement
+            </button>
+          )}
+          {showDraftEditAction && (
+            <button
+              type="button"
+              onClick={startFormEdit}
+              className="inline-flex h-9 items-center gap-1.5 border border-[#287EAD] bg-white px-4 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+            >
+              <Edit2 className="h-3.5 w-3.5" /> Edit form
+            </button>
+          )}
+          {showDraftSaveActions && (
+            <>
+              <button
+                type="button"
+                onClick={cancelFormEdit}
+                disabled={updateFormMutation.isPending || saveFormAsDraftMutation.isPending}
+                className="h-9 border border-[#C8CDD2] bg-white px-4 text-sm font-medium text-[#1F2933] hover:bg-[#F5F7F8] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => saveFormAsDraftMutation.mutate()}
+                disabled={saveFormAsDraftMutation.isPending}
+                className="inline-flex h-9 items-center gap-1.5 border border-[#287EAD] bg-white px-4 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50"
+              >
+                {saveFormAsDraftMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                Save Draft
+              </button>
+              <button
+                type="button"
+                onClick={saveForm}
+                disabled={updateFormMutation.isPending}
+                className="inline-flex h-9 items-center gap-1.5 bg-[#287EAD] px-5 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+              >
+                {updateFormMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                Save form
+              </button>
+            </>
+          )}
+          {canSubmit && (
+            <button
+              type="button"
+              onClick={() => submitMutation.mutate(procurementNextStage ?? undefined)}
+              disabled={submitMutation.isPending}
+              className="inline-flex h-9 items-center gap-1.5 bg-[#287EAD] px-5 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+            >
+              {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+              {submitLabel}
+            </button>
+          )}
+        </div>
+      ) : null}
 
       {generatedLpoId && lpoModalOpen && !lpoMinimized && (
         <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/50 p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={`LPO ${generatedLpoReference || "document"}`}>
