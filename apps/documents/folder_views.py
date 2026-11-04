@@ -17,7 +17,7 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import DocumentFolder, DocumentFolderItem, DocumentFavourite
+from .models import Document, DocumentFolder, DocumentFolderItem, DocumentFavourite, DocumentShare
 from .folder_serializers import (
     DocumentFolderSerializer,
     DocumentFolderTreeSerializer,
@@ -25,6 +25,29 @@ from .folder_serializers import (
     DocumentFavouriteSerializer,
     FolderReorderSerializer,
 )
+
+
+def _prune_saved_documents_no_longer_visible(user):
+    """Remove expired/revoked shared shortcuts so folders never link to 404s."""
+    now = timezone.now()
+    stale_share_ids = DocumentShare.objects.filter(recipient=user).filter(
+        db_models.Q(revoked_at__isnull=False)
+        | db_models.Q(expires_at__isnull=False, expires_at__lte=now)
+    ).values("document_id")
+    candidate_ids = set(DocumentFavourite.objects.filter(
+        user=user, document_id__in=stale_share_ids,
+    ).values_list("document_id", flat=True))
+    candidate_ids.update(DocumentFolderItem.objects.filter(
+        folder__owner=user, document_id__in=stale_share_ids,
+    ).values_list("document_id", flat=True))
+    if not candidate_ids:
+        return
+    from .file_streaming import user_can_view_document
+    docs = {doc.id: doc for doc in Document.objects.filter(id__in=candidate_ids).select_related("document_type", "uploaded_by")}
+    inaccessible = [doc_id for doc_id, doc in docs.items() if not user_can_view_document(user, doc)]
+    if inaccessible:
+        DocumentFavourite.objects.filter(user=user, document_id__in=inaccessible).delete()
+        DocumentFolderItem.objects.filter(folder__owner=user, document_id__in=inaccessible).delete()
 
 
 class DocumentFolderViewSet(viewsets.ModelViewSet):
@@ -38,6 +61,8 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
     serializer_class   = DocumentFolderSerializer
 
     def get_queryset(self):
+        if getattr(self, "action", None) in ("list", "retrieve", "documents"):
+            _prune_saved_documents_no_longer_visible(self.request.user)
         return (
             DocumentFolder.objects
             .filter(owner=self.request.user)
@@ -58,6 +83,7 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
         Always includes the system Favourites folder (auto-creating it if
         this is the user's first visit).
         """
+        _prune_saved_documents_no_longer_visible(request.user)
         # Ensure Favourites exists
         DocumentFolder.get_or_create_favourites(request.user)
 
@@ -186,6 +212,8 @@ class DocumentFolderItemViewSet(viewsets.ModelViewSet):
     serializer_class   = DocumentFolderItemSerializer
 
     def get_queryset(self):
+        if getattr(self, "action", None) == "list":
+            _prune_saved_documents_no_longer_visible(self.request.user)
         return (
             DocumentFolderItem.objects
             .filter(folder__owner=self.request.user)
@@ -231,6 +259,8 @@ class DocumentFavouriteViewSet(viewsets.ModelViewSet):
     http_method_names  = ["get", "post", "delete", "head", "options"]
 
     def get_queryset(self):
+        if getattr(self, "action", None) in ("list", "retrieve", "access"):
+            _prune_saved_documents_no_longer_visible(self.request.user)
         return (
             DocumentFavourite.objects
             .filter(user=self.request.user)
@@ -259,6 +289,10 @@ class DocumentFavouriteViewSet(viewsets.ModelViewSet):
         except Document.DoesNotExist:
             return Response({"detail": "Document not found."}, status=404)
 
+        from .file_streaming import user_can_view_document
+        if not user_can_view_document(request.user, doc):
+            return Response({"detail": "Document not found."}, status=404)
+
         fav = DocumentFavourite.objects.create(user=request.user, document=doc)
         serializer = self.get_serializer(fav)
         return Response(
@@ -283,6 +317,7 @@ class DocumentFavouriteViewSet(viewsets.ModelViewSet):
         doc_id = request.query_params.get("document")
         if not doc_id:
             return Response({"detail": "document query param required."}, status=400)
+        _prune_saved_documents_no_longer_visible(request.user)
         fav = DocumentFavourite.objects.filter(
             user=request.user, document_id=doc_id
         ).first()

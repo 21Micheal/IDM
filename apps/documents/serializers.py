@@ -560,10 +560,13 @@ class DocumentListSerializer(serializers.ModelSerializer):
         share = self._get_active_share(obj, user)
         if share:
             actions = [GroupAction.VIEW.value]
-            if share.access_level == DocumentShare.AccessLevel.DOWNLOAD:
+            share_permissions = set(share.effective_permissions)
+            if "download" in share_permissions:
                 actions.append(GroupAction.DOWNLOAD.value)
-            if share.access_level == DocumentShare.AccessLevel.EDIT:
-                actions.extend([GroupAction.DOWNLOAD.value, GroupAction.EDIT.value, GroupAction.UPLOAD.value])
+            if "comment" in share_permissions:
+                actions.append(GroupAction.COMMENT.value)
+            if "edit" in share_permissions:
+                actions.extend([GroupAction.EDIT.value, GroupAction.UPLOAD.value])
             return actions
         from apps.documents.access import effective_permissions_for_user
         return effective_permissions_for_user(user, obj)
@@ -1063,10 +1066,13 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         share = self._get_active_share(obj, user)
         if share:
             actions = [GroupAction.VIEW.value]
-            if share.access_level == DocumentShare.AccessLevel.DOWNLOAD:
+            share_permissions = set(share.effective_permissions)
+            if "download" in share_permissions:
                 actions.append(GroupAction.DOWNLOAD.value)
-            if share.access_level == DocumentShare.AccessLevel.EDIT:
-                actions.extend([GroupAction.DOWNLOAD.value, GroupAction.EDIT.value, GroupAction.UPLOAD.value])
+            if "comment" in share_permissions:
+                actions.append(GroupAction.COMMENT.value)
+            if "edit" in share_permissions:
+                actions.extend([GroupAction.EDIT.value, GroupAction.UPLOAD.value])
             return actions
         from apps.documents.access import effective_permissions_for_user
         return effective_permissions_for_user(user, obj)
@@ -1643,7 +1649,12 @@ class DocumentShareSelectedSerializer(serializers.Serializer):
     )
     access_level = serializers.ChoiceField(
         choices=DocumentShare.AccessLevel.values,
-        default=DocumentShare.AccessLevel.VIEW,
+        required=False,
+    )
+    permissions = serializers.ListField(
+        child=serializers.ChoiceField(choices=["view", "download", "comment", "edit"]),
+        required=False,
+        allow_empty=False,
     )
     message = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
     expires_at = serializers.DateTimeField(required=False, allow_null=True)
@@ -1653,6 +1664,13 @@ class DocumentShareSelectedSerializer(serializers.Serializer):
         if len(set(value)) != len(value):
             raise serializers.ValidationError("Recipient list contains duplicates.")
         return value
+
+    def validate(self, attrs):
+        if not attrs.get("permissions") and not attrs.get("access_level"):
+            attrs["access_level"] = DocumentShare.AccessLevel.VIEW
+        if attrs.get("permissions") and len(set(attrs["permissions"])) != len(attrs["permissions"]):
+            raise serializers.ValidationError({"permissions": "Permission list contains duplicates."})
+        return attrs
 
     def validate_expires_at(self, value):
         if value is not None and value <= timezone.now():

@@ -2883,7 +2883,18 @@ echo "✓ DocVault LibreOffice integration installed."
 
         doc_ids = serializer.validated_data["document_ids"]
         recipient_ids = serializer.validated_data["recipient_user_ids"]
-        access_level = serializer.validated_data["access_level"]
+        legacy_access_level = serializer.validated_data.get("access_level", DocumentShare.AccessLevel.VIEW)
+        permission_map = {
+            DocumentShare.AccessLevel.VIEW: {"view"},
+            DocumentShare.AccessLevel.DOWNLOAD: {"view", "download"},
+            DocumentShare.AccessLevel.COMMENT: {"view", "comment"},
+            DocumentShare.AccessLevel.EDIT: {"view", "download", "edit"},
+            DocumentShare.AccessLevel.FULL: {"view", "download", "comment", "edit"},
+        }
+        permissions = set(serializer.validated_data.get("permissions") or permission_map.get(legacy_access_level, {"view"}))
+        permissions.add("view")
+        permission_sets = {frozenset(value): key for key, value in permission_map.items()}
+        access_level = permission_sets.get(frozenset(permissions), DocumentShare.AccessLevel.CUSTOM)
         message = serializer.validated_data.get("message", "").strip()
         expires_at = serializer.validated_data.get("expires_at")
         notify_by_email = serializer.validated_data.get("notify_by_email", False)
@@ -2923,6 +2934,7 @@ echo "✓ DocVault LibreOffice integration installed."
                         defaults={
                             "shared_by": request.user,
                             "access_level": access_level,
+                            "permissions": sorted(permissions),
                             "message": message,
                             "expires_at": expires_at,
                             "revoked_at": None,
@@ -2947,6 +2959,7 @@ echo "✓ DocVault LibreOffice integration installed."
                     {
                         "recipients": [str(user.id) for user in recipients],
                         "access_level": access_level,
+                        "permissions": sorted(permissions),
                         "expires_at": expires_at.isoformat() if expires_at else None,
                         "bulk_action": True,
                     },
@@ -2990,8 +3003,14 @@ echo "✓ DocVault LibreOffice integration installed."
             if not share:
                 return Response({"detail": "Only current recipients can request edit access."}, status=400)
             access_request, created = DocumentShareAccessRequest.objects.get_or_create(
-                document=doc, requester=request.user, status=DocumentShareAccessRequest.Status.PENDING,
+                document=doc,
+                requester=request.user,
+                defaults={"status": DocumentShareAccessRequest.Status.PENDING},
             )
+            if not created and access_request.status != DocumentShareAccessRequest.Status.PENDING:
+                access_request.status = DocumentShareAccessRequest.Status.PENDING
+                access_request.save(update_fields=["status", "updated_at"])
+                created = True
             if created:
                 Notification.objects.create(recipient=share.shared_by, type="document_shared", message=f"{request.user.get_full_name() or request.user.email} requested edit access to '{doc.title}'.", link=f"/documents/{doc.id}")
             return Response({"request_id": str(access_request.id), "status": access_request.status}, status=201 if created else 200)
@@ -3008,8 +3027,8 @@ echo "✓ DocVault LibreOffice integration installed."
             "can_manage": is_manager,
             "current_editor_id": str(doc.edit_locked_by_id) if doc.is_edit_locked and doc.edit_locked_by_id else None,
             "current_editor_name": doc.edit_locked_by.get_full_name() if doc.is_edit_locked and doc.edit_locked_by_id else None,
-            "recipients": [{"id": str(s.recipient_id), "name": s.recipient.get_full_name() or s.recipient.email, "email": s.recipient.email, "access_level": s.access_level, "is_editing": bool(doc.is_edit_locked and doc.edit_locked_by_id == s.recipient_id)} for s in shares] if is_manager else [],
-            "my_share": next(({"access_level": s.access_level} for s in shares if s.recipient_id == request.user.id), None),
+            "recipients": [{"id": str(s.recipient_id), "name": s.recipient.get_full_name() or s.recipient.email, "email": s.recipient.email, "access_level": s.access_level, "permissions": s.effective_permissions, "is_editing": bool(doc.is_edit_locked and doc.edit_locked_by_id == s.recipient_id)} for s in shares] if is_manager else [],
+            "my_share": next(({"access_level": s.access_level, "permissions": s.effective_permissions} for s in shares if s.recipient_id == request.user.id), None),
             "my_request": {"status": my_request.status, "id": str(my_request.id)} if my_request else None,
             "requests": [{"id": str(r.id), "requester_id": str(r.requester_id), "requester_name": r.requester.get_full_name() or r.requester.email, "created_at": r.created_at} for r in requests],
         })
@@ -3028,7 +3047,8 @@ echo "✓ DocVault LibreOffice integration installed."
             if not share or not share.is_active:
                 return Response({"detail": "The recipient's share has expired or been revoked."}, status=400)
             share.access_level = DocumentShare.AccessLevel.EDIT
-            share.save(update_fields=["access_level", "updated_at"])
+            share.permissions = ["view", "download", "edit"]
+            share.save(update_fields=["access_level", "permissions", "updated_at"])
             access_request.status = DocumentShareAccessRequest.Status.GRANTED
             Notification.objects.create(recipient=access_request.requester, type="document_shared", message=f"Edit access was granted for '{doc.title}'.", link=f"/documents/{doc.id}")
         else:

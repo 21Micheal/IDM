@@ -153,12 +153,9 @@ class DocumentFolderItemSerializer(serializers.ModelSerializer):
         if folder.owner_id != request.user.id:
             raise serializers.ValidationError({"folder": "Folder not found."})
 
-        # Must be able to see the document (simple ownership / admin check)
-        if not request.user.has_admin_access and doc.uploaded_by_id != request.user.id:
-            # Allow if user has any permission for the document type
-            perms = request.user.get_all_permissions_for_doctype(str(doc.document_type_id))
-            if not perms:
-                raise serializers.ValidationError({"document": "Document not found."})
+        from .file_streaming import user_can_view_document
+        if not user_can_view_document(request.user, doc):
+            raise serializers.ValidationError({"document": "Document not found."})
 
         return attrs
 
@@ -196,10 +193,9 @@ class DocumentFavouriteSerializer(serializers.ModelSerializer):
 
     def validate_document(self, doc):
         request = self.context["request"]
-        if not request.user.has_admin_access and doc.uploaded_by_id != request.user.id:
-            perms = request.user.get_all_permissions_for_doctype(str(doc.document_type_id))
-            if not perms:
-                raise serializers.ValidationError("Document not found.")
+        from .file_streaming import user_can_view_document
+        if not user_can_view_document(request.user, doc):
+            raise serializers.ValidationError("Document not found.")
         return doc
 
     def create(self, validated_data):

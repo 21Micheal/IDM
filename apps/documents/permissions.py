@@ -27,6 +27,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from apps.accounts.models import GroupPermission, GroupAction, ClientDeployment
+from apps.documents.models import DocumentShare
 
 
 class HasDocumentPermission(permissions.BasePermission):
@@ -173,10 +174,25 @@ class HasDocumentPermission(permissions.BasePermission):
             # endpoints; it does not grant general metadata editing.
             return True
 
-        user_perms = request.user.get_all_permissions_for_doctype(
+        user_perms = set(request.user.get_all_permissions_for_doctype(
             document_type_id,
             document=obj,
-        )
+        ))
+        # A direct share adds only its explicitly granted actions. Existing
+        # group permissions remain in effect alongside the share.
+        share = DocumentShare.objects.filter(
+            document=obj, recipient=request.user, revoked_at__isnull=True,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).first()
+        if share:
+            share_permissions = set(share.effective_permissions)
+            if "download" in share_permissions:
+                user_perms.add(GroupAction.DOWNLOAD.value)
+            if "comment" in share_permissions:
+                user_perms.add(GroupAction.COMMENT.value)
+            if "edit" in share_permissions:
+                user_perms.update((GroupAction.EDIT.value, GroupAction.UPLOAD.value))
         if required_action in user_perms:
             allowed = True
         elif (

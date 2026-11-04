@@ -733,7 +733,10 @@ class DocumentShare(models.Model):
     class AccessLevel(models.TextChoices):
         VIEW = "view", "View only"
         DOWNLOAD = "download", "View and download"
+        COMMENT = "comment", "View and comment"
         EDIT = "edit", "View, download and edit"
+        FULL = "full", "Full access"
+        CUSTOM = "custom", "Custom access"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="shares")
@@ -752,6 +755,7 @@ class DocumentShare(models.Model):
         choices=AccessLevel.choices,
         default=AccessLevel.VIEW,
     )
+    permissions = models.JSONField(default=list, blank=True)
     message = models.TextField(blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
@@ -772,6 +776,21 @@ class DocumentShare(models.Model):
             return False
         return self.expires_at is None or self.expires_at > timezone.now()
 
+    @property
+    def effective_permissions(self) -> list[str]:
+        """Return explicit rights, or translate legacy access levels."""
+        allowed = {"view", "download", "comment", "edit"}
+        if isinstance(self.permissions, list) and self.permissions:
+            return sorted(({str(value) for value in self.permissions} & allowed) | {"view"})
+        legacy = {
+            self.AccessLevel.VIEW: {"view"},
+            self.AccessLevel.DOWNLOAD: {"view", "download"},
+            self.AccessLevel.COMMENT: {"view", "comment"},
+            self.AccessLevel.EDIT: {"view", "download", "edit"},
+            self.AccessLevel.FULL: {"view", "download", "comment", "edit"},
+        }
+        return sorted(legacy.get(self.access_level, {"view"}))
+
 
 class DocumentShareAccessRequest(models.Model):
     class Status(models.TextChoices):
@@ -788,7 +807,7 @@ class DocumentShareAccessRequest(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
-        constraints = [models.UniqueConstraint(fields=["document", "requester"], condition=models.Q(status="pending"), name="unique_pending_doc_share_request")]
+        unique_together = [("document", "requester")]
 
 
 class DocumentRelationship(models.Model):

@@ -29,7 +29,7 @@ type BulkAction = "approve" | "reject" | "archive" | "void" | "trash";
 const STATUS_OPTIONS = ["draft", "pending_approval", "approved", "rejected", "archived", "void"];
 
 type EmailAttachmentMode = "separate" | "combined";
-type ShareAccessLevel = "view" | "download" | "edit";
+type SharePermission = "view" | "download" | "comment" | "edit";
 
 type EmailRecipientUser = {
   id: string;
@@ -432,7 +432,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [shareModalOpen, setShareModalOpen] = useState(false);
   const [shareRecipientIds, setShareRecipientIds] = useState<string[]>([]);
   const [shareRecipientSearch, setShareRecipientSearch] = useState("");
-  const [shareAccessLevel, setShareAccessLevel] = useState<ShareAccessLevel>("view");
+  const [sharePermissions, setSharePermissions] = useState<SharePermission[]>(["view"]);
   const [shareExpiresAt, setShareExpiresAt] = useState("");
   const [shareNotifyByEmail, setShareNotifyByEmail] = useState(false);
   const [shareMessage, setShareMessage] = useState("");
@@ -770,7 +770,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       documentsAPI.shareSelected({
         document_ids: selectedIds,
         recipient_user_ids: shareRecipientIds,
-        access_level: shareAccessLevel,
+        permissions: sharePermissions,
         expires_at: shareExpiresAt ? new Date(shareExpiresAt).toISOString() : null,
         notify_by_email: shareNotifyByEmail,
         message: shareMessage.trim(),
@@ -781,7 +781,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       setShareModalOpen(false);
       setShareRecipientIds([]);
       setShareRecipientSearch("");
-      setShareAccessLevel("view");
+      setSharePermissions(["view"]);
       setShareExpiresAt("");
       setShareNotifyByEmail(false);
       setShareMessage("");
@@ -1555,40 +1555,22 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
 
                 <div className="space-y-4">
                   <div>
-                    <label className="text-sm font-semibold text-[#1F2933]">Access</label>
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-semibold text-[#1F2933]">Permissions</label>
+                      <button type="button" className="text-xs font-semibold text-[#287EAD]" onClick={() => setSharePermissions(["view", "download", "comment", "edit"])}>Select all</button>
+                    </div>
                     <div className="mt-2 space-y-2">
-                      <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
-                        <input
-                          type="radio"
-                          name="share-access"
-                          value="view"
-                          checked={shareAccessLevel === "view"}
-                          onChange={() => setShareAccessLevel("view")}
-                          className="mt-1"
-                        />
-                        <span>
-                          <span className="block text-sm font-semibold text-[#1F2933]">View only</span>
-                          <span className="text-xs text-[#5E6870]">Recipients can open the document in IDM.</span>
-                        </span>
-                      </label>
-                      <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
-                        <input type="radio" name="share-access" value="edit" checked={shareAccessLevel === "edit"} onChange={() => setShareAccessLevel("edit")} className="mt-1" />
-                        <span><span className="block text-sm font-semibold text-[#1F2933]">Can edit</span><span className="text-xs text-[#5E6870]">Can check out the document and upload a new version.</span></span>
-                      </label>
-                      <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
-                        <input
-                          type="radio"
-                          name="share-access"
-                          value="download"
-                          checked={shareAccessLevel === "download"}
-                          onChange={() => setShareAccessLevel("download")}
-                          className="mt-1"
-                        />
-                        <span>
-                          <span className="block text-sm font-semibold text-[#1F2933]">View and download</span>
-                          <span className="text-xs text-[#5E6870]">Recipients can also download the file.</span>
-                        </span>
-                      </label>
+                      {([
+                        ["view", "Can view", "Recipients can open the document in IDM."],
+                        ["comment", "Can comment", "Can add comments without changing document content."],
+                        ["edit", "Can edit", "Can check out the document and upload a new version."],
+                        ["download", "Can download", "Can save a local copy of the document."],
+                      ] as const).map(([permission, title, description]) => (
+                        <label key={permission} className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
+                          <input type="checkbox" checked={sharePermissions.includes(permission)} disabled={permission === "view"} onChange={(event) => setSharePermissions((current) => event.target.checked ? [...current, permission] : current.filter((item) => item !== permission))} className="mt-1" />
+                          <span><span className="block text-sm font-semibold text-[#1F2933]">{title}{permission === "view" ? " (required)" : ""}</span><span className="text-xs text-[#5E6870]">{description}</span></span>
+                        </label>
+                      ))}
                     </div>
                   </div>
 

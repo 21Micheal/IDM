@@ -309,14 +309,14 @@ def user_can_download_document(user: User, doc: Document) -> bool:
     if getattr(doc, "is_self_upload", False):
         return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
     # A download-level share grants download on its own.
-    if DocumentShare.objects.filter(
+    active_shares = DocumentShare.objects.filter(
         document=doc,
         recipient=user,
-        access_level__in=[DocumentShare.AccessLevel.DOWNLOAD, DocumentShare.AccessLevel.EDIT],
         revoked_at__isnull=True,
     ).filter(
         models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
-    ).exists():
+    )
+    if any("download" in share.effective_permissions for share in active_shares):
         return True
     document_type_id = str(getattr(doc, "document_type_id", None) or "")
     if not document_type_id:
@@ -340,10 +340,10 @@ def user_can_edit_document(user: User, doc: Document) -> bool:
         return False
     if user.has_admin_access:
         return True
-    if DocumentShare.objects.filter(
-        document=doc, recipient=user, access_level=DocumentShare.AccessLevel.EDIT,
+    if any("edit" in share.effective_permissions for share in DocumentShare.objects.filter(
+        document=doc, recipient=user,
         revoked_at__isnull=True,
-    ).filter(models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())).exists():
+    ).filter(models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now()))):
         return document_allows_edit(doc, user=user)
     if getattr(doc, "is_self_upload", False):
         return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id

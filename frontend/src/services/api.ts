@@ -493,7 +493,8 @@ export const documentsAPI = {
   shareSelected: (data: {
     document_ids: string[];
     recipient_user_ids: string[];
-    access_level: "view" | "download" | "edit";
+    permissions?: ("view" | "download" | "comment" | "edit")[];
+    access_level?: "view" | "download" | "comment" | "edit" | "full";
     message?: string;
     expires_at?: string | null;
     notify_by_email?: boolean;
