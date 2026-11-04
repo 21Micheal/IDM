@@ -493,11 +493,14 @@ export const documentsAPI = {
   shareSelected: (data: {
     document_ids: string[];
     recipient_user_ids: string[];
-    access_level: "view" | "download";
+    access_level: "view" | "download" | "edit";
     message?: string;
     expires_at?: string | null;
     notify_by_email?: boolean;
   }) => api.post("/documents/share_selected/", data),
+  collaboration: (id: string) => api.get(`/documents/${id}/collaboration/`),
+  requestEditAccess: (id: string) => api.post(`/documents/${id}/collaboration/`, {}),
+  manageAccessRequest: (id: string, request_id: string, grant: boolean) => api.post(`/documents/${id}/manage_access_request/`, { request_id, grant }),
 
   reOcr: (id: string) =>
     api.post(`/documents/${id}/re_ocr/`),

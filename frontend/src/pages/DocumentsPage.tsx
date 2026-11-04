@@ -29,7 +29,7 @@ type BulkAction = "approve" | "reject" | "archive" | "void" | "trash";
 const STATUS_OPTIONS = ["draft", "pending_approval", "approved", "rejected", "archived", "void"];
 
 type EmailAttachmentMode = "separate" | "combined";
-type ShareAccessLevel = "view" | "download";
+type ShareAccessLevel = "view" | "download" | "edit";
 
 type EmailRecipientUser = {
   id: string;
@@ -1570,6 +1570,10 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                           <span className="block text-sm font-semibold text-[#1F2933]">View only</span>
                           <span className="text-xs text-[#5E6870]">Recipients can open the document in IDM.</span>
                         </span>
+                      </label>
+                      <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
+                        <input type="radio" name="share-access" value="edit" checked={shareAccessLevel === "edit"} onChange={() => setShareAccessLevel("edit")} className="mt-1" />
+                        <span><span className="block text-sm font-semibold text-[#1F2933]">Can edit</span><span className="text-xs text-[#5E6870]">Can check out the document and upload a new version.</span></span>
                       </label>
                       <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
                         <input

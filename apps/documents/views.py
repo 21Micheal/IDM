@@ -38,6 +38,7 @@ from .models import (
     DocumentType,
     DocumentVersion,
     DocumentShare,
+    DocumentShareAccessRequest,
     DocumentRelationship,
     Mailbox,
     Tag,
@@ -2976,6 +2977,64 @@ echo "✓ DocVault LibreOffice integration installed."
             "skipped": skipped,
             "results": shared,
         })
+
+    @action(detail=True, methods=["get", "post"], url_path="collaboration")
+    def collaboration(self, request, pk=None):
+        doc = self.get_object()
+        if request.method == "POST":
+            if not user_can_view_document(request.user, doc):
+                return Response({"detail": "You cannot request access to this document."}, status=403)
+            share = DocumentShare.objects.filter(document=doc, recipient=request.user, revoked_at__isnull=True).filter(
+                models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
+            ).first()
+            if not share:
+                return Response({"detail": "Only current recipients can request edit access."}, status=400)
+            access_request, created = DocumentShareAccessRequest.objects.get_or_create(
+                document=doc, requester=request.user, status=DocumentShareAccessRequest.Status.PENDING,
+            )
+            if created:
+                Notification.objects.create(recipient=share.shared_by, type="document_shared", message=f"{request.user.get_full_name() or request.user.email} requested edit access to '{doc.title}'.", link=f"/documents/{doc.id}")
+            return Response({"request_id": str(access_request.id), "status": access_request.status}, status=201 if created else 200)
+
+        shares = DocumentShare.objects.filter(document=doc, revoked_at__isnull=True).filter(
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
+        ).select_related("recipient", "shared_by")
+        is_manager = request.user.has_admin_access or doc.uploaded_by_id == request.user.id or shares.filter(shared_by=request.user).exists()
+        if not is_manager and not user_can_view_document(request.user, doc):
+            return Response({"detail": "You cannot view collaboration details."}, status=403)
+        requests = DocumentShareAccessRequest.objects.filter(document=doc, status=DocumentShareAccessRequest.Status.PENDING).select_related("requester") if is_manager else []
+        my_request = DocumentShareAccessRequest.objects.filter(document=doc, requester=request.user).order_by("-created_at").first()
+        return Response({
+            "can_manage": is_manager,
+            "current_editor_id": str(doc.edit_locked_by_id) if doc.is_edit_locked and doc.edit_locked_by_id else None,
+            "current_editor_name": doc.edit_locked_by.get_full_name() if doc.is_edit_locked and doc.edit_locked_by_id else None,
+            "recipients": [{"id": str(s.recipient_id), "name": s.recipient.get_full_name() or s.recipient.email, "email": s.recipient.email, "access_level": s.access_level, "is_editing": bool(doc.is_edit_locked and doc.edit_locked_by_id == s.recipient_id)} for s in shares] if is_manager else [],
+            "my_share": next(({"access_level": s.access_level} for s in shares if s.recipient_id == request.user.id), None),
+            "my_request": {"status": my_request.status, "id": str(my_request.id)} if my_request else None,
+            "requests": [{"id": str(r.id), "requester_id": str(r.requester_id), "requester_name": r.requester.get_full_name() or r.requester.email, "created_at": r.created_at} for r in requests],
+        })
+
+    @action(detail=True, methods=["post"], url_path="manage_access_request")
+    def manage_access_request(self, request, pk=None):
+        doc = self.get_object()
+        if not (request.user.has_admin_access or doc.uploaded_by_id == request.user.id or DocumentShare.objects.filter(document=doc, shared_by=request.user, revoked_at__isnull=True).exists()):
+            return Response({"detail": "Only the sender can manage access requests."}, status=403)
+        access_request = DocumentShareAccessRequest.objects.filter(document=doc, id=request.data.get("request_id"), status=DocumentShareAccessRequest.Status.PENDING).select_related("requester").first()
+        if not access_request:
+            return Response({"detail": "Pending request not found."}, status=404)
+        grant = bool(request.data.get("grant"))
+        if grant:
+            share = DocumentShare.objects.filter(document=doc, recipient=access_request.requester, revoked_at__isnull=True).first()
+            if not share or not share.is_active:
+                return Response({"detail": "The recipient's share has expired or been revoked."}, status=400)
+            share.access_level = DocumentShare.AccessLevel.EDIT
+            share.save(update_fields=["access_level", "updated_at"])
+            access_request.status = DocumentShareAccessRequest.Status.GRANTED
+            Notification.objects.create(recipient=access_request.requester, type="document_shared", message=f"Edit access was granted for '{doc.title}'.", link=f"/documents/{doc.id}")
+        else:
+            access_request.status = DocumentShareAccessRequest.Status.DECLINED
+        access_request.save(update_fields=["status", "updated_at"])
+        return Response({"status": access_request.status})
 
     @action(detail=True, methods=["get", "post"], url_path="relationships")
     def relationships(self, request, pk=None):

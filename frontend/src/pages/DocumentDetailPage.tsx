@@ -490,6 +490,22 @@ export default function DocumentDetailPage() {
     enabled: !!id,
     ...QUERY_SHORT_STALE,
   });
+  const { data: collaboration } = useQuery<any>({
+    queryKey: ["document-collaboration", id],
+    queryFn: () => documentsAPI.collaboration(id!).then((r) => r.data),
+    enabled: !!id && !!doc,
+    refetchInterval: 5_000,
+  });
+  const requestEditMutation = useMutation({
+    mutationFn: () => documentsAPI.requestEditAccess(id!),
+    onSuccess: () => { toast.success("Edit access requested."); qc.invalidateQueries({ queryKey: ["document-collaboration", id] }); },
+    onError: (err) => toast.error(extractApiError(err, "Could not request edit access.")),
+  });
+  const accessDecisionMutation = useMutation({
+    mutationFn: ({ requestId, grant }: { requestId: string; grant: boolean }) => documentsAPI.manageAccessRequest(id!, requestId, grant),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["document-collaboration", id] }); qc.invalidateQueries({ queryKey: ["document", id] }); },
+    onError: (err) => toast.error(extractApiError(err, "Could not update access.")),
+  });
 
   const { data: compareDoc } = useQuery<Document>({
     queryKey: ["document", compareDocumentId],
@@ -1744,6 +1760,16 @@ export default function DocumentDetailPage() {
                 <div className="border-b border-[#C8CDD2] pb-3">
                   <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Access control</p>
                   <p className="mt-1 text-sm text-[#5E6870]">Your effective permissions for this document.</p>
+                </div>
+
+                <div className="border border-[#C8CDD2] bg-white p-3 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div><p className="text-sm font-semibold text-[#1F2933]">Shared access</p><p className="text-xs text-[#5E6870]">Live editor and recipient access, refreshed every 5 seconds.</p></div>
+                    {collaboration?.current_editor_name && <span className="text-xs font-semibold text-emerald-700">Editing: {collaboration.current_editor_name}</span>}
+                  </div>
+                  {collaboration?.can_manage && (collaboration.recipients ?? []).map((recipient: any) => <div key={recipient.id} className="flex justify-between border-t border-[#E1E7EA] pt-2 text-sm"><span>{recipient.name} <span className="text-xs text-[#5E6870]">{recipient.email}</span></span><span className="text-xs capitalize">{recipient.is_editing ? "Editing now" : recipient.access_level === "edit" ? "Can edit" : recipient.access_level === "download" ? "Can download" : "View only"}</span></div>)}
+                  {!collaboration?.can_manage && collaboration?.my_share?.access_level !== "edit" && <button className="border border-[#287EAD] px-3 py-1.5 text-xs font-semibold text-[#287EAD] disabled:opacity-50" disabled={requestEditMutation.isPending || collaboration?.my_request?.status === "pending"} onClick={() => requestEditMutation.mutate()}>{collaboration?.my_request?.status === "pending" ? "Edit access requested" : "Request edit access"}</button>}
+                  {collaboration?.can_manage && (collaboration.requests ?? []).map((accessRequest: any) => <div key={accessRequest.id} className="flex items-center justify-between gap-2 border-t border-[#E1E7EA] pt-2 text-sm"><span>{accessRequest.requester_name} requested edit access</span><span className="flex gap-2"><button className="text-xs font-semibold text-emerald-700" onClick={() => accessDecisionMutation.mutate({ requestId: accessRequest.id, grant: true })}>Grant</button><button className="text-xs font-semibold text-[#5E6870]" onClick={() => accessDecisionMutation.mutate({ requestId: accessRequest.id, grant: false })}>Decline</button></span></div>)}
                 </div>
 
                 <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-3">

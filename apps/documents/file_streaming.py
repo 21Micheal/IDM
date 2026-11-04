@@ -312,7 +312,7 @@ def user_can_download_document(user: User, doc: Document) -> bool:
     if DocumentShare.objects.filter(
         document=doc,
         recipient=user,
-        access_level=DocumentShare.AccessLevel.DOWNLOAD,
+        access_level__in=[DocumentShare.AccessLevel.DOWNLOAD, DocumentShare.AccessLevel.EDIT],
         revoked_at__isnull=True,
     ).filter(
         models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
@@ -340,6 +340,11 @@ def user_can_edit_document(user: User, doc: Document) -> bool:
         return False
     if user.has_admin_access:
         return True
+    if DocumentShare.objects.filter(
+        document=doc, recipient=user, access_level=DocumentShare.AccessLevel.EDIT,
+        revoked_at__isnull=True,
+    ).filter(models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())).exists():
+        return document_allows_edit(doc, user=user)
     if getattr(doc, "is_self_upload", False):
         return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
     if is_built_form_document(doc):

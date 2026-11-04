@@ -733,6 +733,7 @@ class DocumentShare(models.Model):
     class AccessLevel(models.TextChoices):
         VIEW = "view", "View only"
         DOWNLOAD = "download", "View and download"
+        EDIT = "edit", "View, download and edit"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="shares")
@@ -770,6 +771,24 @@ class DocumentShare(models.Model):
         if self.revoked_at:
             return False
         return self.expires_at is None or self.expires_at > timezone.now()
+
+
+class DocumentShareAccessRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        GRANTED = "granted", "Granted"
+        DECLINED = "declined", "Declined"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="share_access_requests")
+    requester = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="document_access_requests")
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [models.UniqueConstraint(fields=["document", "requester"], condition=models.Q(status="pending"), name="unique_pending_doc_share_request")]
 
 
 class DocumentRelationship(models.Model):

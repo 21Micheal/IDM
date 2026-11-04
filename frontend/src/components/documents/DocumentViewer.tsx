@@ -153,7 +153,19 @@ function normalizeUrl(url: string | null | undefined): string | undefined {
 // and page share an origin, so this collapses to the same result.
 function getApiOrigin(): string | null {
   try {
-    return new URL(apiBaseUrl, window.location.origin).origin;
+    const resolved = new URL(apiBaseUrl, window.location.origin);
+    // In the local Docker setup the SPA is on Vite :3000 and API requests use
+    // Vite's relative /api proxy. Desktop WebDAV clients need the backend
+    // origin directly because Vite's dev proxy does not relay WebDAV verbs.
+    // The backend publishes :8000 on the same host in docker-compose.yml.
+    if (
+      import.meta.env.DEV
+      && resolved.origin === window.location.origin
+      && window.location.port === "3000"
+    ) {
+      resolved.port = "8000";
+    }
+    return resolved.origin;
   } catch {
     return null;
   }

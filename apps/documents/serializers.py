@@ -562,6 +562,8 @@ class DocumentListSerializer(serializers.ModelSerializer):
             actions = [GroupAction.VIEW.value]
             if share.access_level == DocumentShare.AccessLevel.DOWNLOAD:
                 actions.append(GroupAction.DOWNLOAD.value)
+            if share.access_level == DocumentShare.AccessLevel.EDIT:
+                actions.extend([GroupAction.DOWNLOAD.value, GroupAction.EDIT.value, GroupAction.UPLOAD.value])
             return actions
         from apps.documents.access import effective_permissions_for_user
         return effective_permissions_for_user(user, obj)
@@ -1063,6 +1065,8 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             actions = [GroupAction.VIEW.value]
             if share.access_level == DocumentShare.AccessLevel.DOWNLOAD:
                 actions.append(GroupAction.DOWNLOAD.value)
+            if share.access_level == DocumentShare.AccessLevel.EDIT:
+                actions.extend([GroupAction.DOWNLOAD.value, GroupAction.EDIT.value, GroupAction.UPLOAD.value])
             return actions
         from apps.documents.access import effective_permissions_for_user
         return effective_permissions_for_user(user, obj)
