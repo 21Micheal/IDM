@@ -980,6 +980,54 @@ class DocumentFolder(models.Model):
             },
         )
         return folder
+
+
+class DocumentFolderShare(models.Model):
+    """A time-bound grant to a folder and all folders/documents beneath it."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    folder = models.ForeignKey(DocumentFolder, on_delete=models.CASCADE, related_name="shares")
+    shared_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="folder_shares_created")
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="folder_shares_received")
+    permissions = models.JSONField(default=list, blank=True)
+    message = models.TextField(blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [models.UniqueConstraint(fields=["folder", "recipient"], name="unique_folder_share_recipient")]
+        indexes = [models.Index(fields=["recipient", "revoked_at", "expires_at"], name="documents_d_recipie_03d995_idx")]
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None and (self.expires_at is None or self.expires_at > timezone.now())
+
+    @property
+    def effective_permissions(self) -> list[str]:
+        allowed = {"view", "download", "comment", "edit"}
+        return sorted(({str(value) for value in self.permissions if isinstance(value, str)} & allowed) | {"view"})
+
+
+class DocumentFolderShareAccessRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        GRANTED = "granted", "Granted"
+        DECLINED = "declined", "Declined"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    folder = models.ForeignKey(DocumentFolder, on_delete=models.CASCADE, related_name="share_access_requests")
+    requester = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="folder_share_access_requests")
+    requested_permissions = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [models.UniqueConstraint(fields=["folder", "requester"], name="unique_folder_share_access_request")]
  
  
 class DocumentFolderItem(models.Model):

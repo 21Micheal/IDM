@@ -507,6 +507,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             ).filter(
                 models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
             ).values("document_id")
+            from .folder_sharing import shared_document_ids
+            active_shared_folder_docs = shared_document_ids(user)
 
             # INVOLVEMENT: own docs, an ACTIVE workflow task (including delegated),
             # a generated LPO the user initiated, a PENDING
@@ -558,7 +560,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     signature_request__signers__signer=user,
                     signature_request__signers__status="pending",
                 ) |
-                models.Q(id__in=active_shared_docs)
+                models.Q(id__in=active_shared_docs) |
+                models.Q(id__in=active_shared_folder_docs)
             )
             if self.action != "list":
                 access_filter |= (

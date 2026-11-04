@@ -17,6 +17,9 @@ export const foldersAPI = {
   /** Recursive tree — used for sidebar */
   tree: () => api.get<DocumentFolder[]>("/documents/folders/tree/"),
 
+  /** Active folders shared with the current user. */
+  shared: () => api.get<DocumentFolder[]>("/documents/folders/shared/"),
+
   get: (id: string) => api.get<DocumentFolder>(`/documents/folders/${id}/`),
 
   create: (data: {
@@ -33,6 +36,20 @@ export const foldersAPI = {
   ) => api.patch<DocumentFolder>(`/documents/folders/${id}/`, data),
 
   delete: (id: string) => api.delete(`/documents/folders/${id}/`),
+
+  share: (id: string, data: { recipient_user_ids: string[]; permissions: string[]; expires_at?: string | null; message?: string }) =>
+    api.post(`/documents/folders/${id}/share/`, data),
+
+  sharing: (id: string) => api.get(`/documents/folders/${id}/sharing/`),
+
+  manageShare: (id: string, data: { recipient_id: string; revoke?: boolean; permissions?: string[]; expires_at?: string | null }) =>
+    api.post(`/documents/folders/${id}/manage-share/`, data),
+
+  requestAccess: (id: string, permissions: string[] = ["edit"]) =>
+    api.post(`/documents/folders/${id}/request-access/`, { permissions }),
+
+  manageAccessRequest: (id: string, request_id: string, grant: boolean) =>
+    api.post(`/documents/folders/${id}/manage-access-request/`, { request_id, grant }),
 
   /** Ordered list of documents inside a folder */
   documents: (folderId: string) =>

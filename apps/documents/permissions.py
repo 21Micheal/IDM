@@ -193,6 +193,14 @@ class HasDocumentPermission(permissions.BasePermission):
                 user_perms.add(GroupAction.COMMENT.value)
             if "edit" in share_permissions:
                 user_perms.update((GroupAction.EDIT.value, GroupAction.UPLOAD.value))
+        from .folder_sharing import folder_share_permissions_for_document
+        folder_permissions = folder_share_permissions_for_document(request.user, obj)
+        if "download" in folder_permissions:
+            user_perms.add(GroupAction.DOWNLOAD.value)
+        if "comment" in folder_permissions:
+            user_perms.add(GroupAction.COMMENT.value)
+        if "edit" in folder_permissions:
+            user_perms.update((GroupAction.EDIT.value, GroupAction.UPLOAD.value))
         if required_action in user_perms:
             allowed = True
         elif (

@@ -357,6 +357,12 @@ export interface DocumentFolder {
   document_count: number;
   created_at: string;
   updated_at: string;
+  is_shared?: boolean;
+  share_id?: string;
+  share_permissions?: string[];
+  shared_by_name?: string | null;
+  shared_by_email?: string;
+  share_expires_at?: string | null;
   // Only present in tree response
   children?: DocumentFolder[];
 }

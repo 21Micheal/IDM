@@ -194,6 +194,9 @@ def user_is_involved_with_document(user: User, doc: Document) -> bool:
         models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
     ).exists():
         return True
+    from .folder_sharing import folder_share_permissions_for_document
+    if "view" in folder_share_permissions_for_document(user, doc):
+        return True
     # A selected signer on an ad-hoc signature request for this document is
     # involved only while their turn to sign is still PENDING — once they've
     # signed or declined, that assignment is complete and must not keep
@@ -287,7 +290,9 @@ def user_can_view_document(user: User, doc: Document) -> bool:
     if user.has_admin_access:
         return True
     if getattr(doc, "is_self_upload", False):
-        return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
+        if doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id:
+            return True
+        return user_is_involved_with_document(user, doc)
     # Check involvement BEFORE the document_type gate so that batch reviewers
     # can preview email-ingested UNCLASS placeholder documents (which have no
     # document_type yet) during the review step.
@@ -307,7 +312,8 @@ def user_can_download_document(user: User, doc: Document) -> bool:
     if user.has_admin_access:
         return True
     if getattr(doc, "is_self_upload", False):
-        return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
+        if doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id:
+            return True
     # A download-level share grants download on its own.
     active_shares = DocumentShare.objects.filter(
         document=doc,
@@ -317,6 +323,9 @@ def user_can_download_document(user: User, doc: Document) -> bool:
         models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
     )
     if any("download" in share.effective_permissions for share in active_shares):
+        return True
+    from .folder_sharing import folder_share_permissions_for_document
+    if "download" in folder_share_permissions_for_document(user, doc):
         return True
     document_type_id = str(getattr(doc, "document_type_id", None) or "")
     if not document_type_id:
@@ -345,8 +354,13 @@ def user_can_edit_document(user: User, doc: Document) -> bool:
         revoked_at__isnull=True,
     ).filter(models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now()))):
         return document_allows_edit(doc, user=user)
-    if getattr(doc, "is_self_upload", False):
-        return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
+    from .folder_sharing import folder_share_permissions_for_document
+    if "edit" in folder_share_permissions_for_document(user, doc):
+        return document_allows_edit(doc, user=user)
+    if getattr(doc, "is_self_upload", False) and (
+        doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
+    ):
+        return True
     if is_built_form_document(doc):
         if not document_allows_form_edit(doc, user=user):
             return False

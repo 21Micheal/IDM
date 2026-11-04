@@ -20,7 +20,7 @@ import {
 import {
   Star, Folder, FolderOpen, FolderPlus,
   ChevronRight, ChevronDown,
-  MoreHorizontal, Pencil, Trash2, Plus,
+  MoreHorizontal, Pencil, Trash2, Plus, Share2,
 } from "lucide-react";
 import clsx from "clsx";
 import { foldersAPI } from "@/services/foldersApi";
@@ -349,6 +349,12 @@ export function FolderTree({ activeFolderId = null, onFolderSelect }: FolderTree
     queryFn: () => foldersAPI.tree().then((r) => r.data),
     staleTime: 30_000,
   });
+  const { data: sharedFolders = [] } = useQuery({
+    queryKey: ["folders", "shared"],
+    queryFn: () => foldersAPI.shared().then((r) => r.data),
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+  });
 
   // Keep the path to the active folder expanded across navigations / refetches.
   useEffect(() => {
@@ -453,6 +459,32 @@ export function FolderTree({ activeFolderId = null, onFolderSelect }: FolderTree
             />
           ))}
         </div>
+      )}
+
+      {sharedFolders.length > 0 && (
+        <section className="mt-3 border-t border-[#CDD3D8] pt-2">
+          <div className="flex items-center gap-2 px-3 pb-1.5 pt-1">
+            <Share2 className="h-3 w-3 text-[#6E767D]" />
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#6E767D]">Shared with me</p>
+          </div>
+          <div className="space-y-0.5 px-1">
+            {sharedFolders.map((folder) => (
+              <button
+                key={folder.share_id ?? folder.id}
+                type="button"
+                onClick={() => handleSelect(folder.id)}
+                className={clsx(
+                  "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors",
+                  activeFolderId === folder.id ? "bg-[#287EAD] text-white" : "text-[#3D454D] hover:bg-white/75",
+                )}
+              >
+                <Folder className="h-4 w-4 shrink-0" style={{ color: activeFolderId === folder.id ? undefined : folder.color }} />
+                <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+                <span className="max-w-20 truncate text-[10px] opacity-70">{folder.shared_by_name}</span>
+              </button>
+            ))}
+          </div>
+        </section>
       )}
     </div>
   );

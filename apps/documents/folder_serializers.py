@@ -4,7 +4,7 @@ apps/documents/folder_serializers.py
 Serializers for DocumentFolder, DocumentFolderItem, DocumentFavourite.
 """
 from rest_framework import serializers
-from .models import DocumentFolder, DocumentFolderItem, DocumentFavourite
+from .models import DocumentFolder, DocumentFolderItem, DocumentFavourite, DocumentFolderShare
 from .models import Document
 
 
@@ -22,12 +22,16 @@ class DocumentFolderSerializer(serializers.ModelSerializer):
     child_count    = serializers.IntegerField(read_only=True, default=0)
     document_count = serializers.IntegerField(read_only=True, default=0)
     parent_name    = serializers.SerializerMethodField()
+    is_shared      = serializers.SerializerMethodField()
+    share_permissions = serializers.SerializerMethodField()
+    shared_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model  = DocumentFolder
         fields = [
             "id", "parent", "parent_name", "name", "color", "icon",
             "is_favourites", "is_system", "position",
+            "is_shared", "share_permissions", "shared_by_name",
             "child_count", "document_count",
             "created_at", "updated_at",
         ]
@@ -39,6 +43,23 @@ class DocumentFolderSerializer(serializers.ModelSerializer):
 
     def get_parent_name(self, obj):
         return obj.parent.name if obj.parent_id else None
+
+    def _active_shares(self, obj):
+        request = self.context.get("request")
+        if not request or obj.owner_id == request.user.id:
+            return []
+        from .folder_sharing import folder_shares_for_folder
+        return list(folder_shares_for_folder(request.user, obj))
+
+    def get_is_shared(self, obj):
+        return obj.owner_id != self.context.get("request").user.id if self.context.get("request") else False
+
+    def get_share_permissions(self, obj):
+        return sorted({permission for share in self._active_shares(obj) for permission in share.effective_permissions})
+
+    def get_shared_by_name(self, obj):
+        shares = self._active_shares(obj)
+        return shares[0].shared_by.get_full_name() or shares[0].shared_by.email if shares else None
 
     # ── Validation ─────────────────────────────────────────────────────────
 
@@ -219,3 +240,46 @@ class FolderReorderSerializer(serializers.Serializer):
             if "id" not in item:
                 raise serializers.ValidationError("Each item must have an 'id' field.")
         return items
+
+
+class DocumentFolderShareSerializer(serializers.Serializer):
+    recipient_user_ids = serializers.ListField(
+        child=serializers.UUIDField(), min_length=1, max_length=100,
+    )
+    permissions = serializers.ListField(
+        child=serializers.ChoiceField(choices=["view", "download", "comment", "edit"]),
+        required=False,
+        default=["view"],
+    )
+    message = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
+
+    def validate_recipient_user_ids(self, value):
+        if len(set(value)) != len(value):
+            raise serializers.ValidationError("Recipient list contains duplicates.")
+        return value
+
+    def validate_permissions(self, value):
+        if len(set(value)) != len(value):
+            raise serializers.ValidationError("Permission list contains duplicates.")
+        return sorted(set(value) | {"view"})
+
+    def validate_expires_at(self, value):
+        from django.utils import timezone
+        if value is not None and value <= timezone.now():
+            raise serializers.ValidationError("Expiry must be in the future.")
+        return value
+
+
+class FolderAccessRequestSerializer(serializers.Serializer):
+    permissions = serializers.ListField(
+        child=serializers.ChoiceField(choices=["download", "comment", "edit"]),
+        required=False,
+        default=["edit"],
+        allow_empty=False,
+    )
+
+    def validate_permissions(self, value):
+        if len(set(value)) != len(value):
+            raise serializers.ValidationError("Permission list contains duplicates.")
+        return sorted(set(value) | {"view"})

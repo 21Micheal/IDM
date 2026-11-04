@@ -558,9 +558,12 @@ class DocumentListSerializer(serializers.ModelSerializer):
                 GroupAction.ARCHIVE.value,
             ]
         share = self._get_active_share(obj, user)
-        if share:
+        from .folder_sharing import folder_share_permissions_for_document
+        folder_permissions = folder_share_permissions_for_document(user, obj)
+        if share or folder_permissions:
+            share_permissions = set(share.effective_permissions) if share else set()
+            share_permissions.update(folder_permissions)
             actions = [GroupAction.VIEW.value]
-            share_permissions = set(share.effective_permissions)
             if "download" in share_permissions:
                 actions.append(GroupAction.DOWNLOAD.value)
             if "comment" in share_permissions:
@@ -1064,9 +1067,12 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
                 GroupAction.ARCHIVE.value,
             ]
         share = self._get_active_share(obj, user)
-        if share:
+        from .folder_sharing import folder_share_permissions_for_document
+        folder_permissions = folder_share_permissions_for_document(user, obj)
+        if share or folder_permissions:
+            share_permissions = set(share.effective_permissions) if share else set()
+            share_permissions.update(folder_permissions)
             actions = [GroupAction.VIEW.value]
-            share_permissions = set(share.effective_permissions)
             if "download" in share_permissions:
                 actions.append(GroupAction.DOWNLOAD.value)
             if "comment" in share_permissions:

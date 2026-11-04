@@ -8,6 +8,7 @@ Register in urls.py:
     router.register(r"folder-items",     DocumentFolderItemViewSet,  basename="folder-item")
     router.register(r"favourites",       DocumentFavouriteViewSet,   basename="document-favourite")
 """
+from datetime import timedelta
 from django.db import models as db_models
 from django.db import transaction
 from django.shortcuts import get_object_or_404
@@ -17,14 +18,22 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import Document, DocumentFolder, DocumentFolderItem, DocumentFavourite, DocumentShare
+from .models import (
+    Document, DocumentFolder, DocumentFolderItem, DocumentFavourite, DocumentShare,
+    DocumentFolderShare, DocumentFolderShareAccessRequest,
+)
 from .folder_serializers import (
     DocumentFolderSerializer,
     DocumentFolderTreeSerializer,
     DocumentFolderItemSerializer,
     DocumentFavouriteSerializer,
     FolderReorderSerializer,
+    DocumentFolderShareSerializer,
+    FolderAccessRequestSerializer,
 )
+from apps.accounts.models import User
+from apps.notifications.models import Notification
+from .folder_sharing import active_folder_shares, descendant_folder_ids, folder_shares_for_folder, shared_folder_ids
 
 
 def _prune_saved_documents_no_longer_visible(user):
@@ -34,11 +43,22 @@ def _prune_saved_documents_no_longer_visible(user):
         db_models.Q(revoked_at__isnull=False)
         | db_models.Q(expires_at__isnull=False, expires_at__lte=now)
     ).values("document_id")
+    stale_folder_shares = DocumentFolderShare.objects.filter(recipient=user).filter(
+        db_models.Q(revoked_at__isnull=False)
+        | db_models.Q(expires_at__isnull=False, expires_at__lte=now)
+    ).values_list("folder_id", flat=True)
+    from .folder_sharing import descendant_folder_ids
+    stale_folder_ids = descendant_folder_ids(stale_folder_shares)
+    stale_folder_doc_ids = DocumentFolderItem.objects.filter(folder_id__in=stale_folder_ids).values("document_id")
     candidate_ids = set(DocumentFavourite.objects.filter(
-        user=user, document_id__in=stale_share_ids,
+        user=user,
+    ).filter(
+        db_models.Q(document_id__in=stale_share_ids) | db_models.Q(document_id__in=stale_folder_doc_ids)
     ).values_list("document_id", flat=True))
     candidate_ids.update(DocumentFolderItem.objects.filter(
-        folder__owner=user, document_id__in=stale_share_ids,
+        folder__owner=user,
+    ).filter(
+        db_models.Q(document_id__in=stale_share_ids) | db_models.Q(document_id__in=stale_folder_doc_ids)
     ).values_list("document_id", flat=True))
     if not candidate_ids:
         return
@@ -61,11 +81,19 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
     serializer_class   = DocumentFolderSerializer
 
     def get_queryset(self):
-        if getattr(self, "action", None) in ("list", "retrieve", "documents"):
+        action = getattr(self, "action", None)
+        if action in ("list", "retrieve", "documents"):
             _prune_saved_documents_no_longer_visible(self.request.user)
+        queryset = DocumentFolder.objects
+        if action in ("retrieve", "documents", "sharing", "request_access"):
+            queryset = queryset.filter(
+                db_models.Q(owner=self.request.user)
+                | db_models.Q(id__in=shared_folder_ids(self.request.user))
+            )
+        else:
+            queryset = queryset.filter(owner=self.request.user)
         return (
-            DocumentFolder.objects
-            .filter(owner=self.request.user)
+            queryset
             .annotate(
                 child_count=db_models.Count("children", distinct=True),
                 document_count=db_models.Count("items",    distinct=True),
@@ -114,6 +142,182 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
             roots, many=True, context={"request": request}
         )
         return Response(serializer.data)
+
+    @action(detail=False, methods=["get"], url_path="shared")
+    def shared(self, request):
+        """List active folder shares received by the current user."""
+        shares = active_folder_shares(request.user).select_related("folder", "folder__owner", "shared_by")
+        results = []
+        for share in shares:
+            folder = share.folder
+            folder_data = DocumentFolderSerializer(folder, context={"request": request}).data
+            folder_data["children"] = DocumentFolderTreeSerializer(folder, context={"request": request}).data.get("children", [])
+            results.append({
+                **folder_data,
+                "share_id": str(share.id),
+                "shared_by_name": share.shared_by.get_full_name() or share.shared_by.email,
+                "shared_by_email": share.shared_by.email,
+                "share_permissions": share.effective_permissions,
+                "share_expires_at": share.expires_at,
+            })
+        return Response(results)
+
+    @action(detail=True, methods=["post"], url_path="share")
+    def share(self, request, pk=None):
+        folder = self.get_object()
+        if folder.owner_id != request.user.id or folder.is_system:
+            return Response({"detail": "Only the owner can share a non-system folder."}, status=403)
+        serializer = DocumentFolderShareSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        recipients = list(User.objects.filter(id__in=data["recipient_user_ids"], is_active=True).exclude(id=request.user.id))
+        if not recipients:
+            return Response({"detail": "Select at least one active recipient other than yourself."}, status=400)
+        shared_by = request.user.get_full_name().strip() or request.user.email
+        for recipient in recipients:
+            share, _ = DocumentFolderShare.objects.update_or_create(
+                folder=folder,
+                recipient=recipient,
+                defaults={
+                    "shared_by": request.user,
+                    "permissions": data["permissions"],
+                    "message": data["message"].strip(),
+                    "expires_at": data.get("expires_at"),
+                    "revoked_at": None,
+                },
+            )
+            DocumentFolderShareAccessRequest.objects.filter(
+                folder=folder, requester=recipient, status=DocumentFolderShareAccessRequest.Status.PENDING,
+            ).update(status=DocumentFolderShareAccessRequest.Status.GRANTED)
+            Notification.objects.create(
+                recipient=recipient,
+                type="document_shared",
+                message=f"{shared_by} shared the folder '{folder.name}' with you.",
+                link=f"/documents/folders/{folder.id}",
+            )
+        return Response({"shared": len(recipients), "permissions": data["permissions"]}, status=201)
+
+    @action(detail=True, methods=["get"], url_path="sharing")
+    def sharing(self, request, pk=None):
+        folder = self.get_object()
+        if folder.owner_id == request.user.id:
+            shares = DocumentFolderShare.objects.filter(folder=folder).select_related("recipient")
+            folder_ids = descendant_folder_ids([folder.id])
+            locked_docs = Document.objects.filter(
+                folder_items__folder_id__in=folder_ids,
+                edit_locked_by__isnull=False,
+                edit_locked_at__gte=timezone.now() - timedelta(hours=1),
+            ).select_related("edit_locked_by").distinct()
+            editing_by_user = {}
+            for document in locked_docs:
+                entry = editing_by_user.setdefault(str(document.edit_locked_by_id), [])
+                entry.append(document.title)
+            requests = DocumentFolderShareAccessRequest.objects.filter(
+                folder=folder, status=DocumentFolderShareAccessRequest.Status.PENDING,
+            ).select_related("requester")
+            return Response({
+                "can_manage": True,
+                "recipients": [{
+                    "id": str(share.recipient_id),
+                    "name": share.recipient.get_full_name() or share.recipient.email,
+                    "email": share.recipient.email,
+                    "permissions": share.effective_permissions,
+                    "expires_at": share.expires_at,
+                    "is_active": share.is_active,
+                    "revoked_at": share.revoked_at,
+                    "editing_documents": editing_by_user.get(str(share.recipient_id), []),
+                } for share in shares],
+                "requests": [{
+                    "id": str(item.id),
+                    "requester_name": item.requester.get_full_name() or item.requester.email,
+                    "requester_email": item.requester.email,
+                    "permissions": item.requested_permissions,
+                } for item in requests],
+            })
+        share = folder_shares_for_folder(request.user, folder).first()
+        if not share:
+            return Response({"detail": "You do not have access to this folder."}, status=403)
+        request_item = DocumentFolderShareAccessRequest.objects.filter(folder=share.folder, requester=request.user).order_by("-created_at").first()
+        return Response({
+            "can_manage": False,
+            "my_share": {"permissions": share.effective_permissions, "shared_by_name": share.shared_by.get_full_name() or share.shared_by.email, "expires_at": share.expires_at},
+            "my_request": {"status": request_item.status} if request_item else None,
+        })
+
+    @action(detail=True, methods=["post"], url_path="manage-share")
+    def manage_share(self, request, pk=None):
+        folder = self.get_object()
+        if folder.owner_id != request.user.id:
+            return Response({"detail": "Only the folder owner can manage its shares."}, status=403)
+        share = DocumentFolderShare.objects.filter(folder=folder, recipient_id=request.data.get("recipient_id")).first()
+        if not share:
+            return Response({"detail": "Recipient share not found."}, status=404)
+        if request.data.get("revoke"):
+            share.revoked_at = timezone.now()
+            share.save(update_fields=["revoked_at", "updated_at"])
+            return Response({"revoked": True})
+        serializer = DocumentFolderShareSerializer(data={
+            "recipient_user_ids": [str(share.recipient_id)],
+            "permissions": request.data.get("permissions", share.effective_permissions),
+            "message": share.message,
+            "expires_at": request.data.get("expires_at", share.expires_at),
+        })
+        serializer.is_valid(raise_exception=True)
+        share.permissions = serializer.validated_data["permissions"]
+        share.expires_at = serializer.validated_data.get("expires_at")
+        share.save(update_fields=["permissions", "expires_at", "updated_at"])
+        return Response({"permissions": share.effective_permissions, "expires_at": share.expires_at})
+
+    @action(detail=True, methods=["post"], url_path="request-access")
+    def request_access(self, request, pk=None):
+        folder = self.get_object()
+        share = folder_shares_for_folder(request.user, folder).first()
+        if not share:
+            return Response({"detail": "Only direct recipients can request additional folder permissions."}, status=403)
+        serializer = FolderAccessRequestSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        folder = share.folder
+        existing = DocumentFolderShareAccessRequest.objects.filter(folder=folder, requester=request.user).first()
+        if existing and existing.status == DocumentFolderShareAccessRequest.Status.PENDING:
+            existing.requested_permissions = serializer.validated_data["permissions"]
+            existing.save(update_fields=["requested_permissions", "updated_at"])
+            return Response({"status": existing.status}, status=200)
+        request_item, _ = DocumentFolderShareAccessRequest.objects.update_or_create(
+            folder=folder,
+            requester=request.user,
+            defaults={"requested_permissions": serializer.validated_data["permissions"], "status": DocumentFolderShareAccessRequest.Status.PENDING},
+        )
+        Notification.objects.create(
+            recipient=share.shared_by,
+            type="document_shared",
+            message=f"{request.user.get_full_name() or request.user.email} requested additional access to folder '{folder.name}'.",
+            link=f"/documents/folders/{folder.id}",
+        )
+        return Response({"status": request_item.status}, status=201)
+
+    @action(detail=True, methods=["post"], url_path="manage-access-request")
+    def manage_access_request(self, request, pk=None):
+        folder = self.get_object()
+        if folder.owner_id != request.user.id:
+            return Response({"detail": "Only the folder owner can manage access requests."}, status=403)
+        access_request = DocumentFolderShareAccessRequest.objects.filter(
+            folder=folder, id=request.data.get("request_id"), status=DocumentFolderShareAccessRequest.Status.PENDING,
+        ).select_related("requester").first()
+        if not access_request:
+            return Response({"detail": "Pending access request not found."}, status=404)
+        grant = bool(request.data.get("grant"))
+        share = DocumentFolderShare.objects.filter(folder=folder, recipient=access_request.requester).first()
+        if grant:
+            if not share or not share.is_active:
+                return Response({"detail": "The recipient's folder share has expired or been revoked."}, status=400)
+            share.permissions = sorted(set(share.effective_permissions) | set(access_request.requested_permissions) | {"view"})
+            share.save(update_fields=["permissions", "updated_at"])
+            access_request.status = DocumentFolderShareAccessRequest.Status.GRANTED
+            Notification.objects.create(recipient=access_request.requester, type="document_shared", message=f"Additional access was granted for folder '{folder.name}'.", link=f"/documents/folders/{folder.id}")
+        else:
+            access_request.status = DocumentFolderShareAccessRequest.Status.DECLINED
+        access_request.save(update_fields=["status", "updated_at"])
+        return Response({"status": access_request.status})
 
     @action(detail=False, methods=["patch"], url_path="reorder")
     def reorder(self, request):
