@@ -367,10 +367,10 @@ export default function FormFillModal({
         </div>
       </div>
 
-      <div className="px-6 pb-4 pt-6">
-        <div className="mx-auto w-full max-w-[1100px]">
+      <div className="form-fill-shell px-4 py-5 sm:px-6 lg:px-8">
+        <div className="mx-auto w-full max-w-[1800px]">
           {missingFields.length > 0 && (
-            <div className="mb-4 border border-amber-300 bg-amber-50 p-4">
+            <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
               <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
                 <AlertCircle className="h-4 w-4 text-amber-600" />
                 Please complete the following required fields before submitting:
@@ -399,7 +399,7 @@ export default function FormFillModal({
               </p>
             </div>
           ) : (
-            <>
+            <div className="form-renderer space-y-5">
               {Boolean((template.sunsystems?.budget as any)?.enabled) && (() => {
                 const budgetMeta = (template.sunsystems?.budget ?? {}) as Record<string, any>;
                 const amountField = budgetMeta.amount_field as string | undefined;
@@ -418,6 +418,7 @@ export default function FormFillModal({
               <TemplateForm
                 sections={template.sections ?? []}
                 values={values}
+                validationIssues={missingFields}
                 onChange={handleFieldChange}
                 readOnly={false}
                 documentStatus="draft"
@@ -431,7 +432,7 @@ export default function FormFillModal({
                   setIsSigningOpen(true);
                 }}
               />
-            </>
+            </div>
           )}
         </div>
       </div>
@@ -443,7 +444,7 @@ export default function FormFillModal({
             type="button"
             onClick={requestClose}
             disabled={isPending}
-            className="h-9 border border-[#C8CDD2] bg-white px-4 text-sm font-medium text-[#1F2933] shadow-md transition-colors hover:bg-[#F5F7F8] disabled:opacity-50"
+            className="h-9 rounded-lg border border-[#E4E7EB] bg-white px-4 text-xs font-semibold text-[#5E6870] shadow-sm transition-colors hover:bg-[#F5F7F8] hover:text-[#1F2933] disabled:opacity-50"
           >
             Cancel
           </button>
@@ -451,7 +452,7 @@ export default function FormFillModal({
             type="button"
             onClick={() => saveDraftMutation.mutate()}
             disabled={isPending}
-            className="inline-flex h-9 items-center gap-1.5 border border-[#287EAD] bg-white px-4 text-sm font-semibold text-[#287EAD] shadow-md transition-colors hover:bg-[#EEF6FB] disabled:opacity-50"
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#287EAD] bg-white px-4 text-xs font-semibold text-[#287EAD] shadow-sm transition-colors hover:bg-[#EEF6FB] disabled:opacity-50"
           >
             {saveDraftMutation.isPending || (uploadingFiles && !submitMutation.isPending) ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -464,7 +465,7 @@ export default function FormFillModal({
             type="button"
             onClick={() => submitMutation.mutate()}
             disabled={isPending}
-            className="inline-flex h-9 items-center gap-1.5 bg-[#287EAD] px-5 text-sm font-semibold text-white shadow-md transition-colors hover:bg-[#1E6F99] disabled:opacity-50"
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#287EAD] px-5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-[#1E6F99] disabled:opacity-50"
           >
             {submitMutation.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />

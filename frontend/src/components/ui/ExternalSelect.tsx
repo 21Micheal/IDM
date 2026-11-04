@@ -21,6 +21,7 @@ import { createPortal } from "react-dom";
 import { Search, X, ChevronDown, Loader2, Check } from "lucide-react";
 import { sunsystemsAPI } from "@/services/api";
 import { useQuery } from "@tanstack/react-query";
+import { analysisDimensionName } from "@/lib/analysisDimensions";
 
 export interface ExternalRecord {
   code: string;
@@ -39,6 +40,18 @@ export interface ExternalSourceDef {
   /** Some sources (analysis codes) are fetched one dimension at a time. */
   needsDimension?: boolean;
   fetch: (params: { dimension?: string }) => Promise<ExternalRecord[]>;
+}
+
+function taxRateFromName(name: string, code = ""): string | undefined {
+  const normalized = name.trim();
+  if (/\b(ex(?:c)?empt|zero[ -]?rated|not (?:analysed|analyzed))\b/i.test(normalized) || code.trim() === "#") return "0";
+  // SunSystems tax analysis names are usually "Standard Rate 16%", but
+  // installations may spell this out as "16 percent" or omit the percent
+  // sign after "Rate". Accept those formats while continuing to use the
+  // configured code description as the source of truth.
+  const match = normalized.match(/(?:^|\D)(\d+(?:\.\d+)?)\s*(?:%|percent\b)/i)
+    ?? normalized.match(/\brate\s+(\d+(?:\.\d+)?)\b/i);
+  return match?.[1];
 }
 
 /* Single source of truth for the External sources the designer can pick. Add a
@@ -83,7 +96,10 @@ export const EXTERNAL_SOURCES: ExternalSourceDef[] = [
             (r.data.analysis_codes ?? []).map((c) => ({
               code: c.analysis_code,
               description: c.name,
-              data: { dimension_id: c.analysis_dimension_id },
+              data: {
+                dimension_id: c.analysis_dimension_id,
+                ...(dimension === "12" ? { tax_rate: taxRateFromName(c.name, c.analysis_code) ?? "" } : {}),
+              },
             })),
           )
         : Promise.resolve([]),
@@ -108,9 +124,14 @@ interface Props {
   /** Show only the code in the box and put the record's (long) name under it.
    * Ignored for multi-select, where the count is more useful. */
   showSelectedName?: boolean;
+  /** Show only the code in the trigger (useful when the description is stored
+   * in a separate field or table column). */
+  showCodeOnly?: boolean;
   /** Called with the full record whenever a value is picked (not cleared).
    * Used to auto-fill sibling fields, e.g. an item's BaseItemUnit. */
   onSelectRecord?: (record: ExternalRecord) => void;
+  /** Resolve a configured default value after options load and run autofill. */
+  autoFillDefault?: boolean;
 }
 
 export default function ExternalSelect({
@@ -124,7 +145,9 @@ export default function ExternalSelect({
   placeholder,
   className = "",
   showSelectedName = false,
+  showCodeOnly = false,
   onSelectRecord,
+  autoFillDefault = false,
 }: Props) {
   const def = externalSourceDef(source);
   const needsDimension = !!def?.needsDimension && !dimension;
@@ -174,14 +197,14 @@ export default function ExternalSelect({
       const vw = window.innerWidth;
       const vh = window.innerHeight;
       const pad = 8;
-      const w = Math.min(500, Math.max(r.width, 300));
-      let left = r.left;
-      if (left + w + pad > vw) left = r.right - w;
-      left = Math.max(pad, left);
+      const minimumWidth = compact ? Math.min(360, vw - pad * 2) : Math.min(420, vw - pad * 2);
+      const w = Math.min(500, vw - pad * 2, Math.max(r.width, minimumWidth));
+      const left = Math.max(pad, Math.min(r.left, vw - w - pad));
       const spaceBelow = vh - r.bottom - pad;
       const spaceAbove = r.top - pad;
-      const maxH = Math.max(200, Math.min(360, spaceBelow > spaceAbove ? spaceBelow : spaceAbove));
-      const top = spaceBelow >= spaceAbove ? r.bottom + 2 : r.top - 2 - maxH;
+      const openAbove = spaceBelow < 220 && spaceAbove > spaceBelow;
+      const maxH = Math.max(120, Math.min(360, openAbove ? spaceAbove : spaceBelow));
+      const top = openAbove ? Math.max(pad, r.top - 2 - maxH) : Math.min(r.bottom + 2, vh - pad - maxH);
       setStyle({ top, left, width: w, maxHeight: maxH });
     };
     calc();
@@ -204,6 +227,29 @@ export default function ExternalSelect({
     return m;
   }, [rows]);
 
+  const singleValue = Array.isArray(value) ? value[0] ?? "" : value;
+  const defaultAutoFillRef = useRef("");
+  useEffect(() => {
+    if (!autoFillDefault) {
+      defaultAutoFillRef.current = "";
+      return;
+    }
+    if (multi || !singleValue || rows.length === 0) return;
+    // Older templates may have a display label saved as "CODE — description".
+    // Resolve the actual record by code and normalize the stored value.
+    const record = byCode.get(singleValue) ?? rows.find((candidate) => {
+      if (!singleValue.startsWith(candidate.code)) return false;
+      const suffix = singleValue.slice(candidate.code.length);
+      return /^\s+[—–-]\s*/.test(suffix);
+    });
+    if (!record) return;
+    const signature = `${source}:${dimension ?? ""}:${singleValue}:${record.code}`;
+    if (defaultAutoFillRef.current === signature) return;
+    defaultAutoFillRef.current = signature;
+    if (record.code !== singleValue) onChange(record.code);
+    onSelectRecord?.(record);
+  }, [autoFillDefault, multi, singleValue, rows, byCode, source, dimension, onChange, onSelectRecord]);
+
   const q = search.trim().toLowerCase();
   const filtered = q
     ? rows.filter(
@@ -217,7 +263,7 @@ export default function ExternalSelect({
   const isSelected = (code: string) => valueArray.includes(code);
   const labelFor = (code: string) => {
     const rec = byCode.get(code);
-    return rec?.description ? `${code} — ${rec.description}` : code;
+    return !showCodeOnly && rec?.description ? `${code} — ${rec.description}` : code;
   };
 
   const toggle = (code: string) => {
@@ -241,8 +287,10 @@ export default function ExternalSelect({
   };
   const clearAll = () => onChange(multi ? [] : "");
 
-  const noun = def ? (multi ? def.plural : def.noun) : "record";
+  const dimensionName = source === "analysis_codes" && dimension ? analysisDimensionName(dimension) : "";
+  const noun = dimensionName ? `${dimensionName} code` : def ? (multi ? def.plural : def.noun) : "record";
   const displayPlaceholder = placeholder ?? (def ? `Select ${noun}…` : "Select…");
+  const searchPlaceholder = dimensionName ? `Search for ${dimensionName}…` : `Search ${def?.plural ?? "records"}…`;
   const selectedName = valueArray.length === 1 ? (byCode.get(valueArray[0])?.description ?? "") : "";
   const showNameOutside = showSelectedName && !multi && valueArray.length === 1 && !!selectedName;
 
@@ -275,7 +323,8 @@ export default function ExternalSelect({
         <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-[#5E6870]" />
       </button>
       {showNameOutside && (
-        <p className="mt-1 break-words text-xs font-medium leading-snug text-[#374151]" title={selectedName}>
+        <p className="mt-1 max-w-full text-xs font-medium leading-4 text-[#374151]" title={selectedName}
+          style={{ display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2, overflow: "hidden" }}>
           {selectedName}
         </p>
       )}
@@ -283,7 +332,7 @@ export default function ExternalSelect({
       {open && !disabled && createPortal(
         <div
           ref={panelRef}
-          className="fixed z-[120] flex flex-col overflow-hidden rounded-md border bg-white shadow-2xl"
+          className="fixed z-[140] flex flex-col overflow-hidden rounded-md border bg-white shadow-2xl"
           style={{ ...style, borderColor: "#287EAD" }}
         >
           <div className="flex items-center gap-2 border-b border-[#D0E6F0] px-3 py-2">
@@ -292,7 +341,7 @@ export default function ExternalSelect({
               ref={searchRef}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder={`Search ${def?.plural ?? "records"}…`}
+              placeholder={searchPlaceholder}
               className="min-w-0 flex-1 bg-transparent text-[13px] text-[#1F2933] outline-none placeholder:text-[#8C969E]"
             />
             {search && (
@@ -339,7 +388,7 @@ export default function ExternalSelect({
               </p>
             ) : filtered.length === 0 ? (
               <p className="px-4 py-10 text-center text-[13px] text-[#5E6870]">
-                {rows.length === 0 ? `No ${def.plural} returned.` : "Nothing matches your search."}
+                {rows.length === 0 ? (dimensionName ? `No ${dimensionName} codes returned.` : `No ${def.plural} returned.`) : "Nothing matches your search."}
               </p>
             ) : (
               filtered.map((rec) => {
@@ -361,7 +410,8 @@ export default function ExternalSelect({
                       {rec.code}
                     </span>
                     <span className="h-full self-stretch bg-[#E5EEF4]" style={{ width: "1px" }} />
-                    <span className="min-w-0 flex-1 truncate px-4 py-2 text-[13px] text-[#1F2933]">
+                    <span className="min-w-0 flex-1 px-4 py-2 text-[13px] leading-4 text-[#1F2933]" title={rec.description}
+                      style={{ display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2, overflow: "hidden" }}>
                       {rec.description || <span className="text-[#8C969E]">—</span>}
                     </span>
                   </button>

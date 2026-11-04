@@ -1,26 +1,22 @@
 /**
- * FormUploadPage  (formerly NewFormModal)
+ * FormUploadPage (formerly NewFormModal)
  *
- * Dedicated full-page route at /forms/new. Template picker matches the
- * requisition create flow; filling uses FormFillModal chrome (same as
- * NewRequisitionPage: sticky header, TemplateForm, floating actions).
+ * Dedicated full-page route at /forms/new.
+ * Automatically loads the first available form template (or template_id query param),
+ * with in-header template switcher, document-width card (max-w-[1100px]), and floating action buttons,
+ * matching NewRequisitionPage styling and width.
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { documentTypesAPI, templatesAPI, normalizeListResponse } from "@/services/api";
+import { templatesAPI } from "@/services/api";
 import {
   Loader2,
-  LayoutTemplate,
-  ArrowRight,
-  AlertTriangle,
   ArrowLeft,
-  ClipboardList,
   FileText,
-  CheckCircle2,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import FormFillModal from "@/components/templates/FormFillModal";
 
 type DocumentTemplateOption = {
@@ -35,19 +31,12 @@ type DocumentTemplateOption = {
   sunsystems?: { budget?: Record<string, unknown>; journal?: Record<string, unknown> } | null;
 };
 
-const IMPREST_MATCHERS = ["imprest"];
-function isImprestDocType(t: any): boolean {
-  const code = String(t?.code || "").toLowerCase();
-  const name = String(t?.name || "").toLowerCase();
-  return IMPREST_MATCHERS.some((m) => code.includes(m) || name.includes(m));
-}
-function isBuiltForm(t: DocumentTemplateOption): boolean {
-  return t.type === "built" && t.kind !== "document";
-}
-
 /** Prop kept for backwards-compat when rendered via the route (onClose → navigate back). */
 export default function NewFormModal({ onClose }: { onClose?: () => void }) {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const preselectedTemplateId = searchParams.get("template_id");
+
   const goBack = () => {
     if (onClose) {
       onClose();
@@ -56,166 +45,77 @@ export default function NewFormModal({ onClose }: { onClose?: () => void }) {
     navigate("/forms");
   };
 
-  const [selectedTemplateId, setSelectedTemplateId] = useState("");
-  const [fillingTemplateId, setFillingTemplateId] = useState<string | null>(null);
-
-  const { data: docTypes = [], isLoading: typesLoading } = useQuery({
-    queryKey: ["document-types"],
-    queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
-    select: (data) => normalizeListResponse<any>(data),
-    staleTime: 5 * 60_000,
-  });
-
-  const imprestType = useMemo(() => docTypes.find(isImprestDocType) ?? null, [docTypes]);
+  const [fillingTemplateId, setFillingTemplateId] = useState<string | null>(preselectedTemplateId || null);
 
   const { data: templates = [], isLoading: templatesLoading } = useQuery({
-    queryKey: ["templates", "document-type", imprestType?.id],
-    queryFn: () => templatesAPI.list({ document_type_id: imprestType!.id }).then((r) => r.data as unknown),
-    select: (data) =>
-      normalizeListResponse<DocumentTemplateOption>(data)
-        .filter(isBuiltForm)
-        .map((t) => ({ ...t, document_type_id: t.document_type_id || t.document_type })),
-    enabled: Boolean(imprestType?.id),
-    staleTime: 5 * 60_000,
+    queryKey: ["templates", "built-forms"],
+    queryFn: async () => {
+      const res = await templatesAPI.list({ type: "built" });
+      const all = res.data?.results || res.data || [];
+      return Array.isArray(all)
+        ? (all.filter((t: any) => t.type === "built" && t.kind !== "document") as DocumentTemplateOption[])
+        : [];
+    },
+    ...QUERY_SHORT_STALE,
+    refetchOnMount: "always",
   });
 
-  // Single template → skip picker.
+  // Auto-select first template (or preselected from URL)
   useEffect(() => {
-    if (templates.length === 1 && !fillingTemplateId) {
-      setFillingTemplateId(templates[0].id);
+    if (!fillingTemplateId && templates.length > 0) {
+      if (preselectedTemplateId && templates.some((t) => t.id === preselectedTemplateId)) {
+        setFillingTemplateId(preselectedTemplateId);
+      } else {
+        setFillingTemplateId(templates[0].id);
+      }
     }
-  }, [templates, fillingTemplateId]);
+  }, [templates, fillingTemplateId, preselectedTemplateId]);
 
-  const fillingTemplate =
-    templates.find((t) => t.id === fillingTemplateId) ??
-    (fillingTemplateId ? templates[0] : null);
-
-  // ── Fill experience (requisition-style) ───────────────────────────────────
-  if (fillingTemplate && imprestType) {
+  if (templatesLoading) {
     return (
-      <FormFillModal
-        template={fillingTemplate}
-        documentTypeId={imprestType.id}
-        documentTypeName={imprestType.name}
-        templates={templates}
-        onSelectTemplate={(id) => setFillingTemplateId(id)}
-        onClose={goBack}
-      />
+      <div className="flex h-full min-h-[60vh] items-center justify-center bg-[#F0F2F5]">
+        <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
+      </div>
     );
   }
 
-  // ── Template picker (aligned with NewRequisition empty/picker chrome) ─────
-  const loading = typesLoading || (Boolean(imprestType) && templatesLoading);
-  const selectedTemplate = templates.find((t) => t.id === selectedTemplateId) ?? null;
-
-  return (
-    <div className="min-h-full bg-[#F0F2F5]">
-      <div className="sticky top-0 z-10 border-b border-[#D9DDE2] bg-white shadow-sm">
-        <div className="flex w-full items-center justify-between gap-4 px-6 py-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <button
-              type="button"
-              onClick={goBack}
-              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-[#E4E7EB] bg-white text-[#5E6870] transition-colors hover:bg-[#F5F7F8] hover:text-[#1F2933]"
-              title="Back to forms"
-            >
-              <ArrowLeft className="h-4 w-4" />
-            </button>
-            <div className="h-5 w-px flex-shrink-0 bg-[#E4E7EB]" />
-            <div className="flex min-w-0 items-center gap-2">
-              <ClipboardList className="h-4 w-4 flex-shrink-0 text-[#287EAD]" />
-              <div className="min-w-0">
-                <h1 className="truncate text-sm font-bold text-[#1F2933]">New Form</h1>
-                <p className="truncate text-[11px] text-[#8C969E]">
-                  Select an Imprest template to fill in
-                </p>
-              </div>
+  if (templates.length === 0) {
+    return (
+      <div className="flex h-full min-h-[60vh] items-center justify-center bg-[#F0F2F5] p-6">
+        <div className="w-full max-w-md rounded-lg border border-[#D9DEE3] bg-white p-8 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-amber-50">
+              <FileText className="h-5 w-5 text-amber-500" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-[#1F2933]">No Form Templates Available</h2>
+              <p className="mt-1.5 text-sm text-[#5E6870]">
+                Ask an administrator to configure a form template.
+              </p>
             </div>
           </div>
+          <button
+            onClick={goBack}
+            className="mt-6 inline-flex items-center gap-2 rounded-lg bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors"
+          >
+            <ArrowLeft className="h-4 w-4" /> Go back
+          </button>
         </div>
       </div>
+    );
+  }
 
-      <div className="flex flex-1 items-start justify-center px-4 pt-10">
-        <div className="w-full max-w-md overflow-hidden border border-[#C8CDD2] bg-white shadow-sm">
-          <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-5 py-3">
-            <p className="text-sm font-bold text-[#1F2933]">Select a form template</p>
-            <p className="mt-0.5 text-xs text-[#5E6870]">
-              Choose the imprest form type you want to fill in.
-            </p>
-          </div>
+  const fillingTemplate =
+    templates.find((t) => t.id === fillingTemplateId) ?? templates[0];
 
-          <div className="p-5">
-            {loading ? (
-              <div className="flex items-center justify-center gap-2 py-8 text-sm text-[#5E6870]">
-                <Loader2 className="h-4 w-4 animate-spin" /> Loading templates…
-              </div>
-            ) : !imprestType ? (
-              <div className="flex items-start gap-3 border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-800">
-                <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-                <span>
-                  No "Imprest" document type was found. Ask an admin to create one (Admin → Document
-                  types).
-                </span>
-              </div>
-            ) : templates.length === 0 ? (
-              <div className="flex items-start gap-3 border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-800">
-                <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-                <span>
-                  No form templates are configured for {imprestType.name} yet. Ask an admin to build
-                  one in Admin → Templates.
-                </span>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {templates.map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => setSelectedTemplateId(t.id)}
-                    className={cn(
-                      "flex w-full cursor-pointer items-start gap-3 border px-3 py-3 text-left transition-colors",
-                      selectedTemplateId === t.id
-                        ? "border-[#287EAD] bg-[#EEF6FB]"
-                        : "border-[#C8CDD2] hover:bg-[#F5F7F8]",
-                    )}
-                  >
-                    <FileText className="mt-0.5 h-4 w-4 flex-shrink-0 text-[#287EAD]" />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-1.5 text-sm font-semibold text-[#1F2933]">
-                        <LayoutTemplate className="h-3.5 w-3.5 text-[#287EAD]" /> {t.name}
-                        {selectedTemplateId === t.id && (
-                          <CheckCircle2 className="ml-auto h-3.5 w-3.5 text-[#287EAD]" />
-                        )}
-                      </span>
-                      {t.description && (
-                        <span className="mt-0.5 block text-xs text-[#5E6870]">{t.description}</span>
-                      )}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="flex justify-end gap-2 border-t border-[#C8CDD2] px-5 py-3">
-            <button
-              type="button"
-              onClick={goBack}
-              className="border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => selectedTemplate && setFillingTemplateId(selectedTemplate.id)}
-              disabled={!selectedTemplate}
-              className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Continue <ArrowRight className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+  return (
+    <FormFillModal
+      template={fillingTemplate}
+      documentTypeId={fillingTemplate.document_type_id || fillingTemplate.document_type || ""}
+      documentTypeName={fillingTemplate.name}
+      templates={templates}
+      onSelectTemplate={(id) => setFillingTemplateId(id)}
+      onClose={goBack}
+    />
   );
 }

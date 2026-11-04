@@ -45,6 +45,7 @@ export interface FieldOption { value: string; label: string }
 export interface WorkflowField {
   /** Stable id used in conditions. Form fields: the form field id. */
   id: string;
+  key?: string;
   label: string;
   type: FieldType;
   options?: FieldOption[];

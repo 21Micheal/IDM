@@ -443,8 +443,8 @@ export default function NewRequisitionPage() {
       </div>
 
       {/* ── Main Document Area ── */}
-      <div className="px-6 pt-6 pb-4">
-        <div className="mx-auto w-full max-w-[1100px]">
+      <div className="px-4 py-5 sm:px-6 lg:px-8">
+        <div className="mx-auto w-full max-w-[1800px]">
 
         {/* Missing fields banner */}
         {missingFields.length > 0 && (
