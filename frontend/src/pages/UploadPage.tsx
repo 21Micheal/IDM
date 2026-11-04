@@ -36,6 +36,8 @@ import IdpFailureModal, { type IdpFailureReason } from "@/components/documents/I
 import { resolveSource, type ReferenceValue } from "@/components/templates/referenceSources";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import CustomListbox from "@/components/ui/CustomListbox";
+import AddToFolderControl from "@/components/folders/AddToFolderControl";
+import { addDocumentsToFolder } from "@/lib/folderCache";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -1088,6 +1090,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const [bulkMode,         setBulkMode]          = useState(() => new URLSearchParams(location.search).get("mode") === "bulk");
   const [useTemplate,      setUseTemplate]       = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
+  const [addToFolder,      setAddToFolder]       = useState(false);
+  const [targetFolderId,   setTargetFolderId]    = useState("");
 
   const [scanStage,        setScanStage]         = useState<ScanStage>("idle");
   const [uploadedDocId,    setUploadedDocId]     = useState<string | null>(null);
@@ -1552,6 +1556,15 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     accept: ACCEPTED_UPLOAD_FORMATS,
   });
 
+  const maybeAddToFolder = useCallback(async (documentId: string) => {
+    if (!addToFolder || !targetFolderId || !documentId) return;
+    try {
+      await addDocumentsToFolder(queryClient, targetFolderId, [documentId]);
+    } catch (err) {
+      toast.warning(extractApiError(err, "Document uploaded, but could not add it to the folder."));
+    }
+  }, [addToFolder, targetFolderId, queryClient]);
+
   // ── Mutations ───────────────────────────────────────────────────────────────
 
   const uploadMutation = useMutation({
@@ -1561,8 +1574,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           if (e.total) setUploadProgress(Math.round((e.loaded * 100) / e.total));
         },
       }),
-    onSuccess: ({ data }) => {
+    onSuccess: async ({ data }) => {
       setUploadProgress(0);
+      await maybeAddToFolder(data.id);
       if (isOcrFlow) {
         setUploadedDocId(data.id);
         if (data.ocr_status === "needs_manual") {
@@ -1597,7 +1611,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         }
         
         queryClient.invalidateQueries({ queryKey: ["documents"] });
-        navigate(`/documents/${data.id}`);
+        navigate(addToFolder && targetFolderId
+          ? `/documents/folders/${targetFolderId}`
+          : `/documents/${data.id}`);
       }
     },
     onError: (err) => {
@@ -1637,7 +1653,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         console.error("Failed to check relationship suggestions:", err);
       }
       
-      navigate(`/documents/${id}`);
+      navigate(addToFolder && targetFolderId
+        ? `/documents/folders/${targetFolderId}`
+        : `/documents/${id}`);
     },
     onError: (err) => {
       toast.error(extractApiError(err, "Could not save details. Please try again."));
@@ -1662,10 +1680,13 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         document_type_id: payload.documentTypeId,
         draft_from_template: payload.draftFromTemplate,
       }),
-    onSuccess: ({ data }) => {
+    onSuccess: async ({ data }) => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
+      await maybeAddToFolder(data.document_id);
       toast.success("Document created from template.");
-      navigate(`/documents/${data.document_id}`);
+      navigate(addToFolder && targetFolderId
+        ? `/documents/folders/${targetFolderId}`
+        : `/documents/${data.document_id}`);
     },
     onError: (err: any) => {
       const data = err?.response?.data;
@@ -1678,6 +1699,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
   const onUpload = async (values: Record<string, unknown>) => {
     if (!selectedTypeId) { toast.error("Please select a document type"); return; }
+    if (addToFolder && !targetFolderId) {
+      toast.error("Select a folder, or uncheck “Add to folder”.");
+      return;
+    }
     if (useTemplate) {
       if (!selectedTemplate) {
         toast.error("Please select a template");
@@ -1833,7 +1858,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const onSkipToDocument = () => {
     if (!uploadedDocId) return;
     queryClient.invalidateQueries({ queryKey: ["documents"] });
-    navigate(`/documents/${uploadedDocId}`);
+    navigate(addToFolder && targetFolderId
+      ? `/documents/folders/${targetFolderId}`
+      : `/documents/${uploadedDocId}`);
   };
 
   const ocrFields    = ocrSuggestions?.fields  ?? {};
@@ -2178,6 +2205,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   Use template
                 </label>
               )}
+              <AddToFolderControl
+                enabled={addToFolder}
+                onEnabledChange={setAddToFolder}
+                folderId={targetFolderId}
+                onFolderIdChange={setTargetFolderId}
+              />
             </div>
 
             {/* Template selector — shown below checkbox when use template is active */}
@@ -2746,6 +2779,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 Use template
               </label>
             )}
+            <AddToFolderControl
+              enabled={addToFolder}
+              onEnabledChange={setAddToFolder}
+              folderId={targetFolderId}
+              onFolderIdChange={setTargetFolderId}
+            />
           </div>
         )}
         </>

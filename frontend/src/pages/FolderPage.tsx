@@ -26,6 +26,7 @@ import { foldersAPI } from "@/services/foldersApi";
 import { documentsAPI } from "@/services/api";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { formatDocumentFileType } from "@/lib/documentFormat";
+import { invalidateFolderCaches } from "@/lib/folderCache";
 import type { DocumentFolder, DocumentFolderItem } from "@/types/";
 import type { Document } from "@/types";
 
@@ -100,8 +101,7 @@ function AddDocumentModal({
   const addMutation = useMutation({
     mutationFn: (docId: string) => foldersAPI.addDocument(folderId, docId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["folder-documents", folderId] });
-      qc.invalidateQueries({ queryKey: ["folders", "tree"] });
+      invalidateFolderCaches(qc, folderId);
     },
   });
 
@@ -371,8 +371,7 @@ export default function FolderPage() {
     mutationFn: (name: string) =>
       foldersAPI.create({ name, parent: folderId! }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["folders", "tree"] });
-      qc.invalidateQueries({ queryKey: ["folder", folderId] });
+      invalidateFolderCaches(qc, folderId);
     },
   });
 
@@ -397,8 +396,12 @@ export default function FolderPage() {
     enabled: !!folderId,
   });
 
-  // Subfolders (from tree cache)
-  const tree: DocumentFolder[] = qc.getQueryData(["folders", "tree"]) ?? [];
+  // Subfolders — subscribe to the tree query so create/rename updates re-render
+  const { data: tree = [] } = useQuery({
+    queryKey: ["folders", "tree"],
+    queryFn: () => foldersAPI.tree().then((r) => r.data),
+    staleTime: 30_000,
+  });
   const findFolder = (nodes: DocumentFolder[], id: string): DocumentFolder | undefined => {
     for (const n of nodes) {
       if (n.id === id) return n;
@@ -414,8 +417,7 @@ export default function FolderPage() {
   const removeDoc = useMutation({
     mutationFn: (docId: string) => foldersAPI.removeDocument(folderId!, docId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["folder-documents", folderId] });
-      qc.invalidateQueries({ queryKey: ["folders", "tree"] });
+      invalidateFolderCaches(qc, folderId);
     },
   });
 

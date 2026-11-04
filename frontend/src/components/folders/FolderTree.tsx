@@ -3,16 +3,15 @@
  *
  * Collapsible folder tree for the document sidebar.
  * Features:
- *  - Recursive render of unlimited depth (UI cap = 5)
+ *  - Recursive render of unlimited depth
  *  - Inline rename, inline create child
  *  - Context menu (rename / new subfolder / delete)
  *  - Star badge on Favourites node
- *  - Drag-to-reorder via HTML5 drag API (no extra lib)
- *  - Optimistic UI via react-query mutations
+ *  - Expanded state survives tree refetches; ancestors of the active folder stay open
  */
 
 import {
-  useState, useRef, useCallback, KeyboardEvent,
+  useState, useRef, useCallback, useEffect, KeyboardEvent,
 } from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -22,15 +21,11 @@ import {
   Star, Folder, FolderOpen, FolderPlus,
   ChevronRight, ChevronDown,
   MoreHorizontal, Pencil, Trash2, Plus,
- 
 } from "lucide-react";
 import clsx from "clsx";
 import { foldersAPI } from "@/services/foldersApi";
+import { collectAncestorIds, invalidateFolderCaches } from "@/lib/folderCache";
 import type { DocumentFolder } from "../../types";
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-// NOTE: removed unused icon map and preset colors to satisfy lint
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -38,51 +33,45 @@ interface FolderNodeProps {
   folder: DocumentFolder;
   depth: number;
   activeFolderId: string | null;
+  expandedIds: Set<string>;
+  onToggleExpand: (id: string) => void;
+  onExpand: (id: string) => void;
   onSelect: (id: string) => void;
 }
-
-// ContextMenuState removed (not used)
 
 // ─── Hooks ────────────────────────────────────────────────────────────────────
 
 function useFolderMutations() {
-  const _qc = useQueryClient();
+  const qc = useQueryClient();
 
-  void _qc;
-
-  const invalidate = () => {
-    _qc.invalidateQueries({ queryKey: ["folders", "tree"] });
-    _qc.invalidateQueries({ queryKey: ["folders"] });
+  const invalidate = (parentId?: string | null) => {
+    invalidateFolderCaches(qc, parentId ?? undefined);
   };
 
   const createFolder = useMutation({
     mutationFn: foldersAPI.create,
-    onSuccess: invalidate,
+    onSuccess: (_data, vars) => invalidate(vars.parent),
   });
 
   const renameFolder = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) =>
       foldersAPI.update(id, { name }),
-    onSuccess: invalidate,
+    onSuccess: (_data, vars) => invalidate(vars.id),
   });
 
   const deleteFolder = useMutation({
     mutationFn: foldersAPI.delete,
-    onSuccess: invalidate,
+    onSuccess: (_data, id) => invalidate(id),
   });
 
   const updateFolder = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Partial<DocumentFolder> }) =>
       foldersAPI.update(id, data),
-    onSuccess: invalidate,
+    onSuccess: (_data, vars) => invalidate(vars.id),
   });
 
   return { createFolder, renameFolder, deleteFolder, updateFolder };
 }
-
-// ─── ColorPicker ─────────────────────────────────────────────────────────────
-
-// ColorDot component removed (unused)
 
 // ─── Inline edit input ────────────────────────────────────────────────────────
 
@@ -184,17 +173,19 @@ function ContextMenu({
 
 // ─── FolderNode ───────────────────────────────────────────────────────────────
 
-function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps) {
-  const [open, setOpen]         = useState(false);
+function FolderNode({
+  folder, depth, activeFolderId, expandedIds, onToggleExpand, onExpand, onSelect,
+}: FolderNodeProps) {
   const [renaming, setRenaming] = useState(false);
   const [addingChild, setAddingChild] = useState(false);
-  const [ctx, setCtx]           = useState<{ x: number; y: number } | null>(null);
+  const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
 
   const { createFolder, renameFolder, deleteFolder } = useFolderMutations();
 
   const hasChildren = (folder.children?.length ?? 0) > 0;
-  const isActive    = activeFolderId === folder.id;
-  const Icon        = folder.is_favourites
+  const open = expandedIds.has(folder.id) || addingChild;
+  const isActive = activeFolderId === folder.id;
+  const Icon = folder.is_favourites
     ? Star
     : (open && hasChildren ? FolderOpen : Folder);
 
@@ -213,7 +204,6 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
 
   return (
     <div>
-      {/* Row */}
       <div
         className={clsx(
           "group flex cursor-pointer select-none items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors",
@@ -222,15 +212,17 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
             : "text-[#3D454D] hover:bg-white/75 hover:text-[#1F2933] hover:shadow-sm",
         )}
         style={{ paddingLeft: `${8 + indent}px` }}
-        onClick={() => { onSelect(folder.id); if (hasChildren) setOpen((o) => !o); }}
+        onClick={() => onSelect(folder.id)}
         onContextMenu={handleContextMenu}
       >
-        {/* Collapse toggle */}
         <span
           className="flex h-4 w-4 shrink-0 items-center justify-center"
-          onClick={(e) => { e.stopPropagation(); if (hasChildren) setOpen((o) => !o); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (hasChildren || addingChild) onToggleExpand(folder.id);
+          }}
         >
-          {hasChildren
+          {hasChildren || addingChild
             ? (open
                 ? <ChevronDown className="h-3 w-3 text-[#6E767D]" />
                 : <ChevronRight className="h-3 w-3 text-[#6E767D]" />
@@ -239,7 +231,6 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
           }
         </span>
 
-        {/* Folder icon */}
         <Icon
           className={clsx(
             "h-4 w-4 shrink-0",
@@ -248,7 +239,6 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
           style={{ color: isActive || folder.is_favourites ? undefined : folder.color }}
         />
 
-        {/* Name / inline edit */}
         {renaming ? (
           <InlineInput
             initial={folder.name}
@@ -265,18 +255,24 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
           </span>
         )}
 
-        {/* Count badge */}
         {folder.document_count > 0 && !renaming && (
-          <span className="min-w-[1.25rem] bg-[#287EAD] px-1.5 py-0.5 text-center text-[10px] font-bold tabular-nums text-white">
+          <span className={clsx(
+            "min-w-[1.25rem] px-1.5 py-0.5 text-center text-[10px] font-bold tabular-nums",
+            isActive ? "bg-white/20 text-white" : "bg-[#287EAD] text-white",
+          )}>
             {folder.document_count}
           </span>
         )}
 
-        {/* ⋯ button */}
         {!renaming && (
           <button
             type="button"
-            className="p-0.5 text-[#6E767D] opacity-0 transition-opacity hover:bg-[#DCEAF2] hover:text-[#287EAD] group-hover:opacity-100"
+            className={clsx(
+              "p-0.5 opacity-0 transition-opacity group-hover:opacity-100",
+              isActive
+                ? "text-white/80 hover:bg-white/15 hover:text-white"
+                : "text-[#6E767D] hover:bg-[#DCEAF2] hover:text-[#287EAD]",
+            )}
             onClick={(e) => { e.stopPropagation(); handleContextMenu(e); }}
           >
             <MoreHorizontal className="h-3.5 w-3.5" />
@@ -284,7 +280,6 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
         )}
       </div>
 
-      {/* Context menu */}
       {ctx && (
         <ContextMenu
           folder={folder}
@@ -292,12 +287,11 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
           y={ctx.y}
           onClose={() => setCtx(null)}
           onRename={() => setRenaming(true)}
-          onNewChild={() => { setOpen(true); setAddingChild(true); }}
+          onNewChild={() => { onExpand(folder.id); setAddingChild(true); }}
           onDelete={handleDelete}
         />
       )}
 
-      {/* Inline new-child input */}
       {addingChild && (
         <div
           className="flex items-center gap-1.5 px-2 py-1.5 text-[#3D454D]"
@@ -308,6 +302,7 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
             initial=""
             placeholder="New folder…"
             onConfirm={(name) => {
+              onExpand(folder.id);
               createFolder.mutate({ name, parent: folder.id });
               setAddingChild(false);
             }}
@@ -316,7 +311,6 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
         </div>
       )}
 
-      {/* Children */}
       {open && folder.children && folder.children.length > 0 && (
         <div>
           {folder.children.map((child) => (
@@ -325,6 +319,9 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
               folder={child}
               depth={depth + 1}
               activeFolderId={activeFolderId}
+              expandedIds={expandedIds}
+              onToggleExpand={onToggleExpand}
+              onExpand={onExpand}
               onSelect={onSelect}
             />
           ))}
@@ -343,9 +340,8 @@ export interface FolderTreeProps {
 
 export function FolderTree({ activeFolderId = null, onFolderSelect }: FolderTreeProps) {
   const navigate = useNavigate();
-  const _qc = useQueryClient();
-  void _qc;
   const [addingRoot, setAddingRoot] = useState(false);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const { createFolder } = useFolderMutations();
 
   const { data: tree = [], isLoading } = useQuery({
@@ -353,6 +349,41 @@ export function FolderTree({ activeFolderId = null, onFolderSelect }: FolderTree
     queryFn: () => foldersAPI.tree().then((r) => r.data),
     staleTime: 30_000,
   });
+
+  // Keep the path to the active folder expanded across navigations / refetches.
+  useEffect(() => {
+    if (!activeFolderId || tree.length === 0) return;
+    const ancestors = collectAncestorIds(tree, activeFolderId);
+    setExpandedIds((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const id of ancestors) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [activeFolderId, tree]);
+
+  const onToggleExpand = useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const onExpand = useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, []);
 
   const handleSelect = useCallback(
     (id: string) => {
@@ -367,7 +398,6 @@ export function FolderTree({ activeFolderId = null, onFolderSelect }: FolderTree
 
   return (
     <div className="select-none">
-      {/* Section header */}
       <div className="flex items-center justify-between gap-2 px-3 pb-2 pt-4">
         <p className="text-[10px] font-bold uppercase tracking-widest text-[#6E767D]">My Folders</p>
         <button
@@ -381,7 +411,6 @@ export function FolderTree({ activeFolderId = null, onFolderSelect }: FolderTree
         </button>
       </div>
 
-      {/* New root folder inline input */}
       {addingRoot && (
         <div className="flex items-center gap-1.5 px-3 py-1.5">
           <Folder className="h-4 w-4 shrink-0 text-[#7C8790]" />
@@ -417,6 +446,9 @@ export function FolderTree({ activeFolderId = null, onFolderSelect }: FolderTree
               folder={folder}
               depth={0}
               activeFolderId={activeFolderId}
+              expandedIds={expandedIds}
+              onToggleExpand={onToggleExpand}
+              onExpand={onExpand}
               onSelect={handleSelect}
             />
           ))}

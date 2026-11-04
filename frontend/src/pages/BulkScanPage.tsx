@@ -37,6 +37,8 @@ import {
 } from "@/components/documents/bulk/bulkUploadUtils";
 import IdpFailureModal, { type IdpFailureReason } from "@/components/documents/IdpFailureModal";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import AddToFolderControl from "@/components/folders/AddToFolderControl";
+import { addDocumentsToFolder } from "@/lib/folderCache";
 
 type Stage = "select" | "processing" | "review" | "complete";
 
@@ -94,6 +96,8 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
   const [idpAllowRegex, setIdpAllowRegex] = useState(false);
   const [idpFallbackPending, setIdpFallbackPending] = useState(false);
   const [pendingReviewBatch, setPendingReviewBatch] = useState<BulkUploadBatch | null>(null);
+  const [addToFolder, setAddToFolder] = useState(false);
+  const [targetFolderId, setTargetFolderId] = useState("");
 
   const { data: docTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
@@ -262,6 +266,27 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
       setStage("complete");
       queryClient.invalidateQueries({ queryKey: ["documents"] });
       toast.success("Batch submitted successfully.");
+
+      if (addToFolder && targetFolderId) {
+        const approvedIds = reviewStates
+          .filter((s) => s.approved && !s.rejected)
+          .map((s) => s.documentId)
+          .filter(Boolean);
+        const fallbackIds = (data.documents ?? []).map((d) => d.document_id).filter(Boolean);
+        const ids = approvedIds.length > 0 ? approvedIds : fallbackIds;
+        if (ids.length > 0) {
+          try {
+            await addDocumentsToFolder(queryClient, targetFolderId, ids);
+            toast.success(
+              ids.length === 1
+                ? "Document added to folder."
+                : `${ids.length} documents added to folder.`,
+            );
+          } catch (err) {
+            toast.warning(extractApiError(err, "Batch submitted, but could not add documents to the folder."));
+          }
+        }
+      }
       
       // Check for relationship suggestions in the batch
       try {
@@ -327,6 +352,10 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
       toast.error("Please select a document type or enable auto-classification");
       return;
     }
+    if (addToFolder && !targetFolderId) {
+      toast.error("Select a folder, or uncheck “Add to folder”.");
+      return;
+    }
     if (files.length === 0) {
       toast.error("Please add at least one file");
       return;
@@ -355,7 +384,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
     }
 
     uploadFiles(files);
-  }, [selectedTypeId, isUntypedBatch, files, uploadFiles]);
+  }, [selectedTypeId, isUntypedBatch, files, uploadFiles, addToFolder, targetFolderId]);
 
   const confirmSkipDuplicates = useCallback(() => {
     if (!pendingUploadFiles || pendingUploadFiles.length === 0) {
@@ -599,17 +628,25 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
             </div>
 
             {/* Checkbox flows with panel content */}
-            <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
-              <input
-                type="checkbox"
-                checked
-                onChange={(event) => {
-                  if (!event.target.checked && onSingleMode) onSingleMode();
-                }}
-                className="h-4 w-4 accent-[#287EAD]"
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+                <input
+                  type="checkbox"
+                  checked
+                  onChange={(event) => {
+                    if (!event.target.checked && onSingleMode) onSingleMode();
+                  }}
+                  className="h-4 w-4 accent-[#287EAD]"
+                />
+                Use bulk mode
+              </label>
+              <AddToFolderControl
+                enabled={addToFolder}
+                onEnabledChange={setAddToFolder}
+                folderId={targetFolderId}
+                onFolderIdChange={setTargetFolderId}
               />
-              Use bulk mode
-            </label>
+            </div>
 
           </div>
 
@@ -717,10 +754,14 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
           <div className="flex flex-col sm:flex-row gap-3 justify-center">
             <button
               type="button"
-              onClick={() => navigate("/documents")}
+              onClick={() => navigate(
+                addToFolder && targetFolderId
+                  ? `/documents/folders/${targetFolderId}`
+                  : "/documents",
+              )}
               className="bg-[#287EAD] px-6 py-3 font-semibold text-white hover:bg-[#206D99]"
             >
-              View documents
+              {addToFolder && targetFolderId ? "View folder" : "View documents"}
             </button>
             <button
               type="button"
