@@ -1921,7 +1921,9 @@ class WorkflowService:
                     pass
 
             lpo_actor = last_approver_action.actor if last_approver_action else instance.started_by
-            WorkflowService._maybe_post_sunsystems_journal(doc, outcome, actor=lpo_actor)
+            WorkflowService._maybe_post_sunsystems_journal(
+                doc, outcome, actor=lpo_actor, workflow_phase=completion_phase
+            )
 
             # A fully-approved procurement stage opens the next stage on its
             # own. The Request posting gate releases RFQ/LPO only after the
@@ -2298,7 +2300,9 @@ class WorkflowService:
             return None
 
     @staticmethod
-    def _maybe_post_sunsystems_journal(document, outcome: str, actor=None, *, defer_imprest_request=False) -> None:
+    def _maybe_post_sunsystems_journal(
+        document, outcome: str, actor=None, *, defer_imprest_request=False, workflow_phase=None
+    ) -> None:
         """Post any journal stages whose ``post_on`` trigger matches this outcome.
 
         Supports multi-stage imprest flows: stage 1 fires on "approved", stage 2
@@ -2322,7 +2326,10 @@ class WorkflowService:
                 get_imprest_retirement_postings,
                 get_sunsystems_config,
             )
-            phase = WorkflowService._document_workflow_phase(document)
+            # Use the phase that just completed. Re-inferring after saving the
+            # outcome can already report "retirement" for a completed request
+            # workflow, before the request journal has posted.
+            phase = str(workflow_phase or WorkflowService._document_workflow_phase(document)).strip().lower()
             posting_actor_id = str(actor.pk) if actor and getattr(actor, "pk", None) else None
             outcomes = [outcome]
             from apps.documents.builder_workflow import completed_procurement_stages, is_procurement_document
@@ -2343,7 +2350,31 @@ class WorkflowService:
             elif phase == "retirement" and outcome == "approved":
                 outcomes = ["retirement_approved", "approved"]
 
+            # Standalone Imprest has two sequential Ledger Journal stages:
+            # Stage 1 is the request and Stage 2+ are retirement. The generic
+            # "approved" trigger is valid for either stage in a template, so
+            # constrain matching to the workflow phase that actually completed.
+            # This also protects old templates where Stage 2 was configured as
+            # "approved" and prevents it consuming request approval.
+            form = ((document.metadata or {}).get("form") or {})
+            standalone_imprest = (
+                str(form.get("workflow_type") or "").strip().lower() == "imprest"
+                and not is_procurement_document(document)
+            )
+            standalone_stage_filter = None
+            if standalone_imprest:
+                if phase == "request":
+                    outcomes = ["request_approved", "approved"] if outcome == "approved" else []
+                    standalone_stage_filter = lambda stage: stage == 1
+                elif phase == "retirement":
+                    outcomes = ["retirement_approved", "fully_approved", "approved"] if outcome == "approved" else []
+                    standalone_stage_filter = lambda stage: stage >= 2
+                else:
+                    outcomes = []
+
             for stage in find_stages_to_post(document, outcomes):
+                if standalone_stage_filter and not standalone_stage_filter(stage):
+                    continue
                 posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
                 if not created:
                     continue

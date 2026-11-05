@@ -88,6 +88,7 @@ export type FieldType =
   | "info" | "spacer"
   | "sunsystems_account"
   | "external"
+  | "budget_line"
   | "budget"
   | "button";
 
@@ -180,6 +181,8 @@ export interface TableColumn {
   sunsystems?: ColumnFinanceBinding;
   /* External (SunSystems-backed) lookup — see ExternalConfig. */
   external?: ExternalConfig | null;
+  /** Modal config for a top-level account + analysis selection. */
+  budgetLine?: BudgetLineConfig;
 }
 
 /* SunSystems / finance bindings (see compileSunSystems). A field/column carries
@@ -795,6 +798,7 @@ const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults
   phone: { label: "Phone", group: "input", defaults: { colSpan: 4, placeholder: "+254 700 000000" } },
   sunsystems_account: { label: "Supplier", group: "input", defaults: { colSpan: 12, multi: true }, hint: "Live supplier lookup from SunSystems" },
   external: { label: "External", group: "input", defaults: { colSpan: 12, external: { source: "items" } }, hint: "Live lookup from SunSystems — items, analysis codes, and more" },
+  budget_line: { label: "Budget Line", group: "input", defaults: { colSpan: 12, budgetLine: { dimensions: [...ANALYSIS_PANEL_SLOTS] } }, hint: "Select an account code and analysis dimensions in a compact modal" },
   budget: { label: "Budget Banner", group: "advanced", defaults: { colSpan: 12 }, hint: "Shows available budget for a specified account code" },
   select: { label: "Dropdown", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
   multi_select: { label: "Multi-select", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
@@ -838,6 +842,7 @@ const ICONS: Record<FieldType, React.ElementType> = {
   calc_boolean: Sigma, multi_file: Files, info: Info, spacer: Minus,
   sunsystems_account: Building2,
   external: Package,
+  budget_line: Building2,
   budget: Wallet,
   button: MousePointerClick,
 };
@@ -1285,6 +1290,9 @@ function newField(type: FieldType): TemplateField {
     currencySymbol: m.defaults.currencySymbol,
     dateFormat: m.defaults.dateFormat,
     referenceSource: m.defaults.referenceSource,
+    budgetLine: m.defaults.budgetLine
+      ? { ...m.defaults.budgetLine, dimensions: [...(m.defaults.budgetLine.dimensions ?? [])] }
+      : undefined,
     required: false,
   };
   if (type === "table") {
@@ -1456,14 +1464,19 @@ function isJournalLineSource(field: TemplateField): boolean {
   return field.sunsystems?.role === "journal_amount";
 }
 
-function valueSpec(field?: { key: string } | null, opts?: { format?: string }) {
-  return field ? { field: field.key, ...(opts?.format ? { format: opts.format } : {}) } : undefined;
+function valueSpec(field?: { key: string; type?: string; sunsystems?: { role?: string } } | null, opts?: { format?: string }) {
+  if (!field) return undefined;
+  return {
+    field: field.key,
+    ...(field.type === "budget_line" && field.sunsystems?.role === "account_code" ? { key: "account_code" } : {}),
+    ...(opts?.format ? { format: opts.format } : {}),
+  };
 }
 
 /* Placeholder values for the builder's payload preview (no real form data yet).
  * Mirrors the value shape the compiled mapping expects: header fields keyed by
  * field key, tables as arrays of column-keyed rows. */
-function sampleScalar(f: { type: FieldType; label: string; options?: string[]; defaultValue?: string }): string | number {
+function sampleScalar(f: TemplateField): unknown {
   if (f.defaultValue) return f.defaultValue;
   switch (f.type) {
     case "number": case "currency": return 100;
@@ -1473,6 +1486,10 @@ function sampleScalar(f: { type: FieldType; label: string; options?: string[]; d
     case "select": case "radio": case "multi_select": return f.options?.[0] ?? "Sample";
     case "boolean": case "checkbox": case "yes_no": return "true";
     case "email": return "sample@example.com";
+    case "budget_line": return {
+      account_code: f.budgetLine?.accountCodes?.[0] ?? "2230201",
+      ...Object.fromEntries((f.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS).map((dimension) => [dimension, "#"])),
+    };
     default: return f.label || "Sample";
   }
 }
@@ -1512,6 +1529,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     ? Boolean(ui.purchaseOrderEnabled)
     : Boolean(ui.journalEnabled && ui.postingKind === "purchase_order");
   const fields = template.sections.flatMap((s) => s.fields ?? []);
+  const topBudgetLineField = fields.find((field) => field.type === "budget_line");
   const hasImprestRequestConfig = fields.some((field) =>
     field.type === "table"
       && field.workflowRole === "rfq_required_lines"
@@ -1546,6 +1564,13 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   // Journal lines: header amount fields + table "journal_lines"repeat blocks.
   // Each entry carries a hidden _fieldKey so per-stage fieldKeys filters can match.
   const lines: Record<string, unknown>[] = [];
+  const topBudgetLineAnalysis: Record<string, unknown> = topBudgetLineField
+    ? (topBudgetLineField.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS).reduce<Record<string, unknown>>((result, dimension) => {
+        const slot = ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1;
+        if (slot > 0) result[String(slot)] = { field: topBudgetLineField.key, key: dimension };
+        return result;
+      }, {})
+    : {};
   for (const f of fields) {
     const b = f.sunsystems ?? {};
     if (f.type !== "table" && b.role === "journal_amount") {
@@ -1556,6 +1581,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         dc: b.dc ?? "D",
         amount: { field: f.key },
         ...(descSpec ? { description: descSpec } : {}),
+        ...(Object.keys(topBudgetLineAnalysis).length ? { analysis: topBudgetLineAnalysis } : {}),
       });
       // Counter (offsetting) line — automatic double-entry when counterAccount is set.
       // e.g. Dr 71001 advance_amount → also Cr 10101 same amount (imprest advance).
@@ -1567,6 +1593,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           dc: counterDc,
           amount: { field: f.key },
           ...(descSpec ? { description: descSpec } : {}),
+          ...(Object.keys(topBudgetLineAnalysis).length ? { analysis: topBudgetLineAnalysis } : {}),
         });
       }
     }
@@ -1612,6 +1639,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         }
         lines.push({
           _fieldKey: f.key,
+          ...(Object.keys(topBudgetLineAnalysis).length ? { analysis: topBudgetLineAnalysis } : {}),
           retirement: {
             issued_amount: issuedAmountSpec,
             spent_amount: { table: f.key, column: amountCol.key },
@@ -1646,6 +1674,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       }
       for (const c of cols.filter((c) => c.sunsystems?.role === "analysis")) {
         analysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
+      }
+      if (Object.keys(analysis).length === 0 && Object.keys(topBudgetLineAnalysis).length) {
+        Object.assign(analysis, topBudgetLineAnalysis);
       }
       lines.push({
         _fieldKey: f.key,
@@ -1766,11 +1797,28 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   // Analysis Dimensions 1-10 for the purchase order: the form's ten-slot
   // analysis panel maps slot N -> AnalysisN, each with its configured
   // AnalysisDimensionId; dedicated single-dimension fields override their slot.
-  const poAnalysis: Record<string, unknown> = {};
+  // Every PO line gets a value for all ten configured SunSystems slots. The
+  // selected dimensions replace these # defaults; unselected/blank dimensions
+  // remain explicitly not analysed in the emitted SSC.
+  const poAnalysis: Record<string, unknown> = Object.fromEntries(
+    ANALYSIS_PANEL_SLOTS.map((dimension, index) => [String(index + 1), {
+      category: { const: dimension },
+      code: { const: "#" },
+    }]),
+  );
+  if (topBudgetLineField) {
+    for (const dimension of topBudgetLineField.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS) {
+      const slot = ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1;
+      if (slot > 0) poAnalysis[String(slot)] = {
+        category: { const: dimension },
+        code: { field: topBudgetLineField.key, key: dimension },
+      };
+    }
+  }
   const panelField = fields.find(
     (f) => f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode !== "single",
   );
-  if (panelField) {
+  if (!topBudgetLineField && panelField) {
     const slots = Array.isArray(panelField.external?.slots) && panelField.external!.slots!.length === 10
       ? panelField.external!.slots!
       : ANALYSIS_PANEL_SLOTS;
@@ -1785,7 +1833,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     // When the ten-slot Analysis Codes panel exists, it is the single source
     // of truth for PO analysis values. A separate single-dimension control
     // (for example Cost Centre) must not overwrite the panel's same slot.
-    if (!panelField && f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode === "single" && f.external?.dimension) {
+    if (!topBudgetLineField && !panelField && f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode === "single" && f.external?.dimension) {
       const slot = ANALYSIS_PANEL_SLOTS.indexOf(f.external.dimension) + 1;
       if (slot > 0) poAnalysis[String(slot)] = { category: { const: f.external.dimension }, code: { field: f.key } };
     }
@@ -1849,6 +1897,17 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           };
         }
       }
+    } else if (topBudgetLineField) {
+      for (const dimension of topBudgetLineField.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS) {
+        const slot = ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1;
+        if (slot > 0) {
+          lineAnalysis[String(slot)] = { field: topBudgetLineField.key, key: dimension };
+          poLineAnalysis[String(slot)] = {
+            category: { const: dimension },
+            code: { field: topBudgetLineField.key, key: dimension },
+          };
+        }
+      }
     }
     for (const c of analysisCols) lineAnalysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
     for (const c of analysisCols) {
@@ -1862,6 +1921,8 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         ? { row_field: budgetLineCol.key, key: "account_code" }
         : acctCol
           ? { row_field: acctCol.key }
+          : topBudgetLineField
+            ? { field: topBudgetLineField.key, key: "account_code" }
           : (f.sunsystems?.account ? { const: f.sunsystems.account } : undefined),
       ...(itemCol
         ? { item_code: { row_field: itemCol.key } }
@@ -5406,6 +5467,38 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               />
             </InspectorRow>
           )}
+          {field.type === "budget_line" && (
+            <>
+              <InspectorRow label="Available account codes" hint="These codes appear in the Budget Line account dropdown.">
+                <DropdownValuesEditor
+                  options={field.budgetLine?.accountCodes ?? []}
+                  onChange={(accountCodes) => onUpdate({ budgetLine: { ...(field.budgetLine ?? {}), accountCodes } })}
+                  quickAddCurrencies={false}
+                />
+              </InspectorRow>
+              <InspectorRow label="Analysis dimensions" hint="Choose which SunSystems dimensions appear in the modal. Unfilled dimensions post as #.">
+                <div className="grid grid-cols-1 gap-1.5 border border-[#C8CDD2] bg-[#F8FAFB] p-2 sm:grid-cols-2">
+                  {ANALYSIS_PANEL_SLOTS.map((dimensionId) => {
+                    const selected = field.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS;
+                    return (
+                      <label key={dimensionId} className="flex min-w-0 items-center gap-2 px-1 py-1 text-xs text-[#34414A]">
+                        <input type="checkbox" checked={selected.includes(dimensionId)}
+                          onChange={(event) => {
+                            const dimensions = event.target.checked
+                              ? [...selected, dimensionId]
+                              : selected.filter((id) => id !== dimensionId);
+                            onUpdate({ budgetLine: { ...(field.budgetLine ?? {}), dimensions: ANALYSIS_PANEL_SLOTS.filter((id) => dimensions.includes(id)) } });
+                          }}
+                          className="h-4 w-4 accent-[#287EAD]" />
+                        <span className="truncate">Analysis {ANALYSIS_PANEL_SLOTS.indexOf(dimensionId) + 1} · {analysisDimensionName(dimensionId)}</span>
+                        <span className="ml-auto font-mono text-[10px] text-[#77838B]">ID {dimensionId}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </InspectorRow>
+            </>
+          )}
           {field.type === "rating" && (
             <InspectorRow label="Number of stars">
               <input type="number" min={2} max={10} value={field.max ?? 5}
@@ -8098,11 +8191,24 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps, embedded 
   const analysisSlots = Array.isArray(analysisPanelField?.external?.slots) && analysisPanelField!.external!.slots!.length === 10
     ? analysisPanelField!.external!.slots!
     : ANALYSIS_PANEL_SLOTS;
-  const stageOptions = processSteps.some((s) => s.value === "approved")
-    ? processSteps
-    : [...processSteps, { value: "approved", label: "Approved" }];
+  const isStandaloneImprest = template.workflow_type === "imprest";
+  const stageOptions = isStandaloneImprest
+    ? [
+        ...processSteps.filter((s) => ["request_approved", "retirement_approved", "fully_approved"].includes(s.value)),
+        ...(ui.journalStages?.some((stage) => (stage.postOn ?? "approved") === "approved")
+          ? [{ value: "approved", label: "Approved (phase-aware)" }]
+          : []),
+      ]
+    : processSteps.some((s) => s.value === "approved")
+      ? processSteps
+      : [...processSteps, { value: "approved", label: "Approved" }];
   const journalBoundFields = fields.filter(isJournalLineSource);
-  const journalStages = (ui.journalStages?.length ? ui.journalStages : [{ stage: 1, label: "Stage 1", postOn: "approved", fieldKeys: [] as string[] }])
+  const journalStages = (ui.journalStages?.length ? ui.journalStages : [{
+    stage: 1,
+    label: "Stage 1",
+    postOn: isStandaloneImprest ? "request_approved" : "approved",
+    fieldKeys: [] as string[],
+  }])
     .map((s, idx) => ({
       stage: Number(s.stage || idx + 1),
       label: s.label ?? `Stage ${idx + 1}`,
@@ -8114,7 +8220,10 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps, embedded 
     setStages(journalStages.map((s, i) => i === index ? { ...s, ...patch } : s));
   const addStage = () => {
     const next = Math.max(0, ...journalStages.map((s) => Number(s.stage) || 0)) + 1;
-    setStages([...journalStages, { stage: next, label: `Stage ${next}`, postOn: "approved", fieldKeys: [] }]);
+    const postOn = isStandaloneImprest
+      ? (next === 1 ? "request_approved" : "retirement_approved")
+      : "approved";
+    setStages([...journalStages, { stage: next, label: `Stage ${next}`, postOn, fieldKeys: [] }]);
   };
   const removeStage = (index: number) =>
     setStages(journalStages.filter((_, i) => i !== index).map((s, i) => ({ ...s, stage: i + 1 })));

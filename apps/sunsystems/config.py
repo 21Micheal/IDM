@@ -491,32 +491,47 @@ def _apply_analysis_panel_mapping(mapping: dict, document) -> dict:
     meta = getattr(document, "metadata", None) or {}
     form = meta.get("form") if isinstance(meta.get("form"), dict) else {}
     sections = form.get("sections") if isinstance(form.get("sections"), list) else []
-    panel = next(
-        (
-            field for section in sections if isinstance(section, dict)
-            for field in section.get("fields", []) if isinstance(field, dict)
-            and field.get("type") == "external"
-            and (field.get("external") or {}).get("source") == "analysis_codes"
-            and (field.get("external") or {}).get("mode") != "single"
-        ),
-        None,
-    )
+    fields = [
+        field for section in sections if isinstance(section, dict)
+        for field in section.get("fields", []) if isinstance(field, dict)
+    ]
+    panel = next((field for field in fields if field.get("type") == "budget_line"), None)
+    if panel is None:
+        panel = next(
+            (
+                field for field in fields
+                if field.get("type") == "external"
+                and (field.get("external") or {}).get("source") == "analysis_codes"
+                and (field.get("external") or {}).get("mode") != "single"
+            ),
+            None,
+        )
     if not panel:
         return mapping
 
+    is_budget_line = panel.get("type") == "budget_line"
     external = panel.get("external") or {}
-    slots = external.get("slots")
-    if not isinstance(slots, list) or len(slots) != 10:
+    budget_line = panel.get("budgetLine") or {}
+    slots = budget_line.get("dimensions") if is_budget_line else external.get("slots")
+    if not isinstance(slots, list) or (not is_budget_line and len(slots) != 10):
         slots = ["04", "05", "06", "03", "08", "09", "10", "11", "07", "12"]
     field_key = panel.get("key")
     ui = get_sunsystems_config(document).get("ui") or {}
     po = mapping.get("purchase_order")
     if not isinstance(po, dict):
         po = mapping
+    analysis_slot_ids = ["04", "05", "06", "03", "08", "09", "10", "11", "07", "12"]
     analysis = {
-        str(index): {"category": {"const": str(dimension)}, "code": {"field": field_key, "key": str(index)}}
-        for index, dimension in enumerate(slots, start=1)
+        str(index): {"category": {"const": dimension}, "code": {"const": "#"}}
+        for index, dimension in enumerate(analysis_slot_ids, start=1)
     }
+    for index, dimension in enumerate(slots, start=1):
+        slot = analysis_slot_ids.index(str(dimension)) + 1 if is_budget_line and str(dimension) in analysis_slot_ids else index
+        key = str(dimension) if is_budget_line else str(index)
+        analysis[str(slot)] = {
+            "category": {"const": str(dimension)},
+            "code": {"field": field_key, "key": key},
+        }
     # Keep the explicit, system-wide Analysis 10 override when configured.
     if str(ui.get("analysis10Code") or "").strip():
         current = analysis["10"]

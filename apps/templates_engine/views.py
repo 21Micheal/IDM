@@ -326,7 +326,13 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 and _eval_visible(f, generation_values, viewer=viewer)
                 and is_editable(f, generation_values, viewer=viewer)
             ]
-            missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]
+            def required_value_missing(field):
+                value = generation_values.get(field["key"])
+                if field.get("type") == "budget_line":
+                    return not isinstance(value, dict) or not str(value.get("account_code") or "").strip()
+                return not value
+
+            missing = [f["label"] for f in all_fields if required_value_missing(f)]
 
             # Table COLUMNS carry their own independent `required` flag (the
             # table field itself is rarely marked required — its columns are).

@@ -1438,7 +1438,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     continue
                 external = field.get("external") or {}
                 is_analysis_field = (
-                    field.get("type") == "analysis_panel"
+                    field.get("type") in {"analysis_panel", "budget_line"}
                     or (field.get("type") == "external" and external.get("source") == "analysis_codes")
                 )
                 key = field["key"]

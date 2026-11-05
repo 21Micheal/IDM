@@ -493,7 +493,10 @@ def _po_analysis_children(parent: ET.Element, analysis: dict, values: dict, row:
         if not isinstance(spec, dict):
             spec = {"const": spec}
         category = resolve_value(spec.get("category") or spec.get("cat") or spec.get("dimension"), values, row)
-        code = resolve_value(spec.get("code"), values, row)
+        # Once a slot has an explicit dimension/category mapping, a blank code
+        # means SunSystems' not-analysed value. Keep the slot in the PO payload
+        # with '#', matching Ledger Import's AnalysisCode1..10 behavior.
+        code = resolve_value(spec.get("code"), values, row, default="#" if category else "")
         # A slot is only emitted when it carries a code; an empty code means the
         # operator picked nothing for that dimension, so the category alone has
         # nothing to say.

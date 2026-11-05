@@ -109,6 +109,8 @@ type Field = {
   required?: boolean; colSpan?: number; width?: number;
   workflowRole?: string;
   options?: string[]; columns?: Column[]; minRows?: number; totalLabel?: string;
+  budgetLine?: { dimensions?: string[]; accountCodes?: string[] };
+  sunsystems?: { role?: string };
   currencySymbol?: string; currencyFromField?: string; referenceSource?: string; referenceGroupId?: string; tooltip?: string; regex?: string;
   min?: string | number; max?: string | number; minLength?: number; maxLength?: number;
   /* Number/currency display config — a "number" field with `currency` type (or
@@ -1116,7 +1118,7 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
   const summary = [
     accountCode,
     ...selectedDimensions
-      .filter((dimension) => current[dimension])
+      .filter((dimension) => current[dimension] && String(current[dimension]) !== "#")
       .map((dimension) => `A${ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1} ${analysisDimensionName(dimension)}: ${String(current[dimension])}`),
   ].filter(Boolean).join(" · ");
 
@@ -1126,6 +1128,9 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
     Object.entries(current).forEach(([key, item]) => {
       if (item != null && typeof item !== "object") next[key] = String(item);
     });
+    for (const dimension of selectedDimensions) {
+      if (!next[dimension]) next[dimension] = "#";
+    }
     setDraft(next);
     setTaxRateDraft(current.tax_rate == null
       ? (taxRateValue == null ? "" : String(taxRateValue))
@@ -1172,10 +1177,11 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
                   ]}
                   className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
                   buttonClassName="w-full"
+                  listClassName="!z-[130]"
                   ariaLabel="Budget Line account code"
                   disabled={disabled || availableAccountCodes.length === 0}
                 />
-                {availableAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add account codes in the table column’s Budget Line settings.</p>}
+                {availableAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add available account codes in the form builder’s Budget Line settings.</p>}
               </div>
               {selectedDimensions.length > 0 ? (
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -1191,8 +1197,7 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
                         onChange={(next) => setDraft((previous) => {
                           const code = Array.isArray(next) ? (next[0] ?? "") : next;
                           const updated = { ...previous };
-                          if (code) updated[dimension] = code;
-                          else delete updated[dimension];
+                          updated[dimension] = code || "#";
                           if (!code) delete updated[`${dimension}_description`];
                           if (dimension === "12" && !code) setTaxRateDraft("");
                           return updated;
@@ -2101,7 +2106,7 @@ function AnalysisPanelInput({ value, onChange, disabled, slots }: {
     <div className="grid gap-2 border border-border bg-card p-3 sm:grid-cols-2">
       {dimensionSlots.map((dimensionId, idx) => {
         const slot = String(idx + 1);
-        const slotValue = current[slot] ?? "";
+        const slotValue = current[slot] ?? "#";
         return (
           <div key={slot} className="flex items-start gap-2">
             <span className="mt-4 w-4 shrink-0 text-right text-xs text-muted-foreground">{idx + 1}</span>
@@ -2121,8 +2126,7 @@ function AnalysisPanelInput({ value, onChange, disabled, slots }: {
                 onChange={(v) => {
                   const next = { ...current };
                   const code = Array.isArray(v) ? (v[0] ?? "") : v;
-                  if (code) next[slot] = code;
-                  else delete next[slot];
+                  next[slot] = code || "#";
                   onChange(next);
                 }}
               />
@@ -2308,6 +2312,9 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     type === "analysis_panel";
   if (field.required && !readOnly && type !== "boolean" && type !== "checkbox" && !isAnalysisPanel)
     rules.required = `${label} is required`;
+  if (type === "budget_line" && field.required && !readOnly) {
+    rules.validate = (v: unknown) => hasFieldValue(v, "budget_line") || `${label} needs an account code`;
+  }
   if (isAnalysisPanel && field.required && !readOnly) {
     rules.validate = (v: unknown) => {
       const filled =
@@ -2681,6 +2688,20 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
             value={f.value}
             onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
             multi={field.multi ?? true}
+          />
+        )} />
+      );
+      break;
+
+    case "budget_line":
+      control_el = (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
+          <BudgetLineInput
+            value={f.value}
+            onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+            disabled={dis}
+            dimensions={field.budgetLine?.dimensions}
+            accountCodes={field.budgetLine?.accountCodes}
           />
         )} />
       );
