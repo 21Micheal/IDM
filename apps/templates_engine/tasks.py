@@ -400,6 +400,14 @@ def _subst_tokens(text, values, keep_page=False):
         if keep_page and key in ("page", "pages"):
             return m.group(0)
         val = values.get(key)
+        if val is None and "." in key:
+            val = values
+            for part in key.split("."):
+                if isinstance(val, dict):
+                    val = val.get(part)
+                else:
+                    val = None
+                    break
         return "" if val is None else str(val)
 
     return _TOKEN_RE.sub(repl, str(text))
@@ -676,6 +684,285 @@ def _design_band_to_legacy(band: dict | None) -> dict:
     return {"enabled": bool(band.get("enabled", True)) and bool(parts), "content": content}
 
 
+def _generate_designer_docx_v2(design, values):
+    """Render the designer's page/cell structure directly to Word tables.
+
+    The previous compatibility conversion flattened these rows into legacy
+    blocks, losing column geometry and images. Word tables are used as the
+    closest editable equivalent to the designer's CSS grid.
+    """
+    from docx import Document
+    from docx.shared import Pt, Mm, Emu
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+    from docx.enum.section import WD_ORIENT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    design = design or {}
+    values = values or {}
+    page = design.get("page") or {}
+    theme = design.get("theme") or {}
+    margin = page.get("margin") or {}
+    size = page.get("size", "A4")
+    dims = {"A4": (210, 297), "A5": (148, 210), "Letter": (216, 279), "Legal": (216, 356)}
+    page_w, page_h = dims.get(size, dims["A4"])
+    landscape = page.get("orientation") == "landscape"
+    if landscape:
+        page_w, page_h = page_h, page_w
+    left, right = float(margin.get("left", 18)), float(margin.get("right", 18))
+    top, bottom = float(margin.get("top", 20)), float(margin.get("bottom", 20))
+    body_font = _designer_font_family(theme.get("fontFamily")) or "Calibri"
+    heading_font = _designer_font_family(theme.get("headingFamily")) or body_font
+    base_pt = max(8, round(float(theme.get("baseFontSize") or 13) * .75))
+    text_rgb = _designer_hex_to_rgb(theme.get("textColor"), "1F2933")
+    heading_rgb = _designer_hex_to_rgb(theme.get("headingColor"), "0F2A3A")
+    alignments = {"left": WD_ALIGN_PARAGRAPH.LEFT, "center": WD_ALIGN_PARAGRAPH.CENTER,
+                  "right": WD_ALIGN_PARAGRAPH.RIGHT, "justify": WD_ALIGN_PARAGRAPH.JUSTIFY}
+    doc = Document()
+    normal = doc.styles["Normal"]
+    normal.font.name, normal.font.size, normal.font.color.rgb = body_font, Pt(base_pt), text_rgb
+    section = doc.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE if landscape else WD_ORIENT.PORTRAIT
+    section.page_width, section.page_height = Mm(page_w), Mm(page_h)
+    section.left_margin, section.right_margin = Mm(left), Mm(right)
+    section.top_margin, section.bottom_margin = Mm(top), Mm(bottom)
+    usable_mm = max(20, page_w - left - right)
+
+    def add_table(container, rows, cols):
+        # Body tables use Document.add_table; nested/header tables require an
+        # explicit width in python-docx.
+        try:
+            return container.add_table(rows=rows, cols=cols)
+        except TypeError:
+            return container.add_table(rows=rows, cols=cols, width=Mm(usable_mm))
+
+    def set_cell_shading(cell, color):
+        rgb = _designer_hex_to_rgb(color) if color else None
+        if not rgb:
+            return
+        shd = OxmlElement("w:shd"); shd.set(qn("w:fill"), str(color).lstrip("#")[:6]); cell._tc.get_or_add_tcPr().append(shd)
+
+    def set_cell_margins(cell, px=0, horizontal_extra=0):
+        tc = cell._tc.get_or_add_tcPr()
+        mar = tc.first_child_found_in("w:tcMar")
+        if mar is None:
+            mar = OxmlElement("w:tcMar"); tc.append(mar)
+        vertical = str(max(0, round(float(px) * 15)))
+        horizontal = str(max(0, round((float(px) + float(horizontal_extra)) * 15)))
+        for side in ("top", "start", "bottom", "end"):
+            node = mar.find(qn("w:" + side))
+            if node is None:
+                node = OxmlElement("w:" + side); mar.append(node)
+            node.set(qn("w:w"), vertical if side in ("top", "bottom") else horizontal); node.set(qn("w:type"), "dxa")
+
+    def set_cell_border(cell, color="#CBD5E1", width=1):
+        tc = cell._tc.get_or_add_tcPr()
+        borders = tc.first_child_found_in("w:tcBorders")
+        if borders is None:
+            borders = OxmlElement("w:tcBorders"); tc.append(borders)
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            tag = "w:" + edge
+            node = borders.find(qn(tag))
+            if node is None:
+                node = OxmlElement(tag); borders.append(node)
+            node.set(qn("w:val"), "single")
+            node.set(qn("w:sz"), str(max(1, round(float(width) * .75))))
+            node.set(qn("w:color"), str(color or "#CBD5E1").lstrip("#")[:6])
+
+    def set_table_widths(table, ratios):
+        table.autofit = False
+        tblpr = table._tbl.tblPr
+        layout = tblpr.find(qn("w:tblLayout"))
+        if layout is None:
+            layout = OxmlElement("w:tblLayout"); tblpr.append(layout)
+        layout.set(qn("w:type"), "fixed")
+        total = sum(max(0.01, float(x or 1)) for x in ratios) or len(ratios)
+        for idx, ratio in enumerate(ratios):
+            width = usable_mm * max(0.01, float(ratio or 1)) / total
+            for cell in table.columns[idx].cells:
+                cell.width = Mm(width)
+
+    def resolve(raw):
+        text = _subst_tokens(str(raw or ""), values)
+        return text
+
+    def style_paragraph(p, style, default_color=None):
+        style = style or {}
+        p.alignment = alignments.get(style.get("align") or style.get("textAlign") or "left", WD_ALIGN_PARAGRAPH.LEFT)
+        p.paragraph_format.space_before = Pt(max(0, float(style.get("marginTop") or 0) * .75))
+        p.paragraph_format.space_after = Pt(max(0, float(style.get("marginBottom") or 0) * .75))
+        return style
+
+    def add_text(p, raw, style=None, *, heading=False, bold=None, italic=None, underline=None):
+        style = style_paragraph(p, style, heading_rgb if heading else None)
+        txt = resolve(raw)
+        run = p.add_run(txt)
+        run.font.name = _designer_font_family(style.get("fontFamily")) or (heading_font if heading else body_font)
+        size = style.get("fontSize")
+        if size:
+            run.font.size = Pt(max(6, float(size) * .75))
+        run.bold = style.get("bold", False) if bold is None else bold
+        run.italic = style.get("italic", False) if italic is None else italic
+        run.underline = style.get("underline", False) if underline is None else underline
+        color = style.get("color") or ("#" + ("0F2A3A" if heading else "1F2933"))
+        try:
+            run.font.color.rgb = _designer_hex_to_rgb(color)
+        except Exception:
+            pass
+        return run
+
+    def data_value(key):
+        value = values
+        for part in str(key or "").strip("{} ").split("."):
+            if isinstance(value, dict): value = value.get(part)
+            else: return None
+        return value
+
+    def render_element(container, el):
+        el = el or {}; typ = el.get("type"); st = el.get("style") or {}
+        if typ in ("text", "note", "heading"):
+            p = container.add_paragraph()
+            add_text(p, el.get("text", ""), st, heading=typ == "heading", italic=(typ == "note" and st.get("italic", True)))
+        elif typ == "box":
+            t = add_table(container, 1, 1); _designer_clear_table_borders(t)
+            cell = t.cell(0, 0); cell.height = Mm(float(st.get("minHeight") or 40) * .264583)
+            if st.get("background"): set_cell_shading(cell, st["background"])
+            if st.get("borderWidth"): set_cell_border(cell, st.get("borderColor"), st["borderWidth"])
+        elif typ == "divider":
+            p = container.add_paragraph(); pPr = p._p.get_or_add_pPr(); borders = OxmlElement("w:pBdr")
+            edge = OxmlElement("w:bottom"); edge.set(qn("w:val"), "single"); edge.set(qn("w:sz"), str(max(1, round(float(st.get("borderWidth") or 1) * .75)))); edge.set(qn("w:color"), str(st.get("borderColor", "#94A3B8")).lstrip("#")); borders.append(edge); pPr.append(borders)
+        elif typ == "spacer":
+            p = container.add_paragraph(); p.paragraph_format.space_after = Pt(max(1, float(el.get("height") or 24) * .75))
+        elif typ in ("bulleted_list", "numbered_list"):
+            for item in el.get("items") or []:
+                p = container.add_paragraph(style="List Bullet" if typ == "bulleted_list" else "List Number")
+                add_text(p, item, st)
+        elif typ == "field_group":
+            pairs = el.get("fields") or []
+            if pairs:
+                t = add_table(container, len(pairs), 2); _designer_clear_table_borders(t)
+                label_mm = min(usable_mm * .7, float(el.get("labelWidth") or 120) * .264583)
+                for i, f in enumerate(pairs):
+                    t.rows[i].cells[0].width = Mm(label_mm); t.rows[i].cells[1].width = Mm(max(10, usable_mm-label_mm))
+                    add_text(t.cell(i, 0).paragraphs[0], f.get("label"), bold=bool(f.get("boldLabel")))
+                    add_text(t.cell(i, 1).paragraphs[0], f.get("value"), bold=bool(f.get("boldValue")))
+        elif typ == "image":
+            src = el.get("src") or data_value(el.get("text"))
+            raw = _decode_data_url_image(src)
+            p = container.add_paragraph(); p.alignment = alignments.get(st.get("align"), WD_ALIGN_PARAGRAPH.LEFT)
+            if raw:
+                try:
+                    kwargs = {}
+                    if el.get("width"): kwargs["width"] = Emu(int(float(el["width"]) / 96 * 914400))
+                    if el.get("height") and el.get("objectFit") == "fill": kwargs["height"] = Emu(int(float(el["height"]) / 96 * 914400))
+                    p.add_run().add_picture(BytesIO(raw), **kwargs)
+                except Exception:
+                    add_text(p, el.get("alt") or "Image", st, italic=True)
+            else:
+                add_text(p, el.get("alt") or "", st, italic=True)
+        elif typ == "signature_group":
+            signatories = el.get("signatories") or []
+            if signatories:
+                t = add_table(container, 1, len(signatories)); _designer_clear_table_borders(t)
+                set_table_widths(t, [1] * len(signatories))
+                for i, sig in enumerate(signatories):
+                    cell = t.cell(0, i); p = cell.paragraphs[0]
+                    add_text(p, (str(sig.get("step") + ". ") if sig.get("step") else "") + str(sig.get("role") or ""), bold=True)
+                    p = cell.add_paragraph(); add_text(p, resolve(sig.get("name")), st)
+                    p = cell.add_paragraph(); add_text(p, "Date: ", bold=True); add_text(p, sig.get("date"), st)
+                    if sig.get("signature"):
+                        p = cell.add_paragraph(); add_text(p, "Signature: ", bold=True); add_text(p, sig.get("signature"), st)
+        elif typ == "data_table":
+            cols = el.get("columns") or []
+            if not cols: return
+            source = data_value(el.get("sourceKey")) if el.get("sourceKey") else None
+            rows = source if isinstance(source, list) else (el.get("staticRows") or [])
+            if el.get("sourceKey") and not isinstance(source, list): rows = [[""] * len(cols) for _ in range(max(1, int(el.get("previewRows") or 2)))]
+            show_head = el.get("showHeader") is not False
+            t = add_table(container, 0, len(cols)); t.style = "Table Grid"
+            set_table_widths(t, [c.get("width", 1) for c in cols])
+            if show_head:
+                cells = t.add_row().cells
+                for i, col in enumerate(cols):
+                    cell = cells[i]; set_cell_shading(cell, el.get("headerBackground") or "#D4DFEF"); set_cell_margins(cell, el.get("cellPadding", 4))
+                    p = cell.paragraphs[0]; p.alignment = alignments.get(col.get("align"), WD_ALIGN_PARAGRAPH.LEFT)
+                    add_text(p, col.get("label"), {"color": el.get("headerColor") or "#111827"}, bold=True)
+            for ri, row in enumerate(rows):
+                cells = t.add_row().cells
+                for ci, col in enumerate(cols):
+                    cell = cells[ci]; set_cell_margins(cell, el.get("cellPadding", 4))
+                    if el.get("striped") and ri % 2: set_cell_shading(cell, "#F8FAFC")
+                    raw = row[ci] if isinstance(row, list) and ci < len(row) else (row.get(col.get("key"), "") if isinstance(row, dict) else "")
+                    p = cell.paragraphs[0]; p.alignment = alignments.get(col.get("align"), WD_ALIGN_PARAGRAPH.LEFT); add_text(p, str(raw or ""), st)
+            for summary in el.get("summaries") or []:
+                cells = t.add_row().cells
+                vals = [summary.get("label", "")] + list(summary.get("values") or [])
+                for i, cell in enumerate(cells):
+                    add_text(cell.paragraphs[0], vals[i] if i < len(vals) else "", st, bold=bool(summary.get("bold")))
+
+    def render_rows(container, rows):
+        for row in rows or []:
+            if row.get("marginTop"):
+                spacer = container.add_paragraph()
+                spacer.paragraph_format.space_after = Pt(float(row["marginTop"]) * .75)
+            cells_data = row.get("columns") or []
+            if not cells_data: continue
+            table = add_table(container, 1, len(cells_data))
+            _designer_clear_table_borders(table); set_table_widths(table, [c.get("width", 1) for c in cells_data])
+            if row.get("minHeight"):
+                from docx.enum.table import WD_ROW_HEIGHT_RULE
+                table.rows[0].height = Mm(float(row["minHeight"]) * .264583)
+                table.rows[0].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+            for idx, data_cell in enumerate(cells_data):
+                cell = table.cell(0, idx)
+                cell.vertical_alignment = {"center": WD_CELL_VERTICAL_ALIGNMENT.CENTER, "end": WD_CELL_VERTICAL_ALIGNMENT.BOTTOM}.get(data_cell.get("verticalAlign"), WD_CELL_VERTICAL_ALIGNMENT.TOP)
+                set_cell_margins(cell, data_cell.get("padding", 0), float(row.get("gap", 0)) / 2)
+                if data_cell.get("background"): set_cell_shading(cell, data_cell["background"])
+                if data_cell.get("borderWidth"): set_cell_border(cell, data_cell.get("borderColor"), data_cell["borderWidth"])
+                # A table cell always starts with one empty paragraph.
+                for element_index, el in enumerate(data_cell.get("elements") or []):
+                    if element_index == 0 and not cell.paragraphs[0].text and len(cell.paragraphs) == 1:
+                        p = cell.paragraphs[0]
+                        # render into initial paragraph where possible
+                        if el.get("type") in ("text", "note", "heading"):
+                            add_text(p, el.get("text", ""), el.get("style") or {}, heading=el.get("type") == "heading")
+                            continue
+                    render_element(cell, el)
+            if row.get("marginBottom"):
+                p = container.add_paragraph(); p.paragraph_format.space_after = Pt(float(row["marginBottom"]) * .75)
+
+    def render_band(band, target):
+        if band and band.get("enabled"):
+            render_rows(target, band.get("rows"))
+            if band.get("border"):
+                p = target.add_paragraph(); pPr = p._p.get_or_add_pPr(); borders = OxmlElement("w:pBdr"); edge = OxmlElement("w:bottom")
+                edge.set(qn("w:val"), "single"); edge.set(qn("w:sz"), "4"); edge.set(qn("w:color"), "C8CDD2"); borders.append(edge); pPr.append(borders)
+
+    if design.get("header", {}).get("enabled"):
+        section.header_distance = Mm(max(5, top / 2)); render_band(design["header"], section.header)
+    if design.get("footer", {}).get("enabled"):
+        section.footer_distance = Mm(max(5, bottom / 2)); render_band(design["footer"], section.footer)
+    pages = design.get("pages") or []
+    for page_index, page_spec in enumerate(pages):
+        if page_index: doc.add_page_break()
+        render_rows(doc, page_spec.get("rows"))
+        # Floating elements use positioned Word tables, keeping them anchored
+        # to the page and independent of the normal flow content.
+        for item in sorted(page_spec.get("floating") or [], key=lambda f: f.get("zIndex", 0)):
+            el = item.get("element") or {}
+            table = doc.add_table(rows=1, cols=1); _designer_clear_table_borders(table)
+            table.autofit = False; table.columns[0].width = Mm(float(item.get("width") or 30)); table.cell(0, 0).width = Mm(float(item.get("width") or 30))
+            tblpr = table._tbl.tblPr; pos = OxmlElement("w:tblpPr")
+            pos.set(qn("w:horzAnchor"), "page"); pos.set(qn("w:vertAnchor"), "page")
+            pos.set(qn("w:tblpX"), str(round(float(item.get("x", 0)) * 56.6929)))
+            pos.set(qn("w:tblpY"), str(round(float(item.get("y", 0)) * 56.6929)))
+            pos.set(qn("w:leftFromText"), "0"); pos.set(qn("w:topFromText"), "0")
+            tblpr.append(pos)
+            render_element(table.cell(0, 0), el)
+    buf = BytesIO(); doc.save(buf); return buf.getvalue()
+
+
 def generate_designer_docx(design, values) -> bytes:
     """
     Render a WYSIWYG document-designer template (block layout) to an editable
@@ -690,6 +977,8 @@ def generate_designer_docx(design, values) -> bytes:
     from docx.oxml import OxmlElement
 
     design = design or {}
+    if isinstance(design.get("pages"), list) and design.get("pages"):
+        return _generate_designer_docx_v2(design, values)
     theme = design.get("theme", {}) or {}
     page = design.get("page", {}) or {}
     blocks = design.get("blocks", []) or []
@@ -928,7 +1217,7 @@ def generate_designer_pdf(design, values) -> bytes:
     from xml.sax.saxutils import escape as xml_escape
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
-    from reportlab.lib.pagesizes import A4, letter, legal, landscape
+    from reportlab.lib.pagesizes import A4, A5, letter, legal, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
     from reportlab.platypus import (
@@ -943,7 +1232,7 @@ def generate_designer_pdf(design, values) -> bytes:
     if not blocks and isinstance(design.get("pages"), list) and design["pages"]:
         blocks = _design_pages_to_legacy_blocks(design)
 
-    page_size = {"A4": A4, "Letter": letter, "Legal": legal}.get(page.get("size", "A4"), A4)
+    page_size = {"A4": A4, "A5": A5, "Letter": letter, "Legal": legal}.get(page.get("size", "A4"), A4)
     if page.get("orientation") == "landscape":
         page_size = landscape(page_size)
     margin = page.get("margin") or {}
@@ -1141,7 +1430,7 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
     from xml.sax.saxutils import escape as xml_escape
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-    from reportlab.lib.pagesizes import A4, letter, legal, landscape
+    from reportlab.lib.pagesizes import A4, A5, letter, legal, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
     from reportlab.lib.utils import ImageReader
@@ -1153,7 +1442,7 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
     page = design.get("page") or {}
     theme = design.get("theme") or {}
     pages = design.get("pages") or []
-    page_size = {"A4": A4, "Letter": letter, "Legal": legal}.get(page.get("size", "A4"), A4)
+    page_size = {"A4": A4, "A5": A5, "Letter": letter, "Legal": legal}.get(page.get("size", "A4"), A4)
     if page.get("orientation") == "landscape":
         page_size = landscape(page_size)
     margin = page.get("margin") or {}
@@ -1198,6 +1487,15 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             rendered = f"<u>{rendered}</u>"
         return Paragraph(rendered or "&#160;", style)
 
+    def value_at(key):
+        value = values
+        for part in str(key or "").strip("{} ").split("."):
+            if isinstance(value, dict):
+                value = value.get(part)
+            else:
+                return None
+        return value
+
     def render_element(element, available_width):
         kind = element.get("type")
         style = element.get("style") or {}
@@ -1227,7 +1525,7 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             columns = element.get("columns") or []
             if not columns:
                 return []
-            source = values.get(element.get("sourceKey") or "")
+            source = value_at(element.get("sourceKey"))
             rows = [[record.get(column.get("key", ""), "") for column in columns] for record in source if isinstance(record, dict)] if isinstance(source, list) else []
             if not rows and not element.get("sourceKey"):
                 rows = element.get("staticRows") or []
@@ -1267,7 +1565,8 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             mark = "•" if kind == "bulleted_list" else None
             return [Paragraph(xml_escape(_subst_tokens(str(item), values)), styles["Normal"], bulletText=mark) for item in (element.get("items") or [])]
         if kind in ("image", "logo"):
-            raw = _decode_data_url_image(element.get("src"))
+            image_source = element.get("src") or value_at(element.get("text"))
+            raw = _decode_data_url_image(image_source)
             if raw:
                 image = RLImage(BytesIO(raw))
                 max_width = min(float(element.get("width") or 120) * .75, available_width)
@@ -1441,6 +1740,21 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             canv.restoreState()
         draw_band(canv, header, page_size[1] - 8 * mm, border_below=True)
         draw_band(canv, footer, 12 * mm)
+        # The designer positions these items against the paper's top-left
+        # corner. Draw them as page-anchored flowables to retain that geometry
+        # in direct PDF previews and downloads.
+        page_index = min(max(0, canv.getPageNumber() - 1), len(pages) - 1) if pages else 0
+        for item in sorted((pages[page_index].get("floating") or []) if pages else [], key=lambda f: f.get("zIndex", 0)):
+            x = float(item.get("x", 0)) * mm
+            y_top = float(item.get("y", 0)) * mm
+            width = max(1, float(item.get("width") or 30) * mm)
+            for flowable in render_element(item.get("element") or {}, width):
+                try:
+                    _w, height = flowable.wrap(width, page_size[1])
+                    flowable.drawOn(canv, x, page_size[1] - y_top - height)
+                    y_top += height / mm
+                except Exception:
+                    logger.debug("Unable to render floating template element in PDF", exc_info=True)
 
     buffer = BytesIO()
     pdf = SimpleDocTemplate(buffer, pagesize=page_size, leftMargin=left, rightMargin=right, topMargin=top, bottomMargin=bottom)

@@ -32,8 +32,11 @@ export function documentLooksLikeForm(doc: DocumentWorkspaceHints | null | undef
   if (doc.metadata?.form?.sections) return true;
   if (doc.document_type?.is_form) return true;
   const typeName = `${doc.document_type_name ?? ""} ${doc.document_type?.name ?? ""} ${doc.document_type?.code ?? ""}`.toLowerCase();
-  // Heuristic fallback when list payloads omit metadata (e.g. search hits).
-  return /\b(imprest|requisition|form)\b/.test(typeName);
+  // Search hits can omit `is_form` and nested metadata, so retain a narrow
+  // fallback for the established built-form document types. A generic
+  // document type named "Form ..." is not enough: designer document templates
+  // may use that word but still open in the regular Documents workspace.
+  return /\b(imprest|requisition)\b/.test(typeName);
 }
 
 export function getDocumentWorkspacePath(
