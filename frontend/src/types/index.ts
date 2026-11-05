@@ -303,6 +303,7 @@ export interface SearchHit {
   title: string;
   reference_number: string;
   document_type: string;
+  document_type_id?: string;
   file_name?: string;
   file_mime_type?: string;
   supplier: string;

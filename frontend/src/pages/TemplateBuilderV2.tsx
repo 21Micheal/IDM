@@ -181,8 +181,6 @@ export interface TableColumn {
   sunsystems?: ColumnFinanceBinding;
   /* External (SunSystems-backed) lookup — see ExternalConfig. */
   external?: ExternalConfig | null;
-  /** Modal config for a top-level account + analysis selection. */
-  budgetLine?: BudgetLineConfig;
 }
 
 /* SunSystems / finance bindings (see compileSunSystems). A field/column carries
@@ -584,6 +582,8 @@ export interface TemplateField {
   tableRef?: TableRef | null;
   /* External (SunSystems-backed) lookup — see ExternalConfig. */
   external?: ExternalConfig | null;
+  /** Modal config for a top-level account + analysis selection. */
+  budgetLine?: BudgetLineConfig;
 }
 
 /* A button's behaviour. Buttons hold no value; they either

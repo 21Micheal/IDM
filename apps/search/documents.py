@@ -146,6 +146,7 @@ class DocumentIndex(ESDocument):
     title = fields.TextField(analyzer="english")
     reference_number = fields.KeywordField()
     document_type = fields.KeywordField()
+    document_type_id = fields.KeywordField()
     document_type_code = fields.KeywordField()
     file_name = fields.TextField(
         fields={"keyword": fields.KeywordField()},
@@ -179,6 +180,9 @@ class DocumentIndex(ESDocument):
 
     def prepare_document_type(self, instance):
         return instance.document_type.name
+
+    def prepare_document_type_id(self, instance):
+        return str(instance.document_type_id) if instance.document_type_id else ""
 
     def prepare_document_type_code(self, instance):
         return (instance.document_type.code or "").upper()
@@ -221,24 +225,41 @@ class DocumentIndex(ESDocument):
         from apps.documents.models import DocumentStatus
 
         status = (instance.status or "").strip()
-        normalized = status.lower()
+        normalized = status.lower().replace(" ", "_")
+        known = {choice.value for choice in DocumentStatus}
+
+        # Prefer the real document status when it is already a known enum value.
+        # Never infer "pending_approval" from the substring "approve" inside
+        # "approved" — that incorrectly labelled finished docs as pending.
+        if normalized in known:
+            return normalized
+
         active_task_statuses = {"pending", "in_progress", "held", "returned"}
         workflow = getattr(instance, "workflow_instance", None)
-
+        has_active_task = False
         if workflow is not None:
             tasks = getattr(workflow, "tasks", None)
-            if tasks is not None and any(getattr(task, "status", None) in active_task_statuses for task in tasks.all()):
-                if "review" in normalized:
-                    return DocumentStatus.PENDING_REVIEW
-                if any(keyword in normalized for keyword in ("approve", "approval", "sign-off", "sign off")):
-                    return DocumentStatus.PENDING_APPROVAL
-                return DocumentStatus.PENDING_APPROVAL
+            if tasks is not None:
+                has_active_task = any(
+                    getattr(task, "status", None) in active_task_statuses for task in tasks.all()
+                )
 
-        if normalized in {choice.value for choice in DocumentStatus}:
-            return normalized
-        if "review" in normalized:
+        def _looks_like_pending_approval(value: str) -> bool:
+            return (
+                "pending" in value
+                and any(token in value for token in ("approv", "sign-off", "sign_off", "signoff"))
+            )
+
+        if has_active_task:
+            if "review" in normalized:
+                return DocumentStatus.PENDING_REVIEW
+            if _looks_like_pending_approval(normalized):
+                return DocumentStatus.PENDING_APPROVAL
+            return DocumentStatus.PENDING_APPROVAL
+
+        if "review" in normalized and "pending" in normalized:
             return DocumentStatus.PENDING_REVIEW
-        if any(keyword in normalized for keyword in ("approve", "approval", "sign-off", "sign off")):
+        if _looks_like_pending_approval(normalized):
             return DocumentStatus.PENDING_APPROVAL
         return None
 

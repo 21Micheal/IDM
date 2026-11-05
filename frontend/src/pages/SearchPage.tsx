@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import statusUtils from "@/lib/status";
 import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import {
@@ -17,25 +16,27 @@ import {
 import { Link, useSearchParams } from "react-router-dom";
 import CustomListbox from "@/components/ui/CustomListbox";
 
-import { documentTypesAPI, normalizeListResponse, searchAPI } from "@/services/api";
-import type { DocumentSearchResponse, DocumentStatus, DocumentType, SearchHit } from "@/types";
+import { documentsAPI, documentTypesAPI, normalizeListResponse, searchAPI } from "@/services/api";
+import type { DocumentSearchResponse, DocumentType, SearchHit } from "@/types";
 import { useDebounce } from "@/hooks/useDebounce";
 import { getPreferredHighlights, highlightSearchText } from "@/lib/search";
 import { formatDocumentFileType } from "@/lib/documentFormat";
+import statusUtils from "@/lib/status";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 const PAGE_SIZE = 20;
 
-const STATUS_OPTIONS: DocumentStatus[] = [
+// Keep in sync with DocumentsPage — pending_approval is the list filter token;
+// the search API expands any pending* value to all pending-like statuses.
+const STATUS_OPTIONS = [
   "draft",
-  "pending_review",
   "pending_approval",
   "approved",
   "rejected",
   "archived",
   "void",
-];
+] as const;
 
 const FORMAT_OPTIONS = [
   { value: "pdf", label: "PDF", mimeTypes: ["application/pdf"] },
@@ -82,6 +83,14 @@ const SORT_OPTIONS = [
   { value: "reference_number", label: "Reference" },
 ];
 
+const CURRENCY_OPTIONS = [
+  { value: "", label: "All currencies" },
+  { value: "USD", label: "USD" },
+  { value: "KES", label: "KES" },
+  { value: "EUR", label: "EUR" },
+  { value: "GBP", label: "GBP" },
+];
+
 function statusLabel(status: string) {
   return status.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
@@ -123,8 +132,39 @@ function formatAmount(amount: number | null, currency?: string) {
   }
 }
 
+function buildSearchParamsFromState(state: {
+  q: string;
+  status: string;
+  document_type: string;
+  supplier: string;
+  format: string;
+  date_from: string;
+  date_to: string;
+  currency: string;
+  amount_min: string;
+  amount_max: string;
+  sort: string;
+}) {
+  const nextParams = new URLSearchParams();
+  if (state.q) nextParams.set("q", state.q);
+  if (state.status) nextParams.set("status", state.status);
+  if (state.document_type) nextParams.set("document_type", state.document_type);
+  if (state.supplier) nextParams.set("supplier", state.supplier);
+  if (state.format) nextParams.set("format", state.format);
+  if (state.date_from) nextParams.set("date_from", state.date_from);
+  if (state.date_to) nextParams.set("date_to", state.date_to);
+  if (state.currency) nextParams.set("currency", state.currency);
+  if (state.amount_min) nextParams.set("amount_min", state.amount_min);
+  if (state.amount_max) nextParams.set("amount_max", state.amount_max);
+  if (state.sort) nextParams.set("sort", state.sort);
+  return nextParams;
+}
+
 export default function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  // Hydrate once from the URL (shareable links). After that filters are owned by
+  // local state — writing back to the URL must not re-import and clobber edits
+  // (that loop is why filters / search text used to "not stick").
   const [searchTerm, setSearchTerm] = useState(() => searchParams.get("q") ?? "");
   const [dateFrom, setDateFrom] = useState(() => searchParams.get("date_from") ?? "");
   const [dateTo, setDateTo] = useState(() => searchParams.get("date_to") ?? "");
@@ -139,38 +179,46 @@ export default function SearchPage() {
   const [page, setPage] = useState(1);
 
   const debouncedSearchTerm = useDebounce(searchTerm, 350);
-  const debouncedSupplier = useDebounce(supplierFilter, 350);
   const searchParamsString = searchParams.toString();
 
-  useEffect(() => {
-    const params = new URLSearchParams(searchParamsString);
-    setSearchTerm(params.get("q") ?? "");
-    setDateFrom(params.get("date_from") ?? "");
-    setDateTo(params.get("date_to") ?? "");
-    setStatusFilter(params.get("status") ?? "");
-    setTypeFilter(params.get("document_type") ?? "");
-    setSupplierFilter(params.get("supplier") ?? "");
-    setFormatFilter(params.get("format") ?? "");
-    setCurrencyFilter(params.get("currency") ?? "");
-    setAmountMin(params.get("amount_min") ?? "");
-    setAmountMax(params.get("amount_max") ?? "");
-    setSort(params.get("sort") ?? "");
-    setPage(1);
-  }, [searchParamsString]);
-
   const { data: documentTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
-    queryKey: ["document-types", "search-filters"],
+    queryKey: ["document-types"],
     queryFn: () => documentTypesAPI.list().then((response) => response.data as unknown),
     select: (data) => normalizeListResponse(data) as DocumentType[],
     ...QUERY_FIVE_MIN_STALE,
   });
+
+  const { data: supplierOptions = [] } = useQuery<string[]>({
+    queryKey: ["document-suppliers"],
+    queryFn: () => documentsAPI.suppliers().then((r) => r.data),
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  const supplierListOptions = useMemo(() => {
+    const list = [
+      { value: "", label: "All suppliers" },
+      ...supplierOptions.map((s) => ({ value: s, label: s })),
+    ];
+    if (supplierFilter && !supplierOptions.includes(supplierFilter)) {
+      list.push({ value: supplierFilter, label: supplierFilter });
+    }
+    return list;
+  }, [supplierOptions, supplierFilter]);
+
+  const currencyListOptions = useMemo(() => {
+    const list = [...CURRENCY_OPTIONS];
+    if (currencyFilter && !list.some((c) => c.value === currencyFilter)) {
+      list.push({ value: currencyFilter, label: currencyFilter });
+    }
+    return list;
+  }, [currencyFilter]);
 
   const selectedFormat = FORMAT_OPTIONS.find((option) => option.value === formatFilter);
   const hasActiveSearch = Boolean(
     debouncedSearchTerm ||
       statusFilter ||
       typeFilter ||
-      debouncedSupplier ||
+      supplierFilter ||
       formatFilter ||
       dateFrom ||
       dateTo ||
@@ -179,13 +227,15 @@ export default function SearchPage() {
       amountMax,
   );
 
+  // Same shape DocumentsPage uses: document_type is the type UUID; status is the
+  // list-filter token (pending_approval expands server-side to all pending*).
   const searchPayload = useMemo(
     () => ({
       search: debouncedSearchTerm,
       filters: {
         ...(statusFilter && { status: statusFilter }),
         ...(typeFilter && { document_type: typeFilter }),
-        ...(debouncedSupplier && { supplier: debouncedSupplier }),
+        ...(supplierFilter && { supplier: supplierFilter }),
         ...(selectedFormat && { file_mime_type: selectedFormat.mimeTypes }),
         ...(dateFrom && { date_from: dateFrom }),
         ...(dateTo && { date_to: dateTo }),
@@ -204,11 +254,11 @@ export default function SearchPage() {
       dateFrom,
       dateTo,
       debouncedSearchTerm,
-      debouncedSupplier,
       page,
       selectedFormat,
       sort,
       statusFilter,
+      supplierFilter,
       typeFilter,
     ],
   );
@@ -219,23 +269,26 @@ export default function SearchPage() {
     enabled: hasActiveSearch,
   });
 
+  // Mirror DocumentsPage: filters live in React state. Push them to the URL for
+  // shareable links, but never re-import URL → state (that feedback loop cleared
+  // in-progress edits and made filter changes appear broken).
   useEffect(() => {
-    const nextParams = new URLSearchParams();
-    if (debouncedSearchTerm) nextParams.set("q", debouncedSearchTerm);
-    if (statusFilter) nextParams.set("status", statusFilter);
-    if (typeFilter) nextParams.set("document_type", typeFilter);
-    if (debouncedSupplier) nextParams.set("supplier", debouncedSupplier);
-    if (formatFilter) nextParams.set("format", formatFilter);
-    if (dateFrom) nextParams.set("date_from", dateFrom);
-    if (dateTo) nextParams.set("date_to", dateTo);
-    if (currencyFilter) nextParams.set("currency", currencyFilter);
-    if (amountMin) nextParams.set("amount_min", amountMin);
-    if (amountMax) nextParams.set("amount_max", amountMax);
-    if (sort) nextParams.set("sort", sort);
+    const nextParams = buildSearchParamsFromState({
+      q: debouncedSearchTerm,
+      status: statusFilter,
+      document_type: typeFilter,
+      supplier: supplierFilter,
+      format: formatFilter,
+      date_from: dateFrom,
+      date_to: dateTo,
+      currency: currencyFilter,
+      amount_min: amountMin,
+      amount_max: amountMax,
+      sort,
+    });
 
-    if (searchParamsString !== nextParams.toString()) {
-      setSearchParams(nextParams, { replace: true });
-    }
+    if (searchParamsString === nextParams.toString()) return;
+    setSearchParams(nextParams, { replace: true });
   }, [
     amountMax,
     amountMin,
@@ -243,12 +296,12 @@ export default function SearchPage() {
     dateFrom,
     dateTo,
     debouncedSearchTerm,
-    debouncedSupplier,
     formatFilter,
     searchParamsString,
     setSearchParams,
     sort,
     statusFilter,
+    supplierFilter,
     typeFilter,
   ]);
 
@@ -267,76 +320,56 @@ export default function SearchPage() {
     setPage(1);
   };
 
-  // Use the raw data from the search query but apply a strict client-side filter
-  // so UI never shows results that don't exactly match the active filters.
-  const rawData = searchQuery.data;
-
-  function hitMatchesFilters(hit: SearchHit) {
-    if (!hit) return false;
-
-    if (statusFilter && !statusUtils.statusMatchesFilter(hit.status, statusFilter)) return false;
-    if (typeFilter && hit.document_type !== typeFilter) return false;
-
-    if (debouncedSupplier) {
-      const supplier = (hit.supplier || "").toLowerCase();
-      if (!supplier.includes(debouncedSupplier.toLowerCase())) return false;
-    }
-
-    if (selectedFormat && hit.file_mime_type) {
-      // Ensure the hit's mime type matches one of the selected format mime types.
-      if (!selectedFormat.mimeTypes.includes(hit.file_mime_type)) return false;
-    }
-
-    if (dateFrom) {
-      const hitDate = hit.document_date ? new Date(hit.document_date) : null;
-      const fromDate = new Date(dateFrom + "T00:00:00");
-      if (!hitDate || isNaN(hitDate.getTime()) || hitDate < fromDate) return false;
-    }
-
-    if (dateTo) {
-      const hitDate = hit.document_date ? new Date(hit.document_date) : null;
-      const toDate = new Date(dateTo + "T23:59:59");
-      if (!hitDate || isNaN(hitDate.getTime()) || hitDate > toDate) return false;
-    }
-
-    if (currencyFilter && hit.currency !== currencyFilter) return false;
-
-    if (amountMin) {
-      const min = Number(amountMin);
-      if (!Number.isNaN(min) && (hit.amount == null || Number(hit.amount) < min)) return false;
-    }
-
-    if (amountMax) {
-      const max = Number(amountMax);
-      if (!Number.isNaN(max) && (hit.amount == null || Number(hit.amount) > max)) return false;
-    }
-
-    return true;
-  }
+  // Same safety net as DocumentsPage: enforce filters against the document
+  // status/type/supplier fields the UI shows, matching docMatchesFilters.
+  const selectedTypeName = useMemo(
+    () => documentTypes.find((type) => String(type.id) === typeFilter)?.name ?? "",
+    [documentTypes, typeFilter],
+  );
 
   const filteredData: DocumentSearchResponse | null = useMemo(() => {
-    if (!rawData) return null;
-    const results = (rawData.results || []).filter((hit) => hitMatchesFilters(hit));
-    // Keep the backend's total count for pagination, only filter the displayed results
-    return { ...rawData, results } as DocumentSearchResponse;
+    if (!hasActiveSearch) return null;
+    const raw = searchQuery.data;
+    if (!raw) return null;
+
+    const results = (raw.results ?? []).filter((hit) => {
+      if (statusFilter && !statusUtils.statusMatchesFilter(hit.status, statusFilter)) return false;
+
+      if (typeFilter) {
+        const hitTypeId = hit.document_type_id;
+        const hitType = String(hit.document_type ?? "").trim().toLowerCase();
+        const matchesId = Boolean(hitTypeId && hitTypeId === typeFilter);
+        const matchesName = Boolean(selectedTypeName && hitType === selectedTypeName.trim().toLowerCase());
+        const matchesDirect = Boolean(hitType && hitType === typeFilter.trim().toLowerCase());
+        if (!matchesId && !matchesName && !matchesDirect && selectedTypeName) {
+          return false;
+        }
+      }
+
+      if (supplierFilter) {
+        const supplier = String(hit.supplier ?? "").toLowerCase();
+        if (!supplier.includes(supplierFilter.toLowerCase())) return false;
+      }
+
+      return true;
+    });
+
+    // Keep backend total for pagination chrome; page contents are what the user sees.
+    return { ...raw, results };
   }, [
-    rawData,
+    hasActiveSearch,
+    searchQuery.data,
+    selectedTypeName,
     statusFilter,
+    supplierFilter,
     typeFilter,
-    debouncedSupplier,
-    selectedFormat,
-    dateFrom,
-    dateTo,
-    currencyFilter,
-    amountMin,
-    amountMax,
   ]);
 
   const totalPages = filteredData ? Math.max(1, Math.ceil((filteredData.total ?? 0) / PAGE_SIZE)) : 1;
   const activeFilterCount = [
     statusFilter,
     typeFilter,
-    debouncedSupplier,
+    supplierFilter,
     formatFilter,
     dateFrom,
     dateTo,
@@ -381,15 +414,22 @@ export default function SearchPage() {
                 value={statusFilter}
                 onChange={(v) => { setStatusFilter(v); setPage(1); }}
                 options={[{ value: "", label: "All statuses" }, ...STATUS_OPTIONS.map((status) => ({ value: status, label: statusLabel(status) }))]}
-                buttonClassName="h-9 w-[140px] border border-[#B7BEC5] bg-white px-2 text-sm text-[#1F2933]"
+                buttonClassName="h-9 w-[130px] border border-[#B7BEC5] bg-white px-2 text-sm text-[#1F2933]"
                 ariaLabel="Status filter"
               />
               <CustomListbox
                 value={typeFilter}
                 onChange={(v) => { setTypeFilter(v); setPage(1); }}
-                options={[{ value: "", label: "All types" }, ...documentTypes.map((type) => ({ value: String(type.name), label: type.name }))]}
+                options={[{ value: "", label: "All types" }, ...documentTypes.map((type) => ({ value: String(type.id), label: type.name }))]}
                 buttonClassName="h-9 w-[140px] border border-[#B7BEC5] bg-white px-2 text-sm text-[#1F2933]"
                 ariaLabel="Document type filter"
+              />
+              <CustomListbox
+                value={supplierFilter}
+                onChange={(v) => { setSupplierFilter(v); setPage(1); }}
+                options={supplierListOptions}
+                buttonClassName="h-9 w-[160px] border border-[#B7BEC5] bg-white px-2 text-sm text-[#1F2933]"
+                ariaLabel="Supplier filter"
               />
               <CustomListbox
                 value={formatFilter}
@@ -406,16 +446,7 @@ export default function SearchPage() {
               </span>
             )}
           </div>
-          <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]">
-            <input
-              value={supplierFilter}
-              onChange={(event) => {
-                setSupplierFilter(event.target.value);
-                setPage(1);
-              }}
-              placeholder="Supplier"
-              className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
-            />
+          <div className="grid gap-3 lg:grid-cols-[1.5fr_1.5fr_1fr_1.2fr_auto]">
             <div className="grid grid-cols-2 gap-2">
               <input
                 type="date"
@@ -462,14 +493,15 @@ export default function SearchPage() {
                 className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
               />
             </div>
-            <input
+            <CustomListbox
               value={currencyFilter}
-              onChange={(event) => {
-                setCurrencyFilter(event.target.value.toUpperCase().slice(0, 3));
+              onChange={(v) => {
+                setCurrencyFilter(v);
                 setPage(1);
               }}
-              placeholder="Currency"
-              className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm uppercase focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
+              options={currencyListOptions}
+              buttonClassName="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
+              ariaLabel="Currency filter"
             />
             <CustomListbox
               value={sort}

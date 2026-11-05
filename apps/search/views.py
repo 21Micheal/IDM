@@ -37,6 +37,43 @@ SEARCH_SNIPPET_FIELDS = [
 
 MAX_SEARCH_LENGTH = 500
 
+MIME_FORMAT_MAP = {
+    "pdf": ["application/pdf"],
+    "word": [
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ],
+    "spreadsheet": [
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "text/csv",
+    ],
+    "presentation": [
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ],
+    "image": [
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/tiff",
+        "image/webp",
+    ],
+}
+
+
+def _expand_mime_types(value) -> list[str]:
+    expanded: list[str] = []
+    for item in _as_list(value):
+        token = str(item or "").strip().lower()
+        if not token:
+            continue
+        if token in MIME_FORMAT_MAP:
+            expanded.extend(MIME_FORMAT_MAP[token])
+        else:
+            expanded.append(str(item).strip())
+    return expanded
+
 _TOKEN_RE = re.compile(r"[\w-]+", re.UNICODE)
 _ES_HIGHLIGHT_TAG_RE = re.compile(r"</?em>")
 _QUERY_STRING_SPECIAL_RE = re.compile(r'([+\-=!(){}\[\]^"~?:\\/]|&&|\|\|)')
@@ -172,7 +209,8 @@ def _build_source_highlights(hit, search_text: str) -> dict[str, str]:
 
     highlights: dict[str, str] = {}
     for field in SEARCH_SNIPPET_FIELDS:
-        source_text = _as_searchable_text(getattr(hit, field, ""))
+        source_value = hit.get(field, "") if isinstance(hit, dict) else getattr(hit, field, "")
+        source_text = _as_searchable_text(source_value)
         if not source_text:
             continue
 
@@ -185,6 +223,30 @@ def _build_source_highlights(hit, search_text: str) -> dict[str, str]:
             highlights[field] = snippet
 
     return highlights
+
+
+def _build_document_highlights(document, search_text: str) -> dict[str, str]:
+    """Build stable context snippets from the current database source.
+
+    Elasticsearch's highlighter can omit fields when source fragments are
+    unavailable or the match is deep in a large extracted field. Use the
+    matching document's full source text as a fallback so every matching hit
+    can show context around the term.
+    """
+    from .documents import _metadata_search_text
+
+    metadata = document.metadata if isinstance(document.metadata, dict) else {}
+    personal_tags = metadata.get("personal_tags") or []
+    return _build_source_highlights({
+        "extracted_text": document.extracted_text or "",
+        "metadata_text": _metadata_search_text(metadata),
+        "supplier": document.supplier or "",
+        "title": document.title or "",
+        "reference_number": document.reference_number or "",
+        "file_name": document.file_name or "",
+        "tags": [tag.name for tag in document.tags.all()],
+        "personal_tags": personal_tags if isinstance(personal_tags, list) else [personal_tags],
+    }, search_text)
 
 
 def _clean_es_highlights(raw_highlights: dict[str, list[str] | str]) -> dict[str, str]:
@@ -290,28 +352,95 @@ class DocumentSearchView(APIView):
             )
 
         if filters.get("document_type"):
-            s = s.filter("term", document_type=filters["document_type"])
+            document_type = str(filters["document_type"]).strip()
+            from django.db.models import Q as DQ
+            from apps.documents.models import DocumentType
+
+            type_query = DQ(name__iexact=document_type) | DQ(code__iexact=document_type)
+            try:
+                type_query |= DQ(id=UUID(document_type))
+            except (ValueError, TypeError):
+                pass
+            resolved_type = DocumentType.objects.filter(type_query).first()
+            type_names = {document_type}
+            type_codes = {document_type.upper()}
+            should_clauses = []
+            if resolved_type:
+                type_names.add(resolved_type.name)
+                if resolved_type.code:
+                    type_codes.add(resolved_type.code.upper())
+                should_clauses.append(Q("term", document_type_id=str(resolved_type.id)))
+                should_clauses.append(Q("term", **{"document_type_id.keyword": str(resolved_type.id)}))
+            should_clauses.extend(Q("term", document_type=name) for name in type_names)
+            should_clauses.extend(Q("term", **{"document_type.keyword": name}) for name in type_names)
+            should_clauses.extend(Q("term", document_type_code=code) for code in type_codes)
+            should_clauses.extend(Q("term", **{"document_type_code.keyword": code}) for code in type_codes)
+            s = s.filter(
+                "bool",
+                should=should_clauses,
+                minimum_should_match=1,
+            )
 
         if filters.get("supplier"):
-            s = s.query("match_phrase_prefix", supplier=filters["supplier"])
-
-        if filters.get("status"):
-            statuses = _as_list(filters["status"])
+            supp_val = str(filters["supplier"]).strip()
+            wildcard_supp = f"*{supp_val}*"
             s = s.filter(
                 "bool",
                 should=[
-                    Q("terms", status=statuses),
-                    Q("terms", workflow_status=statuses),
+                    Q("match_phrase", supplier=supp_val),
+                    Q("match_phrase_prefix", supplier=supp_val),
+                    Q("wildcard", **{"supplier.keyword": {"value": wildcard_supp, "case_insensitive": True}}),
+                    Q("wildcard", **{"supplier": {"value": wildcard_supp, "case_insensitive": True}}),
+                    Q("term", **{"supplier.keyword": supp_val}),
+                    Q("term", supplier=supp_val),
                 ],
                 minimum_should_match=1,
             )
 
-        if filters.get("file_mime_type"):
-            mime_types = _as_list(filters["file_mime_type"])
-            s = s.filter("terms", file_mime_type=mime_types)
+        if filters.get("status"):
+            # Match DocumentFilter / DocumentsPage: filter the document `status`
+            # field only. Do NOT OR against workflow_status — that field is a
+            # derived label and historically mapped "approved" → pending_approval
+            # (substring "approve"), which leaked approved/rejected into Pending.
+            statuses = _as_list(filters["status"])
+            status_should = []
+            for raw in statuses:
+                token = str(raw or "").strip().lower()
+                if not token:
+                    continue
+                if token.startswith("pending"):
+                    status_should.append(Q("wildcard", status="*pending*"))
+                    status_should.append(Q("wildcard", **{"status.keyword": "*pending*"}))
+                else:
+                    status_should.append(Q("term", status=token))
+                    status_should.append(Q("term", **{"status.keyword": token}))
+            if status_should:
+                s = s.filter("bool", should=status_should, minimum_should_match=1)
+
+        format_arg = filters.get("format") or filters.get("file_mime_type")
+        if format_arg:
+            mime_types = _expand_mime_types(format_arg)
+            if mime_types:
+                s = s.filter(
+                    "bool",
+                    should=[
+                        Q("terms", file_mime_type=mime_types),
+                        Q("terms", **{"file_mime_type.keyword": mime_types}),
+                    ],
+                    minimum_should_match=1,
+                )
 
         if filters.get("currency"):
-            s = s.filter("term", currency=str(filters["currency"]).upper())
+            curr = str(filters["currency"]).strip().upper()
+            s = s.filter(
+                "bool",
+                should=[
+                    Q("term", currency=curr),
+                    Q("term", **{"currency.keyword": curr}),
+                    Q("term", currency=curr.lower()),
+                ],
+                minimum_should_match=1,
+            )
 
         if filters.get("is_self_upload") is not None:
             is_self_upload = _parse_bool(filters.get("is_self_upload"))
@@ -321,7 +450,8 @@ class DocumentSearchView(APIView):
         if filters.get("date_from"):
             s = s.filter("range", document_date={"gte": filters["date_from"]})
         if filters.get("date_to"):
-            s = s.filter("range", document_date={"lte": filters["date_to"]})
+            date_to_val = str(filters["date_to"]).strip()
+            s = s.filter("range", document_date={"lte": f"{date_to_val}||/d"})
 
         if filters.get("amount_min") is not None:
             try:
@@ -336,11 +466,25 @@ class DocumentSearchView(APIView):
 
         if filters.get("tags"):
             tags = _as_list(filters["tags"])
-            s = s.filter("terms", tags=tags)
+            s = s.filter(
+                "bool",
+                should=[
+                    Q("terms", tags=tags),
+                    Q("terms", **{"tags.keyword": tags}),
+                ],
+                minimum_should_match=1,
+            )
 
         if filters.get("personal_tags"):
             personal_tags = _as_list(filters["personal_tags"])
-            s = s.filter("terms", personal_tags=personal_tags)
+            s = s.filter(
+                "bool",
+                should=[
+                    Q("terms", personal_tags=personal_tags),
+                    Q("terms", **{"personal_tags.keyword": personal_tags}),
+                ],
+                minimum_should_match=1,
+            )
 
         ordering = _as_text(data.get("ordering"))
         sortable_fields = {
@@ -383,6 +527,17 @@ class DocumentSearchView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        # Fetch the selected source fields from the database as a reliable
+        # fallback for excerpts. Elasticsearch can return a match without a
+        # highlight fragment when the occurrence is deep in a large field.
+        from apps.documents.models import Document
+        source_documents = Document.objects.filter(
+            id__in=[hit.meta.id for hit in response.hits]
+        ).only(
+            "id", "metadata", "extracted_text", "supplier", "title",
+            "reference_number", "file_name", "document_type_id",
+        ).prefetch_related("tags").in_bulk()
+
         hits = []
         for hit in response.hits:
             highlight_dict = {}
@@ -392,6 +547,13 @@ class DocumentSearchView(APIView):
                 except Exception:
                     highlight_dict = {}
             source_highlights = _build_source_highlights(hit, search_text) if search_text else {}
+            try:
+                hit_uuid = UUID(str(hit.meta.id))
+            except (ValueError, TypeError):
+                hit_uuid = hit.meta.id
+            source_document = source_documents.get(hit_uuid) or source_documents.get(str(hit.meta.id)) or source_documents.get(hit.meta.id)
+            if source_document and search_text:
+                source_highlights.update(_build_document_highlights(source_document, search_text))
             highlight_dict = {**highlight_dict, **source_highlights}
 
             score = getattr(hit.meta, "score", 0)
@@ -402,12 +564,17 @@ class DocumentSearchView(APIView):
             except (TypeError, ValueError):
                 score = 0
 
+            doc_type_id = getattr(hit, "document_type_id", "")
+            if not doc_type_id and source_document and getattr(source_document, "document_type_id", None):
+                doc_type_id = str(source_document.document_type_id)
+
             hits.append({
                 "id": hit.meta.id,
                 "score": score,
                 "title": getattr(hit, "title", ""),
                 "reference_number": getattr(hit, "reference_number", ""),
                 "document_type": getattr(hit, "document_type", ""),
+                "document_type_id": doc_type_id,
                 "file_name": getattr(hit, "file_name", ""),
                 "file_mime_type": getattr(hit, "file_mime_type", ""),
                 "supplier": getattr(hit, "supplier", ""),
@@ -487,22 +654,36 @@ class DocumentSearchView(APIView):
 
         if filters.get("document_type"):
             dt = str(filters["document_type"]).strip()
-            # The frontend sends the type *name*; match on id too, but only when
-            # the value is a real UUID (else casting a name to the id field errors).
-            type_q = DQ(document_type__name=dt)
+            # Accept the display name, stable type code, or id so old search
+            # URLs and the type-code based filter use the same path.
+            type_q = DQ(document_type__name__iexact=dt) | DQ(document_type__code__iexact=dt)
             try:
                 type_q |= DQ(document_type_id=UUID(dt))
             except (ValueError, TypeError):
                 pass
             qs = qs.filter(type_q)
         if filters.get("supplier"):
-            qs = qs.filter(supplier__icontains=filters["supplier"])
+            qs = qs.filter(supplier__icontains=str(filters["supplier"]).strip())
         if filters.get("status"):
-            qs = qs.filter(status__in=_as_list(filters["status"]))
-        if filters.get("file_mime_type"):
-            qs = qs.filter(file_mime_type__in=_as_list(filters["file_mime_type"]))
+            # Same semantics as DocumentFilter.filter_status (status column only).
+            status_q = DQ()
+            for raw in _as_list(filters["status"]):
+                token = str(raw or "").strip().lower()
+                if not token:
+                    continue
+                if token.startswith("pending"):
+                    status_q |= DQ(status__icontains="pending")
+                else:
+                    status_q |= DQ(status=token)
+            if status_q:
+                qs = qs.filter(status_q).distinct()
+        format_arg = filters.get("format") or filters.get("file_mime_type")
+        if format_arg:
+            mime_types = _expand_mime_types(format_arg)
+            if mime_types:
+                qs = qs.filter(file_mime_type__in=mime_types)
         if filters.get("currency"):
-            qs = qs.filter(currency=str(filters["currency"]).upper())
+            qs = qs.filter(currency__iexact=str(filters["currency"]).strip())
         if filters.get("is_self_upload") is not None:
             is_self = _parse_bool(filters.get("is_self_upload"))
             if is_self is not None:
@@ -537,17 +718,9 @@ class DocumentSearchView(APIView):
         start = (page - 1) * page_size
         docs = list(qs[start:start + page_size])
 
-        terms = [t for t in search_text.split() if t] if search_text else []
         results = []
         for doc in docs:
-            highlights = {}
-            if search_text:
-                for field, text in (("extracted_text", doc.extracted_text), ("title", doc.title)):
-                    if not text:
-                        continue
-                    idx = _find_match_index(text, search_text, terms)
-                    if idx != -1:
-                        highlights[field] = [_sentence_around_match(text, idx)]
+            highlights = _build_document_highlights(doc, search_text) if search_text else {}
             meta = doc.metadata if isinstance(doc.metadata, dict) else {}
             personal_tags = meta.get("personal_tags") or []
             if not isinstance(personal_tags, list):
@@ -558,6 +731,7 @@ class DocumentSearchView(APIView):
                 "title": doc.title or "",
                 "reference_number": doc.reference_number or "",
                 "document_type": doc.document_type.name if doc.document_type_id else "",
+                "document_type_id": str(doc.document_type_id) if doc.document_type_id else "",
                 "file_name": doc.file_name or "",
                 "file_mime_type": doc.file_mime_type or "",
                 "supplier": doc.supplier or "",

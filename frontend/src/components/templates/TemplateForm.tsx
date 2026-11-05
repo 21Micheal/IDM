@@ -110,7 +110,6 @@ type Field = {
   workflowRole?: string;
   options?: string[]; columns?: Column[]; minRows?: number; totalLabel?: string;
   budgetLine?: { dimensions?: string[]; accountCodes?: string[] };
-  sunsystems?: { role?: string };
   currencySymbol?: string; currencyFromField?: string; referenceSource?: string; referenceGroupId?: string; tooltip?: string; regex?: string;
   min?: string | number; max?: string | number; minLength?: number; maxLength?: number;
   /* Number/currency display config — a "number" field with `currency` type (or
@@ -133,6 +132,7 @@ type Field = {
   /* External (SunSystems-backed) lookup — mirrors the builder's ExternalConfig. */
   external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string; fillDescriptionColumn?: string; fillDescriptionField?: string; fillTaxRateColumn?: string; fillTaxRateField?: string } | null;
   sunsystems?: {
+    role?: string;
     budgetAmountField?: string;
     monitoredAmountField?: string;
     account?: string;

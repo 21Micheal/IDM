@@ -6,6 +6,7 @@ from django.test import SimpleTestCase
 from apps.search.views import (
     _as_list,
     _es_value,
+    _expand_mime_types,
     _parse_bool,
     _parse_positive_int,
     _wildcard_query,
@@ -34,6 +35,11 @@ class SearchRequestParsingTests(SimpleTestCase):
         self.assertEqual(_as_list(["approved", "", None, "draft"]), ["approved", "draft"])
         self.assertEqual(_as_list(None), [])
 
+    def test_expand_mime_types_expands_format_aliases(self):
+        self.assertEqual(_expand_mime_types("pdf"), ["application/pdf"])
+        self.assertEqual(_expand_mime_types(["pdf", "application/json"]), ["application/pdf", "application/json"])
+        self.assertIn("application/vnd.ms-excel", _expand_mime_types("spreadsheet"))
+
     def test_wildcard_query_escapes_query_string_operators(self):
         self.assertEqual(_wildcard_query("INV-100 (draft)"), "*inv\\-100* AND *draft*")
 
@@ -61,3 +67,30 @@ class DocumentIndexAccessPreparationTests(SimpleTestCase):
             DocumentIndex().prepare_accessible_user_ids(document),
             ["user-1", "user-2", "user-3"],
         )
+
+    def test_workflow_status_keeps_approved_as_approved(self):
+        from apps.search.documents import DocumentIndex
+
+        # "approve" is a substring of "approved" — must not become pending_approval.
+        document = SimpleNamespace(
+            status="approved",
+            workflow_instance=None,
+        )
+        self.assertEqual(DocumentIndex().prepare_workflow_status(document), "approved")
+
+        rejected = SimpleNamespace(status="rejected", workflow_instance=None)
+        self.assertEqual(DocumentIndex().prepare_workflow_status(rejected), "rejected")
+
+        pending = SimpleNamespace(status="pending_approval", workflow_instance=None)
+        self.assertEqual(DocumentIndex().prepare_workflow_status(pending), "pending_approval")
+
+    def test_prepare_document_type_id(self):
+        from apps.search.documents import DocumentIndex
+
+        doc_with_type = SimpleNamespace(document_type_id="11111111-2222-3333-4444-555555555555")
+        self.assertEqual(
+            DocumentIndex().prepare_document_type_id(doc_with_type),
+            "11111111-2222-3333-4444-555555555555",
+        )
+        doc_without_type = SimpleNamespace(document_type_id=None)
+        self.assertEqual(DocumentIndex().prepare_document_type_id(doc_without_type), "")
