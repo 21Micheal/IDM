@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import type { SearchHit } from "@/types";
 import {
+  centerHighlightSnippet,
   escapeSearchRegex,
   getPreferredHighlights,
   getQuickSearchSnippet,
@@ -86,4 +87,20 @@ test("getQuickSearchSnippet falls back to highlighted metadata when no backend s
   assert.match(snippet.snippet, /<mark/);
   assert.match(snippet.snippet, /Nile Trading/);
   assert.match(snippet.snippet, />Blue<\/mark>/);
+});
+
+test("centerHighlightSnippet balances context before and after the mark", () => {
+  const longPreamble =
+    "DESCRIPTION CONDITION ORDERED RECEIVED Good / Hikvision 4MP IP Dome Cameras 12 12 " +
+    "Sealed Hikvision 16-Channel NVR (inc. 8TB Surveillance Good / 1 1 HDD) Sealed Good / " +
+    "D-Link 24-Port PoE+ Managed Switch 2 2 Sealed Good / Supreme Cat6 Pure <mark>Copper</mark> " +
+    "Cable Roll (305m) 3 3 Sealed Authorized Receiver Date Thank you for your business.";
+
+  const centered = centerHighlightSnippet(longPreamble, 55, 65);
+  assert.match(centered, /<mark>Copper<\/mark>/);
+  assert.doesNotMatch(centered, /DESCRIPTION CONDITION/);
+  assert.match(centered, /Supreme Cat6 Pure <mark>Copper<\/mark>/);
+  assert.match(centered, /Cable Roll/);
+  assert.match(centered, /^\.\.\./);
+  assert.match(centered, /\.\.\.$/);
 });

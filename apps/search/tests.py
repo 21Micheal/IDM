@@ -6,6 +6,7 @@ from django.test import SimpleTestCase
 from apps.search.views import (
     _as_list,
     _build_source_highlights,
+    _center_snippet_window,
     _clean_es_highlights,
     _es_value,
     _expand_mime_types,
@@ -111,12 +112,27 @@ class SearchHighlightingTests(SimpleTestCase):
             "Line Items (1/3)"
         )
         match_idx = text.lower().find("pepper")
-        snippet = _sentence_around_match(text, match_idx, search_text="pepper", context_chars=120)
+        snippet = _sentence_around_match(text, match_idx, search_text="pepper", before_chars=60, after_chars=70)
         self.assertIn("<mark>Pepper</mark>", snippet)
-        # Verify intermediate context is preserved across newlines
-        self.assertIn("PO Number: PO-98765-X", snippet)
+        # Verify intermediate context before and after is balanced
         self.assertIn("Manager:", snippet)
         self.assertIn("Potts Manhattan", snippet)
+
+    def test_center_snippet_window_centers_highlight_and_avoids_tail_truncation(self):
+        long_preamble = (
+            "DESCRIPTION CONDITION ORDERED RECEIVED Good / Hikvision 4MP IP Dome "
+            "Cameras 12 12 Sealed Hikvision 16-Channel NVR (inc. 8TB Surveillance Good / "
+            "1 1 HDD) Sealed Good / D-Link 24-Port PoE+ Managed Switch 2 2 Sealed Good / "
+            "Supreme Cat6 Pure <mark>Copper</mark> Cable Roll (305m) 3 3 Sealed Authorized"
+        )
+        centered = _center_snippet_window(long_preamble, before_chars=55, after_chars=65)
+        self.assertIn("<mark>Copper</mark>", centered)
+        # Preamble should be trimmed so <mark>Copper</mark> is near the middle
+        self.assertNotIn("DESCRIPTION CONDITION", centered)
+        self.assertIn("Supreme Cat6 Pure <mark>Copper</mark>", centered)
+        self.assertIn("Cable Roll", centered)
+        self.assertTrue(centered.startswith("..."))
+        self.assertTrue(centered.endswith("..."))
 
     def test_clean_es_highlights_normalizes_em_to_mark_and_cleans_whitespace(self):
         raw = {

@@ -89,6 +89,50 @@ export function highlightSearchText(text: string, term: string): string {
   return safeText.replace(regex, `<mark class="${MARK_CLASS}">$1</mark>`);
 }
 
+export function centerHighlightSnippet(
+  text: string,
+  beforeChars: number = 55,
+  afterChars: number = 65,
+): string {
+  if (!text) return "";
+  const clean = String(text).replace(/\s+/g, " ").trim();
+  const markMatch = clean.match(/<mark[^>]*>/i);
+  if (!markMatch || markMatch.index === undefined) return clean;
+
+  const markStart = markMatch.index;
+  const closeMatch = clean.slice(markStart).match(/<\/mark>/i);
+  const markEnd =
+    closeMatch && closeMatch.index !== undefined
+      ? markStart + closeMatch.index + closeMatch[0].length
+      : markStart + markMatch[0].length;
+
+  let prefix = clean.slice(0, markStart);
+  if (prefix.length > beforeChars) {
+    let cutStart = markStart - beforeChars;
+    const sp = prefix.lastIndexOf(" ", cutStart);
+    if (sp !== -1 && sp > cutStart - 20) {
+      cutStart = sp + 1;
+    }
+    prefix = `... ${clean.slice(cutStart, markStart)}`;
+  } else if (markStart > 0 && !prefix.startsWith("...")) {
+    prefix = `... ${prefix.replace(/^\.{3,}\s*/, "")}`;
+  }
+
+  let suffix = clean.slice(markEnd);
+  if (suffix.length > afterChars) {
+    let cutEnd = afterChars;
+    const sp = suffix.indexOf(" ", cutEnd);
+    if (sp !== -1 && sp < cutEnd + 20) {
+      cutEnd = sp;
+    }
+    suffix = `${suffix.slice(0, cutEnd)} ...`;
+  } else if (suffix.length > 0 && !suffix.endsWith("...")) {
+    suffix = `${suffix.replace(/\s*\.{3,}$/, "")} ...`;
+  }
+
+  return `${prefix}${clean.slice(markStart, markEnd)}${suffix}`.trim();
+}
+
 export function getPreferredHighlights(hit: SearchHit, term: string) {
   const searchRegex = buildSearchRegex(term);
 
@@ -100,6 +144,9 @@ export function getPreferredHighlights(hit: SearchHit, term: string) {
       if (!searchRegex) return true;
       searchRegex.lastIndex = 0;
       return searchRegex.test(stripSearchMarkup(snippet));
+    })
+    .map(([field, snippet]): [string, string] => {
+      return [field, centerHighlightSnippet(snippet, 55, 65)];
     })
     .sort(([fieldA], [fieldB]) => {
       const rankA = SEARCH_HIGHLIGHT_FIELD_PRIORITY.indexOf(fieldA);

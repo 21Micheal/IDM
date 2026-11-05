@@ -170,14 +170,63 @@ def _find_match_index(text: str, search_text: str, terms: list[str]) -> int:
     return min(indexes) if indexes else -1
 
 
+def _center_snippet_window(
+    text: str,
+    before_chars: int = 55,
+    after_chars: int = 65,
+) -> str:
+    """Center a snippet around its first <mark> tag so the match is never truncated."""
+    if not text:
+        return ""
+    clean = re.sub(r"\s+", " ", text).strip()
+    match = re.search(r"<mark>", clean, re.IGNORECASE)
+    if not match:
+        return clean
+
+    mark_start = match.start()
+    close_match = re.search(r"</mark>", clean[mark_start:], re.IGNORECASE)
+    mark_end = mark_start + close_match.end() if close_match else mark_start + 6
+
+    # Context before <mark>
+    if mark_start > before_chars:
+        cut_start = mark_start - before_chars
+        sp = clean.rfind(" ", max(0, cut_start - 20), cut_start)
+        if sp != -1:
+            cut_start = sp + 1
+        prefix = "... " + clean[cut_start:mark_start]
+    else:
+        prefix = clean[:mark_start]
+        if mark_start > 0 and not prefix.startswith("..."):
+            prefix = "... " + prefix.lstrip(". ")
+
+    # Context after </mark>
+    after_text = clean[mark_end:]
+    if len(after_text) > after_chars:
+        cut_end = after_chars
+        sp = after_text.find(" ", cut_end, min(len(after_text), cut_end + 20))
+        if sp != -1:
+            cut_end = sp
+        suffix = after_text[:cut_end] + " ..."
+    else:
+        suffix = after_text
+        if len(after_text) > 0 and not suffix.endswith("..."):
+            suffix = suffix.rstrip(". ") + " ..."
+
+    result = f"{prefix}{clean[mark_start:mark_end]}{suffix}".strip()
+    result = re.sub(r"^\.{3,}\s*", "... ", result)
+    result = re.sub(r"\s*\.{3,}$", " ...", result)
+    return result
+
+
 def _sentence_around_match(
     text: str,
     match_index: int,
     search_text: str = "",
     terms: list[str] | None = None,
-    context_chars: int = 140,
+    before_chars: int = 55,
+    after_chars: int = 65,
 ) -> str:
-    """Extract a generous intermediate context window around match_index with <mark> tags."""
+    """Extract a balanced context window around match_index with <mark> tags."""
     if match_index < 0 or not text:
         return ""
 
@@ -188,14 +237,14 @@ def _sentence_around_match(
                 match_len = len(t)
                 break
 
-    raw_start = max(0, match_index - context_chars)
-    raw_end = min(len(text), match_index + match_len + context_chars)
+    raw_start = max(0, match_index - before_chars)
+    raw_end = min(len(text), match_index + match_len + after_chars)
 
     # Expand to word boundary at start
     start = raw_start
     if start > 0:
-        sp = text.rfind(" ", max(0, start - 25), start)
-        nl = text.rfind("\n", max(0, start - 25), start)
+        sp = text.rfind(" ", max(0, start - 20), start)
+        nl = text.rfind("\n", max(0, start - 20), start)
         bound = max(sp, nl)
         if bound != -1:
             start = bound + 1
@@ -203,8 +252,8 @@ def _sentence_around_match(
     # Expand to word boundary at end
     end = raw_end
     if end < len(text):
-        sp = text.find(" ", end, min(len(text), end + 25))
-        nl = text.find("\n", end, min(len(text), end + 25))
+        sp = text.find(" ", end, min(len(text), end + 20))
+        nl = text.find("\n", end, min(len(text), end + 20))
         candidates = [c for c in (sp, nl) if c != -1]
         if candidates:
             end = min(candidates)
@@ -279,7 +328,11 @@ def _build_document_highlights(document, search_text: str) -> dict[str, str]:
     }, search_text)
 
 
-def _clean_es_highlights(raw_highlights: dict[str, list[str] | str]) -> dict[str, str]:
+def _clean_es_highlights(
+    raw_highlights: dict[str, list[str] | str],
+    before_chars: int = 55,
+    after_chars: int = 65,
+) -> dict[str, str]:
     cleaned = {}
     for field, value in raw_highlights.items():
         fragments = value if isinstance(value, list) else [value]
@@ -288,10 +341,7 @@ def _clean_es_highlights(raw_highlights: dict[str, list[str] | str]) -> dict[str
         text = re.sub(r"(?i)</em>", "</mark>", text)
         text = re.sub(r"\s+", " ", text).strip()
         if text:
-            if not text.startswith("..."):
-                text = f"... {text}"
-            if not text.endswith("..."):
-                text = f"{text} ..."
+            text = _center_snippet_window(text, before_chars=before_chars, after_chars=after_chars)
             cleaned[field] = text
     return cleaned
 
@@ -598,9 +648,19 @@ class DocumentSearchView(APIView):
             source_document = source_documents.get(hit_uuid) or source_documents.get(str(hit.meta.id)) or source_documents.get(hit.meta.id)
             if source_document and search_text:
                 source_highlights.update(_build_document_highlights(source_document, search_text))
-            # ES highlights reflect exact query matches and token boundaries;
-            # source_highlights provide intermediate context fallback for any missing fields.
-            highlight_dict = {**source_highlights, **highlight_dict}
+            # Merge highlights: if an ES highlight fragment is truncated at the end
+            # (less than 15 characters after </mark>), fall back to source_highlights
+            # which has full balanced context from the source document.
+            merged_highlights = dict(source_highlights)
+            for k, es_snip in highlight_dict.items():
+                src_snip = source_highlights.get(k, "")
+                after_match = re.search(r"</mark>(.*)", es_snip, re.IGNORECASE)
+                after_text = after_match.group(1).strip(". ") if after_match else ""
+                if len(after_text) < 15 and src_snip:
+                    merged_highlights[k] = src_snip
+                else:
+                    merged_highlights[k] = es_snip
+            highlight_dict = merged_highlights
 
             score = getattr(hit.meta, "score", 0)
             if score is None:
