@@ -12,10 +12,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Loader2, Type as TypeIcon, CalendarClock, Trash2, Undo2,
+  Loader2, Type as TypeIcon, CalendarClock, Undo2,
   PenLine, ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   Bold, Italic, AlignLeft, AlignCenter, AlignRight, CheckCircle2,
-  Sparkles, FileText, Check, Layers
+  FileText
 } from "lucide-react";
 import clsx from "clsx";
 import { documentsAPI, profileAPI } from "@/services/api";
@@ -281,6 +281,7 @@ export default function SignaturePlacementModal({
   const [error, setError] = useState("");
 
   const [items, setItems] = useState<PlacedItem[]>([]);
+  const initialSignaturePlaced = useRef(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [history, setHistory] = useState<PlacedItem[][]>([]);
 
@@ -291,7 +292,7 @@ export default function SignaturePlacementModal({
 
   // Date config
   const [dateFormatId, setDateFormatId] = useState(DATE_FORMATS[0].id);
-  const [dateValue, setDateValue] = useState<string>(() => isoDate(new Date()));
+  const [dateValue] = useState<string>(() => isoDate(new Date()));
 
   // Form mode field mapping selections & below-signature display toggles
   const [selectedSigField, setSelectedSigField] = useState<string>(() => {
@@ -301,7 +302,7 @@ export default function SignaturePlacementModal({
   });
   const [includeName, setIncludeName] = useState(true);
   const [includeDate, setIncludeDate] = useState(true);
-  const [customSignerName, setCustomSignerName] = useState(effectiveSignerName);
+  const customSignerName = effectiveSignerName;
 
   // Sync targetFieldKey if changed externally
   useEffect(() => {
@@ -423,6 +424,18 @@ export default function SignaturePlacementModal({
     if (selectedId === id) setSelectedId(null);
   };
 
+  const patchItem = (id: string, patch: Partial<PlacedItem>) => {
+    setItems((prev) => prev.map((item) => item.id === id ? { ...item, ...patch } : item));
+  };
+
+  const selectedItem = items.find((item) => item.id === selectedId) ?? null;
+
+  const styleSelectedItem = (patch: Partial<PlacedItem>) => {
+    if (!selectedItem) return;
+    pushHistory();
+    patchItem(selectedItem.id, patch);
+  };
+
   const currentDateText = useMemo(() => {
     const d = new Date(`${dateValue}T12:00:00`);
     const opt = DATE_FORMATS.find((f) => f.id === dateFormatId) ?? DATE_FORMATS[0];
@@ -466,6 +479,34 @@ export default function SignaturePlacementModal({
     updateItems([...items, item]);
     setSelectedId(item.id);
   };
+
+  // In PDF mode, open with the active signature already on the first rendered
+  // page. If the user switches signature sources, update that initial stamp.
+  useEffect(() => {
+    if (activeMode !== "pdf" || !activeSignatureImage || !pageSize.width) return;
+    const existing = items.find((item) => item.kind === "signature");
+    if (existing) {
+      if (existing.image_data !== activeSignatureImage) {
+        setItems((prev) => prev.map((item) => item.id === existing.id ? { ...item, image_data: activeSignatureImage } : item));
+      }
+      return;
+    }
+    if (initialSignaturePlaced.current) return;
+    initialSignaturePlaced.current = true;
+    const item: PlacedItem = {
+      id: uid(),
+      kind: "signature",
+      page_number: currentPage,
+      x_percent: 30,
+      y_percent: 65,
+      width_percent: 26,
+      height_percent: 10,
+      image_data: activeSignatureImage,
+    };
+    setItems((prev) => [...prev, item]);
+    setHistory((prev) => [...prev.slice(-29), items]);
+    setSelectedId(item.id);
+  }, [activeMode, activeSignatureImage, currentPage, items, pageSize.width]);
 
   const addTextItem = (kind: Extract<PlacedItemKind, "name" | "date" | "text">) => {
     const text = kind === "name" ? effectiveSignerName : kind === "date" ? currentDateText : "Certified Approved";
@@ -545,49 +586,44 @@ export default function SignaturePlacementModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-      <div className="flex max-h-[92vh] w-full max-w-5xl flex-col rounded-lg border border-[#C8CDD2] bg-white shadow-xl">
+      <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl bg-background shadow-2xl">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-[#E4E7EB] px-6 py-4">
+        <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-4">
           <div>
-            <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-[#EBF5FB] px-2.5 py-0.5 text-xs font-semibold text-[#287EAD]">
-                <Sparkles className="h-3 w-3" />
-                {activeMode === "pdf" ? "PDF Signature Placement" : "Form Signature Application"}
-              </span>
-              <h2 className="text-lg font-semibold text-[#1F2933]">
-                {documentTitle || "Apply Digital Signature"}
-              </h2>
-            </div>
-            {documentRef && <p className="text-xs text-[#5E6870] mt-0.5">Ref: {documentRef}</p>}
+            <h2 className="text-base font-semibold text-foreground">{activeMode === "pdf" ? "Place your signature" : "Apply signature to form"}</h2>
+            <p className="text-xs text-muted-foreground">
+              {activeMode === "pdf" ? `Drag and resize items · ${documentTitle || "this document"}${documentRef ? ` · ${documentRef}` : ""}` : `Signing ${documentTitle || "this form"}${documentRef ? ` · ${documentRef}` : ""}.`}
+            </p>
           </div>
           <button
             onClick={onCancel}
             disabled={isSubmitting}
-            className="rounded p-1 text-[#5E6870] hover:bg-[#F3F5F6] hover:text-[#1F2933]"
+            className="btn-secondary text-sm"
           >
-            ✕
+            Cancel
           </button>
         </div>
 
         {/* Content Body */}
-        <div className="grid flex-1 grid-cols-1 md:grid-cols-12 overflow-hidden min-h-[460px]">
+        <div className="grid min-h-[460px] min-h-0 flex-1 grid-cols-1 overflow-hidden lg:grid-cols-[1fr_360px]">
           {/* Controls Sidebar */}
-          <div className="md:col-span-4 border-r border-[#E4E7EB] bg-[#F9FAFB] p-5 overflow-y-auto space-y-5">
+          <div className="order-2 flex min-h-0 flex-col gap-4 overflow-auto border-t border-border p-5 lg:order-none lg:col-start-2 lg:row-start-1 lg:border-l lg:border-t-0">
             {/* Signature Source */}
             <div>
-              <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] mb-2 block">
-                Signature Source
-              </label>
-              <div className="grid grid-cols-2 gap-2 mb-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-sm font-semibold text-foreground">Signature</p>
+                <span className="text-[11px] text-muted-foreground">{activeMode === "pdf" && items.some((item) => item.kind === "signature") ? "Placed on page" : "Choose a source"}</span>
+              </div>
+              <div className="mb-3 grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => setUseNewSignature(false)}
                   disabled={!savedSignature?.image_data}
                   className={clsx(
-                    "flex flex-col items-center justify-center rounded border p-2.5 text-xs font-medium transition",
+                    "flex flex-col items-center justify-center rounded-md border p-2.5 text-xs font-medium transition",
                     !useNewSignature
-                      ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD] font-semibold"
-                      : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F4F6F8]",
+                      ? "border-primary bg-primary/5 text-primary font-semibold"
+                      : "border-border bg-background text-muted-foreground hover:bg-muted",
                     !savedSignature?.image_data && "opacity-50 cursor-not-allowed"
                   )}
                 >
@@ -598,10 +634,10 @@ export default function SignaturePlacementModal({
                   type="button"
                   onClick={() => setUseNewSignature(true)}
                   className={clsx(
-                    "flex flex-col items-center justify-center rounded border p-2.5 text-xs font-medium transition",
+                    "flex flex-col items-center justify-center rounded-md border p-2.5 text-xs font-medium transition",
                     useNewSignature
-                      ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD] font-semibold"
-                      : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F4F6F8]"
+                      ? "border-primary bg-primary/5 text-primary font-semibold"
+                      : "border-border bg-background text-muted-foreground hover:bg-muted"
                   )}
                 >
                   <PenLine className="h-4 w-4 mb-1" />
@@ -611,14 +647,14 @@ export default function SignaturePlacementModal({
 
               {/* Signature display / pad */}
               {!useNewSignature ? (
-                <div className="rounded border border-[#C8CDD2] bg-white p-3 text-center min-h-[100px] flex items-center justify-center">
+                  <div className="flex h-20 items-center justify-center rounded-md border border-dashed border-border bg-muted/20 p-2">
                   {signatureLoading ? (
                     <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
                   ) : savedSignature?.image_data ? (
                     <img
                       src={savedSignature.image_data}
                       alt="Saved Signature"
-                      className="max-h-20 object-contain mx-auto"
+                      className="max-h-full max-w-full object-contain"
                     />
                   ) : (
                     <div className="text-xs text-amber-700">
@@ -627,7 +663,7 @@ export default function SignaturePlacementModal({
                   )}
                 </div>
               ) : (
-                <div className="rounded border border-[#C8CDD2] bg-white p-2">
+                <div className="rounded-md border border-border p-2">
                   <SignaturePad onChange={setNewSignature} />
                 </div>
               )}
@@ -639,12 +675,9 @@ export default function SignaturePlacementModal({
                 Date & Format (EAT)
               </label>
               <div className="space-y-2">
-                <input
-                  type="date"
-                  value={dateValue}
-                  onChange={(e) => setDateValue(e.target.value)}
-                  className="w-full rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs text-[#1F2933] outline-none focus:border-[#287EAD]"
-                />
+                <div className="rounded border border-[#C8CDD2] bg-[#F4F6F8] px-3 py-1.5 text-xs text-[#1F2933]" aria-readonly="true">
+                  {currentDateText} <span className="text-[#5E6870]">(today, EAT)</span>
+                </div>
                 <select
                   value={dateFormatId}
                   onChange={(e) => setDateFormatId(e.target.value)}
@@ -688,15 +721,7 @@ export default function SignaturePlacementModal({
                       />
                       Include Name below signature
                     </label>
-                    {includeName && (
-                      <input
-                        type="text"
-                        value={customSignerName}
-                        onChange={(e) => setCustomSignerName(e.target.value)}
-                        placeholder="Signer full name"
-                        className="w-full rounded border border-[#C8CDD2] bg-[#FAFBFB] px-2.5 py-1 text-xs outline-none focus:border-[#287EAD]"
-                      />
-                    )}
+                    {includeName && <div className="rounded bg-[#F4F6F8] px-2.5 py-1.5 text-xs text-[#1F2933]" aria-readonly="true">{effectiveSignerName}</div>}
                   </div>
 
                   {/* Include Date Checkbox */}
@@ -721,49 +746,93 @@ export default function SignaturePlacementModal({
             )}
 
             {/* Stamp Buttons for Canvas Placement */}
-            <div className="border-t border-[#E4E7EB] pt-4">
-              <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] mb-2 block">
-                Interactive Stamps
+            <div className="rounded-lg border border-border p-3">
+              <label className="mb-2 block text-sm font-semibold text-foreground">
+                Place on document
               </label>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={addSignatureItem}
                   disabled={!hasSignatureSource}
-                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#287EAD] bg-white px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50"
+                  className="btn-primary col-span-2 flex items-center justify-center gap-2 disabled:opacity-50"
                 >
-                  <PenLine className="h-3.5 w-3.5" /> Stamp Signature
+                  <PenLine className="h-4 w-4" /> Add another signature
                 </button>
                 <button
                   type="button"
                   onClick={() => addTextItem("date")}
-                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-medium text-[#1F2933] hover:bg-[#F3F5F6]"
+                  className="btn-secondary flex items-center justify-center gap-1.5 text-xs"
                 >
-                  <CalendarClock className="h-3.5 w-3.5" /> Stamp Date
+                  <CalendarClock className="h-3.5 w-3.5" /> Add date
                 </button>
-              </div>
-              <div className="grid grid-cols-2 gap-2 mt-2">
                 <button
                   type="button"
                   onClick={() => addTextItem("name")}
-                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-medium text-[#1F2933] hover:bg-[#F3F5F6]"
+                  className="btn-secondary flex items-center justify-center gap-1.5 text-xs"
                 >
-                  <TypeIcon className="h-3.5 w-3.5" /> Stamp Name
+                  <TypeIcon className="h-3.5 w-3.5" /> Add name
                 </button>
                 <button
                   type="button"
                   onClick={undo}
                   disabled={!history.length}
-                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-medium text-[#5E6870] hover:bg-[#F3F5F6] disabled:opacity-40"
+                  className="btn-secondary col-span-2 flex items-center justify-center gap-1.5 disabled:opacity-40"
                 >
-                  <Undo2 className="h-3.5 w-3.5" /> Undo
+                  <Undo2 className="h-3.5 w-3.5" /> Undo last change
                 </button>
               </div>
             </div>
+
+            {selectedItem && selectedItem.kind !== "signature" && (
+              <div className="border-t border-[#E4E7EB] pt-4 space-y-3">
+                <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] block">
+                  {selectedItem.kind === "date" ? "Date stamp style" : selectedItem.kind === "name" ? "Name stamp style" : "Text stamp style"}
+                </label>
+                <select
+                  value={selectedItem.font_family ?? "helvetica"}
+                  onChange={(e) => styleSelectedItem({ font_family: e.target.value as PlacedItem["font_family"] })}
+                  className="w-full rounded border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs"
+                  aria-label="Stamp font"
+                >
+                  <option value="helvetica">Arial / Helvetica</option>
+                  <option value="times">Times New Roman</option>
+                  <option value="courier">Courier</option>
+                </select>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => styleSelectedItem({ bold: !selectedItem.bold })} className="rounded border px-2 py-1 text-xs" aria-pressed={!!selectedItem.bold}>Bold</button>
+                  <button type="button" onClick={() => styleSelectedItem({ italic: !selectedItem.italic })} className="rounded border px-2 py-1 text-xs" aria-pressed={!!selectedItem.italic}>Italic</button>
+                  <button type="button" onClick={() => styleSelectedItem({ align: "left" })} className="rounded border px-2 py-1 text-xs" aria-pressed={(selectedItem.align ?? "center") === "left"}>Left</button>
+                  <button type="button" onClick={() => styleSelectedItem({ align: "center" })} className="rounded border px-2 py-1 text-xs" aria-pressed={(selectedItem.align ?? "center") === "center"}>Center</button>
+                  <button type="button" onClick={() => styleSelectedItem({ align: "right" })} className="rounded border px-2 py-1 text-xs" aria-pressed={(selectedItem.align ?? "center") === "right"}>Right</button>
+                  <input type="color" value={selectedItem.color ?? "#1F2933"} onChange={(e) => styleSelectedItem({ color: e.target.value })} className="h-8 w-9 cursor-pointer rounded border bg-white p-0.5" title="Text colour" />
+                  <input type="range" min={0.8} max={6} step={0.1} value={selectedItem.font_percent ?? 1.6} onChange={(e) => styleSelectedItem({ font_percent: Number(e.target.value) })} className="min-w-0 flex-1 accent-primary" aria-label="Stamp font size" />
+                </div>
+                {selectedItem.kind === "date" && (
+                  <select
+                    value={selectedItem.date_format ?? DATE_FORMATS[0].id}
+                    onChange={(e) => {
+                      const date = selectedItem.date_iso ? new Date(selectedItem.date_iso) : new Date();
+                      const format = DATE_FORMATS.find((f) => f.id === e.target.value) ?? DATE_FORMATS[0];
+                      styleSelectedItem({ date_format: format.id, text: format.format(date) });
+                    }}
+                    className="w-full rounded border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs"
+                    aria-label="Date format"
+                  >
+                    {DATE_FORMATS.map((format) => <option key={format.id} value={format.id}>{format.label}</option>)}
+                  </select>
+                )}
+                {selectedItem.kind !== "date" && (
+                  <div className="rounded bg-[#F4F6F8] px-2.5 py-1.5 text-xs text-[#5E6870]" aria-readonly="true">
+                    {selectedItem.kind === "name" ? effectiveSignerName : selectedItem.text}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Canvas / Preview Stage */}
-          <div className="md:col-span-8 bg-[#E5E9EC] p-6 flex flex-col items-center justify-center overflow-auto relative">
+          <div className="relative order-1 min-h-0 overflow-auto bg-[#EDEDED] p-4 lg:order-none lg:col-start-1 lg:row-start-1">
             {error && (
               <div className="absolute top-4 left-4 right-4 z-20 rounded bg-red-50 border border-red-200 p-2.5 text-xs text-red-700">
                 {error}
@@ -771,53 +840,38 @@ export default function SignaturePlacementModal({
             )}
 
             {activeMode === "pdf" ? (
-              <div className="relative border border-[#C8CDD2] bg-white shadow-md">
-                <div ref={setHostEl} />
+              <>
+                <div className="mb-3 flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setCurrentPage((page) => Math.max(1, page - 1))} disabled={currentPage <= 1} className="btn-secondary px-2 py-1" aria-label="Previous page"><ChevronLeft className="h-4 w-4" /></button>
+                    <span className="text-sm text-foreground">Page {currentPage} of {totalPages || "…"}</span>
+                    <button onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))} disabled={!totalPages || currentPage >= totalPages} className="btn-secondary px-2 py-1" aria-label="Next page"><ChevronRight className="h-4 w-4" /></button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => undo()} disabled={!history.length} className="btn-secondary flex items-center gap-1 px-2 py-1 text-xs disabled:opacity-40"><Undo2 className="h-3.5 w-3.5" /> Undo</button>
+                    <span className="mx-1 h-4 w-px bg-border" />
+                    <button onClick={() => setScale((value) => Math.max(0.7, value - 0.1))} className="btn-secondary px-2 py-1" aria-label="Zoom out"><ZoomOut className="h-4 w-4" /></button>
+                    <span className="w-12 text-center text-xs text-muted-foreground">{Math.round(scale * 100)}%</span>
+                    <button onClick={() => setScale((value) => Math.min(2.5, value + 0.1))} className="btn-secondary px-2 py-1" aria-label="Zoom in"><ZoomIn className="h-4 w-4" /></button>
+                  </div>
+                </div>
+                <div className="relative mx-auto w-fit" onPointerDown={() => setSelectedId(null)}>
+                <div ref={setHostEl} className="relative" />
                 {/* Placed overlay items */}
-                {items
-                  .filter((i) => i.page_number === currentPage)
-                  .map((item) => (
-                    <div
-                      key={item.id}
-                      onClick={() => setSelectedId(item.id)}
-                      style={{
-                        position: "absolute",
-                        left: `${item.x_percent}%`,
-                        top: `${item.y_percent}%`,
-                        width: `${item.width_percent}%`,
-                        height: `${item.height_percent}%`,
-                      }}
-                      className={clsx(
-                        "group cursor-move select-none border border-dashed p-1",
-                        selectedId === item.id ? "border-[#287EAD] bg-blue-50/20" : "border-transparent"
-                      )}
-                    >
-                      {item.kind === "signature" && item.image_data ? (
-                        <img src={item.image_data} alt="signature" className="h-full w-full object-contain" />
-                      ) : (
-                        <div
-                          style={{
-                            fontFamily: FONT_CSS[item.font_family || "helvetica"],
-                            color: item.color || "#1F2933",
-                            textAlign: item.align || "center",
-                          }}
-                          className="h-full w-full flex items-center justify-center text-xs font-medium"
-                        >
-                          {item.text}
-                        </div>
-                      )}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removeItem(item.id);
-                        }}
-                        className="absolute -top-2 -right-2 hidden group-hover:flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-white text-[10px]"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-              </div>
+                {items.filter((item) => item.page_number === currentPage).map((item) => (
+                  <PlacedItemView
+                    key={item.id}
+                    item={item}
+                    selected={selectedId === item.id}
+                    pageSize={pageSize}
+                    onSelect={() => setSelectedId(item.id)}
+                    onChange={(patch) => patchItem(item.id, patch)}
+                    onCommit={pushHistory}
+                    onRemove={() => removeItem(item.id)}
+                  />
+                ))}
+                </div>
+              </>
             ) : (
               /* Direct Form Mode Preview Card — shows signature + neat Name & Date below */
               <div className="w-full max-w-lg rounded-lg border border-[#C8CDD2] bg-white p-6 shadow-sm">
@@ -856,22 +910,22 @@ export default function SignaturePlacementModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between border-t border-[#E4E7EB] bg-white px-6 py-4">
-          <p className="text-xs text-[#5E6870]">
+        <div className="flex items-center justify-between gap-3 border-t border-border bg-background px-5 py-4">
+          <p className="text-xs text-muted-foreground">
             Signatures and date stamps are verified and securely bound upon confirmation.
           </p>
           <div className="flex items-center gap-3">
             <button
               onClick={onCancel}
               disabled={isSubmitting}
-              className="rounded border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+              className="btn-secondary text-sm"
             >
               Cancel
             </button>
             <button
               onClick={handleConfirm}
               disabled={isSubmitting || !hasSignatureSource}
-              className="inline-flex items-center gap-2 rounded bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+              className="btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
             >
               {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               {confirmLabel}
@@ -881,4 +935,132 @@ export default function SignaturePlacementModal({
       </div>
     </div>
   );
+}
+
+type ResizeCorner = "nw" | "ne" | "sw" | "se";
+
+function PlacedItemView({
+  item,
+  selected,
+  pageSize,
+  onSelect,
+  onChange,
+  onCommit,
+  onRemove,
+}: {
+  item: PlacedItem;
+  selected: boolean;
+  pageSize: { width: number; height: number };
+  onSelect: () => void;
+  onChange: (patch: Partial<PlacedItem>) => void;
+  onCommit: () => void;
+  onRemove: () => void;
+}) {
+  const drag = useRef<{ mode: "move" | ResizeCorner; x: number; y: number; item: PlacedItem } | null>(null);
+  const aspect = useRef<number | null>(null);
+  const start = (mode: "move" | ResizeCorner) => (event: React.PointerEvent<HTMLElement>) => {
+    event.stopPropagation();
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    onSelect();
+    onCommit();
+    drag.current = { mode, x: event.clientX, y: event.clientY, item };
+  };
+  const move = (event: React.PointerEvent<HTMLElement>) => {
+    const state = drag.current;
+    if (!state || !pageSize.width || !pageSize.height) return;
+    const dx = ((event.clientX - state.x) / pageSize.width) * 100;
+    const dy = ((event.clientY - state.y) / pageSize.height) * 100;
+    const original = state.item;
+    if (state.mode === "move") {
+      onChange({
+        x_percent: clamp(original.x_percent + dx, 0, 100 - original.width_percent),
+        y_percent: clamp(original.y_percent + dy, 0, 100 - original.height_percent),
+      });
+      return;
+    }
+
+    let { x_percent: x, y_percent: y, width_percent: w, height_percent: h } = original;
+    const ratio = aspect.current ?? (w / Math.max(h, 0.1));
+    if (state.mode.includes("e")) w = clamp(original.width_percent + dx, 4, 100 - x);
+    if (state.mode.includes("w")) {
+      w = clamp(original.width_percent - dx, 4, original.x_percent + original.width_percent);
+      x = original.x_percent + original.width_percent - w;
+    }
+    if (original.kind === "signature") {
+      h = w / ratio;
+      if (state.mode.includes("n")) y = original.y_percent + original.height_percent - h;
+    } else {
+      if (state.mode.includes("s")) h = clamp(original.height_percent + dy, 2, 100 - y);
+      if (state.mode.includes("n")) {
+        h = clamp(original.height_percent - dy, 2, original.y_percent + original.height_percent);
+        y = original.y_percent + original.height_percent - h;
+      }
+    }
+    onChange({ x_percent: x, y_percent: y, width_percent: w, height_percent: h, ...(original.kind !== "signature" ? { font_percent: clamp(h * 0.62, 0.8, 8) } : {}) });
+  };
+  const end = () => { drag.current = null; };
+  const fontPx = (item.font_percent ?? 1.6) / 100 * pageSize.height;
+  const corners: ResizeCorner[] = ["nw", "ne", "sw", "se"];
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onPointerDown={start("move")}
+      onPointerMove={move}
+      onPointerUp={end}
+      onPointerCancel={end}
+      onClick={(event) => { event.stopPropagation(); onSelect(); }}
+      className={clsx("absolute flex items-center justify-center select-none touch-none", selected ? "z-20 ring-2 ring-[#287EAD]" : "z-10 ring-1 ring-transparent hover:ring-[#287EAD]/40", "cursor-move")}
+      style={{ left: `${item.x_percent}%`, top: `${item.y_percent}%`, width: `${item.width_percent}%`, height: `${item.height_percent}%` }}
+      title="Drag to move; use corner handles to resize"
+    >
+      {item.kind === "signature" ? (
+        <img
+          src={item.image_data}
+          alt="Signature"
+          draggable={false}
+          onLoad={(event) => {
+            const image = event.currentTarget;
+            if (!image.naturalHeight) return;
+            const ratio = image.naturalWidth / image.naturalHeight;
+            aspect.current = ratio;
+            const height = item.width_percent / ratio;
+            if (Math.abs(height - item.height_percent) > 0.5) onChange({ height_percent: height });
+          }}
+          className="pointer-events-none h-full w-full object-contain"
+        />
+      ) : (
+        <span
+          className="pointer-events-none block w-full truncate leading-none"
+          style={{
+            fontSize: Math.max(8, fontPx),
+            fontFamily: FONT_CSS[item.font_family ?? "helvetica"],
+            fontWeight: item.bold ? 700 : 400,
+            fontStyle: item.italic ? "italic" : "normal",
+            textAlign: item.align ?? "center",
+            color: item.color ?? "#1F2933",
+          }}
+        >{item.text}</span>
+      )}
+      {selected && <>
+        {corners.map((corner) => (
+          <span
+            key={corner}
+            onPointerDown={start(corner)}
+            onPointerMove={move}
+            onPointerUp={end}
+            onPointerCancel={end}
+            className={clsx("absolute z-30 h-3 w-3 rounded-full border-2 border-white bg-[#287EAD] shadow", corner === "nw" && "-left-1.5 -top-1.5 cursor-nwse-resize", corner === "ne" && "-right-1.5 -top-1.5 cursor-nesw-resize", corner === "sw" && "-bottom-1.5 -left-1.5 cursor-nesw-resize", corner === "se" && "-bottom-1.5 -right-1.5 cursor-nwse-resize")}
+          />
+        ))}
+        <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }} className="absolute -right-2 -top-7 z-30 flex h-6 w-6 items-center justify-center rounded-full bg-red-500 text-white shadow" title="Remove stamp">×</button>
+      </>}
+    </div>
+  );
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }
