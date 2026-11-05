@@ -26,6 +26,24 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 const pdfWorkerPath = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
 const pdfjsImportPromise = import("pdfjs-dist");
 
+/** Backend-generated file URLs can contain an internal Docker hostname (for
+ * example `backend:8000`). Route API file URLs through the same origin the SPA
+ * uses, which is also where the dev proxy exposes `/api/`. */
+function normalizePreviewUrl(url: string | null | undefined): string | undefined {
+  if (!url || !/^https?:\/\//i.test(url)) return url ?? undefined;
+  try {
+    const parsed = new URL(url);
+    if (parsed.pathname.startsWith("/api/")) {
+      parsed.protocol = window.location.protocol;
+      parsed.host = window.location.host;
+      return parsed.toString();
+    }
+  } catch {
+    // Keep the original URL if it cannot be parsed.
+  }
+  return url;
+}
+
 const EAT_TZ = "Africa/Nairobi";
 
 export type PlacedItemKind = "signature" | "date" | "name" | "text";
@@ -324,7 +342,7 @@ export default function SignaturePlacementModal({
     setPdfDoc(null);
     setTotalPages(0);
     setPageSize({ width: 0, height: 0 });
-    const previewUrl = preview?.url;
+    const previewUrl = normalizePreviewUrl(preview?.url);
     if (!previewUrl || preview.viewer !== "pdfjs") return;
 
     pdfjsImportPromise
