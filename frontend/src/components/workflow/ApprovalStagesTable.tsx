@@ -75,8 +75,12 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
     return index;
   };
 
-  const currentPhase =
-    phase && phaseRank(phase) >= 0 ? (phase as string) : null;
+  // Standalone Imprest uses a `request` CASE before `retirement`; request is
+  // intentionally outside the procurement ordering but still needs its own
+  // phase view in this table.
+  const currentPhase = phase && (
+    phaseRank(phase) >= 0 || taskSteps.some((step) => step.phase === phase)
+  ) ? phase : null;
   const phased = Boolean(currentPhase && taskSteps.some((step) => step.phase));
 
   const phaseCounts = useMemo(() => {
@@ -90,19 +94,28 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
   // Earlier procurement phases available behind a toggle (requisition before
   // rfq, requisition + rfq before lpo).  Later phases are never shown here.
   const earlierPhases = phased
-    ? PROCUREMENT_PHASE_ORDER.filter(
-        (name) =>
-          name !== currentPhase
-          && (phaseCounts.get(name) ?? 0) > 0
-          && phaseRank(name) < phaseRank(currentPhase ?? undefined),
-      )
+    ? [
+        ...(currentPhase !== "request" && phaseCounts.has("request") ? ["request"] : []),
+        ...PROCUREMENT_PHASE_ORDER.filter(
+          (name) =>
+            name !== currentPhase
+            && (phaseCounts.get(name) ?? 0) > 0
+            && phaseRank(name) < phaseRank(currentPhase ?? undefined),
+        ),
+      ]
     : [];
 
   const visibleSteps = useMemo(() => {
     if (!phased) return [...taskSteps].sort((a, b) => a.order - b.order);
+    if (currentPhase === "request") {
+      return taskSteps
+        .filter((step) => step.phase === "request")
+        .sort((a, b) => a.order - b.order);
+    }
     const currentRank = phaseRank(currentPhase ?? undefined);
     return taskSteps
       .filter((step) => {
+        if (step.phase === "request") return shownEarlierPhases.has("request");
         const rank = phaseRank(step.phase);
         if (rank < 0 || rank > currentRank) return false;
         return step.phase === currentPhase || shownEarlierPhases.has(step.phase ?? "");

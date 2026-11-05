@@ -498,19 +498,15 @@ export default function FormDetailPage() {
   const canSubmitRequest = ["draft", "returned"].includes(doc.status)
     && (!isRetirementPhase || doc.status === "returned")
     && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
-  // Only allow retirement submission if template has multiple stages configured (Stage 2 exists)
-  const hasRetirementStage = availableStages.includes(2)
-    || Boolean(doc.metadata?.form?.travel_retirement?.enabled);
-  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage
+  // Readiness (including the existence of a configured retirement route) is
+  // computed by the server for both standalone Imprest and Travel forms.
+  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized
     && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
   const canInitiateRetirement = canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit");
-  const showRetirementSubmit = Boolean(doc.metadata?.form?.travel_retirement?.enabled)
-    && requisitionApproved
-    && canInitiateRetirement
-    && hasVisibleRetirementEditSection(formData.sections ?? [], formData.values ?? {}, step, {
-      groupNames: user?.group_names ?? [],
-      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
-    });
+  // The server readiness flag covers both Travel retirement and the standalone
+  // Imprest request → retirement lifecycle. The latter has no travel_retirement
+  // setting, so gating this action on that config hid its Retirement CASE.
+  const showRetirementSubmit = canSubmitRetirement && canInitiateRetirement;
   // Server-computed, travel-aware: requisition -> (rfq | lpo for Travel) -> lpo.
   const procurementNextStage = doc.builder_next_stage ?? null;
   const canSubmitProcurementStage = Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
@@ -1206,7 +1202,7 @@ export default function FormDetailPage() {
               type="button"
               onClick={() => submitMutation.mutate("retirement")}
               disabled={submitMutation.isPending || !canSubmitRetirement}
-              title={canSubmitRetirement ? "Submit this form to the configured Retirement workflow case" : "Available after LPO approval and on or after the configured travel return date"}
+              title="Submit this form to the configured Retirement workflow case"
               className={cn(
                 "inline-flex h-9 items-center gap-1.5 rounded-lg px-4 text-xs font-semibold shadow-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50",
                 canSubmitRetirement
@@ -1215,7 +1211,7 @@ export default function FormDetailPage() {
               )}
             >
               {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-              Submit retirement
+              Submit Retirement
             </button>
           )}
           {showDraftEditAction && (

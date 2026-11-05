@@ -125,7 +125,18 @@ export function phaseOrdersFromDefinition(definition: unknown): Record<string, n
   if (!definition || typeof definition !== "object") return null;
   const def = definition as { version?: number; blocks?: DefinitionBlock[] };
   if (def.version !== 2 || !Array.isArray(def.blocks)) return null;
-  if (!def.blocks.some((b) => b?.kind === "switch" && b?.field_id === "context.phase")) {
+
+  const hasPhaseSwitch = (blocks: DefinitionBlock[] | undefined): boolean =>
+    (blocks ?? []).some((block) =>
+      (block?.kind === "switch" && block.field_id === "context.phase")
+      || hasPhaseSwitch(block?.blocks)
+      || hasPhaseSwitch(block?.default_blocks)
+      || (block?.cases ?? []).some((caseBlock) => hasPhaseSwitch(caseBlock.blocks))
+      || (block?.branches ?? []).some((branch) => hasPhaseSwitch(branch.blocks))
+      || hasPhaseSwitch(block?.else_blocks),
+    );
+
+  if (!hasPhaseSwitch(def.blocks)) {
     return null;
   }
 
@@ -262,55 +273,17 @@ export async function loadWorkflowData(
     template?.definition,
   );
 
-  // Filter steps to show only those that have tasks for this document instance.
-  // This prevents showing all template steps when a document only follows
-  // a specific path (e.g., only 1 or 2 steps instead of the full workflow).
-  const ordersWithTasks = new Set(orderedTasks.map((t) => t.step?.order).filter(Boolean));
-  let filteredSteps = steps;
-
-  // If there are fewer than 5 steps with tasks, this is likely a simple workflow
-  // or a document following a specific path. Show only the steps that have tasks.
-  // Always keep start and end nodes as visual indicators.
-  if (ordersWithTasks.size > 0 && ordersWithTasks.size < 5) {
-    // Separate out start, end, and task nodes
-    const startNode = steps.find((s) => s.kind === "start");
-    const endNode = steps.find((s) => s.kind === "end");
-    const taskNodes = steps.filter((s) => 
-      !s.kind || s.kind === "task" || s.kind === "gateway"
-    );
-
-    // Filter task nodes to only those with tasks
-    const filteredTaskNodes = taskNodes.filter((step) => ordersWithTasks.has(step.order));
-
-    // Rebuild the steps array with start, filtered tasks, and end
-    filteredSteps = [];
-    if (startNode) filteredSteps.push(startNode);
-    filteredSteps.push(...filteredTaskNodes);
-    if (endNode) {
-      // Update the last task's next to point to end
-      if (filteredTaskNodes.length > 0) {
-        const lastTask = filteredTaskNodes[filteredTaskNodes.length - 1];
-        lastTask.next = ["end"];
-      }
-      // Recalculate end node column
-      const lastColumn = Math.max(...filteredSteps.map((s) => s.column ?? 0), 0);
-      filteredSteps.push({
-        ...endNode,
-        column: lastColumn + 1,
-      });
-    }
-  }
+  // Keep configured future steps even before they have task rows. V2 CASE
+  // workflows create tasks as each approver becomes active; filtering by
+  // existing tasks made a multi-step phase look like it had only one step and
+  // made a not-yet-submitted retirement CASE look unconfigured.
+  const filteredSteps = steps;
 
   // The workflow is still "live" (worth polling) while at least one stage is
   // running or yet to be reached, and it hasn't ended in a rejection.
-  const taskSteps = filteredSteps.filter((step) => !step.kind || step.kind === "task");
-  const isActive = orderedTasks.length > 0
-    && taskSteps.some((step) =>
-      step.status === "in-progress" ||
-      step.status === "on-hold" ||
-      step.status === "returned" ||
-      step.status === "pending",
-    );
+  const isActive = instance
+    ? instance.status === "in_progress"
+    : orderedTasks.some((task) => ["in_progress", "held", "pending", "returned"].includes(String(task.status ?? "").toLowerCase()));
 
   return {
     steps: filteredSteps,
