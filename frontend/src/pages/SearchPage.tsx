@@ -19,7 +19,7 @@ import CustomListbox from "@/components/ui/CustomListbox";
 import { documentsAPI, documentTypesAPI, normalizeListResponse, searchAPI } from "@/services/api";
 import type { DocumentSearchResponse, DocumentType, SearchHit } from "@/types";
 import { useDebounce } from "@/hooks/useDebounce";
-import { getPreferredHighlights, highlightSearchText } from "@/lib/search";
+import { getPreferredHighlights, getQuickSearchSnippet, highlightSearchText } from "@/lib/search";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 import statusUtils from "@/lib/status";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
@@ -635,7 +635,7 @@ export default function SearchPage() {
                         </h3>
                       </Link>
 
-                      {preferredHighlights.length > 0 && (
+                      {preferredHighlights.length > 0 ? (
                         <div className="mt-3 max-w-4xl space-y-2 border-l-2 border-[#A7CDE3] pl-3 text-sm leading-6 text-[#4B5560]">
                           {preferredHighlights.map(([field, snippet]) => (
                             <p key={field}>
@@ -647,6 +647,16 @@ export default function SearchPage() {
                             </p>
                           ))}
                         </div>
+                      ) : (
+                        Boolean(debouncedSearchTerm.trim()) && (
+                          <div className="mt-2 text-xs text-[#707B85]">
+                            <span
+                              dangerouslySetInnerHTML={{
+                                __html: getQuickSearchSnippet(hit, debouncedSearchTerm).snippet,
+                              }}
+                            />
+                          </div>
+                        )
                       )}
                     </div>
 

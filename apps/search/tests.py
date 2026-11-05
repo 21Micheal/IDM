@@ -5,10 +5,13 @@ from django.test import SimpleTestCase
 
 from apps.search.views import (
     _as_list,
+    _build_source_highlights,
+    _clean_es_highlights,
     _es_value,
     _expand_mime_types,
     _parse_bool,
     _parse_positive_int,
+    _sentence_around_match,
     _wildcard_query,
 )
 
@@ -94,3 +97,50 @@ class DocumentIndexAccessPreparationTests(SimpleTestCase):
         )
         doc_without_type = SimpleNamespace(document_type_id=None)
         self.assertEqual(DocumentIndex().prepare_document_type_id(doc_without_type), "")
+
+
+class SearchHighlightingTests(SimpleTestCase):
+    def test_sentence_around_match_preserves_intermediate_context_across_newlines(self):
+        text = (
+            "BILL TO: PROJECT REFERENCE:\n"
+            "Stark Industries Project: Global Logistics Overhaul\n"
+            "Attn: Accounts Payable PO Number: PO-98765-X\n"
+            "890 Fifth Avenue Manager: Pepper Potts\n"
+            "Manhattan, NY 10021\n"
+            "United States\n"
+            "Line Items (1/3)"
+        )
+        match_idx = text.lower().find("pepper")
+        snippet = _sentence_around_match(text, match_idx, search_text="pepper", context_chars=120)
+        self.assertIn("<mark>Pepper</mark>", snippet)
+        # Verify intermediate context is preserved across newlines
+        self.assertIn("PO Number: PO-98765-X", snippet)
+        self.assertIn("Manager:", snippet)
+        self.assertIn("Potts Manhattan", snippet)
+
+    def test_clean_es_highlights_normalizes_em_to_mark_and_cleans_whitespace(self):
+        raw = {
+            "extracted_text": [
+                "Invoice #INV-2024-001\nAttn: <em>Pepper</em> Potts\nDue Date: Nov 23"
+            ]
+        }
+        cleaned = _clean_es_highlights(raw)
+        self.assertIn("extracted_text", cleaned)
+        self.assertIn("<mark>Pepper</mark>", cleaned["extracted_text"])
+        self.assertNotIn("<em>", cleaned["extracted_text"])
+        self.assertNotIn("\n", cleaned["extracted_text"])
+        self.assertTrue(cleaned["extracted_text"].startswith("..."))
+        self.assertTrue(cleaned["extracted_text"].endswith("..."))
+
+    def test_build_source_highlights_extracts_all_matching_fields(self):
+        hit = {
+            "title": "Invoice for Pepper",
+            "extracted_text": "Details: Pepper delivery to warehouse",
+            "supplier": "Acme Corp",
+        }
+        highlights = _build_source_highlights(hit, "pepper")
+        self.assertIn("title", highlights)
+        self.assertIn("extracted_text", highlights)
+        self.assertNotIn("supplier", highlights)
+        self.assertIn("<mark>Pepper</mark>", highlights["title"])
+        self.assertIn("<mark>Pepper</mark>", highlights["extracted_text"])

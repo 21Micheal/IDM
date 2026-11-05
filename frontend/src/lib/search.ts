@@ -13,6 +13,8 @@ const SEARCH_HIGHLIGHT_FIELD_PRIORITY = [
   "reference_number",
 ];
 
+const MARK_CLASS = "rounded bg-[#FEF08A] text-[#1F2933] font-semibold px-1 py-0.5 shadow-sm";
+
 export function escapeSearchRegex(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -27,7 +29,7 @@ function escapeHtml(value: string) {
 }
 
 export function stripSearchMarkup(value: string) {
-  return String(value || "").replace(/<\/?em>/g, "");
+  return String(value || "").replace(/<\/?(?:em|mark)[^>]*>/gi, "");
 }
 
 export function getSearchTerms(term: string) {
@@ -52,15 +54,39 @@ function buildSearchRegex(term: string) {
   return uniqueParts.length ? new RegExp(`(${uniqueParts.join("|")})`, "gi") : null;
 }
 
-export function highlightSearchText(text: string, term: string) {
-  const safeText = escapeHtml(stripSearchMarkup(text));
+export function highlightSearchText(text: string, term: string): string {
+  if (!text) return "";
+  const raw = String(text);
+
+  // If text already contains <mark> or <em> tags from backend search / highlight:
+  if (/<(?:mark|em)[^>]*>/i.test(raw)) {
+    const tokens = raw.split(/(<\/?(?:mark|em)[^>]*>)/gi);
+    const regex = buildSearchRegex(term);
+    let inMark = false;
+
+    return tokens
+      .map((token) => {
+        if (/^<(?:mark|em)[^>]*>$/i.test(token)) {
+          inMark = true;
+          return `<mark class="${MARK_CLASS}">`;
+        }
+        if (/^<\/(?:mark|em)>$/i.test(token)) {
+          inMark = false;
+          return "</mark>";
+        }
+        const safe = escapeHtml(token);
+        if (inMark || !regex) return safe;
+        return safe.replace(regex, `<mark class="${MARK_CLASS}">$1</mark>`);
+      })
+      .join("");
+  }
+
+  // Plain text: escape HTML and highlight matching terms
+  const safeText = escapeHtml(raw);
   const regex = buildSearchRegex(term);
   if (!safeText || !regex) return safeText;
 
-  return safeText.replace(
-    regex,
-    '<mark class="rounded bg-accent/20 px-0.5 text-foreground">$1</mark>',
-  );
+  return safeText.replace(regex, `<mark class="${MARK_CLASS}">$1</mark>`);
 }
 
 export function getPreferredHighlights(hit: SearchHit, term: string) {
@@ -68,6 +94,9 @@ export function getPreferredHighlights(hit: SearchHit, term: string) {
 
   return Object.entries(hit.highlights ?? {})
     .filter(([, snippet]) => {
+      if (!snippet) return false;
+      // If the snippet already has mark or em tags from the backend highlighter, it's a confirmed match
+      if (/<(?:mark|em)[^>]*>/i.test(snippet)) return true;
       if (!searchRegex) return true;
       searchRegex.lastIndex = 0;
       return searchRegex.test(stripSearchMarkup(snippet));
@@ -91,7 +120,7 @@ export function getQuickSearchSnippet(hit: SearchHit, term: string) {
     };
   }
 
-  const fallbackSource = hit.supplier || hit.title || hit.reference_number;
+  const fallbackSource = hit.supplier || hit.title || hit.reference_number || hit.file_name || "";
   return {
     snippet: highlightSearchText(fallbackSource, term),
     isFallback: true,

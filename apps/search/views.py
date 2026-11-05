@@ -75,7 +75,7 @@ def _expand_mime_types(value) -> list[str]:
     return expanded
 
 _TOKEN_RE = re.compile(r"[\w-]+", re.UNICODE)
-_ES_HIGHLIGHT_TAG_RE = re.compile(r"</?em>")
+_ES_LEGACY_TAG_RE = re.compile(r"</?em>", re.IGNORECASE)
 _QUERY_STRING_SPECIAL_RE = re.compile(r'([+\-=!(){}\[\]^"~?:\\/]|&&|\|\|)')
 
 
@@ -170,36 +170,66 @@ def _find_match_index(text: str, search_text: str, terms: list[str]) -> int:
     return min(indexes) if indexes else -1
 
 
-def _sentence_around_match(text: str, match_index: int, max_length: int = 260) -> str:
-    if match_index < 0:
+def _sentence_around_match(
+    text: str,
+    match_index: int,
+    search_text: str = "",
+    terms: list[str] | None = None,
+    context_chars: int = 140,
+) -> str:
+    """Extract a generous intermediate context window around match_index with <mark> tags."""
+    if match_index < 0 or not text:
         return ""
 
-    before = text.rfind(".", 0, match_index)
-    before = max(before, text.rfind("!", 0, match_index), text.rfind("?", 0, match_index), text.rfind("\n", 0, match_index))
-    start = before + 1 if before != -1 else 0
+    match_len = len(search_text.strip()) if search_text.strip() else 4
+    if terms:
+        for t in terms:
+            if t in text.lower():
+                match_len = len(t)
+                break
 
-    after_candidates = [
-        index for index in (
-            text.find(".", match_index),
-            text.find("!", match_index),
-            text.find("?", match_index),
-            text.find("\n", match_index),
-        )
-        if index != -1
-    ]
-    end = min(after_candidates) + 1 if after_candidates else len(text)
+    raw_start = max(0, match_index - context_chars)
+    raw_end = min(len(text), match_index + match_len + context_chars)
 
-    if end - start > max_length:
-        half_context = max_length // 2
-        start = max(0, match_index - half_context)
-        end = min(len(text), match_index + half_context)
-
-    snippet = re.sub(r"\s+", " ", text[start:end]).strip()
+    # Expand to word boundary at start
+    start = raw_start
     if start > 0:
-        snippet = f"... {snippet}"
+        sp = text.rfind(" ", max(0, start - 25), start)
+        nl = text.rfind("\n", max(0, start - 25), start)
+        bound = max(sp, nl)
+        if bound != -1:
+            start = bound + 1
+
+    # Expand to word boundary at end
+    end = raw_end
     if end < len(text):
-        snippet = f"{snippet} ..."
-    return snippet
+        sp = text.find(" ", end, min(len(text), end + 25))
+        nl = text.find("\n", end, min(len(text), end + 25))
+        candidates = [c for c in (sp, nl) if c != -1]
+        if candidates:
+            end = min(candidates)
+
+    window = text[start:end]
+    cleaned = re.sub(r"\s+", " ", window).strip()
+
+    # Wrap matching terms in <mark>...</mark> if not already wrapped
+    all_terms = []
+    if search_text.strip():
+        all_terms.append(search_text.strip())
+    if terms:
+        all_terms.extend(terms)
+
+    unique_terms = sorted(set(all_terms), key=lambda x: len(x), reverse=True)
+    if unique_terms:
+        pattern = re.compile(
+            r"(?<!<mark>)(?:\b)(" + "|".join(re.escape(t) for t in unique_terms) + r")(?:\b)(?!</mark>)",
+            re.IGNORECASE,
+        )
+        cleaned = pattern.sub(r"<mark>\1</mark>", cleaned)
+
+    prefix = "... " if start > 0 else ""
+    suffix = " ..." if end < len(text) else ""
+    return f"{prefix}{cleaned}{suffix}".strip()
 
 
 def _build_source_highlights(hit, search_text: str) -> dict[str, str]:
@@ -218,7 +248,7 @@ def _build_source_highlights(hit, search_text: str) -> dict[str, str]:
         if match_index == -1:
             continue
 
-        snippet = _sentence_around_match(source_text, match_index)
+        snippet = _sentence_around_match(source_text, match_index, search_text, terms)
         if snippet:
             highlights[field] = snippet
 
@@ -254,8 +284,14 @@ def _clean_es_highlights(raw_highlights: dict[str, list[str] | str]) -> dict[str
     for field, value in raw_highlights.items():
         fragments = value if isinstance(value, list) else [value]
         text = " ... ".join(str(fragment) for fragment in fragments if fragment)
-        text = _ES_HIGHLIGHT_TAG_RE.sub("", text)
+        text = re.sub(r"(?i)<em>", "<mark>", text)
+        text = re.sub(r"(?i)</em>", "</mark>", text)
+        text = re.sub(r"\s+", " ", text).strip()
         if text:
+            if not text.startswith("..."):
+                text = f"... {text}"
+            if not text.endswith("..."):
+                text = f"{text} ..."
             cleaned[field] = text
     return cleaned
 
@@ -313,20 +349,23 @@ class DocumentSearchView(APIView):
                             query=search_text,
                             fields=SEARCH_TEXT_FIELDS,
                             type="phrase",
+                            boost=10,
+                        ),
+                        Q(
+                            "multi_match",
+                            query=search_text,
+                            fields=SEARCH_TEXT_FIELDS,
+                            operator="and",
                             boost=4,
                         ),
                         Q(
                             "multi_match",
                             query=search_text,
                             fields=SEARCH_TEXT_FIELDS,
+                            fuzziness=1,
+                            prefix_length=2,
                             operator="and",
-                        ),
-                        Q(
-                            "multi_match",
-                            query=search_text,
-                            fields=SEARCH_TEXT_FIELDS,
-                            fuzziness="AUTO",
-                            operator="and",
+                            boost=0.5,
                         ),
                         *(
                             [
@@ -336,16 +375,17 @@ class DocumentSearchView(APIView):
                                     fields=SEARCH_TEXT_FIELDS,
                                     default_operator="AND",
                                     analyze_wildcard=True,
+                                    boost=2,
                                 )
                             ]
                             if wildcard_query
                             else []
                         ),
-                        Q("prefix", title=search_text.lower()),
-                        Q("prefix", reference_number=search_text.lower()),
-                        Q("prefix", supplier=search_text.lower()),
-                        Q("prefix", **{"tags": search_text.lower()}),
-                        Q("prefix", **{"personal_tags": search_text.lower()}),
+                        Q("prefix", title={"value": search_text.lower(), "boost": 4}),
+                        Q("prefix", reference_number={"value": search_text.lower(), "boost": 4}),
+                        Q("prefix", supplier={"value": search_text.lower(), "boost": 3}),
+                        Q("prefix", **{"tags": {"value": search_text.lower(), "boost": 3}}),
+                        Q("prefix", **{"personal_tags": {"value": search_text.lower(), "boost": 3}}),
                     ],
                     minimum_should_match=1,
                 )
@@ -508,15 +548,19 @@ class DocumentSearchView(APIView):
 
         s = s.highlight(
             "title",
+            "reference_number",
+            "supplier",
+            "file_name",
             "extracted_text",
             "metadata_text",
             "tags",
             "personal_tags",
-            fragment_size=180,
+            pre_tags=["<mark>"],
+            post_tags=["</mark>"],
+            fragment_size=240,
             number_of_fragments=2,
-            boundary_scanner="sentence",
             order="score",
-            require_field_match=True,
+            require_field_match=False,
         )
 
         try:
@@ -554,7 +598,9 @@ class DocumentSearchView(APIView):
             source_document = source_documents.get(hit_uuid) or source_documents.get(str(hit.meta.id)) or source_documents.get(hit.meta.id)
             if source_document and search_text:
                 source_highlights.update(_build_document_highlights(source_document, search_text))
-            highlight_dict = {**highlight_dict, **source_highlights}
+            # ES highlights reflect exact query matches and token boundaries;
+            # source_highlights provide intermediate context fallback for any missing fields.
+            highlight_dict = {**source_highlights, **highlight_dict}
 
             score = getattr(hit.meta, "score", 0)
             if score is None:
