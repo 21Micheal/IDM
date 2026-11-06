@@ -29,11 +29,9 @@ function ReviewQueueList() {
     queryKey: ["review-queue"],
     queryFn: () =>
       bulkUploadAPI.list().then((r) => normalizeListResponse<BulkUploadSummary>(r.data)),
-    // Keep the queue fresh while batches are still being OCR'd.
-    refetchInterval: (query) => {
-      const batches = (query.state.data as BulkUploadSummary[] | undefined) ?? [];
-      return batches.some((b) => b.status === "processing") ? 4000 : false;
-    },
+    // Email polls and bulk uploads can create a review batch at any time. Keep
+    // the queue live even when nothing is currently in its processing state.
+    refetchInterval: 4000,
   });
 
   const batches = batchesQuery.data ?? [];

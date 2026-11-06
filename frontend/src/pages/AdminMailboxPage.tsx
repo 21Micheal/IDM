@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BarChart3, Inbox, Loader2, Mail, Pencil, PlugZap, RefreshCw, Trash2, X, Plus } from "lucide-react";
+import { BarChart3, Inbox, Loader2, Mail, Pencil, PlugZap, RefreshCw, Trash2, Plus } from "lucide-react";
 import clsx from "clsx";
 import {
   Bar,
@@ -47,7 +47,6 @@ const POLL_INTERVAL_OPTIONS = [
 const inputCls =
   "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
 const labelCls = "mb-1 block text-xs font-medium uppercase tracking-wide text-[#6E767D]";
-const panelCls = "border border-[#C8CDD2] bg-white";
 const panelHeaderCls = "flex items-center gap-2 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3";
 const btnPrimary =
   "inline-flex items-center gap-2 bg-[#287EAD] px-3 h-9 text-sm font-medium text-white hover:bg-[#226c95] disabled:opacity-50";
@@ -193,21 +192,16 @@ export default function AdminMailboxPage() {
   const mailboxesQuery = useQuery({
     queryKey: ["mailboxes"],
     queryFn: () => mailboxAPI.list().then((r) => normalizeListResponse<Mailbox>(r.data)),
-    // Poll while any mailbox is actively polling so progress stays live.
-    refetchInterval: (query) => {
-      const boxes = (query.state.data as Mailbox[] | undefined) ?? [];
-      return boxes.some((b) => b.poll_status === "polling") ? 3000 : false;
-    },
+    // A mailbox can complete ingestion between scheduled status changes. Keep
+    // its counters and latest-poll state fresh while this admin screen is open.
+    refetchInterval: 4000,
   });
 
   const detailQuery = useQuery({
     queryKey: ["mailbox", selectedId],
     queryFn: () => mailboxAPI.get(selectedId as string).then((r) => r.data),
     enabled: Boolean(selectedId),
-    refetchInterval: (query) => {
-      const box = query.state.data as Mailbox | undefined;
-      return box && box.poll_status === "polling" ? 3000 : false;
-    },
+    refetchInterval: 4000,
   });
 
   const setField = (key: keyof MailboxConnection, value: string | boolean | number) =>
@@ -669,7 +663,7 @@ export default function AdminMailboxPage() {
 
       {/* ── New / edit mailbox dialog ── */}
       <Dialog open={isNewMailboxModalOpen} onOpenChange={setIsNewMailboxModalOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto pointer-events-auto">
           <DialogHeader>
             <DialogTitle>{editingId ? "Edit mailbox" : "New mailbox"}</DialogTitle>
           </DialogHeader>
@@ -684,18 +678,117 @@ export default function AdminMailboxPage() {
               />
             </div>
             <div>
+              <label className={labelCls}>Mail service</label>
+              <select
+                className={`${inputCls} cursor-pointer`}
+                value={protocol}
+                onChange={(e) => changeProtocol(e.target.value as MailboxProtocol)}
+                aria-label="Mail service"
+              >
+                <option value="imap">IMAP</option>
+                <option value="graph">Microsoft 365 (Graph)</option>
+              </select>
+            </div>
+            <div className="md:col-span-2 border border-[#E5E7EB] bg-[#F9FAFB] p-3">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-[#5E6870]">
+                  {protocol === "graph" ? "Microsoft Graph connection" : "IMAP connection"}
+                </p>
+                <button
+                  type="button"
+                  className={btnGhost}
+                  onClick={() => testMutation.mutate()}
+                  disabled={testMutation.isPending}
+                >
+                  {testMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
+                  Test connection
+                </button>
+              </div>
+              {protocol === "graph" ? (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <div>
+                    <label className={labelCls}>Tenant ID</label>
+                    <input className={inputCls} value={connection.tenant_id ?? ""} onChange={(e) => setField("tenant_id", e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Application (client) ID</label>
+                    <input className={inputCls} value={connection.client_id ?? ""} onChange={(e) => setField("client_id", e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Client secret</label>
+                    <input
+                      className={inputCls}
+                      type="password"
+                      value={connection.client_secret ?? ""}
+                      onChange={(e) => setField("client_secret", e.target.value)}
+                      placeholder={editingId ? "Leave blank to keep the saved secret" : ""}
+                      autoComplete="new-password"
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Mailbox email / user principal name</label>
+                    <input className={inputCls} type="email" value={connection.mailbox ?? ""} onChange={(e) => setField("mailbox", e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Mail folder</label>
+                    <input className={inputCls} value={connection.folder ?? "inbox"} onChange={(e) => setField("folder", e.target.value)} />
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <div>
+                    <label className={labelCls}>IMAP server</label>
+                    <input className={inputCls} value={connection.host ?? ""} onChange={(e) => setField("host", e.target.value)} placeholder="imap.example.com" />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Port</label>
+                    <input className={inputCls} type="number" min={1} max={65535} value={connection.port ?? 993} onChange={(e) => setField("port", Number(e.target.value))} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Username</label>
+                    <input className={inputCls} value={connection.username ?? ""} onChange={(e) => setField("username", e.target.value)} autoComplete="username" />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Password</label>
+                    <input
+                      className={inputCls}
+                      type="password"
+                      value={connection.password ?? ""}
+                      onChange={(e) => setField("password", e.target.value)}
+                      placeholder={editingId ? "Leave blank to keep the saved password" : ""}
+                      autoComplete="new-password"
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Mail folder</label>
+                    <input className={inputCls} value={connection.folder ?? "INBOX"} onChange={(e) => setField("folder", e.target.value)} />
+                  </div>
+                  <div className="flex flex-wrap items-end gap-4 pb-2">
+                    <label className="flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+                      <input type="checkbox" checked={connection.use_ssl ?? true} onChange={(e) => setField("use_ssl", e.target.checked)} />
+                      Use SSL
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+                      <input type="checkbox" checked={connection.verify_tls ?? true} onChange={(e) => setField("verify_tls", e.target.checked)} />
+                      Verify TLS certificate
+                    </label>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div>
               <label className={labelCls}>Default document type</label>
-              <CustomListbox
+              <select
+                className={`${inputCls} cursor-pointer`}
                 value={defaultType}
-                onChange={setDefaultType}
-                options={[
-                  { value: "", label: "Unclassified — reviewer classifies" },
-                  ...types.map((t) => ({ value: t.id, label: `${t.name} (${t.code})` })),
-                ]}
-                buttonClassName={inputCls}
-                className="w-full"
-                ariaLabel="Default document type"
-              />
+                onChange={(e) => setDefaultType(e.target.value)}
+                aria-label="Default document type"
+              >
+                <option value="">Unclassified — reviewer classifies</option>
+                {types.map((t) => (
+                  <option key={t.id} value={t.id}>{`${t.name} (${t.code})`}</option>
+                ))}
+              </select>
             </div>
             <div className="md:col-span-2">
               <label className={labelCls}>Sender → supplier map (one per line: email or domain = Supplier)</label>
@@ -786,14 +879,16 @@ export default function AdminMailboxPage() {
               {autoPoll && (
                 <div className="max-w-xs">
                   <label className={labelCls}>Poll interval</label>
-                  <CustomListbox
+                  <select
+                    className={`${inputCls} cursor-pointer`}
                     value={String(pollInterval)}
-                    onChange={(v) => setPollInterval(Number(v))}
-                    options={POLL_INTERVAL_OPTIONS}
-                    buttonClassName={inputCls}
-                    className="w-full"
-                    ariaLabel="Automatic poll interval"
-                  />
+                    onChange={(e) => setPollInterval(Number(e.target.value))}
+                    aria-label="Automatic poll interval"
+                  >
+                    {POLL_INTERVAL_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
                 </div>
               )}
             </div>
