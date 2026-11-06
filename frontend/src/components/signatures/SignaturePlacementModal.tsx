@@ -806,7 +806,39 @@ export default function SignaturePlacementModal({
                   <button type="button" onClick={() => styleSelectedItem({ align: "center" })} className="rounded border px-2 py-1 text-xs" aria-pressed={(selectedItem.align ?? "center") === "center"}>Center</button>
                   <button type="button" onClick={() => styleSelectedItem({ align: "right" })} className="rounded border px-2 py-1 text-xs" aria-pressed={(selectedItem.align ?? "center") === "right"}>Right</button>
                   <input type="color" value={selectedItem.color ?? "#1F2933"} onChange={(e) => styleSelectedItem({ color: e.target.value })} className="h-8 w-9 cursor-pointer rounded border bg-white p-0.5" title="Text colour" />
-                  <input type="range" min={0.8} max={6} step={0.1} value={selectedItem.font_percent ?? 1.6} onChange={(e) => styleSelectedItem({ font_percent: Number(e.target.value) })} className="min-w-0 flex-1 accent-primary" aria-label="Stamp font size" />
+                </div>
+                <div className="space-y-1.5 rounded-md border border-border bg-background p-2.5">
+                  <div className="flex items-center justify-between">
+                    <label htmlFor="stamp-font-size" className="text-xs font-medium text-foreground">Font size</label>
+                    <span className="text-xs tabular-nums text-muted-foreground">{(selectedItem.font_percent ?? 1.6).toFixed(1)}% of page height</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => styleSelectedItem({ font_percent: Math.max(0.5, Number(((selectedItem.font_percent ?? 1.6) - 0.2).toFixed(1))) })}
+                      disabled={(selectedItem.font_percent ?? 1.6) <= 0.5}
+                      className="btn-secondary h-8 w-8 shrink-0 p-0"
+                      aria-label="Decrease font size"
+                    >−</button>
+                    <input
+                      id="stamp-font-size"
+                      type="range"
+                      min={0.5}
+                      max={6}
+                      step={0.1}
+                      value={selectedItem.font_percent ?? 1.6}
+                      onChange={(e) => styleSelectedItem({ font_percent: Number(e.target.value) })}
+                      className="min-w-0 flex-1 accent-primary"
+                      aria-label="Font size"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => styleSelectedItem({ font_percent: Math.min(6, Number(((selectedItem.font_percent ?? 1.6) + 0.2).toFixed(1))) })}
+                      disabled={(selectedItem.font_percent ?? 1.6) >= 6}
+                      className="btn-secondary h-8 w-8 shrink-0 p-0"
+                      aria-label="Increase font size"
+                    >+</button>
+                  </div>
                 </div>
                 {selectedItem.kind === "date" && (
                   <select
@@ -997,7 +1029,7 @@ function PlacedItemView({
         y = original.y_percent + original.height_percent - h;
       }
     }
-    onChange({ x_percent: x, y_percent: y, width_percent: w, height_percent: h, ...(original.kind !== "signature" ? { font_percent: clamp(h * 0.62, 0.8, 8) } : {}) });
+    onChange({ x_percent: x, y_percent: y, width_percent: w, height_percent: h });
   };
   const end = () => { drag.current = null; };
   const fontPx = (item.font_percent ?? 1.6) / 100 * pageSize.height;
