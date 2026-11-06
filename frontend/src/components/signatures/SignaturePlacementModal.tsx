@@ -344,7 +344,7 @@ export default function SignaturePlacementModal({
     setTotalPages(0);
     setPageSize({ width: 0, height: 0 });
     const previewUrl = normalizePreviewUrl(preview?.url);
-    if (!previewUrl || preview.viewer !== "pdfjs") return;
+    if (!previewUrl || preview?.viewer !== "pdfjs") return;
 
     pdfjsImportPromise
       .then((pdfjsLib) => {

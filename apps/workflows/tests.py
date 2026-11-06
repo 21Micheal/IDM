@@ -361,3 +361,121 @@ class ProcurementAutoAdvanceTests(V2ActivationTests):
         with self.captureOnCommitCallbacks(execute=False) as callbacks:
             WorkflowService._activate_v2_step(instance)
         self.assertTrue(callbacks)
+
+
+class WorkflowCurrencyConditionTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email="test@example.com", password="password")
+        self.group = UserGroup.objects.create(name="Finance Group", created_by=self.user)
+        self.doc_type = DocumentType.objects.create(name="Purchase Order", code="PO")
+
+    def test_currency_condition_evaluation_and_active_orders(self):
+        """Verify that currency can be evaluated in IF/ELSE and SWITCH blocks,
+        and active_step_orders prunes non-matching branches."""
+        from apps.workflows.serializers import WorkflowInstanceSerializer
+
+        # PO workflow definition with currency check
+        definition = {
+            "version": 2,
+            "blocks": [
+                {
+                    "id": "b_hod",
+                    "kind": "approval",
+                    "step": _step("HOD Approval"),
+                },
+                {
+                    "id": "b_if_usd",
+                    "kind": "if_else",
+                    "branches": [
+                        {
+                            "id": "br_usd",
+                            "when": {
+                                "id": "g1",
+                                "kind": "group",
+                                "combinator": "and",
+                                "children": [
+                                    {
+                                        "id": "r1",
+                                        "kind": "rule",
+                                        "field_id": "currency",
+                                        "op": "eq",
+                                        "value": "USD",
+                                    }
+                                ],
+                            },
+                            "blocks": [
+                                {
+                                    "id": "b_finance",
+                                    "kind": "approval",
+                                    "step": _step("Finance Approval"),
+                                }
+                            ],
+                        }
+                    ],
+                    "else_blocks": [
+                        {
+                            "id": "b_end",
+                            "kind": "end",
+                            "outcome": "approved",
+                            "reason": "Currency not USD",
+                        }
+                    ],
+                },
+            ],
+        }
+
+        template = WorkflowTemplate.objects.create(
+            name="Test Currency PO",
+            target_type="document",
+            document_type=self.doc_type,
+            definition=definition,
+            created_by=self.user,
+        )
+        step1 = WorkflowStep.objects.create(template=template, order=1, name="HOD Approval", step_type="approval")
+        step2 = WorkflowStep.objects.create(template=template, order=2, name="Finance Approval", step_type="approval")
+
+        # Document with currency KES
+        doc_kes = Document.objects.create(
+            title="PO-KES",
+            reference_number="PO-KES-001",
+            document_type=self.doc_type,
+            amount=150000.0,
+            currency="KES",
+            uploaded_by=self.user,
+        )
+        inst_kes = WorkflowInstance.objects.create(
+            template=template,
+            document=doc_kes,
+            status="approved",
+            current_step_order=1,
+            started_by=self.user,
+        )
+        orders, outcome = WorkflowService._v2_active_step_orders(inst_kes)
+        self.assertEqual(orders, [1])
+        self.assertEqual(outcome, "approved")
+
+        serializer_kes = WorkflowInstanceSerializer(inst_kes)
+        self.assertEqual(serializer_kes.data.get("active_step_orders"), [1])
+
+        # Document with currency USD
+        doc_usd = Document.objects.create(
+            title="PO-USD",
+            reference_number="PO-USD-001",
+            document_type=self.doc_type,
+            amount=5000.0,
+            currency="USD",
+            uploaded_by=self.user,
+        )
+        inst_usd = WorkflowInstance.objects.create(
+            template=template,
+            document=doc_usd,
+            status="in_progress",
+            current_step_order=1,
+            started_by=self.user,
+        )
+        orders_usd, outcome_usd = WorkflowService._v2_active_step_orders(inst_usd)
+        self.assertEqual(orders_usd, [1, 2])
+        self.assertIsNone(outcome_usd)
+
+        serializer_usd = WorkflowInstanceSerializer(inst_usd)
+        self.assertEqual(serializer_usd.data.get("active_step_orders"), [1, 2])

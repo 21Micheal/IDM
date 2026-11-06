@@ -116,6 +116,28 @@ SYSTEM_FIELDS = [
         "source": "system",
     },
     {
+        "id": "currency",
+        "label": "Currency",
+        "type": FieldType.SELECT,
+        "source": "system",
+        "options": [
+            {"value": "USD", "label": "USD"},
+            {"value": "KES", "label": "KES"},
+            {"value": "EUR", "label": "EUR"},
+            {"value": "GBP", "label": "GBP"},
+            {"value": "ZAR", "label": "ZAR"},
+            {"value": "NGN", "label": "NGN"},
+            {"value": "GHS", "label": "GHS"},
+            {"value": "AED", "label": "AED"},
+            {"value": "INR", "label": "INR"},
+            {"value": "JPY", "label": "JPY"},
+            {"value": "CAD", "label": "CAD"},
+            {"value": "AUD", "label": "AUD"},
+            {"value": "CHF", "label": "CHF"},
+            {"value": "CNY", "label": "CNY"},
+        ],
+    },
+    {
         "id": "context.phase",
         "label": "Workflow phase",
         "type": FieldType.SELECT,
@@ -1290,10 +1312,12 @@ def resolve_active_path(
                 walk(block.get("else_blocks", []), active and matched_index is None)
             elif kind == "switch":
                 field_value = to_string(get_value(ctx, block.get("field_id")))
+                field_val_norm = field_value.strip().lower()
                 cases = block.get("cases", [])
                 matched_index = None
                 for index, case in enumerate(cases):
-                    if field_value in [to_string(value) for value in case.get("values", [])]:
+                    case_vals_norm = [to_string(value).strip().lower() for value in case.get("values", [])]
+                    if field_val_norm in case_vals_norm or field_value in [to_string(value) for value in case.get("values", [])]:
                         matched_index = index
                         break
                 for index, case in enumerate(cases):
@@ -1433,6 +1457,7 @@ class WorkflowExecution:
             field_id = block.get("field_id")
             field_value = get_value(self.ctx, field_id)
             field_value_str = to_string(field_value)
+            field_value_norm = field_value_str.strip().lower()
             
             matched = False
             matched_case_id = None
@@ -1441,7 +1466,8 @@ class WorkflowExecution:
             cases = block.get("cases", [])
             for case in cases:
                 case_values = case.get("values", [])
-                if field_value_str in [to_string(v) for v in case_values]:
+                case_values_norm = [to_string(v).strip().lower() for v in case_values]
+                if field_value_norm in case_values_norm or field_value_str in [to_string(v) for v in case_values]:
                     matched = True
                     matched_case_id = case.get("id")
                     case_ids = block.get("_case_entry_ids", [])

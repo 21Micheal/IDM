@@ -175,6 +175,7 @@ type WorkflowInstanceRecord = {
   document?: string;
   template?: string;
   phase?: WorkflowPhase | string;
+  active_step_orders?: number[] | null;
   started_at?: string;
   started_by?: {
     full_name?: string;
@@ -271,6 +272,8 @@ export async function loadWorkflowData(
     template?.steps ?? [],
     effectivePhase,
     template?.definition,
+    instance?.active_step_orders,
+    instance?.status,
   );
 
   // Keep configured future steps even before they have task rows. V2 CASE
@@ -298,6 +301,8 @@ function buildApproverWorkflow(
   templateSteps: WorkflowTemplateStepRecord[] = [],
   workflowPhase?: WorkflowPhase | null,
   templateDefinition?: unknown,
+  activeStepOrders?: number[] | null,
+  instanceStatus?: string | null,
 ): WorkflowStep[] {
   const grouped = tasksWithHistory.reduce((map, item) => {
     const order = item.task.step?.order ?? map.size + 1;
@@ -330,9 +335,18 @@ function buildApproverWorkflow(
           assignee_user_name: undefined,
           instructions: undefined,
         }));
-  const sourceSteps = phaseMap
+  let sourceSteps = phaseMap
     ? sourceStepsRaw.filter((step) => orderPhase.has(step.order))
     : sourceStepsRaw;
+
+  // When the workflow instance has resolved active branch step orders, filter out
+  // steps from inactive branches that were never reached / executed.
+  if (Array.isArray(activeStepOrders) && activeStepOrders.length > 0) {
+    const activeSet = new Set(activeStepOrders);
+    sourceSteps = sourceSteps.filter(
+      (step) => activeSet.has(step.order) || grouped.has(step.order)
+    );
+  }
 
   // ── Pass 1: derive each step's raw status from its own tasks ────────────────
   // A step only has tasks once the engine has reached it, so a step with no
@@ -402,10 +416,16 @@ function buildApproverWorkflow(
     value ? PROCUREMENT_PHASE_ORDER.indexOf(value as WorkflowPhase) : -1;
   const currentPhaseIndex = phaseIndex(workflowPhase);
 
+  const isInstanceFinished =
+    instanceStatus === "approved" ||
+    instanceStatus === "completed" ||
+    instanceStatus === "rejected" ||
+    instanceStatus === "cancelled";
+
   let terminated = false;
   const resolved = base.map((step) => {
     let status: WorkflowStep["status"] = step.rawStatus;
-    if (terminated && !step.hasTasks) status = "skipped";
+    if ((terminated || isInstanceFinished) && !step.hasTasks) status = "skipped";
     const stepPhaseIndex = phaseIndex(step.phase);
     if (
       step.phase

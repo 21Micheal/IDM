@@ -1069,12 +1069,13 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
     started_by = UserSummarySerializer(read_only=True)
     rule_label = serializers.CharField(source="rule.label", read_only=True, default="")
     phase = serializers.SerializerMethodField()
+    active_step_orders = serializers.SerializerMethodField()
 
     class Meta:
         model  = WorkflowInstance
         fields = [
             "id", "target_type", "document", "payment_run", "template", "rule", "rule_label",
-            "phase",
+            "phase", "active_step_orders",
             "status", "current_step_order", "imprest_request_status",
             "imprest_request_current_step_order", "imprest_request_completed_at",
             "definition_version", "current_node_id",
@@ -1100,3 +1101,15 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
             except Exception:
                 pass
         return "request"
+
+    def get_active_step_orders(self, obj):
+        if not obj.template_id or not obj.template:
+            return None
+        from apps.workflows.services import WorkflowService
+        if not WorkflowService.is_v2_workflow(obj.template):
+            return None
+        try:
+            orders, _ = WorkflowService._v2_active_step_orders(obj)
+            return orders
+        except Exception:
+            return None

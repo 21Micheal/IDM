@@ -56,6 +56,16 @@ export interface WorkflowField {
 /** Fields that exist for every document type. Extend to taste. */
 export const SYSTEM_FIELDS: WorkflowField[] = [
   { id: "amount",              label: "Amount",               type: "money",       source: "system" },
+  { id: "currency",            label: "Currency",             type: "select",      source: "system",
+    options: [
+      { value: "USD", label: "USD" }, { value: "KES", label: "KES" },
+      { value: "EUR", label: "EUR" }, { value: "GBP", label: "GBP" },
+      { value: "ZAR", label: "ZAR" }, { value: "NGN", label: "NGN" },
+      { value: "GHS", label: "GHS" }, { value: "AED", label: "AED" },
+      { value: "INR", label: "INR" }, { value: "JPY", label: "JPY" },
+      { value: "CAD", label: "CAD" }, { value: "AUD", label: "AUD" },
+      { value: "CHF", label: "CHF" }, { value: "CNY", label: "CNY" },
+    ] },
   { id: "context.phase",       label: "Workflow phase",       type: "select",      source: "system",
     options: [
       { value: "requisition", label: "Requisition" }, { value: "rfq", label: "RFQ" },

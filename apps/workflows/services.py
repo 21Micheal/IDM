@@ -277,11 +277,20 @@ class WorkflowService:
             context["document.title"] = document.title or ""
             context["document.created_at"] = document.created_at.isoformat() if document.created_at else ""
             
+            # Currency
+            curr = str(document.currency or "").strip().upper()
+            if not curr and hasattr(document, "amount_currency"):
+                curr = str(document.amount_currency or "").strip().upper()
+            if not curr:
+                curr = "USD"
+            context["currency"] = curr
+            context["document.currency"] = curr
+
             # Amount with currency
-            if document.amount:
+            if document.amount is not None:
                 context["amount"] = {
                     "amount": float(document.amount),
-                    "currency": document.currency or "USD",
+                    "currency": curr,
                 }
             else:
                 context["amount"] = None
@@ -329,13 +338,21 @@ class WorkflowService:
             if isinstance(form_values, dict):
                 for field_id, value in form_values.items():
                     context[field_id] = value
+                if (not document.currency or document.currency == "USD") and form_values.get("currency"):
+                    form_curr = str(form_values["currency"]).strip().upper()
+                    if form_curr:
+                        context["currency"] = form_curr
+                        context["document.currency"] = form_curr
         
         elif payment_run:
             # Payment run fields
+            curr = payment_run.currency_codes[0] if payment_run.currency_codes else "USD"
+            context["currency"] = curr
+            context["document.currency"] = curr
             context["payment_run.line_count"] = len(payment_run.lines) if payment_run.lines else 0
             context["payment_run.total"] = {
                 "amount": float(payment_run.total_amount) if payment_run.total_amount else 0,
-                "currency": payment_run.currency_codes[0] if payment_run.currency_codes else "USD",
+                "currency": curr,
             }
             context["context.phase"] = "payment_run"
             
