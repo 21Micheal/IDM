@@ -112,6 +112,7 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
             activity_col = next((c for c in cols if (c.get("external") or {}).get("dimension") == "10" or re.search(r"activity.*code", c.get("label", ""), re.I) or re.search(r"activity.*code", c.get("key", ""), re.I)), None)
             activity_desc_col = next((c for c in cols if re.search(r"activity.*desc", c.get("label", ""), re.I) or re.search(r"activity.*desc", c.get("key", ""), re.I)), None)
             account_col = next((c for c in cols if (c.get("sunsystems") or {}).get("role") == "account_code" or re.search(r"account.*code", c.get("label", ""), re.I) or re.search(r"account.*code", c.get("key", ""), re.I)), None)
+            dsa_account_col = next((c for c in cols if (c.get("sunsystems") or {}).get("role") == "dsa_account_code"), None)
             cost_centre_col = next((c for c in cols if (c.get("external") or {}).get("dimension") == "05" or re.search(r"cost.*centre", c.get("label", ""), re.I) or re.search(r"cost.*centre", c.get("key", ""), re.I)), None)
             
             # Prioritize description column (exact "Description" label or sunsystems role)
@@ -164,7 +165,9 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
 
                 # 3. Account Code
                 acct_code = _text(
-                    budget_obj.get("account_code")
+                    budget_obj.get("dsa_account_code")
+                    or (r.get(dsa_account_col.get("key")) if dsa_account_col else "")
+                    or budget_obj.get("account_code")
                     or (r.get(account_col.get("key")) if account_col else "")
                     or values.get("request_a_c_reference")
                     or values.get("account_code")

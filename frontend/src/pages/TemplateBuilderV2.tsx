@@ -117,8 +117,10 @@ export type TableColumnType =
 export interface BudgetLineConfig {
   /** SunSystems AnalysisDimensionIds shown in the Budget Line editor modal. */
   dimensions?: string[];
-  /** Account codes available in the modal's local dropdown. */
+  /** Ticket account codes; stored as account_code in the Budget Line value. */
   accountCodes?: string[];
+  /** DSA account codes; stored as dsa_account_code in the Budget Line value. */
+  dsaAccountCodes?: string[];
   /** Numeric sibling column that receives the selected Tax dimension's rate. */
   taxRateColumn?: string;
 }
@@ -1364,9 +1366,18 @@ function normalizeField(field: TemplateField): TemplateField {
   const colSpan = field.colSpan ?? field.width ?? 6;
   const helpText = field.helpText ?? field.help_text;
   const key = field.key || `field_${uid()}`;
-  const columns = (field.type === "table" || type === "table")
+  const rawColumns = (field.type === "table" || type === "table")
     ? (field.columns ?? [newColumn("text", "Item"), newColumn("number", "Amount")])
     : field.columns;
+  const columns = rawColumns?.map((column) => {
+    const role = column.sunsystems?.role;
+    const label = String(column.label || "").trim();
+    const isGenericAccountLabel = /^(account\s*code|ticket\s*account\s*code|dsa\s*account\s*code)$/i.test(label);
+    if (!isGenericAccountLabel) return column;
+    if (role === "account_code") return { ...column, label: "Ticket Account code" };
+    if (role === "dsa_account_code") return { ...column, label: "DSA Account code" };
+    return column;
+  });
   const sunsystems = migrateFinanceBinding(field.sunsystems);
   const visibleWhen = toRuleGroup(field.visibleWhen);
   const editableWhen = toRuleGroup(field.editableWhen);
@@ -1407,7 +1418,7 @@ export const FINANCE_FIELD_ROLES = [
   { value: "reference", label: "Transaction reference" },
   { value: "transaction_date", label: "Transaction date" },
   { value: "description", label: "Description" },
-  { value: "account_code", label: "Account code" },
+  { value: "account_code", label: "Ticket Account code" },
   { value: "supplier_code", label: "Supplier code (PO)" },
   { value: "item_code", label: "Item code (PO)" },
   { value: "purchase_transaction_type", label: "Purchase transaction type (PO)" },
@@ -1423,7 +1434,9 @@ export const FINANCE_BUDGET_ROLES = [
 export const FINANCE_COLUMN_ROLES = [
   { value: "", label: "— none —" },
   { value: "line_amount", label: "Line amount" },
-  { value: "account_code", label: "Account code" },
+  { value: "budget_line", label: "Budget line (Account + Analysis)" },
+  { value: "account_code", label: "Ticket Account code" },
+  { value: "dsa_account_code", label: "DSA Account code" },
   { value: "description", label: "Description" },
   { value: "analysis", label: "Analysis code" },
   { value: "item_code", label: "Item code" },
@@ -1516,7 +1529,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const fields = template.sections.flatMap((s) => s.fields ?? []);
   const hasImprestRequestConfig = fields.some((field) =>
     field.type === "table"
-      && field.workflowRole === "rfq_required_lines"
+      && (field.workflowRole === "rfq_required_lines" || field.columns?.some((column) =>
+        column.sunsystems?.role === "dsa_account_code"
+        || (column.type === "budget_line" && Boolean(column.budgetLine?.dsaAccountCodes?.length))))
       && (field.sunsystems?.imprestRequest?.enabled
         || field.columns?.some((column) => column.sunsystems?.role === "line_amount" && column.sunsystems?.imprestRequest?.enabled)),
   );
@@ -1637,7 +1652,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         continue;
       }
       const acctCol = cols.find((c) => c.sunsystems?.role === "account_code");
-      const budgetLineCol = cols.find((c) => c.type === "budget_line");
+      const budgetLineCol = cols.find((c) => c.type === "budget_line" || c.sunsystems?.role === "budget_line");
       const descCol = cols.find((c) => c.sunsystems?.role === "description");
       const analysis: Record<string, unknown> = {};
       if (budgetLineCol) {
@@ -1826,12 +1841,19 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     const upCol = cols.find((c) => c.sunsystems?.role === "unit_price");
     const acctCol = cols.find((c) => c.sunsystems?.role === "account_code")
       ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "account code");
-    const imprestAccountCol = acctCol ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "account code");
+    const dsaAccountCol = cols.find((c) => c.sunsystems?.role === "dsa_account_code");
+    const imprestAccountCol = dsaAccountCol ?? acctCol ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "account code");
     const supplierCol = cols.find((c) => c.sunsystems?.role === "supplier_code" || c.type === "sunsystems_account");
     const curCol = cols.find((c) => c.sunsystems?.role === "currency");
     const uomCol = cols.find((c) => c.sunsystems?.role === "uom");
     const analysisCols = cols.filter((c) => c.sunsystems?.role === "analysis");
-    const budgetLineCol = cols.find((c) => c.type === "budget_line");
+    const budgetLineCol = cols.find((c) => c.type === "budget_line" || c.sunsystems?.role === "budget_line");
+    const budgetLineHasDsaAccount = Boolean(budgetLineCol?.budgetLine?.dsaAccountCodes?.length);
+    const dsaAccountSpec = dsaAccountCol
+      ? { row_field: dsaAccountCol.key }
+      : budgetLineHasDsaAccount && budgetLineCol
+        ? { row_field: budgetLineCol.key, key: "dsa_account_code" }
+        : undefined;
     const imprestRequest = f.sunsystems?.imprestRequest ?? amtCol?.sunsystems?.imprestRequest;
     const imprestAccountSource = amtCol?.sunsystems?.accountSource ?? imprestRequest?.accountSource;
     const imprestManualAccount = amtCol?.sunsystems?.account ?? imprestRequest?.account;
@@ -1865,6 +1887,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         : acctCol
           ? { row_field: acctCol.key }
           : (f.sunsystems?.account ? { const: f.sunsystems.account } : undefined),
+      ...(dsaAccountSpec ? { exclude_if: dsaAccountSpec } : {}),
       ...(itemCol
         ? { item_code: { row_field: itemCol.key } }
         : itemFieldSpec
@@ -1874,7 +1897,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         ? { product_group: { row_field: productGroupCol.key } }
         : (f.workflowRole !== "rfq_required_lines" && productGroupSpec ? { product_group: productGroupSpec } : {})),
       ...(transactionTypeCol ? { purchase_transaction_type: { row_field: transactionTypeCol.key } } : {}),
-      ...(imprestRequest?.enabled && f.workflowRole === "rfq_required_lines"
+      ...(imprestRequest?.enabled && (f.workflowRole === "rfq_required_lines" || dsaAccountSpec)
         ? {
             ...(imprestAccountSource === "account_code" && imprestAccountCol
               ? { imprest_request_account: {
@@ -1921,9 +1944,17 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         : { const: ui.quantity || "1" },
       ...(upCol ? { unit_price: { row_field: upCol.key } } : {}),
       ...(amtCol ? { amount: { row_field: amtCol.key } } : {}),
-      ...(Object.keys(lineAnalysis).length ? { analysis: f.workflowRole === "rfq_required_lines" ? lineAnalysis : poLineAnalysis } : {}),
+      ...(Object.keys(lineAnalysis).length ? { analysis: f.workflowRole === "rfq_required_lines" || dsaAccountSpec ? lineAnalysis : poLineAnalysis } : {}),
     };
-    if (f.workflowRole === "rfq_required_lines") {
+    if (dsaAccountSpec && imprestRequest?.enabled) {
+      imprestRequestLines.push({
+        ...lineSpec,
+        include_if: dsaAccountSpec,
+        account_code: dsaAccountSpec,
+        imprest_request_account: dsaAccountSpec,
+        exclude_if: undefined,
+      });
+    } else if (f.workflowRole === "rfq_required_lines") {
       // General / Imprest rows are exclusively the source for the advance
       // journal. They are never PurchaseOrder lines, even when they contain
       // item, supplier, or pricing columns.
@@ -3207,7 +3238,7 @@ function ImprestRequestConfigEditor({ field, siblingColumns, onChange }: {
     <div className="space-y-2">
       <div>
         <p className="text-sm font-medium text-[#1F2933]">Imprest request posting</p>
-        <p className="mt-0.5 text-[10px] text-[#8C969E]">At requisition approval, post the advance journal for all populated rows in this table. Common line mappings come from the Purchase Order profile.</p>
+        <p className="mt-0.5 text-[10px] text-[#8C969E]">Rows with a DSA Account code post to the Imprest ledger; rows without one post as Ticket purchase order lines. The shared Budget Line supplies the analysis dimensions.</p>
       </div>
       <div className="space-y-3 border border-[#C8CDD2] bg-white p-3">
         <ToggleYesNo value={!!config?.enabled} onChange={enableConfig} />
@@ -3262,7 +3293,7 @@ function AccountCodeSourcePicker({ value, onChange }: {
       onChange={(next) => onChange(next as AccountCodeSource)}
       options={[
         { value: "manual", label: "Manual account" },
-        { value: "account_code", label: "Use Account code field/column" },
+        { value: "account_code", label: "Use Ticket Account code field/column" },
         { value: "supplier_code", label: "Use selected Supplier code" },
       ]}
       className={cls}
@@ -3446,10 +3477,17 @@ function ColumnConfigModal({
               </Row>
               {draft.type === "budget_line" && (
                 <>
-                  <Row label="Available account codes" hint="These codes appear in the Budget Line account dropdown.">
+                  <Row label="Ticket Account codes" hint="Mapped to the Budget Line Ticket Account code and SunSystems AccountCode for Ticket lines.">
                     <DropdownValuesEditor
                       options={draft.budgetLine?.accountCodes ?? []}
                       onChange={(accountCodes) => set({ budgetLine: { ...(draft.budgetLine ?? {}), accountCodes } })}
+                      quickAddCurrencies={false}
+                    />
+                  </Row>
+                  <Row label="DSA Account codes" hint="Mapped to the Budget Line DSA Account code and SunSystems AccountCode for DSA lines.">
+                    <DropdownValuesEditor
+                      options={draft.budgetLine?.dsaAccountCodes ?? []}
+                      onChange={(dsaAccountCodes) => set({ budgetLine: { ...(draft.budgetLine ?? {}), dsaAccountCodes } })}
                       quickAddCurrencies={false}
                     />
                   </Row>
@@ -3691,7 +3729,17 @@ function ColumnConfigModal({
               <Row label="SunSystems role">
                 <CustomListbox
                   value={draft.sunsystems?.role === "purchase_transaction_type" && isImprestRequestTable ? "" : draft.sunsystems?.role ?? ""}
-                  onChange={(val) => set({ sunsystems: { ...(draft.sunsystems ?? {}), role: val || undefined } })}
+                  onChange={(val) => {
+                    const nextRole = val || undefined;
+                    const currentLabel = String(draft.label || "").trim();
+                    const genericAccountLabel = /^(account\s*code|ticket\s*account\s*code|dsa\s*account\s*code)$/i.test(currentLabel);
+                    const nextLabel = genericAccountLabel
+                      ? nextRole === "account_code" ? "Ticket Account code"
+                        : nextRole === "dsa_account_code" ? "DSA Account code"
+                          : draft.label
+                      : draft.label;
+                    set({ label: nextLabel, sunsystems: { ...(draft.sunsystems ?? {}), role: nextRole } });
+                  }}
                   options={FINANCE_COLUMN_ROLES
                     .filter((option) => !(isImprestRequestTable && option.value === "purchase_transaction_type"))
                     .map((o) => ({ value: o.value, label: o.label }))}
@@ -5386,7 +5434,9 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                   ariaLabel="Table purpose"
                 />
               </InspectorRow>
-              {field.workflowRole === "rfq_required_lines" && (
+              {(field.workflowRole === "rfq_required_lines" || (field.columns ?? []).some((column) =>
+                column.sunsystems?.role === "dsa_account_code"
+                || (column.type === "budget_line" && Boolean(column.budgetLine?.dsaAccountCodes?.length)))) && (
                 <ImprestRequestConfigEditor
                   field={field}
                   siblingColumns={field.columns ?? []}

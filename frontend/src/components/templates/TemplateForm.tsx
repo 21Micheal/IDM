@@ -60,7 +60,7 @@ type Column = {
   type?: ColType | string; options?: string[]; currencySymbol?: string;
   currencyFromColumn?: string;
   showTotal?: boolean;
-  budgetLine?: { dimensions?: string[]; accountCodes?: string[]; taxRateColumn?: string };
+  budgetLine?: { dimensions?: string[]; accountCodes?: string[]; dsaAccountCodes?: string[]; taxRateColumn?: string };
   dateFormat?: string;
   dateMinColumn?: string;
   /* Number/currency display config (builder: "Number / Currency" column). */
@@ -900,6 +900,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
           disabled={dis}
           dimensions={col.budgetLine?.dimensions}
           accountCodes={col.budgetLine?.accountCodes}
+          dsaAccountCodes={col.budgetLine?.dsaAccountCodes}
           taxRateColumn={taxRateColumnKey}
           taxRateValue={taxRateColumnKey ? row?.[taxRateColumnKey] : undefined}
           onTaxRateChange={(rate) => {
@@ -1121,12 +1122,13 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
 
 // ── Table field ───────────────────────────────────────────────────────────────
 
-function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, taxRateColumn, taxRateValue, onTaxRateChange }: {
+function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, dsaAccountCodes, taxRateColumn, taxRateValue, onTaxRateChange }: {
   value: unknown;
   onChange: (value: Record<string, string>) => void;
   disabled?: boolean;
   dimensions?: string[];
   accountCodes?: string[];
+  dsaAccountCodes?: string[];
   taxRateColumn?: string;
   taxRateValue?: unknown;
   onTaxRateChange?: (rate: string) => void;
@@ -1136,12 +1138,15 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
   const [taxRateDraft, setTaxRateDraft] = useState("");
   const selectedDimensions = Array.isArray(dimensions) ? dimensions : ANALYSIS_PANEL_SLOTS;
   const availableAccountCodes = Array.isArray(accountCodes) ? accountCodes : [];
+  const availableDsaAccountCodes = Array.isArray(dsaAccountCodes) ? dsaAccountCodes : [];
   const current = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-  const accountCode = String(current.account_code ?? "");
+  const ticketAccountCode = String(current.account_code ?? "");
+  const dsaAccountCode = String(current.dsa_account_code ?? "");
   const summary = [
-    accountCode,
+    ticketAccountCode,
+    dsaAccountCode,
     ...selectedDimensions
       .filter((dimension) => current[dimension])
       .map((dimension) => `A${ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1} ${analysisDimensionName(dimension)}: ${String(current[dimension])}`),
@@ -1188,21 +1193,39 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
               </button>
             </div>
             <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
-              <div>
-                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">Account code</label>
-                <CustomListbox
-                  value={draft.account_code ?? ""}
-                  onChange={(next) => setDraft((previous) => ({ ...previous, account_code: next }))}
-                  options={[
-                    { value: "", label: "Select account code…" },
-                    ...availableAccountCodes.map((code) => ({ value: code, label: code })),
-                  ]}
-                  className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
-                  buttonClassName="w-full"
-                  ariaLabel="Budget Line account code"
-                  disabled={disabled || availableAccountCodes.length === 0}
-                />
-                {availableAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add account codes in the table column’s Budget Line settings.</p>}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">Ticket Account code</label>
+                  <CustomListbox
+                    value={draft.account_code ?? ""}
+                    onChange={(next) => setDraft((previous) => ({ ...previous, account_code: next }))}
+                    options={[
+                      { value: "", label: "Select Ticket account code…" },
+                      ...availableAccountCodes.map((code) => ({ value: code, label: code })),
+                    ]}
+                    className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
+                    buttonClassName="w-full"
+                    ariaLabel="Budget Line Ticket account code"
+                    disabled={disabled || availableAccountCodes.length === 0}
+                  />
+                  {availableAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add Ticket account codes in the Budget Line settings.</p>}
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">DSA Account code</label>
+                  <CustomListbox
+                    value={draft.dsa_account_code ?? ""}
+                    onChange={(next) => setDraft((previous) => ({ ...previous, dsa_account_code: next }))}
+                    options={[
+                      { value: "", label: "Select DSA account code…" },
+                      ...availableDsaAccountCodes.map((code) => ({ value: code, label: code })),
+                    ]}
+                    className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
+                    buttonClassName="w-full"
+                    ariaLabel="Budget Line DSA account code"
+                    disabled={disabled || availableDsaAccountCodes.length === 0}
+                  />
+                  {availableDsaAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add DSA account codes in the Budget Line settings.</p>}
+                </div>
               </div>
               {selectedDimensions.length > 0 ? (
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -1271,7 +1294,7 @@ function hasFieldValue(value: unknown, type?: string): boolean {
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === "object") {
     const record = value as Record<string, unknown>;
-    if (type === "budget_line") return Boolean(String(record.account_code ?? "").trim());
+    if (type === "budget_line") return Boolean(String(record.account_code || record.dsa_account_code || "").trim());
     // External / analysis-panel style objects are empty until at least one slot is set.
     return Object.values(record).some((entry) => entry !== undefined && entry !== null && String(entry).trim() !== "");
   }

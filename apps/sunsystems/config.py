@@ -273,6 +273,12 @@ def get_imprest_request_postings(document) -> list[dict]:
         for row in rows:
             if not isinstance(row, dict) or not any(value not in (None, "", [], {}) for value in row.values()):
                 continue
+            include_if = spec.get("include_if")
+            if isinstance(include_if, dict) and not resolve_value(include_if, values, row).strip():
+                continue
+            exclude_if = spec.get("exclude_if")
+            if isinstance(exclude_if, dict) and resolve_value(exclude_if, values, row).strip():
+                continue
             group["rows"].append(row)
 
     postings = []
@@ -356,6 +362,15 @@ def get_imprest_request_postings(document) -> list[dict]:
                 slot: {"const": code}
                 for slot, code in shared_analysis.items()
             }
+            # In a merged Ticket/DSA table the budget-line analysis belongs to
+            # each source row. Resolve those shared dimensions from the DSA
+            # row itself, while retaining LPO analysis as the legacy fallback.
+            row_analysis = spec.get("analysis") if isinstance(spec.get("analysis"), dict) else {}
+            for slot, slot_spec in row_analysis.items():
+                code_spec = slot_spec.get("code") if isinstance(slot_spec, dict) else slot_spec
+                code = resolve_value(code_spec, values, row).strip()
+                if code and code != "#":
+                    analysis[str(slot)] = {"const": code}
             if analysis:
                 common["analysis"] = analysis
             lines.extend([
@@ -425,6 +440,39 @@ def has_imprest_request_lines(document) -> bool:
             columns = [column for column in field.get("columns") or [] if isinstance(column, dict)]
             rows = values.get(field.get("key"))
             if not isinstance(rows, list):
+                continue
+            dsa_account_column = next(
+                (column for column in columns if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "dsa_account_code"),
+                None,
+            )
+            budget_line_column = next(
+                (column for column in columns if (column.get("type") == "budget_line" or ((column.get("sunsystems") or {}).get("role") == "budget_line")) and ((column.get("budgetLine") or {}).get("dsaAccountCodes") or [])),
+                None,
+            )
+            if dsa_account_column or budget_line_column:
+                dsa_key = dsa_account_column.get("key") if dsa_account_column else budget_line_column.get("key")
+                nested_dsa = not dsa_account_column
+                amount_column = next(
+                    (column for column in columns if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "line_amount"),
+                    None,
+                )
+                amount_key = amount_column.get("key") if amount_column else None
+                for row in rows:
+                    budget_value = row.get(dsa_key) if isinstance(row, dict) else None
+                    if nested_dsa and isinstance(budget_value, dict):
+                        dsa_value = budget_value.get("dsa_account_code")
+                    else:
+                        dsa_value = budget_value
+                    if not isinstance(row, dict) or not str(dsa_value or "").strip():
+                        continue
+                    if amount_key:
+                        try:
+                            if Decimal(str(row.get(amount_key) or "0").replace(",", "").strip()) > 0:
+                                return True
+                        except (InvalidOperation, ValueError):
+                            continue
+                # The merged table's DSA account column determines which
+                # rows enter the request lane. Ticket-only rows do not.
                 continue
             itinerary_table = field.get("workflowRole") == "rfq_required_lines"
             imprest_enabled = bool(
@@ -616,12 +664,22 @@ def get_imprest_retirement_postings(document) -> list[dict]:
                     amount_spec = spec.get("amount") or spec.get("unit_price") or spec.get("quantity")
                     amount_column_key = amount_spec.get("row_field") if isinstance(amount_spec, dict) else None
                     if amount_column_key:
-                        issued_amount = {
-                            "sum_rows": {
-                                "table": request_table,
-                                "amount_column": amount_column_key,
+                        include_if = spec.get("include_if")
+                        if isinstance(include_if, dict) and include_if.get("row_field"):
+                            issued_amount = {
+                                "sum_nonempty_rows": {
+                                    "table": request_table,
+                                    "amount_column": amount_column_key,
+                                    "match_spec": include_if,
+                                }
                             }
-                        }
+                        else:
+                            issued_amount = {
+                                "sum_rows": {
+                                    "table": request_table,
+                                    "amount_column": amount_column_key,
+                                }
+                            }
                         break
             elif retirement.get("issuedAmountField"):
                 issued_amount = {"field": retirement["issuedAmountField"]}

@@ -418,7 +418,8 @@ function coerceScopeValue(fieldType: string | undefined, raw: unknown): CalcValu
   // resolve the selected account code instead of coercing the object to 0.
   if (fieldType === "budget_line") {
     if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      const accountCode = (raw as Record<string, unknown>).account_code;
+      const record = raw as Record<string, unknown>;
+      const accountCode = record.account_code || record.dsa_account_code;
       return accountCode === null || accountCode === undefined ? "" : String(accountCode);
     }
     return raw === null || raw === undefined ? "" : String(raw);

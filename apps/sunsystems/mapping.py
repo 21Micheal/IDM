@@ -210,6 +210,22 @@ def resolve_amount(spec: Any, values: dict, row: dict | None = None) -> Decimal:
             if item in match_values:
                 total += resolve_amount({"row_field": aggregate.get("amount_column")}, values, table_row)
         return total
+    aggregate = spec.get("sum_nonempty_rows") if isinstance(spec, dict) else None
+    if isinstance(aggregate, dict):
+        rows = (values or {}).get(aggregate.get("table"))
+        if not isinstance(rows, list):
+            return Decimal("0")
+        total = Decimal("0")
+        match_column = aggregate.get("match_column")
+        match_spec = aggregate.get("match_spec")
+        for table_row in rows:
+            if not isinstance(table_row, dict):
+                continue
+            matched_value = resolve_value(match_spec, values, table_row) if isinstance(match_spec, dict) else table_row.get(match_column)
+            if (match_spec or match_column) and matched_value in (None, "", [], {}):
+                continue
+            total += resolve_amount({"row_field": aggregate.get("amount_column")}, values, table_row)
+        return total
     text = resolve_value(spec, values, row, default="0")
     text = re.sub(r"[,\s]", "", text)
     if text in ("", "-"):
@@ -380,6 +396,12 @@ def _iter_po_lines(specs: list[dict], values: dict, warnings: list[str]) -> Iter
                 continue
             if not any(value not in (None, "", [], {}) for value in row.values()):
                 continue
+            include_if = spec.get("include_if")
+            if isinstance(include_if, dict) and not resolve_value(include_if, values, row).strip():
+                continue
+            exclude_if = spec.get("exclude_if")
+            if isinstance(exclude_if, dict) and resolve_value(exclude_if, values, row).strip():
+                continue
             yield spec, row
 
 
@@ -409,6 +431,12 @@ def expand_purchase_order_postings(
             if row is not None and not isinstance(row, dict):
                 continue
             if row is not None and not any(value not in (None, "", [], {}) for value in row.values()):
+                continue
+            include_if = spec.get("include_if")
+            if isinstance(include_if, dict) and not resolve_value(include_if, values, row).strip():
+                continue
+            exclude_if = spec.get("exclude_if")
+            if isinstance(exclude_if, dict) and resolve_value(exclude_if, values, row).strip():
                 continue
             transaction_type = resolve_value(txn_spec, values, row) or resolve_value(po.get("transaction_type"), values, row)
             product_group = resolve_value(product_spec, values, row)
@@ -685,6 +713,7 @@ def classify_retirement(retirement: dict, values: dict, warnings: list[str] | No
     issued_field_key = issued_spec.get("field") if isinstance(issued_spec, dict) else None
     issued_sum_spec = issued_spec.get("sum_matching_rows") if isinstance(issued_spec, dict) else None
     issued_rows_spec = issued_spec.get("sum_rows") if isinstance(issued_spec, dict) else None
+    issued_nonempty_rows_spec = issued_spec.get("sum_nonempty_rows") if isinstance(issued_spec, dict) else None
     if issued_field_key and issued_field_key not in (values or {}):
         # The configured field key doesn't exist in the submitted values at
         # all — as opposed to existing with a blank/zero value. This is the
@@ -717,6 +746,17 @@ def classify_retirement(retirement: dict, values: dict, warnings: list[str] | No
             _warnings.append(
                 "Retirement's Imprest request amount source is incomplete or its source table is missing; "
                 "issued amount treated as 0. Check the General / Imprest table mappings."
+            )
+    elif isinstance(issued_nonempty_rows_spec, dict):
+        table_key = issued_nonempty_rows_spec.get("table")
+        amount_column = issued_nonempty_rows_spec.get("amount_column")
+        match_column = issued_nonempty_rows_spec.get("match_column")
+        match_spec = issued_nonempty_rows_spec.get("match_spec")
+        rows = (values or {}).get(table_key)
+        if not table_key or not amount_column or not (match_column or match_spec) or not isinstance(rows, list):
+            _warnings.append(
+                "Retirement's DSA amount source is incomplete or its source table is missing; "
+                "issued amount treated as 0. Check the DSA Account code and Line amount mappings."
             )
     elif not issued_field_key:
         # No field was ever selected in the Retirement panel — the mapping

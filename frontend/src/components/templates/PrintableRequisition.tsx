@@ -280,12 +280,14 @@ export default function PrintableRequisition({
     const activityColumn = cols.find((column) => column.external?.source === "analysis_codes" && column.external?.dimension === "10");
     const costCentreColumn = cols.find((column) => column.external?.source === "analysis_codes" && column.external?.dimension === "05");
     const accountColumn = roleColumn("account_code");
+    const dsaAccountColumn = roleColumn("dsa_account_code");
     const amountColumn = roleColumn("line_amount");
     return rows.map((row: AnyRecord) => {
       const budget = budgetColumn && row?.[budgetColumn.key] && typeof row[budgetColumn.key] === "object" ? row[budgetColumn.key] : {};
       const activityCode = text(row?.[activityColumn?.key] || budget["10"]);
       const costCode = text(row?.[costCentreColumn?.key] || budget["05"]);
-      const account = text(row?.[accountColumn?.key] || budget.account_code);
+      const dsaAccount = text(row?.[dsaAccountColumn?.key] || budget.dsa_account_code);
+      const account = text(dsaAccount || row?.[accountColumn?.key] || budget.account_code);
       const activityDescription = text(
         budget["10_description"]
         || budget["10_name"]
@@ -298,7 +300,7 @@ export default function PrintableRequisition({
         activityDescription: activityDescription || "—",
         costCentre: costCentreName || costCode || "—",
         accountCode: account || "—",
-        description: table.workflowRole === "rfq_required_lines" ? "Imprest" : "Travel",
+        description: table.workflowRole === "rfq_required_lines" || dsaAccount ? "DSA" : "Ticket",
         estimated: text(row?.[amountColumn?.key]) || "—",
       };
     });
@@ -311,10 +313,20 @@ export default function PrintableRequisition({
   const itinerary = tables.find(isTravelItinerary);
   // Only the approved/issued itinerary is printed here; never substitute the
   // requester-entered amount from the separate Imprest Request table.
-  const imprestTables = tables.filter((table) => table.workflowRole === "rfq_required_lines").map((table) => ({
-    table,
-    rows: Array.isArray(values[table.key]) ? values[table.key] as AnyRecord[] : [],
-  }));
+  const imprestTables = tables.flatMap((table) => {
+    const rows = Array.isArray(values[table.key]) ? values[table.key] as AnyRecord[] : [];
+    const dsaAccountColumn = (table.columns || []).find((column: AnyRecord) => column.sunsystems?.role === "dsa_account_code");
+    const budgetLineColumn = (table.columns || []).find((column: AnyRecord) => column.type === "budget_line" && column.budgetLine?.dsaAccountCodes?.length);
+    if (table.workflowRole !== "rfq_required_lines" && !dsaAccountColumn && !budgetLineColumn) return [];
+    return [{
+      table,
+      rows: dsaAccountColumn || budgetLineColumn
+        ? rows.filter((row) => text(dsaAccountColumn
+          ? row?.[dsaAccountColumn.key]
+          : row?.[budgetLineColumn?.key]?.dsa_account_code))
+        : rows,
+    }];
+  });
   const itineraryRows = itinerary ? (Array.isArray(values[itinerary.key]) ? values[itinerary.key] : []) : [];
   const destination = itinerary ? (() => {
     const columns = tableColumns(itinerary);
