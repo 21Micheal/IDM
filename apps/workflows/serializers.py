@@ -213,6 +213,14 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         UserGroup.ensure_hod_group()
         mutable = dict(data)
         mutable["assignee_type"] = normalize_assignee_type(mutable.get("assignee_type", "group_any"))
+        # The dedicated manager mode is resolved from the document submitter's
+        # profile, so discard any stale group/user IDs before DRF attempts to
+        # look those IDs up. Clearing these only in validate() is too late:
+        # related fields have already rejected missing UUIDs by then.
+        if mutable["assignee_type"] == "assigned_line_manager":
+            mutable["assignee_group"] = None
+            mutable["assignee_user"] = None
+            mutable["assignee_user_field"] = ""
         return super().to_internal_value(mutable)
 
     def validate(self, attrs):
@@ -297,13 +305,18 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         if assignee_type == "form_user":
             attrs["assignee_user"] = None
             attrs["assignee_user_auto"] = False
+        if assignee_type == "assigned_line_manager":
+            attrs["assignee_group"] = None
+            attrs["assignee_user"] = None
+            attrs["assignee_user_auto"] = False
+            attrs["assignee_user_field"] = ""
         if assignee_type not in ("group_specific", "form_user") and assignee_user is not None:
             raise serializers.ValidationError(
                 {"assignee_user": "Only specific member assignments can set a user."}
             )
         if assignee_type != "form_user":
             attrs["assignee_user_field"] = ""
-        if assignee_type not in ("group_any", "group_all", "group_specific", "form_user"):
+        if assignee_type not in ("group_any", "group_all", "group_specific", "form_user", "assigned_line_manager"):
             raise serializers.ValidationError({"assignee_type": "Invalid assignment mode."})
 
         if assignee_type == "group_specific" and assignee_group and assignee_user:

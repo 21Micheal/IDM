@@ -26,6 +26,7 @@ New methods:
   WorkflowService.build_evaluation_context(document, payment_run)
 """
 import logging
+import uuid
 
 from django.db import transaction
 from django.db.models import Q
@@ -42,7 +43,7 @@ from .models import (
     WorkflowTemplate, WorkflowStep, WorkflowRule,
 )
 from apps.documents.models import Document, DocumentStatus, DocumentVersion
-from apps.accounts.models import User
+from apps.accounts.models import User, UserGroup
 from apps.audit.models import AuditEvent, AuditLog
 from apps.search.indexing import schedule_document_search_pipeline
 from apps.search.utils import summarize_bulk_index_error
@@ -1407,6 +1408,40 @@ class WorkflowService:
 
     @staticmethod
     def _resolve_assignees(step: WorkflowStep, document=None):
+        if step.assignee_type == "assigned_line_manager":
+            submitter = getattr(document, "uploaded_by", None) if document else None
+            manager_assignment = str(getattr(submitter, "line_manager", "") or "").strip()
+            if not manager_assignment:
+                raise WorkflowError(
+                    f"Step '{step.name}' needs the submitter to have a line manager assigned."
+                )
+            manager_group = UserGroup.objects.filter(name__iexact="Managers", is_active=True).first()
+            if not manager_group:
+                raise WorkflowError("Create an active Managers group before using Assigned Line Manager.")
+            eligible_managers = User.objects.filter(
+                is_active=True,
+                group_memberships__group=manager_group,
+            ).filter(
+                Q(group_memberships__expires_at__isnull=True)
+                | Q(group_memberships__expires_at__gt=timezone.now())
+            ).distinct()
+            try:
+                manager = eligible_managers.filter(pk=uuid.UUID(manager_assignment)).first()
+            except (TypeError, ValueError, AttributeError):
+                manager = None
+            if manager is None:
+                manager = next((
+                    candidate for candidate in eligible_managers
+                    if manager_assignment.casefold() in {
+                        candidate.get_full_name().casefold(), candidate.email.casefold()
+                    }
+                ), None)
+            if not manager:
+                raise WorkflowError(
+                    f"The line manager assigned to the submitter for '{step.name}' is unavailable."
+                )
+            return [manager]
+
         if step.assignee_type == "form_user":
             if not step.assignee_group_id:
                 raise WorkflowError(f"Step '{step.name}' is missing its approver group.")

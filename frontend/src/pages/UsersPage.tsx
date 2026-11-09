@@ -10,6 +10,7 @@ import {
   Plus, Search, Loader2, X, Users as UsersIcon,
 } from "lucide-react";
 import CustomListbox from "@/components/ui/CustomListbox";
+import LineManagerSelect from "@/components/users/LineManagerSelect";
 import { toast } from "@/components/ui/vault-toast";
 import { TemporaryPasswordModal } from "@/components/users/TemporaryPasswordModal";
 import { format } from "date-fns";
@@ -161,7 +162,7 @@ function CreateUserModal({
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-[#1F2933] mb-1.5">Line Manager</label>
-                  <input {...register("line_manager")} className="input" placeholder="Manager name or title" />
+                  <LineManagerSelect groups={groups} value={watch("line_manager") ?? ""} onChange={(id) => setValue("line_manager", id)} />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-[#1F2933] mb-1.5">DSA</label>
@@ -271,7 +272,7 @@ function EditUserModal({
           <div className="grid grid-cols-2 gap-4">
             <div><label className="block text-sm font-medium text-[#1F2933] mb-1.5">Staff Number</label><input {...register("staff_number")} className="input" /></div>
             <div><label className="block text-sm font-medium text-[#1F2933] mb-1.5">Grade</label><input {...register("grade")} className="input" /></div>
-            <div><label className="block text-sm font-medium text-[#1F2933] mb-1.5">Line Manager</label><input {...register("line_manager")} className="input" /></div>
+            <div><label className="block text-sm font-medium text-[#1F2933] mb-1.5">Line Manager</label><LineManagerSelect groups={groups} value={watch("line_manager") ?? ""} onChange={(id) => setValue("line_manager", id)} /></div>
             <div><label className="block text-sm font-medium text-[#1F2933] mb-1.5">DSA</label><input {...register("dsa")} className="input" placeholder="USD 400" /></div>
           </div>
 

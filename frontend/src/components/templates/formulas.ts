@@ -22,6 +22,7 @@ export type FormulaUser = {
   staff_number?: string | null;
   grade?: string | null;
   line_manager?: string | null;
+  line_manager_name?: string | null;
   dsa?: string | null;
 } | null | undefined;
 
@@ -93,7 +94,7 @@ export const FORMULAS: Record<string, FormulaDef> = {
   current_user_line_manager: {
     key: "current_user_line_manager",
     label: "Current user — line manager",
-    evaluate: (ctx) => ctx.user?.line_manager || "",
+    evaluate: (ctx) => ctx.user?.line_manager_name || ctx.user?.line_manager || "",
   },
   current_user_dsa: {
     key: "current_user_dsa",

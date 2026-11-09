@@ -125,6 +125,7 @@ class WorkflowStep(models.Model):
         ("group_all",      "All members of group"),
         ("group_specific", "Specific member of group"),
         ("form_user",      "User selected in form"),
+        ("assigned_line_manager", "Submitter's assigned line manager"),
     ]
 
     STEP_TYPES = [
@@ -161,7 +162,7 @@ class WorkflowStep(models.Model):
     )
 
     # ── Approval-step fields ──────────────────────────────────────────────────
-    assignee_type = models.CharField(max_length=20, choices=ASSIGNEE_TYPES, default="group_any")
+    assignee_type = models.CharField(max_length=32, choices=ASSIGNEE_TYPES, default="group_any")
     assignee_group = models.ForeignKey(
         "accounts.UserGroup",
         null=True,

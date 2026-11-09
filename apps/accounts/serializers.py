@@ -3,6 +3,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.crypto import get_random_string
 from rest_framework import serializers
 import base64
+import uuid
 from django.utils import timezone
 from django.db.models import Q
 from .models import User, Department, UserGroup, GroupPermission, UserGroupMembership, UserDelegation, UserPreference, UserSignature
@@ -77,13 +78,59 @@ class DepartmentSerializer(serializers.ModelSerializer):
 class UserSummarySerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     department_name  = serializers.CharField(source="department.name", read_only=True, default=None)
+    line_manager_name = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
-        fields = ["id", "email", "first_name", "last_name", "full_name", "job_description", "staff_number", "grade", "line_manager", "dsa", "is_staff", "department_name"]
+        fields = ["id", "email", "first_name", "last_name", "full_name", "job_description", "staff_number", "grade", "line_manager", "line_manager_name", "dsa", "is_staff", "department_name"]
 
     def get_full_name(self, obj):
         return obj.get_full_name()
+
+    def get_line_manager_name(self, obj):
+        return assigned_line_manager_name(obj)
+
+
+def validate_line_manager_assignment(value):
+    """Store the selected manager's user UUID, scoped to active Managers membership."""
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    group = UserGroup.objects.filter(name__iexact="Managers", is_active=True).first()
+    if not group:
+        raise serializers.ValidationError("Create an active Managers group before assigning a line manager.")
+    managers = User.objects.filter(
+        is_active=True,
+        group_memberships__group=group,
+    ).filter(
+        Q(group_memberships__expires_at__isnull=True) |
+        Q(group_memberships__expires_at__gt=timezone.now())
+    ).distinct()
+    try:
+        manager = managers.filter(pk=uuid.UUID(value)).first()
+    except (TypeError, ValueError, AttributeError):
+        manager = None
+    if manager is None:
+        manager = next((
+            candidate for candidate in managers
+            if value.casefold() in {
+                candidate.get_full_name().casefold(), candidate.email.casefold()
+            }
+        ), None)
+    if manager is None:
+        raise serializers.ValidationError("Select an active member of the Managers group.")
+    return str(manager.pk)
+
+
+def assigned_line_manager_name(user):
+    value = str(getattr(user, "line_manager", "") or "").strip()
+    if not value:
+        return ""
+    try:
+        manager = User.objects.filter(pk=uuid.UUID(value), is_active=True).first()
+    except (TypeError, ValueError, AttributeError):
+        return value
+    return manager.get_full_name() if manager else ""
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -94,13 +141,14 @@ class UserSerializer(serializers.ModelSerializer):
     can_view_system_audit = serializers.SerializerMethodField()
     admin_source     = serializers.SerializerMethodField()
     group_ids        = serializers.SerializerMethodField()
+    line_manager_name = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
         fields = [
             "id", "email", "first_name", "last_name", "full_name",
             "job_description",
-            "staff_number", "grade", "line_manager", "dsa",
+            "staff_number", "grade", "line_manager", "line_manager_name", "dsa",
             "is_staff",
             "is_superuser",
             "has_admin_access", "can_view_system_audit", "admin_source",
@@ -115,10 +163,14 @@ class UserSerializer(serializers.ModelSerializer):
             "has_admin_access", "can_view_system_audit", "admin_source",
             "must_change_password", "last_login_ip", "last_login",
             "group_names", "group_ids", "created_at", "updated_at",
+            "line_manager_name",
         ]
 
     def get_full_name(self, obj):
         return obj.get_full_name()
+
+    def get_line_manager_name(self, obj):
+        return assigned_line_manager_name(obj)
 
     def get_group_names(self, obj):
         return list(
@@ -203,6 +255,9 @@ class UserCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Job description is required.")
         return value
 
+    def validate_line_manager(self, value):
+        return validate_line_manager_assignment(value)
+
     COMMON_EMAIL_TYPO_DOMAINS = {
         "gmai.com",
         "gmial.com",
@@ -263,6 +318,9 @@ class UserUpdateSerializer(serializers.ModelSerializer):
 
     def validate_job_description(self, value):
         return value.strip()
+
+    def validate_line_manager(self, value):
+        return validate_line_manager_assignment(value)
 
     def validate(self, attrs):
         request = self.context.get("request")

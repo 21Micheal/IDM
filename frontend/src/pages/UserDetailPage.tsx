@@ -23,6 +23,7 @@ import {
   CalendarClock,
 } from "lucide-react";
 import CustomListbox from "@/components/ui/CustomListbox";
+import LineManagerSelect from "@/components/users/LineManagerSelect";
 import { toast } from "@/components/ui/vault-toast";
 import { TemporaryPasswordModal } from "@/components/users/TemporaryPasswordModal";
 import {
@@ -360,7 +361,6 @@ export default function UserDetailPage() {
               {([
                 ["staff_number", "Staff Number", "0046"],
                 ["grade", "Grade", "P3"],
-                ["line_manager", "Line Manager", "Manager name or title"],
                 ["dsa", "DSA", "USD 400"],
               ] as const).map(([key, label, placeholder]) => (
                 <div key={key}>
@@ -373,6 +373,15 @@ export default function UserDetailPage() {
                   />
                 </div>
               ))}
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-[#5E6870] uppercase tracking-wider mb-1.5">Line Manager</label>
+              <LineManagerSelect
+                groups={groups}
+                value={form.line_manager}
+                onChange={(line_manager) => setForm((current) => ({ ...current, line_manager }))}
+              />
             </div>
 
             <fieldset>

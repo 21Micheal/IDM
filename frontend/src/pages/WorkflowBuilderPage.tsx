@@ -25,7 +25,7 @@ import {
 } from "@/lib/workflowGraph";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-type AssigneeType = "group_any" | "group_all" | "group_specific" | "form_user";
+type AssigneeType = "group_any" | "group_all" | "group_specific" | "form_user" | "assigned_line_manager";
 type StepType = "approval" | "notification";
 type WorkflowTargetType = "document" | "payment_run";
 type WorkflowRouteKind = "document" | "form" | "payment_run";
@@ -303,6 +303,7 @@ const ASSIGNEE_MODES: { value: AssigneeType; label: string; description: string;
   { value: "group_all", label: "All members", description: "Consensus required", Icon: UsersRound },
   { value: "group_specific", label: "Specific member", description: "Designated approver or a chosen member", Icon: User },
   { value: "form_user", label: "Selected form user", description: "The person selected by the requisitioner", Icon: User },
+  { value: "assigned_line_manager", label: "Assigned Line Manager", description: "The submitter's manager from their profile", Icon: User },
 ];
 
 const GROUP_COLORS = [
@@ -344,7 +345,7 @@ function normalizeAssigneeType(value: unknown): AssigneeType {
   if (typeof value === "string" && value in LEGACY_ASSIGNEE_TYPE_MAP) {
     return LEGACY_ASSIGNEE_TYPE_MAP[value];
   }
-  if (value === "group_any" || value === "group_all" || value === "group_specific" || value === "form_user") {
+  if (value === "group_any" || value === "group_all" || value === "group_specific" || value === "form_user" || value === "assigned_line_manager") {
     return value;
   }
   return "group_any";
@@ -556,6 +557,13 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
     return rest;
   }
 
+  if (rest.assignee_type === "assigned_line_manager") {
+    rest.assignee_group = null;
+    rest.assignee_user = null;
+    rest.assignee_user_auto = false;
+    rest.assignee_user_field = "";
+  }
+
   // Approval step: clear notification fields
   rest.notify_user                  = null;
   rest.notify_email                 = "";
@@ -654,7 +662,7 @@ function validateStepData(raw: StepData): string | null {
     if (!s.notification_message?.trim()) return `"${s.name}" needs an email message.`;
     return null;
   }
-  if (!s.assignee_group) return `"${s.name}" needs a group.`;
+  if (s.assignee_type !== "assigned_line_manager" && !s.assignee_group) return `"${s.name}" needs a valid active approver group. Select a group again.`;
   if (s.assignee_type === "group_specific" && !s.assignee_user) return `"${s.name}" needs a specific group member.`;
   if (s.assignee_type === "form_user" && !s.assignee_user_field) return `"${s.name}" needs a user field selected.`;
   if (!s.allow_approve && !s.allow_reject && !s.allow_return && !s.allow_return_submitter) return `"${s.name}" must have at least one approver action enabled.`;
@@ -662,25 +670,26 @@ function validateStepData(raw: StepData): string | null {
   return null;
 }
 
-function formatApiError(value: unknown): string | null {
-  if (typeof value === "string") return value;
+function formatApiError(value: unknown, path = ""): string | null {
+  if (typeof value === "string") return path ? `${path}: ${value}` : value;
   if (Array.isArray(value)) {
-    for (const item of value) {
-      const message = formatApiError(item);
+    for (const [index, item] of value.entries()) {
+      const message = formatApiError(item, path ? `${path}.${index}` : String(index));
       if (message) return message;
     }
     return null;
   }
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    for (const key of ["detail", "non_field_errors", "steps", "name"]) {
+    for (const key of ["detail", "non_field_errors"]) {
       if (key in record) {
-        const message = formatApiError(record[key]);
+        const message = formatApiError(record[key], path);
         if (message) return message;
       }
     }
-    for (const nested of Object.values(record)) {
-      const message = formatApiError(nested);
+    for (const [key, nested] of Object.entries(record)) {
+      const nextPath = path ? `${path}.${key}` : key;
+      const message = formatApiError(nested, nextPath);
       if (message) return message;
     }
   }
@@ -835,6 +844,7 @@ function StepEditPanel({
   const isRequisitionWorkflow = /requisition/i.test(`${docType?.name ?? ""} ${docType?.code ?? ""}`);
   const needsGroupMember = step.assignee_type === "group_specific" && !isHodGroupSelected;
   const needsFormUser = step.assignee_type === "form_user";
+  const usesAssignedManager = step.assignee_type === "assigned_line_manager";
   const { data: formTemplates = [], isLoading: formTemplatesLoading } = useQuery<Array<Record<string, any>>>({
     queryKey: ["workflow-form-templates", docType?.id],
     queryFn: async () => {
@@ -1023,7 +1033,7 @@ function StepEditPanel({
             </button>
           )}
           <div className="grid grid-cols-1 gap-4 p-4 rounded-lg bg-muted/40 border border-border">
-            <div>
+            {!usesAssignedManager && <div>
               <Label required>Approver group</Label>
               <CustomListbox
                 value={step.assignee_group ?? ""}
@@ -1045,7 +1055,7 @@ function StepEditPanel({
                 buttonClassName={inp}
                 ariaLabel="Approver group"
               />
-            </div>
+            </div>}
 
             <div>
               <Label required>Assignment mode</Label>
@@ -1060,12 +1070,15 @@ function StepEditPanel({
                     assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
                     assignee_user_auto: next === "group_specific" ? step.assignee_user_auto : undefined,
                     assignee_user_field: next === "form_user" ? (step.assignee_user_field ?? "") : "",
+                    assignee_group: next === "assigned_line_manager" ? null : step.assignee_group,
+                    assignee_group_name: next === "assigned_line_manager" ? undefined : step.assignee_group_name,
                   });
                 }}
                 options={ASSIGNEE_MODES.map((m) => ({ value: m.value, label: `${m.label} — ${m.description}` }))}
                 buttonClassName={inp}
                 ariaLabel="Assignment mode"
               />
+              {usesAssignedManager && <p className="text-[11px] text-muted-foreground mt-1">Uses the requester&apos;s assigned Line Manager. That user must be active and belong to the Managers group.</p>}
               {isHodGroupSelected && (
                 <p className="text-[11px] text-muted-foreground mt-1">
                   The assignee will be picked automatically from the uploader&apos;s department head.
@@ -2423,7 +2436,24 @@ function TemplateEditor({
     // HOD group is always "any member" — enforced on every approval step, wherever it sits in the tree.
     const blocksForSave = mapSteps(blocks, (step) => {
       if (step.step_type === "notification") return step;
+      if (step.assignee_type === "assigned_line_manager") {
+        return {
+          ...step,
+          assignee_group: null,
+          assignee_group_name: undefined,
+          assignee_user: null,
+          assignee_user_name: undefined,
+          assignee_user_auto: false,
+          assignee_user_field: "",
+        };
+      }
       const group = (groups ?? []).find((item) => item.id === step.assignee_group);
+      if (step.assignee_group && !group) {
+        // Avoid sending an obsolete group UUID that the server can no longer
+        // resolve. The regular step validation below will stop the save and
+        // focus this step so its approver group can be selected again.
+        return { ...step, assignee_group: null, assignee_group_name: undefined };
+      }
       if (!isHodGroupName(group?.name ?? step.assignee_group_name)) return step;
       return {
         ...step,

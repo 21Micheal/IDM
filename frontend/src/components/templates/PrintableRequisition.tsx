@@ -349,7 +349,7 @@ export default function PrintableRequisition({
     ["Staff Code", findField(fields, values, [/staff code/, /staff number/, /employee number/]) || text(document.uploaded_by?.staff_number)],
     ["Department", findField(fields, values, [/department/]) || text(document.uploaded_by_department_name || document.department_name || document.uploaded_by?.department_name || document.department) || "—"],
     ["Grade", findField(fields, values, [/^grade$/]) || text(document.uploaded_by?.grade)],
-    ["Line Manager", findField(fields, values, [/line manager/]) || text(document.uploaded_by?.line_manager)],
+    ["Line Manager", findField(fields, values, [/line manager/]) || text(document.uploaded_by?.line_manager_name || document.uploaded_by?.line_manager)],
     ["DSA", findField(fields, values, [/^dsa$/, /daily subsistence allowance/]) || text(document.uploaded_by?.dsa)],
     ["Accounting Period", accountingPeriod || findField(fields, values, [/accounting period/, /^period$/])],
     ["Purpose of Travel", findField(fields, values, [/activity description/, /purpose of travel/])],

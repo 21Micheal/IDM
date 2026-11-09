@@ -11,6 +11,7 @@ Keep the keys in sync with frontend/src/components/templates/formulas.ts.
 """
 from __future__ import annotations
 
+import uuid
 from django.utils import timezone
 
 # Friendly aliases → canonical formula key (mirror of the frontend ALIASES).
@@ -80,7 +81,15 @@ def resolve_formula(formula, *, user=None, reference_number=None, now=None) -> s
     if key == "current_user_grade":
         return getattr(user, "grade", "") or ""
     if key == "current_user_line_manager":
-        return getattr(user, "line_manager", "") or ""
+        assignment = str(getattr(user, "line_manager", "") or "").strip() if user else ""
+        if not assignment:
+            return ""
+        try:
+            from apps.accounts.models import User
+            manager = User.objects.filter(pk=uuid.UUID(assignment), is_active=True).first()
+        except (TypeError, ValueError, AttributeError):
+            return assignment
+        return manager.get_full_name() if manager else ""
     if key == "current_user_dsa":
         return getattr(user, "dsa", "") or ""
     if key == "now":

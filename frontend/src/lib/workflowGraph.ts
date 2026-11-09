@@ -597,8 +597,10 @@ export function toPseudocode(blocks: Block[], fields: Map<string, WorkflowField>
       switch (b.kind) {
         case "approval": {
           const s = b.step;
-          const mode = s.assignee_type === "group_all" ? "ALL of" : s.assignee_type === "group_specific" ? "SPECIFIC member of" : "ANY of";
-          lines.push(`${ind(d)}APPROVE "${s.name || "Untitled"}" by ${mode} ${groupName(s.assignee_group)}${s.sla_hours ? `  [SLA ${s.sla_hours}h]` : ""}`);
+          const mode = s.assignee_type === "assigned_line_manager"
+            ? "the submitter's assigned Line Manager"
+            : `${s.assignee_type === "group_all" ? "ALL of" : s.assignee_type === "group_specific" ? "SPECIFIC member of" : "ANY of"} ${groupName(s.assignee_group)}`;
+          lines.push(`${ind(d)}APPROVE "${s.name || "Untitled"}" by ${mode}${s.sla_hours ? `  [SLA ${s.sla_hours}h]` : ""}`);
           const rt = [s.allow_return ? "previous step" : "", s.allow_return_submitter ? "submitter" : ""].filter(Boolean);
           if (rt.length) lines.push(`${ind(d + 1)}CAN RETURN to ${rt.join(" or ")}`);
           break;
