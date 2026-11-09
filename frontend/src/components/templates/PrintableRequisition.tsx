@@ -345,10 +345,12 @@ export default function PrintableRequisition({
   const totalEstimated = travelLines.reduce((sum, line) => sum + (Number(String(line.estimated).replace(/,/g, "")) || 0), 0);
   const top = [
     ["Name of Requesting Officer", findField(fields, values, [/requesting officer/, /requester name/, /requisitioner/, /requested by/]) || text(document.uploaded_by?.full_name) || "—"],
-    ["Position", findField(fields, values, [/^position$/])],
-    ["Staff Code", findField(fields, values, [/staff code/, /employee number/])],
+    ["Position", findField(fields, values, [/^position$/]) || text(document.uploaded_by?.job_description)],
+    ["Staff Code", findField(fields, values, [/staff code/, /staff number/, /employee number/]) || text(document.uploaded_by?.staff_number)],
     ["Department", findField(fields, values, [/department/]) || text(document.uploaded_by_department_name || document.department_name || document.uploaded_by?.department_name || document.department) || "—"],
-    ["Grade", findField(fields, values, [/^grade$/])],
+    ["Grade", findField(fields, values, [/^grade$/]) || text(document.uploaded_by?.grade)],
+    ["Line Manager", findField(fields, values, [/line manager/]) || text(document.uploaded_by?.line_manager)],
+    ["DSA", findField(fields, values, [/^dsa$/, /daily subsistence allowance/]) || text(document.uploaded_by?.dsa)],
     ["Accounting Period", accountingPeriod || findField(fields, values, [/accounting period/, /^period$/])],
     ["Purpose of Travel", findField(fields, values, [/activity description/, /purpose of travel/])],
     ["Destination", destination || findField(fields, values, [/destination/])],

@@ -17,13 +17,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { extractApiError } from "@/lib/apiError";
-import { templatesAPI, documentsAPI } from "@/services/api";
+import { templatesAPI, documentsAPI, authAPI } from "@/services/api";
 import TemplateForm, { pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
 import { useFormDraftAutosave } from "@/hooks/useFormDraftAutosave";
 import { toast } from "@/components/ui/vault-toast";
 import { cn } from "@/lib/utils";
 import {
-  Loader2, ArrowLeft, FileText, CheckCircle2,
+  Loader2, ArrowLeft, FileText, CheckCircle2, Trash2,
   RefreshCw, Sparkles, ChevronDown, ClipboardList,
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
@@ -38,6 +38,7 @@ export default function NewRequisitionPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const user = useAuthStore((s) => s.user);
+  const setUser = useAuthStore((s) => s.setUser);
   const [searchParams] = useSearchParams();
   const preselectedTemplateId = searchParams.get("template_id");
   const supplierCode = searchParams.get("supplier_code");
@@ -50,6 +51,24 @@ export default function NewRequisitionPage() {
   const [isSigningOpen, setIsSigningOpen] = useState(false);
   const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const [formInstanceKey, setFormInstanceKey] = useState(0);
+  const [isClearingDraft, setIsClearingDraft] = useState(false);
+
+  // Refresh the signed-in user's profile before applying current-user formulas.
+  // The persisted auth store can predate newly added profile fields, so relying
+  // on it alone can leave those formula fields blank until a later session sync.
+  const { data: freshUser } = useQuery({
+    queryKey: ["auth", "me", "requisition", user?.id],
+    queryFn: () => authAPI.me().then((response) => response.data),
+    enabled: Boolean(user?.id),
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+  });
+
+  useEffect(() => {
+    if (freshUser) setUser(freshUser);
+  }, [freshUser, setUser]);
 
   // Formula evaluation context
   const formulaContext = useMemo(
@@ -245,6 +264,34 @@ export default function NewRequisitionPage() {
       toast.error(err?.response?.data?.detail || "Failed to save draft");
     },
   });
+
+  const clearDraft = async () => {
+    if (!window.confirm("Delete this requisition draft? It will be moved to Trash, and the entered form values will be cleared.")) return;
+    setIsClearingDraft(true);
+    try {
+      await autosave.discardDraft();
+      const resetValues = selectedTemplate?.sections
+        ? applyFormulasAndDefaults(
+            selectedTemplate.sections,
+            {},
+            { user, now: new Date(), values: {} },
+            { preserveUserValues: false },
+          )
+        : {};
+      setFormValues(resetValues);
+      setFormDirty(false);
+      setMissingFields([]);
+      supplierPrefillRef.current = null;
+      setFormInstanceKey((key) => key + 1);
+      void qc.invalidateQueries({ queryKey: ["documents"] });
+      void qc.invalidateQueries({ queryKey: ["requisitions"] });
+      toast.success("Draft deleted");
+    } catch {
+      toast.error("Could not delete this draft. Your form is still available.");
+    } finally {
+      setIsClearingDraft(false);
+    }
+  };
 
   // Submit mutation
   const submitMutation = useMutation({
@@ -472,6 +519,7 @@ export default function NewRequisitionPage() {
           <>
             {/* Form sections — detached cards, matching builder preview */}
             <TemplateForm
+              key={formInstanceKey}
               sections={selectedTemplate.sections ?? []}
               values={formValues}
               validationIssues={missingFields}
@@ -504,6 +552,15 @@ export default function NewRequisitionPage() {
         <div className="fixed bottom-6 right-6 z-40 flex items-center gap-2">
           <button
             type="button"
+            onClick={clearDraft}
+            disabled={isClearingDraft || isSavingDraft || isSubmitting || (!formDirty && !autosave.documentId)}
+            className="inline-flex h-9 items-center gap-1.5 border border-red-300 bg-white px-3 text-sm font-medium text-red-700 shadow-md hover:bg-red-50 disabled:opacity-50 transition-colors"
+          >
+            {isClearingDraft ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+            Delete Draft
+          </button>
+          <button
+            type="button"
             onClick={async () => {
               if (formDirty) {
                 try {
@@ -522,7 +579,7 @@ export default function NewRequisitionPage() {
           <button
             type="button"
             onClick={() => saveDraftMutation.mutate()}
-            disabled={isSavingDraft}
+            disabled={isSavingDraft || isClearingDraft}
             className="inline-flex h-9 items-center gap-1.5 border border-[#287EAD] bg-white px-4 text-sm font-semibold text-[#287EAD] shadow-md hover:bg-[#EEF6FB] disabled:opacity-50 transition-colors"
           >
             {isSavingDraft && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
@@ -531,7 +588,7 @@ export default function NewRequisitionPage() {
           <button
             type="button"
             onClick={() => submitMutation.mutate()}
-            disabled={isSubmitting}
+            disabled={isSubmitting || isClearingDraft}
             className="inline-flex h-9 items-center gap-1.5 bg-[#287EAD] px-5 text-sm font-semibold text-white shadow-md hover:bg-[#1E6F99] disabled:opacity-50 transition-colors"
           >
             {isSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}

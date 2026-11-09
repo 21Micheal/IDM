@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { usersAPI, departmentsAPI, profileAPI } from "@/services/api";
+import { usersAPI, departmentsAPI, groupsAPI, profileAPI } from "@/services/api";
 import {
   ArrowLeft,
   Loader2,
@@ -36,6 +36,7 @@ interface Department {
   id: string;
   name: string;
 }
+interface UserGroup { id: string; name: string }
 
 interface User {
   id: string;
@@ -44,13 +45,31 @@ interface User {
   last_name: string;
   full_name: string;
   job_description: string;
+  staff_number: string;
+  grade: string;
+  line_manager: string;
+  dsa: string;
   department: string | null;
   department_name: string | null;
+  group_ids: string[];
   is_active: boolean;
   mfa_enabled: boolean;
   group_names?: string[];
   last_login: string | null;
   created_at: string;
+}
+
+interface UserEditForm {
+  first_name: string;
+  last_name: string;
+  job_description: string;
+  staff_number: string;
+  grade: string;
+  line_manager: string;
+  dsa: string;
+  department: string;
+  group_ids: string[];
+  is_active: boolean;
 }
 
 export default function UserDetailPage() {
@@ -79,17 +98,28 @@ export default function UserDetailPage() {
     staleTime: 1000 * 60 * 5,
   });
 
+  const { data: groups = [] } = useQuery<UserGroup[]>({
+    queryKey: ["groups", "user-assignment"],
+    queryFn: () => groupsAPI.list().then((r) => r.data.results ?? r.data),
+    staleTime: 1000 * 60 * 5,
+  });
+
   const { data: delegations = [] } = useQuery<DelegationRecord[]>({
     queryKey: ["users", "delegations", id],
     queryFn: () => usersAPI.delegations(id).then((r) => r.data),
     enabled: Boolean(id),
   });
 
-  const [form, setForm] = useState({
+  const [form, setForm] = useState<UserEditForm>({
     first_name: "",
     last_name: "",
     job_description: "",
+    staff_number: "",
+    grade: "",
+    line_manager: "",
+    dsa: "",
     department: "",
+    group_ids: [],
     is_active: true,
   });
 
@@ -99,7 +129,12 @@ export default function UserDetailPage() {
       first_name: user.first_name,
       last_name: user.last_name,
       job_description: user.job_description || "",
+      staff_number: user.staff_number || "",
+      grade: user.grade || "",
+      line_manager: user.line_manager || "",
+      dsa: user.dsa || "",
       department: user.department || "",
+      group_ids: user.group_ids || [],
       is_active: user.is_active,
     });
   }, [user]);
@@ -320,6 +355,49 @@ export default function UserDetailPage() {
                 placeholder="Role responsibilities, scope, etc."
               />
             </div>
+
+            <div className="grid sm:grid-cols-2 gap-3">
+              {([
+                ["staff_number", "Staff Number", "0046"],
+                ["grade", "Grade", "P3"],
+                ["line_manager", "Line Manager", "Manager name or title"],
+                ["dsa", "DSA", "USD 400"],
+              ] as const).map(([key, label, placeholder]) => (
+                <div key={key}>
+                  <label className="block text-[11px] font-semibold text-[#5E6870] uppercase tracking-wider mb-1.5">{label}</label>
+                  <input
+                    className="w-full h-9 border border-[#C8CDD2] bg-white px-3 text-sm text-[#1F2933] focus:outline-none focus:border-[#287EAD]"
+                    placeholder={placeholder}
+                    value={form[key]}
+                    onChange={(event) => setForm((current) => ({ ...current, [key]: event.target.value }))}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <fieldset>
+              <legend className="block text-[11px] font-semibold text-[#5E6870] uppercase tracking-wider mb-1.5">Groups</legend>
+              <div className="grid sm:grid-cols-2 gap-2 border border-[#C8CDD2] p-3">
+                {groups.filter((group) => group.name !== "HOD").map((group) => (
+                  <label key={group.id} className="flex items-center gap-2 text-sm text-[#1F2933]">
+                    <input
+                      type="checkbox"
+                      checked={form.group_ids.includes(group.id)}
+                      onChange={(event) => setForm((current) => ({
+                        ...current,
+                        group_ids: event.target.checked
+                          ? [...current.group_ids, group.id]
+                          : current.group_ids.filter((groupId) => groupId !== group.id),
+                      }))}
+                      className="h-4 w-4 accent-[#287EAD]"
+                    />
+                    {group.name}
+                  </label>
+                ))}
+                {!groups.length && <p className="text-xs text-[#5E6870]">No active groups available.</p>}
+              </div>
+              <p className="mt-1 text-[11px] text-[#8C969E]">HOD membership follows the department head assignment.</p>
+            </fieldset>
 
             <div>
               <label className="block text-[11px] font-semibold text-[#5E6870] uppercase tracking-wider mb-1.5">Department</label>

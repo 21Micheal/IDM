@@ -18,6 +18,13 @@ _ALIASES = {
     "created_by": "current_user",
     "created_by_email": "current_user_email",
     "department": "current_user_department",
+    "role": "current_user_role",
+    "position": "current_user_role",
+    "staff_number": "current_user_staff_number",
+    "employee_number": "current_user_staff_number",
+    "grade": "current_user_grade",
+    "line_manager": "current_user_line_manager",
+    "dsa": "current_user_dsa",
     "now_time": "now",
     "date": "today",
 }
@@ -26,6 +33,11 @@ _CANONICAL = {
     "current_user",
     "current_user_email",
     "current_user_department",
+    "current_user_role",
+    "current_user_staff_number",
+    "current_user_grade",
+    "current_user_line_manager",
+    "current_user_dsa",
     "now",
     "today",
     "reference_number",
@@ -61,6 +73,16 @@ def resolve_formula(formula, *, user=None, reference_number=None, now=None) -> s
     if key == "current_user_department":
         dept = getattr(user, "department", None) if user else None
         return getattr(dept, "name", "") or ""
+    if key == "current_user_role":
+        return getattr(user, "job_description", "") or ""
+    if key == "current_user_staff_number":
+        return getattr(user, "staff_number", "") or ""
+    if key == "current_user_grade":
+        return getattr(user, "grade", "") or ""
+    if key == "current_user_line_manager":
+        return getattr(user, "line_manager", "") or ""
+    if key == "current_user_dsa":
+        return getattr(user, "dsa", "") or ""
     if key == "now":
         return now.strftime("%Y-%m-%d %H:%M")
     if key == "today":

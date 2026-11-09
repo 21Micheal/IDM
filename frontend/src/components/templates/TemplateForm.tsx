@@ -2253,7 +2253,8 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
   // Auto-fill (formula) fields: read-only, value is computed (client preview /
   // server-authoritative). Rendered the same way whether filling or approving.
-  if (resolveFormula(field.formula)) {
+  const formulaDefinition = resolveFormula(field.formula);
+  if (formulaDefinition) {
     const shown = referenceLabel(allValues[key]);
     return (
       <div className="min-w-0" style={style}>
@@ -2262,7 +2263,11 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
           {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
         </label>
         <div data-protected-value="true" className={`${inp} form-protected-value flex items-center`} style={{ backgroundColor: "#F6F7F8", color: "#8C969E" }}>
-          {shown || <span className="italic">Filled automatically on save</span>}
+          {shown || (
+            <span className="italic">
+              {formulaDefinition.serverOnly ? "Assigned when the requisition is saved" : "No value is set in your profile"}
+            </span>
+          )}
         </div>
       </div>
     );

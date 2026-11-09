@@ -4,6 +4,7 @@ from django.utils.crypto import get_random_string
 from rest_framework import serializers
 import base64
 from django.utils import timezone
+from django.db.models import Q
 from .models import User, Department, UserGroup, GroupPermission, UserGroupMembership, UserDelegation, UserPreference, UserSignature
 
 
@@ -79,7 +80,7 @@ class UserSummarySerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ["id", "email", "first_name", "last_name", "full_name", "job_description", "is_staff", "department_name"]
+        fields = ["id", "email", "first_name", "last_name", "full_name", "job_description", "staff_number", "grade", "line_manager", "dsa", "is_staff", "department_name"]
 
     def get_full_name(self, obj):
         return obj.get_full_name()
@@ -92,26 +93,28 @@ class UserSerializer(serializers.ModelSerializer):
     has_admin_access = serializers.SerializerMethodField()
     can_view_system_audit = serializers.SerializerMethodField()
     admin_source     = serializers.SerializerMethodField()
+    group_ids        = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
         fields = [
             "id", "email", "first_name", "last_name", "full_name",
             "job_description",
+            "staff_number", "grade", "line_manager", "dsa",
             "is_staff",
             "is_superuser",
             "has_admin_access", "can_view_system_audit", "admin_source",
             "department", "department_name",
             "mfa_enabled", "must_change_password",
             "is_active", "last_login_ip", "last_login",
-            "group_names", "created_at", "updated_at",
+            "group_names", "group_ids", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "full_name", "department_name",
             "is_staff", "is_superuser",
             "has_admin_access", "can_view_system_audit", "admin_source",
             "must_change_password", "last_login_ip", "last_login",
-            "group_names", "created_at", "updated_at",
+            "group_names", "group_ids", "created_at", "updated_at",
         ]
 
     def get_full_name(self, obj):
@@ -122,6 +125,15 @@ class UserSerializer(serializers.ModelSerializer):
             obj.group_memberships
             .select_related("group")
             .values_list("group__name", flat=True)
+        )
+
+    def get_group_ids(self, obj):
+        return list(
+            obj.group_memberships
+            .filter(group__is_active=True)
+            .exclude(group__name=UserGroup.HOD_GROUP_NAME)
+            .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+            .values_list("group_id", flat=True)
         )
 
     def get_has_admin_access(self, obj):
@@ -171,9 +183,19 @@ class UserSignatureSerializer(serializers.ModelSerializer):
 
 class UserCreateSerializer(serializers.ModelSerializer):
     """Admin creates a user. Password is auto-generated and returned clearly."""
+    group_ids = serializers.PrimaryKeyRelatedField(
+        queryset=UserGroup.objects.filter(is_active=True), many=True,
+        required=False, write_only=True,
+    )
+
     class Meta:
         model  = User
-        fields = ["email", "first_name", "last_name", "job_description", "department", "is_active"]
+        fields = ["email", "first_name", "last_name", "job_description", "staff_number", "grade", "line_manager", "dsa", "department", "group_ids", "is_active"]
+
+    def validate_group_ids(self, groups):
+        if any(group.name == UserGroup.HOD_GROUP_NAME for group in groups):
+            raise serializers.ValidationError("HOD membership is managed through department heads.")
+        return groups
 
     def validate_job_description(self, value):
         value = value.strip()
@@ -205,6 +227,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
+        groups = validated_data.pop("group_ids", [])
         # Generate a strong, readable temporary password
         temp_password = get_random_string(
             length=12,
@@ -219,15 +242,24 @@ class UserCreateSerializer(serializers.ModelSerializer):
             must_change_password=True,
             **validated_data,
         )
+        UserGroupMembership.objects.bulk_create([
+            UserGroupMembership(user=user, group=group, added_by=self.context.get("request").user)
+            for group in groups
+        ])
         print(f"DEBUG: Created user {user.email} with password: {temp_password}")
         print(f"DEBUG: User password hash: {user.password[:20]}...")
         return user
 
 
 class UserUpdateSerializer(serializers.ModelSerializer):
+    group_ids = serializers.PrimaryKeyRelatedField(
+        queryset=UserGroup.objects.filter(is_active=True), many=True,
+        required=False, write_only=True,
+    )
+
     class Meta:
         model  = User
-        fields = ["first_name", "last_name", "job_description", "department", "is_active", "mfa_enabled"]
+        fields = ["first_name", "last_name", "job_description", "staff_number", "grade", "line_manager", "dsa", "department", "group_ids", "is_active", "mfa_enabled"]
 
     def validate_job_description(self, value):
         return value.strip()
@@ -235,7 +267,7 @@ class UserUpdateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         request = self.context.get("request")
         if request and not request.user.has_admin_access:
-            allowed = {"first_name", "last_name"}
+            allowed = {"first_name", "last_name", "staff_number", "grade", "line_manager", "dsa"} if self.instance == request.user else {"first_name", "last_name"}
             for key in attrs:
                 if key not in allowed:
                     raise serializers.ValidationError(
@@ -253,10 +285,23 @@ class UserUpdateSerializer(serializers.ModelSerializer):
                         "Change the department head before moving them."
                     )
                 })
+        groups = attrs.get("group_ids")
+        if groups is not None and any(group.name == UserGroup.HOD_GROUP_NAME for group in groups):
+            raise serializers.ValidationError({"group_ids": "HOD membership is managed through department heads."})
         return attrs
 
     def update(self, instance, validated_data):
+        groups = validated_data.pop("group_ids", None)
         user = super().update(instance, validated_data)
+        if groups is not None:
+            UserGroupMembership.objects.filter(user=user).exclude(
+                group__name=UserGroup.HOD_GROUP_NAME
+            ).exclude(group__in=groups).delete()
+            for group in groups:
+                UserGroupMembership.objects.update_or_create(
+                    user=user, group=group,
+                    defaults={"added_by": self.context.get("request").user if self.context.get("request") else None, "expires_at": None},
+                )
         UserGroup.sync_hod_memberships(
             added_by=self.context.get("request").user if self.context.get("request") else None
         )

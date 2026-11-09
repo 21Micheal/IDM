@@ -488,6 +488,9 @@ def _designer_merge_values(values, *, user, reference_number, title):
         key: resolve_formula(key, user=user, reference_number=reference_number, now=now)
         for key in (
             "current_user", "current_user_email", "current_user_department",
+            "current_user_role",
+            "current_user_staff_number", "current_user_grade",
+            "current_user_line_manager", "current_user_dsa",
             "today", "now", "reference_number",
         )
     }
@@ -512,6 +515,8 @@ def _designer_merge_values(values, *, user, reference_number, title):
         "user_name": formula["current_user"],
         "prepared_by": formula["current_user"],
         "department": formula["current_user_department"],
+        "role": formula["current_user_role"],
+        "position": formula["current_user_role"],
         "document_date": formula["today"],
         "date": formula["today"],
         "document_no": reference_number,

@@ -2,7 +2,7 @@
  * formulas.ts — Auto-fill and dynamic formula engine for built-template form fields.
  *
  * Supports:
- *   • Standard system formulas (current_user, current_user_email, current_user_department, today, now, reference_number)
+ *   • Standard system formulas (current_user, current_user_email, current_user_department, current_user_role, current_user_staff_number, current_user_grade, current_user_line_manager, current_user_dsa, today, now, reference_number)
  *   • Dynamic conditional expressions: IF(condition, true_val, false_val)
  *   • Nested IF conditions
  *   • Regex condition matching: REGEX_MATCH(field, "pattern"), field =~ /pattern/, field !~ /pattern/
@@ -16,8 +16,13 @@ export type FormulaUser = {
   first_name?: string | null;
   last_name?: string | null;
   email?: string | null;
+  job_description?: string | null;
   department_name?: string | null;
   department?: { name?: string } | null;
+  staff_number?: string | null;
+  grade?: string | null;
+  line_manager?: string | null;
+  dsa?: string | null;
 } | null | undefined;
 
 export type FormulaContext = {
@@ -70,6 +75,31 @@ export const FORMULAS: Record<string, FormulaDef> = {
     label: "Current user — department",
     evaluate: (ctx) => ctx.user?.department_name || ctx.user?.department?.name || "",
   },
+  current_user_role: {
+    key: "current_user_role",
+    label: "Current user — role / position",
+    evaluate: (ctx) => ctx.user?.job_description || "",
+  },
+  current_user_staff_number: {
+    key: "current_user_staff_number",
+    label: "Current user — staff number",
+    evaluate: (ctx) => ctx.user?.staff_number || "",
+  },
+  current_user_grade: {
+    key: "current_user_grade",
+    label: "Current user — grade",
+    evaluate: (ctx) => ctx.user?.grade || "",
+  },
+  current_user_line_manager: {
+    key: "current_user_line_manager",
+    label: "Current user — line manager",
+    evaluate: (ctx) => ctx.user?.line_manager || "",
+  },
+  current_user_dsa: {
+    key: "current_user_dsa",
+    label: "Current user — DSA",
+    evaluate: (ctx) => ctx.user?.dsa || "",
+  },
   now: {
     key: "now",
     label: "Current date & time",
@@ -92,6 +122,13 @@ const ALIASES: Record<string, string> = {
   created_by: "current_user",
   created_by_email: "current_user_email",
   department: "current_user_department",
+  role: "current_user_role",
+  position: "current_user_role",
+  staff_number: "current_user_staff_number",
+  employee_number: "current_user_staff_number",
+  grade: "current_user_grade",
+  line_manager: "current_user_line_manager",
+  dsa: "current_user_dsa",
   now_time: "now",
   date: "today",
 };

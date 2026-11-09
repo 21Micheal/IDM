@@ -1526,7 +1526,12 @@ export const usersAPI = {
     first_name: string;
     last_name: string;
     job_description: string;
-    department?: string;
+    staff_number?: string;
+    grade?: string;
+    line_manager?: string;
+    dsa?: string;
+    department?: string | null;
+    group_ids?: string[];
     password?: string;
     confirm_password?: string;
   }) => api.post("/users/", data),
@@ -1536,7 +1541,12 @@ export const usersAPI = {
       first_name: string;
       last_name: string;
       job_description: string;
+      staff_number: string;
+      grade: string;
+      line_manager: string;
+      dsa: string;
       department: string | null;
+      group_ids: string[];
       is_active: boolean;
     }>
   ) => api.patch(`/users/${id}/`, data),

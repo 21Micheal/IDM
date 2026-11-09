@@ -29,6 +29,10 @@ export interface AuthUser {
   first_name: string;
   last_name: string;
   job_description?: string;
+  staff_number?: string;
+  grade?: string;
+  line_manager?: string;
+  dsa?: string;
   is_staff?: boolean;
   is_superuser?: boolean;
   has_admin_access?: boolean;

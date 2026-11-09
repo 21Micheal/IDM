@@ -153,6 +153,14 @@ class HasDocumentPermission(permissions.BasePermission):
         # Involved users can always read; owners can also submit (e.g. after a return).
         if required_action == GroupAction.VIEW.value:
             return True
+        if (
+            action == "destroy"
+            and is_owner
+            and (obj.status or "").strip().lower() in {"draft", "returned", "rejected"}
+        ):
+            # Owners must be able to remove their own pre-approval drafts from
+            # Trash even when their document-type permissions omit DELETE.
+            return True
         from apps.documents.access import returned_rework_editor_id
         if (obj.status or "").strip().lower() == "returned":
             assigned_editor_id = returned_rework_editor_id(obj)

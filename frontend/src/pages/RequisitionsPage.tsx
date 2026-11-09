@@ -9,14 +9,15 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import { Plus, Search as SearchIcon, X, ClipboardList, Loader2, FileText } from "lucide-react";
+import { Plus, Search as SearchIcon, X, ClipboardList, Loader2, FileText, Trash2 } from "lucide-react";
 import { documentsAPI, sunsystemsAPI } from "@/services/api";
 import CustomListbox from "@/components/ui/CustomListbox";
 import { cn } from "@/lib/utils";
 import { getReqAmount, getReqSupplier } from "@/lib/requisitionFields";
 import { useAuthStore } from "@/store/authStore";
+import { toast } from "@/components/ui/vault-toast";
 
 const PAGE_SIZE = 10;
 const STATS_POOL_SIZE = 500;
@@ -109,6 +110,7 @@ function formatVariance(amount: number, currency?: string) {
 
 export default function RequisitionsPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const location = useLocation();
   const openLpoFor = (location.state as { openLpoFor?: string } | null)?.openLpoFor;
   const user = useAuthStore((s) => s.user);
@@ -121,6 +123,19 @@ export default function RequisitionsPage() {
   const [amountMin, setAmountMin] = useState("");
   const [amountMax, setAmountMax] = useState("");
   const [page, setPage] = useState(1);
+
+  const deleteDraftMutation = useMutation({
+    mutationFn: (id: string) => documentsAPI.delete(id),
+    onSuccess: (_response, id) => {
+      toast.success("Draft deleted and moved to Trash.");
+      queryClient.setQueryData(["requisitions", "pool"], (current: any) => current
+        ? { ...current, results: (current.results ?? []).filter((doc: any) => String(doc.id) !== id) }
+        : current);
+      void queryClient.invalidateQueries({ queryKey: ["requisitions", "pool"] });
+      void queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: () => toast.error("Could not delete this draft."),
+  });
 
   const { data: poolData, isLoading } = useQuery({
     queryKey: ["requisitions", "pool"],
@@ -365,8 +380,33 @@ export default function RequisitionsPage() {
                 >
                   <td className="px-4 py-3 text-xs tabular-nums text-[#9AA5B1]">{(page - 1) * PAGE_SIZE + i + 1}</td>
                   <td className="px-4 py-3">
-                    <span className="font-semibold text-[#1F2933]">{doc.reference_number || "—"}</span>
-                    <span className="mt-0.5 block max-w-[230px] truncate text-[11px] font-normal text-[#8A949C]">{doc.title || "Purchase requisition"}</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="font-semibold text-[#1F2933]">{doc.reference_number || "—"}</span>
+                        <span className="mt-0.5 block max-w-[230px] truncate text-[11px] font-normal text-[#8A949C]">{doc.title || "Purchase requisition"}</span>
+                      </div>
+                      {String(doc.status).toLowerCase() === "draft"
+                        && (user?.has_admin_access || String(doc.uploaded_by?.id) === String(user?.id)) && (
+                        <button
+                          type="button"
+                          aria-label={`Delete draft ${doc.reference_number || doc.title || "requisition"}`}
+                          title="Delete draft"
+                          disabled={deleteDraftMutation.isPending}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (window.confirm("Delete this requisition draft? It will be moved to Trash.")) {
+                              deleteDraftMutation.mutate(String(doc.id));
+                            }
+                          }}
+                          className="inline-flex shrink-0 items-center gap-1 px-1.5 py-1 text-[11px] font-semibold text-[#7D8790] hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+                        >
+                          {deleteDraftMutation.isPending && deleteDraftMutation.variables === String(doc.id)
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <Trash2 className="h-3.5 w-3.5" />}
+                          Delete draft
+                        </button>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-xs text-[#5E6870]">{getReqSupplier(doc, supplierAccounts)}</td>
                   <td className="px-4 py-3 text-xs text-[#5E6870]">

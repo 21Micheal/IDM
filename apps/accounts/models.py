@@ -98,6 +98,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     role       = models.CharField(max_length=50, default=Role.VIEWER)
     # Reuse the legacy ldap_dn column for the free-text job description.
     job_description = models.CharField(max_length=255, blank=True, default="", db_column="ldap_dn")
+    staff_number = models.CharField(max_length=40, blank=True, default="")
+    grade = models.CharField(max_length=40, blank=True, default="")
+    line_manager = models.CharField(max_length=150, blank=True, default="")
+    # Keep the allowance as text to preserve the currency label (for example,
+    # "USD 400") and support different currencies without assuming a unit.
+    dsa = models.CharField(max_length=60, blank=True, default="")
     department = models.ForeignKey(
         Department, null=True, blank=True,
         on_delete=models.SET_NULL, related_name="users",

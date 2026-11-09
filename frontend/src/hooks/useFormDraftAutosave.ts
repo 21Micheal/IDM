@@ -73,6 +73,7 @@ export function useFormDraftAutosave({
   const documentIdRef = useRef<string | null>(existingDocumentId ?? null);
   const versionsRef = useRef({ current: 0, saved: 0 });
   const inFlightRef = useRef<Promise<string | null> | null>(null);
+  const discardingRef = useRef(false);
   const uploadsRef = useRef(new Map<string, CachedUpload>());
   const identityRef = useRef(`${templateId ?? ""}:${existingDocumentId ?? ""}`);
 
@@ -88,6 +89,7 @@ export function useFormDraftAutosave({
   }, [templateId, existingDocumentId]);
 
   const saveNow = useCallback(async (force = false): Promise<string | null> => {
+    if (discardingRef.current) return documentIdRef.current;
     const current = latestRef.current;
     if (!enabled || !current.templateId) return null;
     if (force && versionsRef.current.current <= versionsRef.current.saved) {
@@ -169,6 +171,24 @@ export function useFormDraftAutosave({
     return savedId;
   }, [saveNow]);
 
+  const discardDraft = useCallback(async (): Promise<void> => {
+    discardingRef.current = true;
+    try {
+      // Let any request already in progress finish so a just-created draft is
+      // known before we delete it. A failed save may still have created a doc.
+      if (inFlightRef.current) await inFlightRef.current.catch(() => undefined);
+      const id = documentIdRef.current;
+      if (id) await documentsAPI.delete(id);
+      documentIdRef.current = null;
+      setDocumentId(null);
+      versionsRef.current = { current: 0, saved: 0 };
+      uploadsRef.current.clear();
+      setStatus("idle");
+    } finally {
+      discardingRef.current = false;
+    }
+  }, []);
+
   const saveNowRef = useRef(saveNow);
   saveNowRef.current = saveNow;
 
@@ -176,7 +196,7 @@ export function useFormDraftAutosave({
   // the latest state during unmount so ordinary navigation does not discard
   // the last keystrokes.
   useEffect(() => () => {
-    if (latestRef.current.dirty && versionsRef.current.current > versionsRef.current.saved) {
+    if (!discardingRef.current && latestRef.current.dirty && versionsRef.current.current > versionsRef.current.saved) {
       void saveNowRef.current(true).catch(() => undefined);
     }
   }, []);
@@ -199,5 +219,5 @@ export function useFormDraftAutosave({
     return () => window.removeEventListener("beforeunload", warnBeforeUnload);
   }, [dirty, enabled, status]);
 
-  return { documentId, status, saveNow, finalizeNow };
+  return { documentId, status, saveNow, finalizeNow, discardDraft };
 }

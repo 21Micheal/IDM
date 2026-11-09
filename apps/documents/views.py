@@ -1017,6 +1017,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         doc = self.get_object()
         if doc.deleted_at:
             return Response({"detail": "Document is already in Trash."}, status=400)
+        if not self._can_manage_trash(doc, request.user):
+            return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
         if doc.status not in self.TRASHABLE_STATUSES:
             return Response(
                 {"detail": "Only draft, returned, or rejected documents can be moved to Trash."},
