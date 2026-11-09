@@ -27,6 +27,7 @@ import {
   ClipboardCheck,
   ArrowRight,
   FileSpreadsheet,
+  Trash2,
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -297,6 +298,11 @@ export default function Layout({
         to: "/list",
         label: "All Requisitions",
         icon: ClipboardList,
+      },
+      {
+        to: "/trash",
+        label: "Trash",
+        icon: Trash2,
       },
       {
         to: "/new",

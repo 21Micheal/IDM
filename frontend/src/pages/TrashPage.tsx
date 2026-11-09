@@ -29,7 +29,6 @@ import { toast } from "@/components/ui/vault-toast";
 import type { Document } from "@/types";
 import { format, formatDistanceToNow } from "date-fns";
 import StatusBadge from "@/components/documents/StatusBadge";
-import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import CustomListbox from "@/components/ui/CustomListbox";
 
 interface FilterState {
@@ -196,26 +195,23 @@ export default function TrashPage() {
 
   return (
     <div className="flex h-full flex-col bg-[#F8FAFC] text-[14px] text-[#0F172A]">
-      {/* ── Page header bar ─────────────────────────────────────────────────── */}
-      <WorkspaceCommandBar
-        actions={
-          !isLoading && filteredDocs.length > 0 ? (
-            <div className="border border-[#D5DCE3] bg-white px-3 py-2 text-sm font-semibold text-[#0F172A]">
-              {filteredDocs.length} item{filteredDocs.length !== 1 ? "s" : ""}
-            </div>
-          ) : null
-        }
-      >
-        <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
-          <Trash2 className="h-5 w-5 text-white" />
+      {/* ── Page header ─────────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between border-b border-[#E2E8F0] bg-white px-6 py-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center border border-[#D5E8F2] bg-[#EEF6FB] text-[#287EAD]">
+            <Trash2 className="h-5 w-5" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold text-[#1F2933]">Trash</h1>
+            <p className="mt-0.5 text-sm text-[#6E767D]">Restore deleted requisitions or permanently remove them.</p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-xl font-semibold">Trash</h1>
-          <p className="mt-0.5 text-sm text-white/75">
-            Manage deleted documents — restore or permanently remove them.
-          </p>
-        </div>
-      </WorkspaceCommandBar>
+        {!isLoading && filteredDocs.length > 0 && (
+          <div className="border border-[#D5DCE3] bg-white px-3 py-2 text-sm font-semibold text-[#1F2933]">
+            {filteredDocs.length} item{filteredDocs.length !== 1 ? "s" : ""}
+          </div>
+        )}
+      </div>
 
       {/* ── Body ────────────────────────────────────────────────────────────── */}
       <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5 pr-0">

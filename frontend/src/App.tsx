@@ -43,6 +43,7 @@ const RequisitionDashboardPage = lazy(() => import("@/pages/RequisitionDashboard
 const NewRequisitionPage = lazy(() => import("@/pages/NewRequisitionPage"));
 const RequisitionFormBuilder = lazy(() => import("@/pages/RequisitionFormBuilder"));
 const RequisitionReportsPage = lazy(() => import("@/pages/RequisitionReportsPage"));
+const TrashPage = lazy(() => import("@/pages/TrashPage"));
 
 
 
@@ -384,6 +385,7 @@ export default function App() {
             >
               <Route index element={<RequisitionDashboardPage />} />
               <Route path="list" element={<RequisitionsPage />} />
+              <Route path="trash" element={<TrashPage />} />
               <Route path="new" element={<NewRequisitionPage />} />
               <Route path="suppliers" element={<SuppliersPage />} />
               <Route path="external" element={<ExternalPage />} />
