@@ -42,6 +42,7 @@ const ExternalPage = lazy(() => import("@/pages/ExternalPage"));
 const RequisitionDashboardPage = lazy(() => import("@/pages/RequisitionDashboardPage"));
 const NewRequisitionPage = lazy(() => import("@/pages/NewRequisitionPage"));
 const RequisitionFormBuilder = lazy(() => import("@/pages/RequisitionFormBuilder"));
+const RequisitionReportsPage = lazy(() => import("@/pages/RequisitionReportsPage"));
 
 
 
@@ -388,6 +389,7 @@ export default function App() {
               <Route path="external" element={<ExternalPage />} />
               <Route path="approvals" element={<WorkflowPage />} />
               <Route path="analytics" element={<AnalyticsDashboardPage />} />
+              <Route path="reports" element={<RequisitionReportsPage />} />
               <Route path="audit" element={<AuditPage />} />
               <Route path="notifications" element={<NotificationsPage />} />
               <Route path="notifications/workflow/:documentId" element={<NotificationWorkflowPage />} />

@@ -904,6 +904,40 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             result.append(cleaned)
         return Response(sorted(result, key=str.lower))
 
+    @action(detail=False, methods=["get"], url_path="requisition-report")
+    def requisition_report(self, request):
+        """
+        Comprehensive financial reporting for Requisition forms:
+        Activity code, Description, Account code, Amount, and Journal number.
+        """
+        from apps.documents.requisition_reports import (
+            build_requisition_report,
+            generate_requisition_report_csv,
+        )
+
+        qs = (
+            self.get_queryset()
+            .filter(deleted_at__isnull=True)
+            .filter(
+                models.Q(metadata__form__isnull=False)
+                | models.Q(document_type__code__iexact="REQUISITION_FORM")
+            )
+            .select_related("uploaded_by", "uploaded_by__department", "document_type")
+            .prefetch_related("journal_postings")
+            .order_by("-created_at")
+        )
+
+        report_data = build_requisition_report(qs, request.query_params)
+
+        if request.query_params.get("format") == "csv" or request.query_params.get("export") == "csv":
+            csv_content = generate_requisition_report_csv(report_data)
+            response = HttpResponse(csv_content, content_type="text/csv; charset=utf-8")
+            filename = f"requisition_report_{timezone.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
+
+        return Response(report_data, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=["get"], url_path="duplicate-check")
     def duplicate_check(self, request):
         dms_settings = DMSSettings.load()

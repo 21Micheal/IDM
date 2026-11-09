@@ -4,6 +4,7 @@ import type {
   DocumentEditTokenResponse,
   DocumentPreviewResponse,
 } from "@/types";
+import type { RequisitionReportResponse, RequisitionReportParams } from "@/types/reports";
 
 // ── OCR suggestion types (exported for use in components) ─────────────────────
 
@@ -301,6 +302,32 @@ export const documentsAPI = {
 
   /** Distinct supplier names across all documents the user can see. */
   suppliers: () => api.get<string[]>("/documents/suppliers/"),
+
+  /**
+   * Requisition financial line reporting:
+   * Activity code, Description, Account code, Amount, and Journal number.
+   */
+  requisitionReport: (params?: RequisitionReportParams) =>
+    api.get<RequisitionReportResponse>("/documents/requisition-report/", { params }),
+
+  downloadRequisitionReportCsv: (params?: RequisitionReportParams) =>
+    api.get("/documents/requisition-report/", {
+      params: { ...(params || {}), export: "csv" },
+      responseType: "blob",
+    }),
+
+  exportRequisitionReportUrl: (params?: RequisitionReportParams) => {
+    const searchParams = new URLSearchParams();
+    searchParams.set("export", "csv");
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== "") {
+          searchParams.set(k, String(v));
+        }
+      });
+    }
+    return `/api/v1/documents/requisition-report/?${searchParams.toString()}`;
+  },
 
   /**
    * List only the current user's personal (self-upload) documents.

@@ -316,6 +316,7 @@ export default function FormDetailPage() {
 
   const formData = (doc?.metadata as Record<string, any> | undefined)?.form as
     | {
+      template_id?: string;
       sections?: unknown[];
       values?: Record<string, unknown>;
       travel_retirement?: { enabled?: boolean };

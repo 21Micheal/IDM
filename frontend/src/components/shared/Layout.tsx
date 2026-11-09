@@ -26,6 +26,7 @@ import {
   Inbox,
   ClipboardCheck,
   ArrowRight,
+  FileSpreadsheet,
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -327,6 +328,11 @@ export default function Layout({
         icon: Package,
       },
 
+      {
+        to: "/reports",
+        label: "Reports",
+        icon: FileSpreadsheet,
+      },
       {
         to: "/audit",
         label: canViewSystemAudit ? "Audit Trail" : "Document Activity",
@@ -640,6 +646,8 @@ export default function Layout({
                 ? "Requisition Approvals Queue"
                 : location.pathname.includes("/analytics")
                 ? "Procurement Spend Analytics"
+                : location.pathname.startsWith("/reports")
+                ? "Requisition Financial Reports"
                 : location.pathname.startsWith("/audit")
                 ? canViewSystemAudit ? "Audit Trail" : "Document Activity"
                 : location.pathname.includes("/dashboard")
