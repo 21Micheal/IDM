@@ -43,6 +43,9 @@ import {
 import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
 import ExternalSelect from "@/components/ui/ExternalSelect";
 import { ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
+import { formatDateTimeValue, formatDateValue } from "@/lib/dateFormatting";
+import FormattedDateInput from "@/components/templates/FormattedDateInput";
+import FormattedDateTimeInput from "@/components/templates/FormattedDateTimeInput";
 import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOperators";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -58,6 +61,8 @@ type Column = {
   currencyFromColumn?: string;
   showTotal?: boolean;
   budgetLine?: { dimensions?: string[]; accountCodes?: string[]; taxRateColumn?: string };
+  dateFormat?: string;
+  dateMinColumn?: string;
   /* Number/currency display config (builder: "Number / Currency" column). */
   decimals?: number; thousandsSeparator?: boolean;
   min?: number; max?: number;
@@ -115,6 +120,7 @@ type Field = {
    * a linked currency dropdown) is money; both share decimals/grouping. */
   decimals?: number; thousandsSeparator?: boolean;
   defaultValue?: string; readonly?: boolean; hidden?: boolean;
+  dateFormat?: string; dateMinField?: string;
   formula?: string;
   multi?: boolean;
   // Calculated value (see calc_number/calc_currency/calc_text/calc_date types)
@@ -1005,10 +1011,31 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
         </select>
       );
     }
-    case "date":
-      return <input type="date" value={sval} min={minimumDate(col.min)} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
-    case "datetime":
-      return <input type="datetime-local" value={sval} min={minimumDateTime(col.min)} disabled={dis} onChange={(e) => { onChange(e.target.value); e.currentTarget.blur(); }} className={base} />;
+    case "date": {
+      const linkedMin = col.dateMinColumn ? String(row?.[columnKey(col.dateMinColumn) ?? col.dateMinColumn] ?? "").slice(0, 10) : "";
+      const minimum = [minimumDate(col.min), linkedMin].filter(Boolean).reduce((latest, date) => date > latest ? date : latest, "");
+      return (
+        <FormattedDateInput
+          value={sval}
+          dateFormat={col.dateFormat}
+          min={minimum}
+          disabled={dis}
+          ariaLabel={col.label || "Date"}
+          onChange={(next) => onChange(next)}
+          className={base}
+        />
+      );
+    }
+    case "datetime": {
+      const linkedKey = columnKey(col.dateMinColumn);
+      const linkedValue = linkedKey ? String(row?.[linkedKey] ?? "") : "";
+      const linkedColumn = col.dateMinColumn ? tableColumns.find((candidate) => candidate.key === col.dateMinColumn || candidate.id === col.dateMinColumn) : undefined;
+      const linkedMin = linkedValue
+        ? (linkedColumn?.type === "date" || /^\d{4}-\d{2}-\d{2}$/.test(linkedValue)) ? `${linkedValue.slice(0, 10)}T00:00` : linkedValue
+        : "";
+      const minimum = [minimumDateTime(col.min), linkedMin].filter(Boolean).reduce((latest, date) => date > latest ? date : latest, "");
+      return <FormattedDateTimeInput value={sval} dateFormat={col.dateFormat} min={minimum} disabled={dis} ariaLabel={col.label || "Date and time"} onChange={onChange} className={base} />;
+    }
     case "time":
       return <input type="time" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "email":
@@ -1259,6 +1286,8 @@ function isMissingRequiredValue(value: unknown, type?: string): boolean {
 function validationMessageFor(issues: string[], label: string, value?: unknown, type?: string): string | undefined {
   const issue = issues.find((item) => item === label || item.startsWith(`${label} (`) || item === `Past date: ${label}` || item.startsWith(`Past date: ${label} (`));
   if (!issue) return undefined;
+  const dateRange = issue.match(/must be on or after (.+?)(?: \(row \d+\))?\)?$/i);
+  if (dateRange) return "Choose a date on or after " + dateRange[1].replace(/\)$/, "") + ".";
   if (issue.startsWith("Past date:")) {
     const dateValue = String(value ?? "").slice(0, 10);
     return dateValue && dateValue < minimumDate() ? "Choose today or a later date." : undefined;
@@ -1301,9 +1330,12 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
     const issue = validationIssues.find((item) => {
       const normalized = item.startsWith("Past date: ") ? item.slice("Past date: ".length) : item;
       if (rowIndex === undefined) return normalized === prefix;
+      if (normalized.startsWith(prefix + " (must be on or after ")) return true;
       return normalized === `${prefix} (row ${rowIndex + 1})` || normalized === prefix;
     });
     if (!issue) return undefined;
+    const dateRange = issue.match(/must be on or after (.+?)(?: \(row \d+\))?\)?$/i);
+    if (dateRange) return "Choose a date on or after " + dateRange[1].replace(/\)$/, "") + ".";
     if (issue.startsWith("Past date:")) {
       const dateValue = String(value ?? "").slice(0, 10);
       if (!dateValue || dateValue >= minimumDate()) return undefined;
@@ -2247,7 +2279,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
         <div data-protected-value="true" className={`${inp} form-protected-value flex items-center gap-1.5`} style={{ backgroundColor: "#F6F7F8", color: "#1F2933", fontWeight: 600 }}>
           {symbol && <span style={{ color: "#8C969E", fontWeight: 500 }}>{symbol}</span>}
           {hasValue ? (
-            String(raw)
+            type === "calc_date" ? formatDateValue(raw, field.dateFormat) : String(raw)
           ) : field.calc?.expression ? (
             <span className="italic" style={{ color: "#8C969E", fontWeight: 400 }}>Calculating…</span>
           ) : (
@@ -2733,10 +2765,50 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
         : type === "datetime" ? "datetime-local"
         : type === "time" ? "time"
         : "text";
-      control_el = (
+      control_el = type === "date" ? (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => {
+          const linkedMin = field.dateMinField ? String(allValues[field.dateMinField] ?? "").slice(0, 10) : "";
+          const minimum = [minimumDate(field.min), linkedMin].filter(Boolean).reduce((latest, date) => date > latest ? date : latest, "");
+          const raw = String(f.value ?? "");
+          if (dis) return <span className="flex min-h-9 items-center text-sm text-foreground">{formatDateValue(raw, field.dateFormat) || <span className="italic text-muted-foreground">—</span>}</span>;
+          return (
+            <FormattedDateInput
+              value={raw}
+              dateFormat={field.dateFormat}
+              min={minimum}
+              max={typeof field.max === "string" ? field.max : undefined}
+              ariaLabel={field.label || "Date"}
+              onChange={(next) => { f.onChange(next); onChangeCb(key, next); }}
+              className={inp}
+            />
+          );
+        }} />
+      ) : type === "datetime" ? (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => {
+          const raw = String(f.value ?? "");
+          if (dis) return <span className="flex min-h-9 items-center text-sm text-foreground">{formatDateTimeValue(raw, field.dateFormat) || <span className="italic text-muted-foreground">—</span>}</span>;
+          const linkedValue = field.dateMinField ? String(allValues[field.dateMinField] ?? "") : "";
+          const linkedField = field.dateMinField ? allFields.find((candidate) => candidate.key === field.dateMinField) : undefined;
+          const linkedMin = linkedValue
+            ? (linkedField?.type === "date" || /^\d{4}-\d{2}-\d{2}$/.test(linkedValue)) ? `${linkedValue.slice(0, 10)}T00:00` : linkedValue
+            : "";
+          const minimum = [minimumDateTime(field.min), linkedMin].filter(Boolean).reduce((latest, date) => date > latest ? date : latest, "");
+          return (
+            <FormattedDateTimeInput
+              value={raw}
+              dateFormat={field.dateFormat}
+              min={minimum}
+              max={typeof field.max === "string" ? field.max : undefined}
+              ariaLabel={field.label || "Date and time"}
+              onChange={(next) => { f.onChange(next); onChangeCb(key, next); }}
+              className={inp}
+            />
+          );
+        }} />
+      ) : (
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
           <input type={htmlType} value={String(f.value ?? "")} disabled={dis}
-            placeholder={field.placeholder} min={type === "date" ? minimumDate(field.min) : type === "datetime" ? minimumDateTime(field.min) : field.min} max={field.max}
+            placeholder={field.placeholder} min={type === "datetime" ? minimumDateTime(field.min) : field.min} max={field.max}
             maxLength={field.maxLength} className={inp}
             onChange={(e) => {
               f.onChange(e.target.value);
@@ -3134,6 +3206,18 @@ export function pastDateFieldLabels(
       if (field.type === "date" || field.type === "datetime") {
         const value = String(values[key] ?? "").slice(0, 10);
         if (value && value < today) invalid.push(field.label ?? key);
+        if ((field.type === "date" || field.type === "datetime") && field.dateMinField) {
+          const startField = allFields.find((candidate) => candidate.key === field.dateMinField);
+          const rawEndValue = String(values[key] ?? "");
+          const rawStartValue = String(values[field.dateMinField] ?? "");
+          const endValue = field.type === "date" ? rawEndValue.slice(0, 10) : rawEndValue.replace(" ", "T");
+          const startValue = field.type === "date"
+            ? rawStartValue.slice(0, 10)
+            : /^\d{4}-\d{2}-\d{2}$/.test(rawStartValue) ? `${rawStartValue}T00:00` : rawStartValue.replace(" ", "T");
+          if (endValue && startValue && endValue < startValue) {
+            invalid.push((field.label ?? key) + " (must be on or after " + (startField?.label ?? field.dateMinField) + ")");
+          }
+        }
       }
       if (field.type !== "table") continue;
       const rows = Array.isArray(values[key]) ? values[key] as Record<string, unknown>[] : [];
@@ -3143,6 +3227,18 @@ export function pastDateFieldLabels(
           if (!evalVisible(column, values, allFields, processStep, row, viewer)) return;
           if (!evalEditable(column, values, allFields, processStep, row, viewer)) return;
           const value = String(row?.[column.key!] ?? "").slice(0, 10);
+          if ((column.type === "date" || column.type === "datetime") && column.dateMinColumn) {
+            const startColumn = (field.columns ?? []).find((candidate) => candidate.key === column.dateMinColumn);
+            const rawEndValue = String(row?.[column.key!] ?? "");
+            const rawStartValue = String(row?.[column.dateMinColumn] ?? "");
+            const endValue = column.type === "date" ? rawEndValue.slice(0, 10) : rawEndValue.replace(" ", "T");
+            const startValue = column.type === "date"
+              ? rawStartValue.slice(0, 10)
+              : /^\d{4}-\d{2}-\d{2}$/.test(rawStartValue) ? `${rawStartValue}T00:00` : rawStartValue.replace(" ", "T");
+            if (endValue && startValue && endValue < startValue) {
+              invalid.push((field.label ?? key) + " — " + (column.label ?? column.key) + " (must be on or after " + (startColumn?.label ?? column.dateMinColumn) + ") (row " + (index + 1) + ")");
+            }
+          }
           if (value && value < today) invalid.push(`${field.label ?? key} — ${column.label ?? column.key} (row ${index + 1})`);
         });
       }

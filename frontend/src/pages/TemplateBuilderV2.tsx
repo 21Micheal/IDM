@@ -153,6 +153,7 @@ export interface TableColumn {
   /** Modal configuration for the composite account + analysis budget line. */
   budgetLine?: BudgetLineConfig;
   dateFormat?: string;
+  dateMinColumn?: string;
   referenceSource?: string;    // e.g. "users", "departments", "vendors"
   referenceGroupId?: string;
   readonly?: boolean;
@@ -557,6 +558,7 @@ export interface TemplateField {
   // only the fallback used if the selected value isn't a known currency code.
   currencyFromField?: string;
   dateFormat?: string;
+  dateMinField?: string;
   referenceSource?: string;
   referenceGroupId?: string;
   formula?: string;            // auto-fill formula, e.g. "current_user", "now"
@@ -3809,7 +3811,25 @@ function ColumnConfigModal({
                 </>
               )}
               {(draft.type === "date" || draft.type === "datetime") && (
-                <Row label="Date format"><input className={cn(iCls, "font-mono")} value={draft.dateFormat ?? "YYYY-MM-DD"} onChange={(e) => set({ dateFormat: e.target.value })} /></Row>
+                <>
+                  <Row label="Date format" hint={draft.type === "datetime" ? "Formats the date portion; time remains in 24-hour HH:mm format." : "Use tokens such as DD-MM-YYYY, MM/DD/YYYY, or YYYY-MM-DD."}>
+                    <input className={cn(iCls, "font-mono")} value={draft.dateFormat ?? "YYYY-MM-DD"} onChange={(e) => set({ dateFormat: e.target.value })} />
+                  </Row>
+                  <Row label="Minimum date from" hint="For an end date or time, choose its start column. Earlier values will be blocked.">
+                    <CustomListbox
+                      value={draft.dateMinColumn ?? ""}
+                      onChange={(dateMinColumn) => set({ dateMinColumn: dateMinColumn || undefined })}
+                      options={[
+                        { value: "", label: "No linked date" },
+                        ...siblingColumns.filter((column) => column.id !== draft.id && ["date", "datetime"].includes(String(column.type)) && column.key)
+                          .map((column) => ({ value: column.key as string, label: column.label || column.key || "" })),
+                      ]}
+                      className={iCls}
+                      buttonClassName="w-full"
+                      ariaLabel="Minimum date source column"
+                    />
+                  </Row>
+                </>
               )}
               {(draft.type === "reference" || draft.type === "user") && (
                 <>
@@ -5209,6 +5229,11 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           <InspectorRow label="Tooltip">
             <input className={inputCls} value={field.tooltip ?? ""} onChange={(e) => onUpdate({ tooltip: e.target.value })} />
           </InspectorRow>
+          {(field.type === "date" || field.type === "datetime") && (
+            <InspectorRow label="Date format" hint={field.type === "datetime" ? "Formats the date portion; time remains in 24-hour HH:mm format." : "Use tokens such as DD-MM-YYYY, MM/DD/YYYY, or YYYY-MM-DD."}>
+              <input className={cn(inputCls, "font-mono")} value={field.dateFormat ?? "YYYY-MM-DD"} placeholder="DD-MM-YYYY" onChange={(e) => onUpdate({ dateFormat: e.target.value })} />
+            </InspectorRow>
+          )}
           {!isTable && (
             <InspectorRow label={`Column width — ${field.colSpan} / 12`}>
               <input type="range" min={1} max={12} value={field.colSpan ?? 6}
@@ -5595,8 +5620,19 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
             </div>
           )}
           {(field.type === "date" || field.type === "datetime") && (
-            <InspectorRow label="Date format">
-              <input className={cn(inputCls, "font-mono")} value={field.dateFormat ?? "YYYY-MM-DD"} onChange={(e) => onUpdate({ dateFormat: e.target.value })} />
+            <InspectorRow label="Minimum date from" hint="Choose a start field to prevent an earlier date or time.">
+              <CustomListbox
+                value={field.dateMinField ?? ""}
+                onChange={(dateMinField) => onUpdate({ dateMinField: dateMinField || undefined })}
+                options={[
+                  { value: "", label: "No linked date" },
+                  ...siblings.filter((candidate) => candidate.id !== field.id && ["date", "datetime"].includes(candidate.type) && candidate.key)
+                    .map((candidate) => ({ value: candidate.key as string, label: candidate.label || candidate.key || "" })),
+                ]}
+                className={inputCls}
+                buttonClassName="w-full"
+                ariaLabel="Minimum date source field"
+              />
             </InspectorRow>
           )}
           <VisibilityEditor

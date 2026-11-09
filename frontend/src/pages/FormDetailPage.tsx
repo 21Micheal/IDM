@@ -970,6 +970,10 @@ export default function FormDetailPage() {
         });
       });
       formCopy.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
+        if (input.dataset.templateDatePicker === "true") {
+          input.remove();
+          return;
+        }
         const type = input.type.toLowerCase();
         if (type === "hidden" || type === "file") {
           input.remove();
@@ -979,7 +983,9 @@ export default function FormDetailPage() {
           input.remove();
           return;
         }
-        const value = type === "checkbox"
+        const value = input.dataset.templateDateInput === "true"
+          ? input.value.trim()
+          : type === "checkbox"
           ? (input.checked ? "Yes" : "No")
           : type === "radio"
             ? "✓"

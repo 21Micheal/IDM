@@ -1,6 +1,7 @@
 import type { WorkflowStep } from "@/components/notifications/workflow-visualizer";
 import { useQuery } from "@tanstack/react-query";
 import { sunsystemsAPI } from "@/services/api";
+import { formatDateTimeValue, formatDateValue } from "@/lib/dateFormatting";
 
 type AnyRecord = Record<string, any>;
 
@@ -45,6 +46,18 @@ function findField(fields: AnyRecord[], values: AnyRecord, patterns: RegExp[]): 
   return "";
 }
 
+function findDateField(fields: AnyRecord[], values: AnyRecord, patterns: RegExp[]): string {
+  for (const field of fields) {
+    const label = normalized(fieldLabel(field));
+    if (!patterns.some((pattern) => pattern.test(label))) continue;
+    const value = values[field.key];
+    if (value) return field.dateFormat
+      ? (field.type === "datetime" ? formatDateTimeValue(value, field.dateFormat) : formatDateValue(value, field.dateFormat))
+      : displayDate(value, field.type === "datetime");
+  }
+  return "";
+}
+
 function tableColumns(table: AnyRecord): AnyRecord[] {
   return (table.columns || []).filter((column: AnyRecord) => !column.hidden && column.key);
 }
@@ -70,7 +83,7 @@ function PrintableTable({ table, rows, columns }: { table: AnyRecord; rows: AnyR
       <thead><tr>{visibleColumns.map((column) => <th key={column.key}>{fieldLabel(column)}</th>)}</tr></thead>
       <tbody>
         {rows.length ? rows.map((row, index) => (
-          <tr key={index}>{visibleColumns.map((column) => <td key={column.key}>{["date", "datetime"].includes(column.type) ? displayDate(row?.[column.key], column.type === "datetime") || "—" : cellValue(row?.[column.key])}</td>)}</tr>
+          <tr key={index}>{visibleColumns.map((column) => <td key={column.key}>{["date", "datetime"].includes(column.type) ? (column.dateFormat ? (column.type === "datetime" ? formatDateTimeValue(row?.[column.key], column.dateFormat) : formatDateValue(row?.[column.key], column.dateFormat)) : displayDate(row?.[column.key], column.type === "datetime")) || "—" : cellValue(row?.[column.key])}</td>)}</tr>
         )) : <tr><td colSpan={Math.max(visibleColumns.length, 1)}>—</td></tr>}
       </tbody>
       {(table.columns || []).some((column: AnyRecord) => column.showTotal && visibleColumns.includes(column)) && (
@@ -328,10 +341,10 @@ export default function PrintableRequisition({
     ["Purpose of Travel", findField(fields, values, [/activity description/, /purpose of travel/])],
     ["Destination", destination || findField(fields, values, [/destination/])],
     ["Workshop / Activity Dates", [
-      findField(fields, values, [/activity start date/, /workshop.*from/, /travel start date/]),
-      findField(fields, values, [/activity end date/, /workshop.*to/, /travel end date/]),
-    ].filter(Boolean).map((value) => displayDate(value)).join(" – ")],
-    ["Expected Travel Date", displayDate(findField(fields, values, [/expected.*travel date/, /travel date/]))],
+      findDateField(fields, values, [/activity start date/, /workshop.*from/, /travel start date/]),
+      findDateField(fields, values, [/activity end date/, /workshop.*to/, /travel end date/]),
+    ].filter(Boolean).join(" – ")],
+    ["Expected Travel Date", findDateField(fields, values, [/expected.*travel date/, /travel date/])],
   ];
   const fundingCoverage = fields
     .filter((field) => /fully|partially/i.test(fieldLabel(field)))
