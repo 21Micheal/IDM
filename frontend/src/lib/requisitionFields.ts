@@ -47,7 +47,8 @@ export function getReqAmount(doc: any): number | null {
 
   for (const field of fields) {
     if (field.type !== "table" || !field.key) continue;
-    const amountColumn = field.columns?.find((column) => column.sunsystems?.role === "line_amount");
+    const amountColumn = field.columns?.find((column) => column.sunsystems?.role === "travel_line_amount")
+      ?? field.columns?.find((column) => column.sunsystems?.role === "line_amount");
     const rows = values[field.key];
     if (!amountColumn?.key || !Array.isArray(rows)) continue;
     const amounts = rows

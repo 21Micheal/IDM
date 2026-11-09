@@ -281,7 +281,8 @@ export default function PrintableRequisition({
     const costCentreColumn = cols.find((column) => column.external?.source === "analysis_codes" && column.external?.dimension === "05");
     const accountColumn = roleColumn("account_code");
     const dsaAccountColumn = roleColumn("dsa_account_code");
-    const amountColumn = roleColumn("line_amount");
+    const travelAmountColumn = roleColumn("travel_line_amount") || roleColumn("line_amount");
+    const dsaAmountColumn = roleColumn("dsa_line_amount") || (!roleColumn("travel_line_amount") ? roleColumn("line_amount") : undefined);
     return rows.map((row: AnyRecord) => {
       const budget = budgetColumn && row?.[budgetColumn.key] && typeof row[budgetColumn.key] === "object" ? row[budgetColumn.key] : {};
       const activityCode = text(row?.[activityColumn?.key] || budget["10"]);
@@ -301,7 +302,7 @@ export default function PrintableRequisition({
         costCentre: costCentreName || costCode || "—",
         accountCode: account || "—",
         description: table.workflowRole === "rfq_required_lines" || dsaAccount ? "DSA" : "Ticket",
-        estimated: text(row?.[amountColumn?.key]) || "—",
+        estimated: text(row?.[(dsaAccount ? dsaAmountColumn : travelAmountColumn)?.key]) || "—",
       };
     });
   });

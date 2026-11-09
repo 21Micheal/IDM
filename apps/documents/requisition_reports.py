@@ -121,7 +121,11 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
                 desc_col = next((c for c in cols if re.search(r"description|item.*desc|category", c.get("label", ""), re.I)), None)
 
             # Amount column
-            amt_col = next((c for c in cols if (c.get("sunsystems") or {}).get("role") == "line_amount" or re.search(r"lpo.*amount|actual.*amount|actual.*spend|total.*estimated", c.get("key", ""), re.I) or re.search(r"actual.*spend|total.*amount|gross.*val", c.get("label", ""), re.I)), None)
+            travel_amt_col = next((c for c in cols if (c.get("sunsystems") or {}).get("role") == "travel_line_amount"), None)
+            dsa_amt_col = next((c for c in cols if (c.get("sunsystems") or {}).get("role") == "dsa_line_amount"), None)
+            has_travel_amt_role = travel_amt_col is not None
+            generic_amt_col = next((c for c in cols if (c.get("sunsystems") or {}).get("role") == "line_amount"), None)
+            amt_col = travel_amt_col or generic_amt_col or next((c for c in cols if re.search(r"lpo.*amount|actual.*amount|actual.*spend|total.*estimated", c.get("key", ""), re.I) or re.search(r"actual.*spend|total.*amount|gross.*val", c.get("label", ""), re.I)), None)
             if not amt_col:
                 amt_col = next((c for c in cols if re.search(r"estimated.*amount|estimated.*cost|amount|total", c.get("label", ""), re.I) or c.get("type") == "currency"), None)
 
@@ -195,8 +199,14 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
                 )
 
                 # 6. Amount
-                raw_amt = r.get(amt_col.get("key")) if amt_col else None
-                if raw_amt is None:
+                dsa_account = _text(budget_obj.get("dsa_account_code") or (r.get(dsa_account_col.get("key")) if dsa_account_col else ""))
+                if dsa_account:
+                    row_amount_col = dsa_amt_col or (generic_amt_col if not has_travel_amt_role else None)
+                else:
+                    row_amount_col = amt_col
+                raw_amt = r.get(row_amount_col.get("key")) if row_amount_col else None
+                has_explicit_amount_roles = bool(travel_amt_col or dsa_amt_col)
+                if raw_amt is None and not (dsa_account and has_explicit_amount_roles):
                     raw_amt = (
                         r.get("total_estimated_amount_75ud")
                         or r.get("lpo_amount")

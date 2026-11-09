@@ -500,7 +500,7 @@ def _row_line_item(row: dict, columns: list) -> dict:
     quantity = pick("qty", "quantity")
     unit_price = pick("unit price")
     net_price = pick("net")
-    line_amount = pick_role("line_amount")
+    line_amount = pick_role("travel_line_amount") or pick_role("line_amount")
     if line_amount not in (None, ""):
         # Travel itinerary carries the actual requested amount; the Travel
         # table's Line amount role is the explicit link to that value.

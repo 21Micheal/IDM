@@ -170,15 +170,10 @@ def _apply_po_line_amount_columns(mapping: dict, document) -> dict:
         table = tables.get(str(spec.get("repeat_over") or ""))
         if not table:
             continue
-        amount_column = next(
-            (
-                column for column in table.get("columns") or []
-                if isinstance(column, dict)
-                and str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "line_amount"
-                and column.get("key")
-            ),
-            None,
-        )
+        columns = [column for column in table.get("columns") or [] if isinstance(column, dict)]
+        amount_column = next((column for column in columns if ((column.get("sunsystems") or {}).get("role") or "").strip().lower() == "travel_line_amount" and column.get("key")), None)
+        if not amount_column:
+            amount_column = next((column for column in columns if ((column.get("sunsystems") or {}).get("role") or "").strip().lower() == "line_amount" and column.get("key")), None)
         if amount_column:
             spec["amount"] = {"row_field": amount_column["key"]}
     return mapping
@@ -298,9 +293,12 @@ def get_imprest_request_postings(document) -> list[dict]:
             for field in section.get("fields") or []:
                 if field.get("type") != "table" or field.get("key") != table_key:
                     continue
-                for column in field.get("columns") or []:
+                columns = [column for column in field.get("columns") or [] if isinstance(column, dict)]
+                explicit_dsa_amount = next((column for column in columns if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "dsa_line_amount"), None)
+                has_travel_amount = any(str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "travel_line_amount" for column in columns)
+                for column in columns:
                     role = str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower()
-                    if role == "line_amount":
+                    if role == "dsa_line_amount" or (role == "line_amount" and not has_travel_amount and not explicit_dsa_amount):
                         line_amount_key = column.get("key")
                         break
                 break
@@ -374,8 +372,16 @@ def get_imprest_request_postings(document) -> list[dict]:
             if analysis:
                 common["analysis"] = analysis
             lines.extend([
-                {**common, "account": {"const": row_value(debit_account)}, "dc": "D"},
-                {**common, "account": {"const": row_value(credit_account)}, "dc": "C"},
+                {
+                    **common,
+                    "account": {"const": row_value(debit_account)},
+                    "dc": str(spec.get("imprest_request_dc") or "D").upper(),
+                },
+                {
+                    **common,
+                    "account": {"const": row_value(credit_account)},
+                    "dc": str(spec.get("imprest_request_counter_dc") or ("C" if str(spec.get("imprest_request_dc") or "D").upper() == "D" else "D")).upper(),
+                },
             ])
 
         if not lines:
@@ -452,10 +458,10 @@ def has_imprest_request_lines(document) -> bool:
             if dsa_account_column or budget_line_column:
                 dsa_key = dsa_account_column.get("key") if dsa_account_column else budget_line_column.get("key")
                 nested_dsa = not dsa_account_column
-                amount_column = next(
-                    (column for column in columns if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "line_amount"),
-                    None,
-                )
+                amount_column = next((column for column in columns if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "dsa_line_amount"), None)
+                has_travel_amount = any(str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "travel_line_amount" for column in columns)
+                if not amount_column and not has_travel_amount:
+                    amount_column = next((column for column in columns if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "line_amount"), None)
                 amount_key = amount_column.get("key") if amount_column else None
                 for row in rows:
                     budget_value = row.get(dsa_key) if isinstance(row, dict) else None

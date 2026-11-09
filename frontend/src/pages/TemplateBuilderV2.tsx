@@ -222,13 +222,13 @@ export interface ColumnFinanceBinding {
   counterAccount?: string;
   counterAccountSource?: AccountCodeSource;
   counterDc?: "D" | "C";
-  // for role "line_amount": THIS line's own default/
+  // for amount roles: THIS line's own default/
   // fallback account (used when the table has no
   // separate "account_code"-role column).
-  dc?: "D" | "C";           // for role "line_amount": this line's debit/credit
+  dc?: "D" | "C";           // for amount roles: this line's debit/credit
   // direction — settable right on the amount column
   // instead of only at the table level, so multiple
-  // "line_amount" columns in one table can each pick
+  // amount columns in one table can each pick
   // their own account + direction.
   analysisNumber?: number;  // for role "analysis" → AnalysisCode{n}
   /* Imprest/retirement reconciliation — only meaningful for role
@@ -286,7 +286,7 @@ export interface RetirementScenario {
  * _expand_retirement_lines) interprets at posting time. */
 export interface RetirementConfig {
   enabled: boolean;
-  /** Use either a numeric form field or the total from General / Imprest rows. */
+  /** Use either a numeric form field or the total from configured DSA amount rows. */
   issuedAmountMode?: "field" | "imprest_request_total";
   issuedAmountField?: string; // top-level field KEY holding the issued amount
   exact: RetirementScenario;
@@ -1433,7 +1433,9 @@ export const FINANCE_BUDGET_ROLES = [
 ];
 export const FINANCE_COLUMN_ROLES = [
   { value: "", label: "— none —" },
-  { value: "line_amount", label: "Line amount" },
+  { value: "line_amount", label: "Line amount (legacy / generic)" },
+  { value: "travel_line_amount", label: "Travel line amount" },
+  { value: "dsa_line_amount", label: "DSA line amount" },
   { value: "budget_line", label: "Budget line (Account + Analysis)" },
   { value: "account_code", label: "Ticket Account code" },
   { value: "dsa_account_code", label: "DSA Account code" },
@@ -1448,6 +1450,28 @@ export const FINANCE_COLUMN_ROLES = [
   { value: "unit_price", label: "Unit price" },
   { value: "currency", label: "Currency" },
 ];
+
+function travelAmountColumn(columns: TableColumn[]): TableColumn | undefined {
+  return columns.find((column) => column.sunsystems?.role === "travel_line_amount")
+    ?? columns.find((column) => column.sunsystems?.role === "line_amount");
+}
+
+function dsaAmountColumn(columns: TableColumn[]): TableColumn | undefined {
+  return columns.find((column) => column.sunsystems?.role === "dsa_line_amount")
+    ?? (columns.some((column) => column.sunsystems?.role === "travel_line_amount")
+      ? undefined
+      : columns.find((column) => column.sunsystems?.role === "line_amount"));
+}
+
+function dsaAccountValueSpec(field: TemplateField): Record<string, string> | undefined {
+  const columns = field.columns ?? [];
+  const direct = columns.find((column) => column.sunsystems?.role === "dsa_account_code");
+  if (direct) return { row_field: direct.key };
+  const budgetLine = columns.find((column) => column.type === "budget_line" || column.sunsystems?.role === "budget_line");
+  return budgetLine?.budgetLine?.dsaAccountCodes?.length
+    ? { row_field: budgetLine.key, key: "dsa_account_code" }
+    : undefined;
+}
 
 /* A field's budget role, tolerating the legacy combined `role` values
  * ("budget_amount"/"budget_account") in case a template wasn't re-saved. */
@@ -1529,11 +1553,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const fields = template.sections.flatMap((s) => s.fields ?? []);
   const hasImprestRequestConfig = fields.some((field) =>
     field.type === "table"
-      && (field.workflowRole === "rfq_required_lines" || field.columns?.some((column) =>
-        column.sunsystems?.role === "dsa_account_code"
-        || (column.type === "budget_line" && Boolean(column.budgetLine?.dsaAccountCodes?.length))))
+      && (field.workflowRole === "rfq_required_lines" || Boolean(dsaAccountValueSpec(field)))
       && (field.sunsystems?.imprestRequest?.enabled
-        || field.columns?.some((column) => column.sunsystems?.role === "line_amount" && column.sunsystems?.imprestRequest?.enabled)),
+        || field.columns?.some((column) => ["line_amount", "dsa_line_amount"].includes(column.sunsystems?.role ?? "") && column.sunsystems?.imprestRequest?.enabled)),
   );
   if (!ledgerJournalEnabled && !purchaseOrderEnabled && !hasImprestRequestConfig && !ui.budgetEnabled) {
     return { ...ss, ui: cleanedUi };
@@ -1615,16 +1637,16 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           ? { field: retirement.issuedAmountField }
           : { const: "0" };
         if (retirement.issuedAmountMode === "imprest_request_total") {
-          const requestTable = fields.find((candidate) => candidate.type === "table" && candidate.workflowRole === "rfq_required_lines");
-          const requestAmountColumn = requestTable?.columns?.find((candidate) => candidate.sunsystems?.role === "line_amount");
+          const requestTable = fields.find((candidate) => candidate.type === "table"
+            && (candidate.workflowRole === "rfq_required_lines" || Boolean(dsaAccountValueSpec(candidate)))
+            && Boolean(candidate.sunsystems?.imprestRequest?.enabled || candidate.columns?.some((column) => column.sunsystems?.imprestRequest?.enabled)));
+          const requestAmountColumn = requestTable ? dsaAmountColumn(requestTable.columns ?? []) : undefined;
           const requestConfig = requestTable?.sunsystems?.imprestRequest ?? requestAmountColumn?.sunsystems?.imprestRequest;
           if (requestTable && requestAmountColumn && requestConfig?.enabled) {
-            issuedAmountSpec = {
-              sum_rows: {
-                table: requestTable.key,
-                amount_column: requestAmountColumn.key,
-              },
-            };
+            const dsaAccountSpec = dsaAccountValueSpec(requestTable);
+            issuedAmountSpec = dsaAccountSpec
+              ? { sum_nonempty_rows: { table: requestTable.key, amount_column: requestAmountColumn.key, match_spec: dsaAccountSpec } }
+              : { sum_rows: { table: requestTable.key, amount_column: requestAmountColumn.key } };
           }
         }
         lines.push({
@@ -1756,7 +1778,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const poTables = fields.filter((f) => f.type === "table" && f.workflowRole !== "retirement_expenses" && f.workflowRole !== "rfq_required_lines").map((f) => ({
     field: f,
     columns: f.columns ?? [],
-    amount: (f.columns ?? []).find((c) => c.sunsystems?.role === "line_amount"),
+    amount: travelAmountColumn(f.columns ?? []),
     quantity: (f.columns ?? []).find((c) => c.sunsystems?.role === "quantity"),
     unitPrice: (f.columns ?? []).find((c) => c.sunsystems?.role === "unit_price"),
   }));
@@ -1828,7 +1850,8 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     // Retirement expense rows reconcile the advance; they are not PO lines.
     if (f.workflowRole === "retirement_expenses") continue;
     const cols = f.columns ?? [];
-    const amtCol = cols.find((c) => c.sunsystems?.role === "line_amount");
+    const amtCol = travelAmountColumn(cols);
+    const dsaAmtCol = dsaAmountColumn(cols);
     const itemCol = cols.find((c) => c.sunsystems?.role === "item_code")
       ?? cols.find((c) => c.type === "external" && c.external?.source === "items")
       ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "item");
@@ -1849,16 +1872,12 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     const analysisCols = cols.filter((c) => c.sunsystems?.role === "analysis");
     const budgetLineCol = cols.find((c) => c.type === "budget_line" || c.sunsystems?.role === "budget_line");
     const budgetLineHasDsaAccount = Boolean(budgetLineCol?.budgetLine?.dsaAccountCodes?.length);
-    const dsaAccountSpec = dsaAccountCol
-      ? { row_field: dsaAccountCol.key }
-      : budgetLineHasDsaAccount && budgetLineCol
-        ? { row_field: budgetLineCol.key, key: "dsa_account_code" }
-        : undefined;
-    const imprestRequest = f.sunsystems?.imprestRequest ?? amtCol?.sunsystems?.imprestRequest;
-    const imprestAccountSource = amtCol?.sunsystems?.accountSource ?? imprestRequest?.accountSource;
-    const imprestManualAccount = amtCol?.sunsystems?.account ?? imprestRequest?.account;
-    const imprestCounterAccountSource = amtCol?.sunsystems?.counterAccountSource ?? imprestRequest?.counterAccountSource;
-    const imprestManualCounterAccount = amtCol?.sunsystems?.counterAccount ?? imprestRequest?.counterAccount;
+    const dsaAccountSpec = dsaAccountValueSpec(f);
+    const imprestRequest = f.sunsystems?.imprestRequest ?? dsaAmtCol?.sunsystems?.imprestRequest ?? amtCol?.sunsystems?.imprestRequest;
+    const imprestAccountSource = dsaAmtCol?.sunsystems?.accountSource ?? imprestRequest?.accountSource;
+    const imprestManualAccount = dsaAmtCol?.sunsystems?.account ?? imprestRequest?.account;
+    const imprestCounterAccountSource = dsaAmtCol?.sunsystems?.counterAccountSource ?? imprestRequest?.counterAccountSource;
+    const imprestManualCounterAccount = dsaAmtCol?.sunsystems?.counterAccount ?? imprestRequest?.counterAccount;
     if (!amtCol && !(qtyCol && upCol)) continue;
     const lineAnalysis: Record<string, unknown> = {};
     const poLineAnalysis: Record<string, unknown> = {};
@@ -1901,9 +1920,10 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         ? {
             ...(imprestAccountSource === "account_code" && imprestAccountCol
               ? { imprest_request_account: {
-                  row_field: imprestAccountCol.key,
-                  ...(imprestAccountCol.type === "budget_line" ? { key: "account_code" } : {}),
+                  ...(dsaAccountSpec ?? { row_field: imprestAccountCol.key }),
                 } }
+              : imprestAccountSource === "account_code" && dsaAccountSpec
+                ? { imprest_request_account: dsaAccountSpec }
               : imprestAccountSource === "supplier_code" && supplierCol
                 ? { imprest_request_account: { row_field: supplierCol.key } }
                 : imprestAccountSource === "manual" && imprestManualAccount
@@ -1911,9 +1931,10 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
                   : {}),
             ...(imprestCounterAccountSource === "account_code" && imprestAccountCol
               ? { imprest_request_counter_account: {
-                  row_field: imprestAccountCol.key,
-                  ...(imprestAccountCol.type === "budget_line" ? { key: "account_code" } : {}),
+                  ...(dsaAccountSpec ?? { row_field: imprestAccountCol.key }),
                 } }
+              : imprestCounterAccountSource === "account_code" && dsaAccountSpec
+                ? { imprest_request_counter_account: dsaAccountSpec }
               : imprestCounterAccountSource === "supplier_code" && supplierCol
                 ? { imprest_request_counter_account: { row_field: supplierCol.key } }
                 : imprestCounterAccountSource === "manual" && imprestManualCounterAccount
@@ -1934,6 +1955,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
               TransactionAmountAccount: "999",
               ...(imprestRequest.parameters ?? {}),
             },
+            imprest_request_dc: dsaAmtCol?.sunsystems?.dc ?? "D",
+            imprest_request_counter_dc: dsaAmtCol?.sunsystems?.counterDc
+              ?? (dsaAmtCol?.sunsystems?.dc === "C" ? "D" : "C"),
           }
         : {}),
       ...(descriptionCol ? { description: { row_field: descriptionCol.key } } : {}),
@@ -1946,18 +1970,18 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       ...(amtCol ? { amount: { row_field: amtCol.key } } : {}),
       ...(Object.keys(lineAnalysis).length ? { analysis: f.workflowRole === "rfq_required_lines" || dsaAccountSpec ? lineAnalysis : poLineAnalysis } : {}),
     };
-    if (dsaAccountSpec && imprestRequest?.enabled) {
+    if (dsaAccountSpec && dsaAmtCol && imprestRequest?.enabled) {
       imprestRequestLines.push({
         ...lineSpec,
         include_if: dsaAccountSpec,
+        amount: { row_field: dsaAmtCol.key },
         account_code: dsaAccountSpec,
-        imprest_request_account: dsaAccountSpec,
         exclude_if: undefined,
       });
     } else if (f.workflowRole === "rfq_required_lines") {
-      // General / Imprest rows are exclusively the source for the advance
-      // journal. They are never PurchaseOrder lines, even when they contain
-      // item, supplier, or pricing columns.
+      // Legacy standalone Imprest rows are exclusively the source for the
+      // advance journal. They are never PurchaseOrder lines, even when they
+      // contain item, supplier, or pricing columns.
       if (imprestRequest?.enabled) imprestRequestLines.push(lineSpec);
     } else {
       poLines.push(lineSpec);
@@ -3136,8 +3160,10 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
 }) {
   const retirement = column.sunsystems?.retirement;
   const amountFieldOptions = formFields.filter((f) => f.key && (f.type === "number" || f.type === "currency" || CALCULATED_TYPES.has(f.type)));
-  const imprestTable = formFields.find((f) => f.type === "table" && f.workflowRole === "rfq_required_lines");
-  const imprestAmountColumn = imprestTable?.columns?.find((c) => c.sunsystems?.role === "line_amount");
+  const imprestTable = formFields.find((f) => f.type === "table"
+    && (f.workflowRole === "rfq_required_lines" || Boolean(dsaAccountValueSpec(f)))
+    && Boolean(f.sunsystems?.imprestRequest?.enabled || f.columns?.some((column) => column.sunsystems?.imprestRequest?.enabled)));
+  const imprestAmountColumn = imprestTable ? dsaAmountColumn(imprestTable.columns ?? []) : undefined;
   const imprestConfig = imprestTable?.sunsystems?.imprestRequest ?? imprestAmountColumn?.sunsystems?.imprestRequest;
   const hasImprestTotalSource = !!(imprestTable && imprestAmountColumn && imprestConfig?.enabled);
   const IMPREST_TOTAL_SOURCE = "__imprest_request_total__";
@@ -3177,10 +3203,10 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
                 ariaLabel="Issued amount field"
               />
               {retirement.issuedAmountMode === "imprest_request_total" && (
-                <p className="mt-1 text-[10px] text-[#5E6870]">Issued amount is calculated by summing the Line amount column for all populated rows in the General / Imprest table.</p>
+                <p className="mt-1 text-[10px] text-[#5E6870]">Issued amount is calculated from the DSA line amount for rows with a DSA account code.</p>
               )}
               {!hasImprestTotalSource && imprestTable && (
-                <p className="mt-1 text-[10px] text-amber-600">To use the request total, enable Imprest request posting on the General / Imprest table and map its Line amount column.</p>
+                <p className="mt-1 text-[10px] text-amber-600">To use the request total, enable Imprest request posting on the merged table and map its DSA line amount.</p>
               )}
               {amountFieldOptions.length === 0 && !hasImprestTotalSource ? (
                 <p className="mt-1 text-[10px] text-amber-600">Add a Number or Currency field elsewhere on the form to hold the issued/requested amount.</p>
@@ -3212,7 +3238,7 @@ function ImprestRequestConfigEditor({ field, siblingColumns, onChange }: {
   siblingColumns: TableColumn[];
   onChange: (config: ImprestRequestConfig | undefined) => void;
 }) {
-  const amountColumn = siblingColumns.find((candidate) => candidate.sunsystems?.role === "line_amount");
+  const amountColumn = dsaAmountColumn(siblingColumns);
   const config = field.sunsystems?.imprestRequest ?? amountColumn?.sunsystems?.imprestRequest;
   const iCls = "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
   const parameterDefaults: Record<string, string> = {
@@ -3274,7 +3300,7 @@ function ImprestRequestConfigEditor({ field, siblingColumns, onChange }: {
               ))}
               </div>
             </div>
-            {!amountColumn && <p className="text-[10px] text-amber-600">Map a table column to Line amount so the advance total can be calculated.</p>}
+            {!amountColumn && <p className="text-[10px] text-amber-600">Map a table column to DSA line amount so the advance total can be calculated.</p>}
           </>
         )}
       </div>
@@ -3759,7 +3785,7 @@ function ColumnConfigModal({
                   />
                 </Row>
               )}
-              {draft.sunsystems?.role === "line_amount" && (
+              {["line_amount", "dsa_line_amount"].includes(draft.sunsystems?.role ?? "") && (
                 <>
                   <div className="grid grid-cols-2 gap-3">
                     <Row label="Debit / Credit">
@@ -3776,7 +3802,11 @@ function ColumnConfigModal({
                       />
                     </Row>
                     <Row label="Account source">
-                      <AccountCodeSourcePicker value={draft.sunsystems?.accountSource ?? (siblingColumns.some((candidate) => candidate.sunsystems?.role === "account_code") ? "account_code" : "manual")}
+                      <AccountCodeSourcePicker value={draft.sunsystems?.accountSource ?? (
+                        draft.sunsystems?.role === "dsa_line_amount"
+                          ? siblingColumns.some((candidate) => candidate.sunsystems?.role === "dsa_account_code" || ((candidate.type === "budget_line" || candidate.sunsystems?.role === "budget_line") && Boolean(candidate.budgetLine?.dsaAccountCodes?.length))) ? "account_code" : "manual"
+                          : siblingColumns.some((candidate) => candidate.sunsystems?.role === "account_code") ? "account_code" : "manual"
+                      )}
                         onChange={(accountSource) => set({ sunsystems: { ...(draft.sunsystems ?? {}), accountSource } })} />
                     </Row>
                     <Row label="Manual account / fallback" hint="Used when the selected source is manual, or its mapped column is unavailable.">
@@ -3804,11 +3834,13 @@ function ColumnConfigModal({
                         placeholder="Optional manual counter account" />
                     </Row>
                   </div>
-                  <RetirementConfigEditor
-                    column={draft}
-                    formFields={formFields}
-                    onChange={(retirement) => set({ sunsystems: { ...(draft.sunsystems ?? {}), retirement } })}
-                  />
+                  {draft.sunsystems?.role === "line_amount" && (
+                    <RetirementConfigEditor
+                      column={draft}
+                      formFields={formFields}
+                      onChange={(retirement) => set({ sunsystems: { ...(draft.sunsystems ?? {}), retirement } })}
+                    />
+                  )}
                 </>
               )}
               {(isNumeric || draft.type === "date" || draft.type === "text") && (
@@ -5421,12 +5453,11 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
             <>
               <InspectorRow label="Table purpose" hint="Identifies the table in the requisition and retirement lifecycle.">
                 <CustomListbox
-                  value={field.workflowRole ?? ""}
+                  value={field.workflowRole === "rfq_required_lines" ? "" : (field.workflowRole ?? "")}
                   onChange={(value) => onUpdate({ workflowRole: (value || undefined) as TemplateField["workflowRole"] })}
                   options={[
-                    { value: "", label: "General table" },
+                    { value: "", label: "General" },
                     { value: "requisition_lines", label: "Requisition lines" },
-                    { value: "rfq_required_lines", label: "General / Imprest lines" },
                     { value: "retirement_expenses", label: "Retirement expenses" },
                   ]}
                   className={inputCls}
@@ -8176,7 +8207,7 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps, embedded 
   const poSupplierLabel = roleLabel("supplier_code");
   const poLineTables = fields.filter(
     (f) => f.type === "table" && f.workflowRole !== "retirement_expenses" && f.workflowRole !== "rfq_required_lines" && (f.columns ?? []).some((c) =>
-      ["line_amount", "item_code", "quantity", "unit_price"].includes(c.sunsystems?.role ?? "")),
+      ["line_amount", "travel_line_amount", "item_code", "quantity", "unit_price"].includes(c.sunsystems?.role ?? "")),
   );
   const analysisPanelField = fields.find(
     (f) => f.type === "external" && f.external?.source === "analysis_codes" && f.external?.mode !== "single",
