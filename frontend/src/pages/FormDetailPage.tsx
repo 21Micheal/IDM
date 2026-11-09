@@ -23,11 +23,11 @@ import { useParams, useNavigate, useLocation, useSearchParams, Link } from "reac
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, sunsystemsAPI, workflowAPI, type JournalPosting } from "@/services/api";
 import TemplateForm, { hasVisibleEditableSection, hasVisibleRetirementEditSection, pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
+import { useFormDraftAutosave } from "@/hooks/useFormDraftAutosave";
 import PrintableRequisition from "@/components/templates/PrintableRequisition";
 import BudgetBanner from "@/components/templates/BudgetBanner";
 import JournalPostingCard from "@/components/templates/JournalPostingCard";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
-import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { ApprovalStagesTable } from "@/components/workflow/ApprovalStagesTable";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import { WorkflowVisualizer } from "@/components/notifications/workflow-visualizer";
@@ -270,6 +270,7 @@ export default function FormDetailPage() {
   const [reworkResubmitted, setReworkResubmitted] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const formDirtyRef = useRef(false);
+  const [formIsDirty, setFormIsDirty] = useState(false);
   const [showJournalXml, setShowJournalXml] = useState(false);
   const [comment, setComment] = useState("");
   const [auditPage, setAuditPage] = useState(1);
@@ -294,17 +295,6 @@ export default function FormDetailPage() {
   // Required fields that failed the last save/submit attempt. Kept in state
   // (not just a toast) so a long list stays on screen while it's being fixed.
   const [missingFields, setMissingFields] = useState<string[]>([]);
-
-  // Warn before leaving/reloading with unsaved form edits.
-  useEffect(() => {
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (!formEditing || !formDirtyRef.current) return;
-      e.preventDefault();
-      e.returnValue = "";
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [formEditing]);
 
   const awaitingPostingGate = awaitingLpo || awaitingLpoReady || awaitingImprestPostSince > 0;
 
@@ -337,6 +327,23 @@ export default function FormDetailPage() {
       lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string }>;
     }
     | undefined;
+
+  const formAutosave = useFormDraftAutosave({
+    enabled: Boolean(formEditing && formData),
+    dirty: formIsDirty,
+    templateId: String(formData?.template_id || id || ""),
+    existingDocumentId: id,
+    title: String(doc?.title || "Form"),
+    values: formValues,
+    onSaved: () => {
+      void qc.invalidateQueries({ queryKey: ["forms"] });
+      void qc.invalidateQueries({ queryKey: ["requisitions"] });
+    },
+  });
+  const markFormDirty = useCallback(() => {
+    formDirtyRef.current = true;
+    setFormIsDirty(true);
+  }, []);
 
   const imprestPostingGateActive =
     String(formData?.imprest_request_workflow_status || "").toLowerCase() === "posting";
@@ -535,6 +542,7 @@ export default function FormDetailPage() {
     if (!formEditing && canEdit && (isAssignedReworkEditor || (isEditableApprovalStep && !isFinalFormProcessStep(formProcessStep))) && hasConfiguredEditableSection) {
       setFormValues({ ...(formData?.values ?? {}) });
       formDirtyRef.current = false;
+      setFormIsDirty(false);
       setFormEditing(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -598,6 +606,7 @@ export default function FormDetailPage() {
     if (!hasEditPermission) return;
     setFormValues({ ...(formData?.values ?? {}) });
     formDirtyRef.current = false;
+    setFormIsDirty(false);
     setFormEditing(true);
   }, [doc, activeTask, formEditing, formData?.values, user?.has_admin_access]);
 
@@ -676,6 +685,7 @@ export default function FormDetailPage() {
         if (!formEditing) {
           setFormValues({ ...(formData?.values ?? {}) });
           formDirtyRef.current = false;
+          setFormIsDirty(false);
           setFormEditing(true);
         }
         setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
@@ -695,6 +705,7 @@ export default function FormDetailPage() {
       toast.success("Submitted for approval");
       setFormEditing(false);
       formDirtyRef.current = false;
+      setFormIsDirty(false);
       const reworkEditorId = doc?.metadata?.form?.return_for_rework?.editor_id;
       const resubmittedByPreviousApprover = doc?.status === "returned"
         && Boolean(reworkEditorId)
@@ -751,14 +762,12 @@ export default function FormDetailPage() {
   });
 
   const updateFormMutation = useMutation({
-    mutationFn: () => {
-      const { jsonValues, attachments } = collectFormAttachments(formValues);
-      return documentsAPI.updateForm(id!, jsonValues, attachments);
-    },
+    mutationFn: () => formAutosave.finalizeNow(),
     onSuccess: () => {
       toast.success("Form updated.");
       setFormEditing(false);
       formDirtyRef.current = false;
+      setFormIsDirty(false);
       qc.invalidateQueries({ queryKey: ["form", id] });
       qc.invalidateQueries({ queryKey: ["forms"] });
     },
@@ -766,13 +775,11 @@ export default function FormDetailPage() {
   });
 
   const saveFormAsDraftMutation = useMutation({
-    mutationFn: () => {
-      const { jsonValues, attachments } = collectFormAttachments(formValues);
-      return documentsAPI.updateForm(id!, jsonValues, attachments);
-    },
+    mutationFn: () => formAutosave.finalizeNow(),
     onSuccess: () => {
       toast.success("Saved as draft.");
       formDirtyRef.current = false;
+      setFormIsDirty(false);
       qc.invalidateQueries({ queryKey: ["form", id] });
     },
     onError: (err: any) => toast.error(extractApiError(err, "Failed to save draft")),
@@ -927,6 +934,7 @@ export default function FormDetailPage() {
     if (!(["draft", "returned"].includes(doc.status) && canEdit)) return;
     setFormValues({ ...(formData.values ?? {}) });
     formDirtyRef.current = false;
+    setFormIsDirty(false);
     setFormEditing(true);
   };
   const retryLpoPreview = async () => {
@@ -1085,6 +1093,7 @@ export default function FormDetailPage() {
       if (!formEditing) {
         setFormValues({ ...(formData?.values ?? {}) });
         formDirtyRef.current = false;
+        setFormIsDirty(false);
         setFormEditing(true);
       }
       toast.error(
@@ -1107,10 +1116,18 @@ export default function FormDetailPage() {
   };
 
   // Leaving edit mode throws away unsaved work — always confirm first.
-  const cancelFormEdit = () => {
-    if (formDirtyRef.current && !window.confirm("Discard your unsaved changes to this form?")) return;
+  const cancelFormEdit = async () => {
+    if (formDirtyRef.current) {
+      try {
+        await formAutosave.saveNow(true);
+      } catch {
+        toast.error("Could not save your latest changes. Please try again before leaving edit mode.");
+        return;
+      }
+    }
     setFormEditing(false);
     formDirtyRef.current = false;
+    setFormIsDirty(false);
     setMissingFields([]);
   };
 
@@ -1252,7 +1269,7 @@ export default function FormDetailPage() {
                   />
                 ) : (
                   <span className="text-xs text-[#5E6870]">
-                    {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitLpo ? "LPO generated — submit to continue" : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
+                    {formEditing ? (formAutosave.status === "saving" || formAutosave.status === "unsaved" ? "Saving changes…" : formAutosave.status === "error" ? "Autosave failed" : formAutosave.status === "saved" ? "Changes saved" : "Editing") : canSubmitLpo ? "LPO generated — submit to continue" : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
                   </span>
                 )}
               </div>
@@ -1379,7 +1396,7 @@ export default function FormDetailPage() {
                   sections={formData.sections ?? []}
                   values={formEditing ? formValues : (formData.values ?? {})}
                   validationIssues={formEditing ? missingFields : []}
-                  onChange={(k, v) => { formDirtyRef.current = true; setFormValues((prev) => ({ ...prev, [k]: v })); }}
+                  onChange={(k, v) => { markFormDirty(); setFormValues((prev) => ({ ...prev, [k]: v })); }}
                   readOnly={!formEditing}
                   documentId={doc.id}
                   documentStatus={step}
@@ -1449,13 +1466,13 @@ export default function FormDetailPage() {
                 });
 
                 setFormValues((prev) => ({ ...prev, ...updates }));
-                formDirtyRef.current = true;
+                markFormDirty();
                 setIsSigningOpen(false);
                 setTargetSignatureField(null);
               }}
               onApplyToForm={(fields) => {
                 setFormValues((prev) => ({ ...prev, ...fields }));
-                formDirtyRef.current = true;
+                markFormDirty();
               }}
             />
           )}
@@ -1467,9 +1484,11 @@ export default function FormDetailPage() {
               values={formData?.values ?? {}}
               onBeforeSend={async () => {
                 if (!formDirtyRef.current) return;
-                const { jsonValues, attachments } = collectFormAttachments(formValues);
-                await documentsAPI.updateForm(doc.id, jsonValues, attachments);
+                await formAutosave.finalizeNow();
                 formDirtyRef.current = false;
+                setFormIsDirty(false);
+                void qc.invalidateQueries({ queryKey: ["forms"] });
+                void qc.invalidateQueries({ queryKey: ["requisitions"] });
                 qc.invalidateQueries({ queryKey: ["form", id] });
               }}
               onUpdated={() => qc.invalidateQueries({ queryKey: ["form", id] })}

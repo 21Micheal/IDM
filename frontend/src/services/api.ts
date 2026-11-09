@@ -369,17 +369,21 @@ export const documentsAPI = {
     id: string,
     values: Record<string, unknown>,
     attachments: Array<{ field: string; file: File }> = [],
-    options: { rfqSupplierCode?: string } = {},
+    options: { rfqSupplierCode?: string; autosave?: boolean; title?: string } = {},
   ) => {
     if (attachments.length === 0) {
       return api.post(`/documents/${id}/update_form/`, {
         values,
         ...(options.rfqSupplierCode ? { rfq_supplier_code: options.rfqSupplierCode } : {}),
+        ...(options.autosave ? { autosave: true } : {}),
+        ...(options.title ? { title: options.title } : {}),
       });
     }
     const fd = new FormData();
     fd.append("values", JSON.stringify(values));
     if (options.rfqSupplierCode) fd.append("rfq_supplier_code", options.rfqSupplierCode);
+    if (options.autosave) fd.append("autosave", "true");
+    if (options.title) fd.append("title", options.title);
     for (const { field, file } of attachments) {
       fd.append(field, file, file.name);
     }
@@ -1674,6 +1678,7 @@ export const templatesAPI = {
     title: string;
     document_type_id?: string;
     draft_from_template?: boolean;
+    requisition_submission?: boolean;
     attachments: Array<{ field: string; file: File }>;
   }) => {
     const fd = new FormData();
@@ -1682,6 +1687,7 @@ export const templatesAPI = {
     fd.append("title", payload.title);
     if (payload.document_type_id) fd.append("document_type_id", payload.document_type_id);
     fd.append("draft_from_template", String(Boolean(payload.draft_from_template)));
+    if (payload.requisition_submission) fd.append("requisition_submission", "true");
     for (const { field, file } of payload.attachments) {
       fd.append(field, file, file.name);
     }

@@ -19,7 +19,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { extractApiError } from "@/lib/apiError";
 import { templatesAPI, documentsAPI } from "@/services/api";
 import TemplateForm, { pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
-import { collectFormAttachments } from "@/components/templates/formAttachments";
+import { useFormDraftAutosave } from "@/hooks/useFormDraftAutosave";
 import { toast } from "@/components/ui/vault-toast";
 import { cn } from "@/lib/utils";
 import {
@@ -85,6 +85,25 @@ export default function NewRequisitionPage() {
     refetchInterval: 30_000,
   });
 
+  const autosave = useFormDraftAutosave({
+    enabled: Boolean(selectedTemplateId && selectedTemplate),
+    dirty: formDirty,
+    templateId: selectedTemplateId,
+    documentTypeId: selectedTemplate?.document_type_id,
+    title: String(formValues.title || (selectedTemplate?.name ? `Requisition — ${selectedTemplate.name}` : "Requisition")),
+    values: formValues,
+    requisitionSubmission: true,
+    onCreated: () => {
+      void qc.invalidateQueries({ queryKey: ["documents"] });
+      void qc.invalidateQueries({ queryKey: ["requisitions"] });
+    },
+    onSaved: () => {
+      setFormDirty(false);
+      void qc.invalidateQueries({ queryKey: ["documents"] });
+      void qc.invalidateQueries({ queryKey: ["requisitions"] });
+    },
+  });
+
   // Auto-select first requisition template if not set
   useEffect(() => {
     if (!selectedTemplateId && templates.length > 0 && !preselectedTemplateId) {
@@ -106,10 +125,18 @@ export default function NewRequisitionPage() {
     }
   }, [templates, selectedTemplateId, loadingTemplates]);
 
-  const selectTemplate = (templateId: string) => {
+  const selectTemplate = async (templateId: string) => {
     if (templateId === selectedTemplateId) {
       setTemplatePickerOpen(false);
       return;
+    }
+    if (formDirty) {
+      try {
+        await autosave.saveNow(true);
+      } catch {
+        toast.error("Could not save this requisition before switching templates.");
+        return;
+      }
     }
     setSelectedTemplateId(templateId);
     setFormValues({});
@@ -208,41 +235,10 @@ export default function NewRequisitionPage() {
 
   // Save Draft mutation
   const saveDraftMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedTemplateId) throw new Error("No template selected");
-      const missing = requiredFieldLabels(
-        selectedTemplate?.sections ?? [],
-        formValues,
-        {
-          groupNames: user?.group_names ?? [],
-          isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
-          canEditConditionalSections: true,
-        },
-        "draft"
-      );
-      if (missing.length) {
-        setMissingFields(missing);
-        toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} need${missing.length === 1 ? "s" : ""} attention.`);
-        throw new Error("Form validation failed");
-      }
-      setMissingFields([]);
-      const { jsonValues, attachments } = collectFormAttachments(formValues);
-      const payload = {
-        template_id: selectedTemplateId,
-        output_format: "pdf" as const,
-        values: jsonValues,
-        title: (jsonValues.title as string) || (selectedTemplate?.name ? `Requisition — ${selectedTemplate.name}` : "Requisition"),
-        document_type_id: selectedTemplate?.document_type_id,
-        draft_from_template: true,
-        requisition_submission: true,
-        attachments,
-      };
-      return templatesAPI.fillTemplateWithAttachments(payload);
-    },
-    onSuccess: (res) => {
+    mutationFn: () => autosave.finalizeNow(),
+    onSuccess: (docId) => {
       toast.success("Requisition draft saved successfully");
       setFormDirty(false);
-      const docId = res.data?.id || res.data?.document_id;
       navigate(docId ? `/${docId}` : "/list");
     },
     onError: (err: any) => {
@@ -280,19 +276,7 @@ export default function NewRequisitionPage() {
         throw new Error("FORM_REQUIRED_FIELDS");
       }
       setMissingFields([]);
-      const { jsonValues, attachments } = collectFormAttachments(formValues);
-      const payload = {
-        template_id: selectedTemplateId,
-        output_format: "pdf" as const,
-        values: jsonValues,
-        title: (jsonValues.title as string) || (selectedTemplate?.name ? `Requisition — ${selectedTemplate.name}` : "Requisition"),
-        document_type_id: selectedTemplate?.document_type_id,
-        draft_from_template: false,
-        requisition_submission: true,
-        attachments,
-      };
-      const res = await templatesAPI.fillTemplateWithAttachments(payload);
-      const docId = res.data?.id || res.data?.document_id;
+      const docId = await autosave.finalizeNow();
       if (docId) return documentsAPI.submit(docId, { workflow_stage: "requisition" });
       throw new Error("Failed to initialize requisition document");
     },
@@ -378,8 +362,15 @@ export default function NewRequisitionPage() {
           {/* Left: back button */}
           <div className="flex items-center gap-3 min-w-0">
             <button
-              onClick={() => {
-                if (formDirty && !window.confirm("Discard unsaved changes?")) return;
+              onClick={async () => {
+                if (formDirty) {
+                  try {
+                    await autosave.saveNow(true);
+                  } catch {
+                    toast.error("Could not save this requisition before leaving.");
+                    return;
+                  }
+                }
                 navigate("/list");
               }}
               className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-[#E4E7EB] bg-white text-[#5E6870] hover:bg-[#F5F7F8] hover:text-[#1F2933] transition-colors"
@@ -417,7 +408,13 @@ export default function NewRequisitionPage() {
             {selectedTemplate && (
               <span className="inline-flex items-center gap-1.5 rounded border border-[#C8CDD2] bg-[#F5F7F8] px-2.5 py-1 text-[11px] font-semibold text-[#5E6870]">
                 <span className="h-1.5 w-1.5 rounded-full bg-slate-400" />
-                Draft
+                {autosave.status === "saving" || autosave.status === "unsaved"
+                  ? "Saving…"
+                  : autosave.status === "saved"
+                    ? "Draft saved"
+                    : autosave.status === "error"
+                      ? "Autosave failed"
+                      : "Draft"}
               </span>
             )}
             {templates.length > 1 && (
@@ -507,8 +504,15 @@ export default function NewRequisitionPage() {
         <div className="fixed bottom-6 right-6 z-40 flex items-center gap-2">
           <button
             type="button"
-            onClick={() => {
-              if (formDirty && !window.confirm("Discard changes and return to list?")) return;
+            onClick={async () => {
+              if (formDirty) {
+                try {
+                  await autosave.saveNow(true);
+                } catch {
+                  toast.error("Could not save this requisition before leaving.");
+                  return;
+                }
+              }
               navigate("/list");
             }}
             className="h-9 border border-[#C8CDD2] bg-white px-4 text-sm font-medium text-[#1F2933] shadow-md hover:bg-[#F5F7F8] transition-colors"

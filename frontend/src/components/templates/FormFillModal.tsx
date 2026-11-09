@@ -24,13 +24,14 @@
 
 import { useEffect, useState } from "react";
 import { extractApiError } from "@/lib/apiError";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, templatesAPI } from "@/services/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { documentsAPI } from "@/services/api";
 import { pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
 import { useAuthStore } from "@/store/authStore";
 import TemplateForm from "@/components/templates/TemplateForm";
 import BudgetBanner from "@/components/templates/BudgetBanner";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
+import { useFormDraftAutosave } from "@/hooks/useFormDraftAutosave";
 import { toast } from "@/components/ui/vault-toast";
 import { X, Loader2, Send, Save, FileText, LayoutTemplate, Paperclip } from "lucide-react";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
@@ -67,16 +68,43 @@ export default function FormFillModal({
 
   const [title, setTitle] = useState((initialTitle ?? "").trim() || template.name);
   const [values, setValues] = useState<Record<string, unknown>>(() => initialValues);
-  const [uploadingFiles, setUploadingFiles] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   // Required fields flagged by the last "Start workflow" attempt — shown inline
   // (a toast with a long list is unreadable and disappears).
   const [missingFields, setMissingFields] = useState<string[]>([]);
   const dirty = Object.keys(values).length > 0 || title.trim() !== template.name;
 
-  // Esc closes the modal, but never silently throws away typed answers.
-  const requestClose = () => {
-    if (dirty && !window.confirm("Discard this form? Your answers will be lost.")) return;
+  const autosave = useFormDraftAutosave({
+    enabled: true,
+    dirty,
+    templateId: template.id,
+    documentTypeId,
+    title,
+    values,
+    onCreated: () => {
+      queryClient.invalidateQueries({ queryKey: ["forms"] });
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onSaved: () => {
+      void queryClient.invalidateQueries({ queryKey: ["forms"] });
+      void queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+  });
+
+  // Save the latest values before leaving; this also captures the last edit
+  // when someone closes the page before the debounce timer runs.
+  const requestClose = async () => {
+    if (submitting) return;
+    if (dirty) {
+      try {
+        await autosave.saveNow(true);
+        queryClient.invalidateQueries({ queryKey: ["forms"] });
+        queryClient.invalidateQueries({ queryKey: ["documents"] });
+      } catch {
+        toast.error("Could not save your latest changes. Please try again before leaving.");
+        return;
+      }
+    }
     onClose();
   };
   useEffect(() => {
@@ -87,47 +115,6 @@ export default function FormFillModal({
 
   const sections = (template.sections ?? []) as Array<{ title?: string; fields?: unknown[] }>;
 
-  // ── Core create mutation ───────────────────────────────────────────────────
-  // Returns the new document id. onSuccess is deliberately left empty here —
-  // callers (handleSaveAsDraft / handleStartWorkflow) take responsibility for
-  // toasting and closing so they can chain the submit call when needed.
-  const createMutation = useMutation({
-    mutationFn: async () => {
-      const { jsonValues, attachments } = collectFormAttachments(values);
-
-      setUploadingFiles(attachments.length > 0);
-      const request =
-        attachments.length > 0
-          ? templatesAPI.fillTemplateWithAttachments({
-              template_id: template.id,
-              values: jsonValues,
-              output_format: "pdf",
-              title: title.trim() || template.name,
-              document_type_id: documentTypeId,
-              draft_from_template: false,
-              attachments,
-            })
-          : templatesAPI.fillTemplate({
-              template_id: template.id,
-              values: jsonValues,
-              output_format: "pdf",
-              title: title.trim() || template.name,
-              document_type_id: documentTypeId,
-              draft_from_template: false,
-            });
-
-      const { data } = await request;
-      setUploadingFiles(false);
-      return data.document_id as string;
-    },
-    onError: (err: any) => {
-      setUploadingFiles(false);
-      setSubmitting(false);
-      const message = extractApiError(err, "Could not create the form.");
-      if (!/required fields missing/i.test(message)) toast.error(message);
-    },
-  });
-
   // ── Save as draft ──────────────────────────────────────────────────────────
   // No validation gate — partial forms are allowed (mirrors FormDetailPage's
   // own "Save draft" which also skips required-field checks).
@@ -137,13 +124,13 @@ export default function FormFillModal({
       return;
     }
     try {
-      await createMutation.mutateAsync();
+      await autosave.finalizeNow();
       queryClient.invalidateQueries({ queryKey: ["forms"] });
       queryClient.invalidateQueries({ queryKey: ["documents"] });
       toast.success("Form saved as draft.");
       onClose();
     } catch {
-      // error already toasted by createMutation.onError
+      toast.error("Could not save this form as a draft. Please try again.");
     }
   };
 
@@ -183,7 +170,8 @@ export default function FormFillModal({
 
     setSubmitting(true);
     try {
-      const docId = await createMutation.mutateAsync();
+      const docId = await autosave.finalizeNow();
+      if (!docId) throw new Error("Could not save the form before starting its workflow.");
       try {
         await documentsAPI.submit(docId);
         queryClient.invalidateQueries({ queryKey: ["forms"] });
@@ -208,14 +196,14 @@ export default function FormFillModal({
       if (/required fields missing/i.test(message)) {
         const fieldList = message.split(/required fields missing:\s*/i)[1];
         setMissingFields(fieldList ? fieldList.split(/,\s*/) : [message]);
-      }
+      } else toast.error(message || "Could not save the form before starting its workflow.");
     } finally {
       setSubmitting(false);
     }
   };
 
   const fileCount = collectFormAttachments(values).attachments.length;
-  const isCreating = createMutation.isPending || uploadingFiles;
+  const isCreating = autosave.status === "saving";
   const isPending = isCreating || submitting;
 
   return (
@@ -260,6 +248,11 @@ export default function FormFillModal({
             <Paperclip className="h-3.5 w-3.5" />
             {fileCount} file{fileCount !== 1 ? "s" : ""}
           </div>
+        )}
+        {autosave.status !== "idle" && (
+          <span className="flex-shrink-0 text-[10px] font-medium text-white/80" aria-live="polite">
+            {autosave.status === "saving" || autosave.status === "unsaved" ? "Saving progress…" : autosave.status === "saved" ? "Progress saved" : "Autosave failed"}
+          </span>
         )}
       </WorkspaceCommandBar>
 

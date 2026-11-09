@@ -1527,6 +1527,23 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         from apps.documents.metadata_audit import diff_form_value_fields
         changed_form_fields = diff_form_value_fields(prior_values, values, sections)
 
+        if str(request.data.get("autosave") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            # Debounced client autosaves persist the form state and uploaded
+            # attachments without regenerating a PDF or creating a document
+            # version/audit event for every keystroke.
+            meta_form["values"] = values
+            meta_form["attachments"] = rebuild_attachments(values)
+            meta["form"] = meta_form
+            doc.metadata = meta
+            autosaved_title = str(request.data.get("title") or "").strip()
+            if autosaved_title:
+                doc.title = autosaved_title
+            try:
+                doc.save(update_fields=["metadata", "title", "updated_at"])
+            except SEARCH_INDEX_EXCEPTIONS:
+                logger.warning("Form autosave %s saved but realtime indexing failed.", doc.id)
+            return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
+
         # The regenerated PDF view shows display strings, not structured dicts.
         render_values = descriptors_to_names(values)
         shim = SimpleNamespace(name=doc.title, sections=sections)
