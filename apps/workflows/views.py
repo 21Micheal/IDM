@@ -122,6 +122,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                     assignee_group=step.assignee_group, assignee_user=step.assignee_user,
                     assignee_user_auto=step.assignee_user_auto,
                     assignee_user_field=step.assignee_user_field,
+                    allow_assignee_selection=step.allow_assignee_selection,
                     post_lpo_after_approval=step.post_lpo_after_approval,
                     post_imprest_request_after_approval=step.post_imprest_request_after_approval,
                     sla_hours=step.sla_hours, allow_resubmit=step.allow_resubmit,
@@ -474,6 +475,12 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             WorkflowTaskSerializer(tasks, many=True, context={"request": request}).data
         )
 
+    @action(detail=True, methods=["get"], url_path="routing_options")
+    def routing_options(self, request, pk=None):
+        task = self.get_object()
+        self._check_permission(task, request.user)
+        return Response(WorkflowService.routing_options(task))
+
     # ── Approve ────────────────────────────────────────────────────────────
 
     @action(detail=True, methods=["post"])
@@ -548,6 +555,7 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
                 items=items,
                 use_new_signature=use_new_signature,
                 signature_image=signature_image,
+                next_approver_id=request.data.get("next_approver_id"),
             )
         except WorkflowError as exc:
             return Response({"detail": str(exc)}, status=400)
@@ -617,7 +625,10 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
 
         self._check_permission(task, request.user)
         try:
-            WorkflowService.return_for_review(task, request.user, comment, return_to)
+            WorkflowService.return_for_review(
+                task, request.user, comment, return_to,
+                return_approver_id=request.data.get("return_approver_id"),
+            )
         except WorkflowError as exc:
             return Response({"detail": str(exc)}, status=400)
         return Response({"status": "returned", "return_to": return_to, "detail": "Document returned for review."})

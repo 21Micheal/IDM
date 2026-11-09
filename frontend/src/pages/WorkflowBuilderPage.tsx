@@ -42,6 +42,8 @@ interface WorkflowStep {
   // Approval-step fields
   assignee_type: AssigneeType;
   assignee_group: string | null;
+  /** Let the preceding approver optionally choose a member of this step's group. */
+  allow_assignee_selection?: boolean;
   assignee_group_name?: string;
   assignee_user: string | null;
   assignee_user_name?: string;
@@ -360,6 +362,7 @@ function normalizeStep(step: WorkflowStep): WorkflowStep {
     post_imprest_request_after_approval: Boolean((step as any).post_imprest_request_after_approval),
     parallel_lane: (step as any).parallel_lane === "imprest_request" ? "imprest_request" : null,
     assignee_type: normalizeAssigneeType(step.assignee_type),
+    allow_assignee_selection: Boolean((step as any).allow_assignee_selection),
     assignee_group: isUuidLike(step.assignee_group) ? step.assignee_group : null,
     assignee_user: isUuidLike(step.assignee_user) ? step.assignee_user : null,
     notify_user: isUuidLike(step.notify_user) ? step.notify_user : (step.notify_user ?? null),
@@ -489,6 +492,7 @@ function blankStep(): WorkflowStep {
     post_imprest_request_after_approval: false,
     parallel_lane: null,
     assignee_type: "group_any", assignee_group: null, assignee_user: null, assignee_user_field: "",
+    allow_assignee_selection: false,
     sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, allow_return_submitter: true,
     approve_button_label: "",
     requires_signature: false, instructions: "",
@@ -503,6 +507,7 @@ function blankNotificationStep(): WorkflowStep {
     post_lpo_after_approval: false,
     post_imprest_request_after_approval: false,
     assignee_type: "group_any", assignee_group: null, assignee_user: null,
+    allow_assignee_selection: false,
     sla_hours: 1,
     allow_resubmit: false, allow_approve: false, allow_reject: false, allow_return: false, allow_return_submitter: false,
     requires_signature: false,
@@ -539,6 +544,7 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
     rest.allow_return_submitter = false;
     rest.allow_resubmit     = false;
     rest.requires_signature = false;
+    rest.allow_assignee_selection = false;
     rest.post_imprest_request_after_approval = false;
     rest.assignee_user_auto = false;
     rest.assignee_group     = null;
@@ -1029,6 +1035,7 @@ function StepEditPanel({
                     assignee_group: id,
                     assignee_group_name: g?.name,
                     assignee_type: isHod ? "group_any" : step.assignee_type,
+                    allow_assignee_selection: id ? step.allow_assignee_selection : false,
                     assignee_user: null,
                     assignee_user_name: undefined,
                     assignee_user_auto: undefined,
@@ -1048,6 +1055,7 @@ function StepEditPanel({
                   const next = v as AssigneeType;
                   onChange({
                     assignee_type: next,
+                    allow_assignee_selection: ["group_any", "group_specific"].includes(next) ? step.allow_assignee_selection : false,
                     assignee_user: next === "group_specific" ? step.assignee_user : null,
                     assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
                     assignee_user_auto: next === "group_specific" ? step.assignee_user_auto : undefined,
@@ -1123,6 +1131,33 @@ function StepEditPanel({
               </div>
             )}
           </div>
+
+          {step.assignee_group && ["group_any", "group_specific"].includes(step.assignee_type) && (
+            <button
+              type="button"
+              onClick={() => onChange({ allow_assignee_selection: !step.allow_assignee_selection })}
+              className={clsx(
+                "w-full flex items-start gap-3 p-4 rounded-xl border text-left transition-colors",
+                step.allow_assignee_selection
+                  ? "border-violet-300 bg-violet-50 text-violet-950"
+                  : "border-border bg-muted/30 text-foreground hover:bg-muted/60",
+              )}
+              aria-pressed={Boolean(step.allow_assignee_selection)}
+            >
+              <span className={clsx(
+                "mt-0.5 w-4 h-4 rounded border flex items-center justify-center shrink-0",
+                step.allow_assignee_selection ? "bg-violet-600 border-violet-600 text-white" : "border-muted-foreground/50",
+              )}>
+                {step.allow_assignee_selection ? <Check className="w-3 h-3" /> : null}
+              </span>
+              <span>
+                <span className="block text-xs font-semibold">Let the previous approver choose this approver</span>
+                <span className="block text-[11px] mt-1 opacity-80">
+                  They can select an active member of {selectedGroup?.name ?? "this group"} when approving the previous step or returning the form here. Leaving it blank keeps this step&apos;s configured assignment.
+                </span>
+              </span>
+            </button>
+          )}
 
           <div>
             <Label>SLA (hours)</Label>

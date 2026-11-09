@@ -25,6 +25,45 @@ import { useAuthStore } from "@/store/authStore";
 import { formatDistanceToNow, format } from "date-fns";
 import clsx from "clsx";
 import SignaturePlacementModal, { type SignaturePlacementResult } from "@/components/signatures/SignaturePlacementModal";
+import CustomListbox from "@/components/ui/CustomListbox";
+
+interface RoutingTarget {
+  step_id: string;
+  step_name: string;
+  group_name: string;
+  members: Array<{ id: string; name: string }>;
+}
+
+function ApproverChoice({
+  title,
+  target,
+  value,
+  onChange,
+}: {
+  title: string;
+  target: RoutingTarget;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label className="label text-xs">{title} <span className="text-muted-foreground">(optional)</span></label>
+      <CustomListbox
+        value={value}
+        onChange={onChange}
+        options={[
+          { value: "", label: `Use configured routing (${target.group_name})` },
+          ...target.members.map((member) => ({ value: member.id, label: member.name })),
+        ]}
+        buttonClassName="input w-full text-sm"
+        ariaLabel={title}
+      />
+      <p className="text-[11px] text-muted-foreground">
+        {target.step_name} · {target.group_name}. Leave blank to use the workflow&apos;s configured assignee.
+      </p>
+    </div>
+  );
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface WorkflowTask {
@@ -230,6 +269,14 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
   const [comment, setComment]   = useState("");
   const [holdHours, setHoldHours] = useState(24);
   const [returnTo, setReturnTo] = useState<"previous_step" | "uploader">("uploader");
+  const [nextApproverId, setNextApproverId] = useState("");
+  const [returnApproverId, setReturnApproverId] = useState("");
+  const { data: routingOptions } = useQuery<{ next: RoutingTarget | null; previous: RoutingTarget | null }>({
+    queryKey: ["workflow-routing-options", task.id],
+    queryFn: () => workflowAPI.routingOptions(task.id).then((response) => response.data),
+    enabled: Boolean(task.id && (task.status === "in_progress" || task.status === "held")),
+    staleTime: 30_000,
+  });
 
   // Previous approval can live in an earlier workflow phase, so order 1 in
   // the current phase does not mean there is no previous approver. The API
@@ -323,6 +370,8 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     setOptimisticAction(null);
     setActiveAction(null);
     setComment("");
+    setNextApproverId("");
+    setReturnApproverId("");
     refetchWorkflowState();
     await onCompleted?.(action);
   };
@@ -336,7 +385,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
   const approveMutation = useMutation({
     mutationFn: async (result?: SignaturePlacementResult) => {
       await onBeforeApprove?.();
-      return workflowAPI.approveTask(task.id, comment, result ?? undefined);
+      return workflowAPI.approveTask(task.id, comment, result ?? undefined, nextApproverId || undefined);
     },
     onMutate: () => beginOptimisticAction("approve"),
     onSuccess: async () => { toast.success(`${capitalizedTargetLabel} approved`); await completeAction("approve"); },
@@ -359,7 +408,10 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
   });
 
   const returnMutation = useMutation({
-    mutationFn: () => workflowAPI.returnForReview(task.id, comment, returnTo),
+    mutationFn: () => workflowAPI.returnForReview(
+      task.id, comment, returnTo,
+      returnTo === "previous_step" ? (returnApproverId || undefined) : undefined,
+    ),
     onMutate: () => beginOptimisticAction("return"),
     onSuccess: async () => {
       toast.success(`${capitalizedTargetLabel} sent back`);
@@ -398,6 +450,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
 
   const openReturnForm = () => {
     setReturnTo(canReturnSubmitter ? "uploader" : "previous_step");
+    setReturnApproverId("");
     setActiveAction("return");
   };
 
@@ -405,6 +458,8 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     setComment("");
     setHoldHours(24);
     setReturnTo("uploader");
+    setNextApproverId("");
+    setReturnApproverId("");
     setActiveAction(null);
     setSignedResult(null);
   };
@@ -541,6 +596,14 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
             {activeAction === "approve" && (
               <div className="space-y-3">
                 <p className="text-sm font-bold text-[#1F2933]">Approve {targetLabel}</p>
+                {routingOptions?.next && (
+                  <ApproverChoice
+                    title="Choose the next approver"
+                    target={routingOptions.next}
+                    value={nextApproverId}
+                    onChange={setNextApproverId}
+                  />
+                )}
                 <div>
                   <label className="label text-xs">Comment (optional)</label>
                   <textarea
@@ -634,7 +697,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
                       {canReturnSubmitter && (
                         <button
                           type="button"
-                          onClick={() => setReturnTo("uploader")}
+                          onClick={() => { setReturnTo("uploader"); setReturnApproverId(""); }}
                           className={clsx(
                             "border px-3 py-1.5 text-xs font-semibold",
                             returnTo === "uploader"
@@ -648,7 +711,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
                       {canReturnPrevious && (
                         <button
                           type="button"
-                          onClick={() => setReturnTo("previous_step")}
+                          onClick={() => { setReturnTo("previous_step"); setReturnApproverId(""); }}
                           className={clsx(
                             "border px-3 py-1.5 text-xs font-semibold",
                             returnTo === "previous_step"
@@ -661,6 +724,14 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
                       )}
                     </div>
                   </div>
+                )}
+                {returnTo === "previous_step" && routingOptions?.previous && (
+                  <ApproverChoice
+                    title="Choose who receives the returned form"
+                    target={routingOptions.previous}
+                    value={returnApproverId}
+                    onChange={setReturnApproverId}
+                  />
                 )}
                 <div>
                   <label className="label text-xs">What needs to be fixed? <span className="text-red-600">*</span></label>
@@ -859,6 +930,14 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
       {activeAction === "approve" && (
         <div className="space-y-3 border border-[#C8CDD2] p-4 bg-white">
           <p className="text-sm font-medium text-foreground">Approve {targetLabel}</p>
+          {routingOptions?.next && (
+            <ApproverChoice
+              title="Choose the next approver"
+              target={routingOptions.next}
+              value={nextApproverId}
+              onChange={setNextApproverId}
+            />
+          )}
           <div>
             <label className="label text-xs">Comment (optional)</label>
             <textarea
@@ -969,7 +1048,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
                 {canReturnSubmitter && (
                   <button
                     type="button"
-                    onClick={() => setReturnTo("uploader")}
+                    onClick={() => { setReturnTo("uploader"); setReturnApproverId(""); }}
                     className={clsx(
                       "border px-3 py-1.5 text-xs font-semibold",
                       returnTo === "uploader"
@@ -983,7 +1062,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
                 {canReturnPrevious && (
                   <button
                     type="button"
-                    onClick={() => setReturnTo("previous_step")}
+                    onClick={() => { setReturnTo("previous_step"); setReturnApproverId(""); }}
                     className={clsx(
                       "border px-3 py-1.5 text-xs font-semibold",
                       returnTo === "previous_step"
@@ -996,6 +1075,14 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
                 )}
               </div>
             </div>
+          )}
+          {returnTo === "previous_step" && routingOptions?.previous && (
+            <ApproverChoice
+              title="Choose who receives the returned form"
+              target={routingOptions.previous}
+              value={returnApproverId}
+              onChange={setReturnApproverId}
+            />
           )}
           <div>
             <label className="label text-xs">What needs to be fixed? <span className="text-red-500">*</span></label>

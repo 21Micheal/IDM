@@ -488,7 +488,8 @@ class WorkflowService:
     @staticmethod
     @transaction.atomic
     def approve(task: WorkflowTask, actor, comment: str = "", request=None, signature_placement=None,
-                items=None, use_new_signature: bool = False, signature_image=None) -> None:
+                items=None, use_new_signature: bool = False, signature_image=None,
+                next_approver_id=None) -> None:
         # Lock the workflow instance before the task. ``group_any`` creates a
         # task for every eligible member; locking only a task would let two
         # members approve different sibling tasks at the same time and advance
@@ -501,7 +502,18 @@ class WorkflowService:
         task.acted_at = timezone.now()
         task.save(update_fields=["status", "comment", "acted_at"])
 
-        action = WorkflowTaskAction.objects.create(task=task, actor=actor, action="approved", comment=comment)
+        next_step = WorkflowService._next_approval_step(instance, task.step, task.execution_lane or "main")
+        selected_approver = None
+        if next_approver_id:
+            selected_approver = WorkflowService._validate_selected_approver(next_step, next_approver_id)
+        action = WorkflowTaskAction.objects.create(
+            task=task,
+            actor=actor,
+            action="approved",
+            comment=comment,
+            selected_approver=selected_approver,
+            selected_approver_step=next_step if selected_approver else None,
+        )
 
         # Use the task's current mirrored order. The graph node keeps the same
         # row when steps move, while the instance cursor is repaired on save.
@@ -593,6 +605,7 @@ class WorkflowService:
             advance_order,
             task_step_order=task_step_order if advance_order != task_step_order else None,
             execution_lane=execution_lane,
+            source_task_id=task.id,
         )
 
     # ── Reject ─────────────────────────────────────────────────────────────
@@ -641,7 +654,8 @@ class WorkflowService:
     @staticmethod
     @transaction.atomic
     def return_for_review(
-        task: WorkflowTask, actor, comment: str, return_to: str = "uploader"
+        task: WorkflowTask, actor, comment: str, return_to: str = "uploader",
+        return_approver_id=None,
     ) -> None:
         task, instance = WorkflowService._lock_action_task(task)
         WorkflowService._assert_actionable(task, instance=instance)
@@ -667,6 +681,16 @@ class WorkflowService:
             if previous_approval_action is None:
                 raise WorkflowError("There is no previous approval step to return to.")
 
+        selected_approver = None
+        selected_approver_step = None
+        if return_approver_id:
+            if return_to != "previous_step" or previous_approval_action is None:
+                raise WorkflowError("Choose a previous-step approver only when returning to the previous step.")
+            selected_approver_step = previous_approval_action.task.step
+            selected_approver = WorkflowService._validate_selected_approver(
+                selected_approver_step, return_approver_id,
+            )
+
         task.status     = "returned"
         task.comment    = comment
         task.return_to  = return_to
@@ -674,7 +698,13 @@ class WorkflowService:
         task.save(update_fields=["status", "comment", "return_to", "acted_at"])
 
         action = WorkflowTaskAction.objects.create(
-            task=task, actor=actor, action="returned", comment=comment, return_to=return_to
+            task=task,
+            actor=actor,
+            action="returned",
+            comment=comment,
+            return_to=return_to,
+            selected_approver=selected_approver,
+            selected_approver_step=selected_approver_step if selected_approver else None,
         )
 
         current_order  = task.step.order
@@ -707,7 +737,9 @@ class WorkflowService:
 
         WorkflowService._skip_active_tasks(instance, step_order=current_order, execution_lane=execution_lane)
 
-        rework_editor = previous_approval_action.actor_id if previous_approval_action else None
+        rework_editor = selected_approver.id if selected_approver else (
+            previous_approval_action.actor_id if previous_approval_action else None
+        )
 
         # A returned document is a rework handoff. The previous approver gets
         # edit access and a notification, but no approval task controls. On
@@ -1021,7 +1053,7 @@ class WorkflowService:
         WorkflowService._activate_step(instance, order, execution_lane=execution_lane)
 
     @staticmethod
-    def _activate_step(instance: WorkflowInstance, order: int, execution_lane: str = "main") -> None:
+    def _activate_step(instance: WorkflowInstance, order: int, execution_lane: str = "main", source_task_id=None) -> None:
         try:
             step = instance.template.steps.get(order=order)
         except WorkflowStep.DoesNotExist:
@@ -1030,7 +1062,10 @@ class WorkflowService:
 
         # ── Notification step: fire-and-forget, then immediately advance ──────
         if step.step_type == "notification":
-            WorkflowService._execute_notification_step(instance, step, order, execution_lane=execution_lane)
+            WorkflowService._execute_notification_step(
+                instance, step, order, execution_lane=execution_lane,
+                source_task_id=source_task_id,
+            )
             return
 
         # ── Approval step: create tasks and wait for human action ─────────────
@@ -1039,7 +1074,19 @@ class WorkflowService:
             if step.sla_hours else None
         )
 
-        assignees = WorkflowService._resolve_assignees(step, instance.document)
+        selected_action = None
+        if source_task_id:
+            selected_action = WorkflowTaskAction.objects.filter(
+                task_id=source_task_id,
+                action="approved",
+                selected_approver_step=step,
+                selected_approver__is_active=True,
+            ).select_related("selected_approver").first()
+        selected_user = selected_action.selected_approver if selected_action else None
+        if selected_user and step.assignee_group_id and WorkflowService._is_active_group_member(step.assignee_group, selected_user):
+            assignees = [selected_user]
+        else:
+            assignees = WorkflowService._resolve_assignees(step, instance.document)
         tasks = []
         for assigned in assignees:
             tasks.append(
@@ -1086,7 +1133,7 @@ class WorkflowService:
             )
 
     @staticmethod
-    def _execute_notification_step(instance: WorkflowInstance, step: WorkflowStep, order: int, execution_lane: str = "main") -> None:
+    def _execute_notification_step(instance: WorkflowInstance, step: WorkflowStep, order: int, execution_lane: str = "main", source_task_id=None) -> None:
         """
         Handle a notification step (informational blast to people outside the
         approval chain). Does not replace per-stage action/completion notifies:
@@ -1171,7 +1218,9 @@ class WorkflowService:
                 WorkflowService._send_notification_step_email(step, payment_run=instance.payment_run)
 
         # Immediately advance — notification steps never block
-        WorkflowService._advance_step(instance, order, execution_lane=execution_lane)
+        WorkflowService._advance_step(
+            instance, order, execution_lane=execution_lane, source_task_id=source_task_id,
+        )
 
     @staticmethod
     def _send_notification_step_email(step: WorkflowStep, document=None, payment_run=None) -> None:
@@ -1457,6 +1506,78 @@ class WorkflowService:
         raise WorkflowError(f"Unsupported assignee type: {step.assignee_type}")
 
     @staticmethod
+    def _next_approval_step(instance: WorkflowInstance, step: WorkflowStep, execution_lane="main"):
+        if WorkflowService.is_v2_workflow(instance.template):
+            orders, _ = WorkflowService._v2_active_step_orders(instance, execution_lane)
+            later_orders = [order for order in orders if order > step.order]
+            candidates = instance.template.steps.filter(order__in=later_orders, step_type="approval").order_by("order")
+        else:
+            candidates = instance.template.steps.filter(
+                order__gt=step.order, step_type="approval",
+            ).order_by("order")
+        return candidates.first()
+
+    @staticmethod
+    def _previous_approval_action(task: WorkflowTask):
+        return WorkflowTaskAction.objects.filter(
+            task__workflow_instance=task.workflow_instance,
+            task__execution_lane=task.execution_lane or "main",
+            task__step__step_type="approval",
+            action="approved",
+            actor__isnull=False,
+            created_at__lt=task.created_at,
+        ).select_related("task__step__template", "actor").order_by("-created_at").first()
+
+    @staticmethod
+    def _validate_selected_approver(step: WorkflowStep | None, user_id):
+        if not step or not step.allow_assignee_selection:
+            raise WorkflowError("The configured target step does not allow approver selection.")
+        if not step.assignee_group_id:
+            raise WorkflowError("Approver selection is unavailable because the target step has no group.")
+        user = User.objects.filter(pk=user_id, is_active=True).first()
+        if not user or not WorkflowService._is_active_group_member(step.assignee_group, user):
+            raise WorkflowError(f"Choose an active member of '{step.assignee_group.name}'.")
+        return user
+
+    @staticmethod
+    def routing_options(task: WorkflowTask):
+        """Return enabled member choices for the next and previous approval steps."""
+        instance = task.workflow_instance
+        lane = task.execution_lane or "main"
+        previous_action = WorkflowService._previous_approval_action(task)
+        targets = {
+            "next": WorkflowService._next_approval_step(instance, task.step, lane),
+            "previous": previous_action.task.step if previous_action else None,
+        }
+        result = {}
+        for key, step in targets.items():
+            if (
+                not step or not step.allow_assignee_selection
+                or not step.assignee_group_id or not step.assignee_group.is_active
+            ):
+                result[key] = None
+                continue
+            result[key] = {
+                "step_id": str(step.id),
+                "step_name": step.name,
+                "group_name": step.assignee_group.name,
+                "members": [
+                    {
+                        "id": str(user.id),
+                        "name": user.get_full_name() or user.email,
+                    }
+                    for user in WorkflowService._active_group_members(step.assignee_group)
+                ],
+            }
+            head = step.assignee_group.head
+            if head and head.is_active and not any(item["id"] == str(head.id) for item in result[key]["members"]):
+                result[key]["members"].insert(0, {
+                    "id": str(head.id),
+                    "name": head.get_full_name() or head.email,
+                })
+        return result
+
+    @staticmethod
     def _lock_action_task(task: WorkflowTask) -> tuple[WorkflowTask, WorkflowInstance]:
         """Serialize every decision in a workflow lane and refresh stale tasks."""
         instance = WorkflowInstance.objects.select_for_update().get(
@@ -1527,7 +1648,7 @@ class WorkflowService:
                 pass
 
     @staticmethod
-    def _advance_step(instance: WorkflowInstance, order: int, task_step_order: int | None = None, execution_lane: str = "main") -> None:
+    def _advance_step(instance: WorkflowInstance, order: int, task_step_order: int | None = None, execution_lane: str = "main", source_task_id=None) -> None:
         # Skip sibling tasks by their persisted FK order, then navigate by the
         # logical order in the active v2 definition.
         WorkflowService._skip_active_tasks(instance, step_order=task_step_order if task_step_order is not None else order, execution_lane=execution_lane)
@@ -1537,13 +1658,19 @@ class WorkflowService:
             orders, end_outcome = WorkflowService._v2_active_step_orders(instance, execution_lane)
             later = [candidate for candidate in orders if candidate > order]
             if later:
-                WorkflowService._activate_step(instance, order=later[0], execution_lane=execution_lane)
+                WorkflowService._activate_step(
+                    instance, order=later[0], execution_lane=execution_lane,
+                    source_task_id=source_task_id,
+                )
             else:
                 WorkflowService._complete(instance, end_outcome or "approved", execution_lane=execution_lane)
             return
         next_order = order + 1
         if instance.template.steps.filter(order=next_order).exists():
-            WorkflowService._activate_step(instance, order=next_order, execution_lane=execution_lane)
+            WorkflowService._activate_step(
+                instance, order=next_order, execution_lane=execution_lane,
+                source_task_id=source_task_id,
+            )
         else:
             WorkflowService._complete(instance, "approved", execution_lane=execution_lane)
 
@@ -1749,7 +1876,10 @@ class WorkflowService:
             action="submitted_lpo",
             comment="Submitted the generated LPO to the next workflow step.",
         )
-        WorkflowService._advance_step(instance, task.step.order, task_step_order=task.step.order)
+        WorkflowService._advance_step(
+            instance, task.step.order, task_step_order=task.step.order,
+            source_task_id=task.id,
+        )
 
     @staticmethod
     def _active_group_members(group):
@@ -2166,12 +2296,13 @@ class WorkflowService:
                     return False
                 with transaction.atomic():
                     locked = WorkflowInstance.objects.select_for_update().get(pk=instance.pk)
-                    if locked.status != "in_progress" or not locked.tasks.filter(
+                    gate_task = locked.tasks.filter(
                         step=step,
                         execution_lane="main",
                         status__in=["approved", "awaiting_posting"],
                         actions__action="approved",
-                    ).exists():
+                    ).order_by("-acted_at").first()
+                    if locked.status != "in_progress" or not gate_task:
                         return False
                     active_orders, _ = WorkflowService._v2_active_step_orders(locked)
                     if WorkflowService.is_v2_workflow(locked.template) and step.order not in active_orders:
@@ -2187,13 +2318,13 @@ class WorkflowService:
                     metadata["form"] = form
                     document.metadata = metadata
                     WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
-                    locked.tasks.filter(
-                        step=step,
-                        execution_lane="main",
-                        status="awaiting_posting",
-                        actions__action="approved",
-                    ).update(status="approved", updated_at=timezone.now())
-                    WorkflowService._advance_step(locked, step.order, task_step_order=step.order)
+                    if gate_task.status == "awaiting_posting":
+                        gate_task.status = "approved"
+                        gate_task.save(update_fields=["status", "updated_at"])
+                    WorkflowService._advance_step(
+                        locked, step.order, task_step_order=step.order,
+                        source_task_id=gate_task.id,
+                    )
                 return True
 
             if "request" not in completed_procurement_stages(document):

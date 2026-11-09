@@ -1394,17 +1394,29 @@ export const workflowAPI = {
   myTasks: () => api.get("/workflows/tasks/my_tasks/"),
   listTasks: (params?: Record<string, unknown>) =>
     api.get("/workflows/tasks/", { params }),
-  approveTask: (id: string, comment = "", result?: SignSubmission) =>
-    result
-      ? api.post(`/workflows/tasks/${id}/approve/`, buildSignatureForm(result, { comment }), {
-          headers: { "Content-Type": undefined },
-        })
-      : api.post(`/workflows/tasks/${id}/approve/`, { comment }),
+  approveTask: (id: string, comment = "", result?: SignSubmission, nextApproverId?: string) => {
+    if (result) {
+      const form = buildSignatureForm(result, { comment });
+      if (nextApproverId) form.append("next_approver_id", nextApproverId);
+      return api.post(`/workflows/tasks/${id}/approve/`, form, {
+        headers: { "Content-Type": undefined },
+      });
+    }
+    return api.post(`/workflows/tasks/${id}/approve/`, {
+      comment,
+      ...(nextApproverId ? { next_approver_id: nextApproverId } : {}),
+    });
+  },
+  routingOptions: (id: string) => api.get(`/workflows/tasks/${id}/routing_options/`),
   submitLpo: (id: string) => api.post(`/workflows/tasks/${id}/submit_lpo/`),
   rejectTask: (id: string, comment: string) =>
     api.post(`/workflows/tasks/${id}/reject/`, { comment }),
-  returnForReview: (id: string, comment: string, returnTo: "previous_step" | "uploader" | "same_step" = "uploader") =>
-    api.post(`/workflows/tasks/${id}/return_for_review/`, { comment, return_to: returnTo }),
+  returnForReview: (id: string, comment: string, returnTo: "previous_step" | "uploader" | "same_step" = "uploader", returnApproverId?: string) =>
+    api.post(`/workflows/tasks/${id}/return_for_review/`, {
+      comment,
+      return_to: returnTo,
+      ...(returnApproverId ? { return_approver_id: returnApproverId } : {}),
+    }),
   holdTask: (id: string, comment: string, holdHours: number) =>
     api.post(`/workflows/tasks/${id}/hold/`, {
       comment,

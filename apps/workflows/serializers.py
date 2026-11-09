@@ -97,6 +97,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             # approval-step fields
             "assignee_type", "assignee_group", "assignee_group_name",
             "assignee_user", "assignee_user_name", "assignee_user_auto", "assignee_user_field",
+            "allow_assignee_selection",
             "sla_hours", "allow_resubmit",
             "allow_approve", "approve_button_label", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
@@ -175,6 +176,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "post_imprest_request_after_approval",
             # approval-step
             "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto", "assignee_user_field",
+            "allow_assignee_selection",
             "sla_hours", "allow_resubmit",
             "allow_approve", "approve_button_label", "allow_reject", "allow_return", "allow_return_submitter",
             "requires_signature",
@@ -195,6 +197,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "approver_email_subject":  {"required": False, "allow_blank": True},
             "approver_email_body":     {"required": False, "allow_blank": True},
             "approve_button_label":    {"required": False, "allow_blank": True, "trim_whitespace": True},
+            "allow_assignee_selection": {"required": False},
             "notify_email":            {"required": False, "allow_blank": True},
             "notify_emails":           {"required": False},
             "notification_subject":    {"required": False, "allow_blank": True},
@@ -256,6 +259,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             attrs["allow_resubmit"]      = False
             attrs["requires_signature"]  = False
             attrs["assignee_user_auto"]  = False
+            attrs["allow_assignee_selection"] = False
             return attrs
 
         # ── Approval step validation ──────────────────────────────────────────
@@ -277,16 +281,29 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"assignee_user_field": "Select the form field that contains the approver."}
                 )
-            if assignee_type == "form_user":
-                attrs["assignee_user"] = None
-                attrs["assignee_user_auto"] = False
-            if assignee_type not in ("group_specific", "form_user") and assignee_user is not None:
-                raise serializers.ValidationError(
-                    {"assignee_user": "Only specific member assignments can set a user."}
-                )
-            if assignee_type != "form_user":
-                attrs["assignee_user_field"] = ""
-        else:
+        allow_assignee_selection = attrs.get(
+            "allow_assignee_selection",
+            getattr(self.instance, "allow_assignee_selection", False),
+        )
+        if allow_assignee_selection:
+            if not assignee_group:
+                raise serializers.ValidationError({
+                    "allow_assignee_selection": "Approver selection requires a configured group on this step."
+                })
+            if assignee_type not in ("group_any", "group_specific"):
+                raise serializers.ValidationError({
+                    "allow_assignee_selection": "Approver selection is available for Any member or Specific member assignment modes."
+                })
+        if assignee_type == "form_user":
+            attrs["assignee_user"] = None
+            attrs["assignee_user_auto"] = False
+        if assignee_type not in ("group_specific", "form_user") and assignee_user is not None:
+            raise serializers.ValidationError(
+                {"assignee_user": "Only specific member assignments can set a user."}
+            )
+        if assignee_type != "form_user":
+            attrs["assignee_user_field"] = ""
+        if assignee_type not in ("group_any", "group_all", "group_specific", "form_user"):
             raise serializers.ValidationError({"assignee_type": "Invalid assignment mode."})
 
         if assignee_type == "group_specific" and assignee_group and assignee_user:
@@ -822,12 +839,15 @@ class WorkflowTaskActionSerializer(serializers.ModelSerializer):
     action_display    = serializers.CharField(source="get_action_display", read_only=True)
     return_to         = serializers.CharField(read_only=True)
     return_to_display = serializers.CharField(source="get_return_to_display", read_only=True)
+    selected_approver = UserSummarySerializer(read_only=True)
+    selected_approver_step_name = serializers.CharField(source="selected_approver_step.name", read_only=True, default=None)
 
     class Meta:
         model  = WorkflowTaskAction
         fields = [
             "id", "action", "action_display", "return_to", "return_to_display",
-            "actor", "comment", "hold_hours", "created_at",
+            "actor", "comment", "hold_hours", "selected_approver",
+            "selected_approver_step_name", "created_at",
         ]
 
 

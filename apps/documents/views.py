@@ -1049,11 +1049,18 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         self._prepare_builder_workflow_phase(doc)
         doc.refresh_from_db(fields=["metadata", "updated_at"])
+        requested_stage = str(request.data.get("workflow_stage") or "").strip().lower()
 
-        # Keep this check before the explicit procurement-stage branch too:
-        # new requisitions enter through workflow_stage="requisition" and
-        # return from that branch before the legacy submit checks below.
-        if is_travel_requisition(doc):
+        # Outstanding retirements block starting another travel requisition,
+        # but must never block submitting the retirement itself or advancing
+        # another phase of an existing requisition.
+        form = ((doc.metadata or {}).get("form") or {})
+        current_phase = str(form.get("workflow_phase") or "requisition").strip().lower()
+        if (
+            is_travel_requisition(doc)
+            and current_phase == "requisition"
+            and requested_stage in ("", "requisition")
+        ):
             overdue = overdue_travel_retirement_for_user(
                 request.user, exclude_document_id=doc.id,
             )
@@ -1063,7 +1070,6 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        requested_stage = str(request.data.get("workflow_stage") or "").strip().lower()
         if requested_stage == "retirement":
             if not can_submit_retirement_workflow(doc, user=request.user):
                 return Response(

@@ -850,7 +850,14 @@ def can_submit_request_workflow(document: Document, *, user=None) -> bool:
         ):
             return False
 
-        if user is not None and is_travel_requisition(document):
+        # This rule is a gate on starting a new requisition cycle. Returned
+        # retirement forms must remain resubmittable so the outstanding
+        # reconciliation can actually be completed.
+        if (
+            user is not None
+            and phase != "retirement"
+            and is_travel_requisition(document)
+        ):
             if overdue_travel_retirement_for_user(user, exclude_document_id=document.id):
                 return False
 

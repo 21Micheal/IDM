@@ -183,6 +183,10 @@ class WorkflowStep(models.Model):
     # (head) rather than hand-picked. Such steps resolve the group's CURRENT head
     # at assignment time, so changing the group's approver propagates to them.
     assignee_user_auto = models.BooleanField(default=False)
+    allow_assignee_selection = models.BooleanField(
+        default=False,
+        help_text="Allow the adjacent approver to choose an active member of this step's group.",
+    )
     sla_hours      = models.PositiveSmallIntegerField(default=48)
     allow_resubmit = models.BooleanField(default=True)
     allow_approve  = models.BooleanField(default=True, help_text="Approver can approve at this step")
@@ -554,6 +558,20 @@ class WorkflowTaskAction(models.Model):
     return_to  = models.CharField(
         max_length=20, choices=RETURN_TO_CHOICES, blank=True,
         help_text="Where the document was returned to",
+    )
+    selected_approver = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="selected_workflow_approver_actions",
+    )
+    selected_approver_step = models.ForeignKey(
+        WorkflowStep,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="selected_approver_actions",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
