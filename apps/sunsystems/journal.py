@@ -58,6 +58,7 @@ def post_journal_for_document(
 
     if posting.status == JournalPostingStatus.POSTED:
         _maybe_generate_lpo_after_posting(document, posting, actor)
+        _maybe_generate_payment_voucher_after_posting(document, posting, actor)
         _resume_lpo_workflow_after_posting(document)
         return posting
 
@@ -164,6 +165,7 @@ def post_journal_for_document(
         )
         _write_back_to_document(document, posting)
         _maybe_generate_lpo_after_posting(document, posting, actor)
+        _maybe_generate_payment_voucher_after_posting(document, posting, actor)
         _resume_lpo_workflow_after_posting(document)
         try:
             from apps.documents.builder_workflow import sync_retirement_variance
@@ -214,6 +216,21 @@ def _maybe_generate_lpo_after_posting(document, posting, actor=None) -> None:
             "SunSystems PO %s was posted, but its LPO PDF could not be generated for %s",
             posting.journal_number,
             document.pk,
+        )
+
+
+def _maybe_generate_payment_voucher_after_posting(document, posting, actor=None) -> None:
+    """Generate the refund voucher after all configured retirement stages post."""
+    try:
+        from apps.documents.payment_voucher import generate_payment_voucher_for_retirement
+
+        generate_payment_voucher_for_retirement(document, posting, actor=actor or posting.posted_by)
+    except Exception:
+        # Journal posting is already committed in SunSystems. Voucher generation
+        # must be recoverable without making the external posting appear failed.
+        logger.exception(
+            "Retirement journal stage %s posted, but its Payment Voucher could not be generated for %s",
+            getattr(posting, "stage", "?"), document.pk,
         )
 
 
