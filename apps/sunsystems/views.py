@@ -1319,3 +1319,104 @@ class AnalysisCodesQueryView(APIView):
             )
 
         return Response({"ok": True, "analysis_codes": analysis_codes, "count": len(analysis_codes)})
+
+
+class RelatedActivityAnalysisQueryView(APIView):
+    """Find unambiguous ledger analysis values associated with an Activity code.
+
+    Budget Code is intentionally fixed to B for this lookup. The Activity
+    dimension is AnalysisCode7 in the current ledger slot configuration.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        import xml.etree.ElementTree as ET
+        from django.utils import timezone
+
+        activity_code = str(request.query_params.get("activity_code") or "").strip()
+        if not activity_code:
+            return Response(
+                {"ok": False, "error": "An activity code is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        conn = effective_connection()
+        config = SunSystemsConfig.from_mapping(conn)
+        business_unit = str(
+            request.query_params.get("business_unit") or config.business_unit or "CAS"
+        ).strip()
+        start_period = f"001{timezone.localdate().year - 1}"
+
+        root = ET.Element("SSC")
+        ET.SubElement(root, "ErrorContext")
+        ET.SubElement(root, "User")
+        context = ET.SubElement(root, "SunSystemsContext")
+        ET.SubElement(context, "BusinessUnit").text = business_unit
+        ET.SubElement(context, "BudgetCode").text = "B"
+        payload = ET.SubElement(root, "Payload")
+        filter_node = ET.SubElement(payload, "Filter")
+        expr = ET.SubElement(filter_node, "Expr", {"operator": "AND"})
+        ET.SubElement(expr, "Item", {
+            "name": "/Ledger/Line/AccountingPeriod",
+            "operator": "GTE",
+            "value": start_period,
+        })
+        ET.SubElement(expr, "Item", {
+            "name": "/Ledger/Line/Accounts/AccountType",
+            "operator": "EQU",
+            "value": "3",
+        })
+        ET.SubElement(expr, "Item", {
+            "name": "/Ledger/Line/AnalysisCode7",
+            "operator": "EQU",
+            "value": activity_code,
+        })
+        select = ET.SubElement(payload, "Select")
+        ledger = ET.SubElement(select, "Ledger")
+        line = ET.SubElement(ledger, "Line")
+        for name in ["AccountCode", "AccountingPeriod", *(f"AnalysisCode{slot}" for slot in range(1, 11))]:
+            ET.SubElement(line, name).text = "."
+        ssc_payload = ET.tostring(root, encoding="unicode")
+
+        try:
+            client = SunSystemsClient(config)
+            # Ledger lines are queried through the Journal component in the
+            # working payment-run integration, even though the SSC selection
+            # hierarchy is <Ledger>.
+            response_xml = client.execute("Journal", "Query", ssc_payload)
+        except SunSystemsError as exc:
+            return Response(
+                {"ok": False, "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        try:
+            result = ET.fromstring(response_xml or "<SSC/>")
+        except ET.ParseError as exc:
+            return Response(
+                {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        rows = result.findall(".//Ledger/Line")
+        related_codes: dict[str, str] = {}
+        ambiguous_slots: list[str] = []
+        for slot in range(1, 11):
+            values = {
+                (node.findtext(f"AnalysisCode{slot}") or "").strip()
+                for node in rows
+            }
+            if len(values) == 1 and next(iter(values)):
+                related_codes[str(slot)] = next(iter(values))
+            elif len(values) > 1:
+                ambiguous_slots.append(str(slot))
+
+        return Response({
+            "ok": True,
+            "activity_code": activity_code,
+            "start_period": start_period,
+            "related_codes": related_codes,
+            "ambiguous_slots": ambiguous_slots,
+            "matched_rows": len(rows),
+        })

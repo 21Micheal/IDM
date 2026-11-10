@@ -17,7 +17,7 @@ import { useForm, Controller } from "react-hook-form";
 import { useQuery } from "@tanstack/react-query";
 import { AlertCircle, Calculator, CheckCircle2, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload, Building2, PenTool, User, CalendarClock } from "lucide-react";
 import type { ReactNode } from "react";
-import { documentsAPI } from "@/services/api";
+import { documentsAPI, sunsystemsAPI } from "@/services/api";
 import BudgetBanner from "./BudgetBanner";
 import { toast } from "@/components/ui/vault-toast";
 import CustomListbox from "@/components/ui/CustomListbox";
@@ -1136,6 +1136,9 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [taxRateDraft, setTaxRateDraft] = useState("");
+  const [activityLookupLoading, setActivityLookupLoading] = useState(false);
+  const [activityLookupStatus, setActivityLookupStatus] = useState("");
+  const activityLookupSequence = useRef(0);
   const selectedDimensions = Array.isArray(dimensions) ? dimensions : ANALYSIS_PANEL_SLOTS;
   const availableAccountCodes = Array.isArray(accountCodes) ? accountCodes : [];
   const availableDsaAccountCodes = Array.isArray(dsaAccountCodes) ? dsaAccountCodes : [];
@@ -1159,6 +1162,7 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
       if (item != null && typeof item !== "object") next[key] = String(item);
     });
     setDraft(next);
+    setActivityLookupStatus("");
     setTaxRateDraft(current.tax_rate == null
       ? (taxRateValue == null ? "" : String(taxRateValue))
       : String(current.tax_rate));
@@ -1238,23 +1242,75 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
                         source="analysis_codes"
                         dimension={dimension}
                         value={draft[dimension] ?? ""}
-                        onChange={(next) => setDraft((previous) => {
+                        onChange={(next) => {
                           const code = Array.isArray(next) ? (next[0] ?? "") : next;
-                          const updated = { ...previous };
-                          if (code) updated[dimension] = code;
-                          else delete updated[dimension];
-                          if (!code) delete updated[`${dimension}_description`];
+                          setDraft((previous) => {
+                            const updated = { ...previous };
+                            if (code) updated[dimension] = code;
+                            else delete updated[dimension];
+                            if (!code) delete updated[`${dimension}_description`];
+                            if (dimension === "10" && !code) {
+                              ANALYSIS_PANEL_SLOTS.filter((analysisDimension) => analysisDimension !== "10").forEach((analysisDimension) => {
+                                delete updated[analysisDimension];
+                                delete updated[`${analysisDimension}_description`];
+                              });
+                            }
+                            return updated;
+                          });
+                          if (dimension === "10" && !code) {
+                            activityLookupSequence.current += 1;
+                            setActivityLookupLoading(false);
+                            setActivityLookupStatus("");
+                          }
                           if (dimension === "12" && !code) setTaxRateDraft("");
-                          return updated;
-                        })}
+                        }}
                         autoFillDefault={dimension === "12" && Boolean(draft[dimension])}
-                        onSelectRecord={(record) => {
+                        onSelectRecord={async (record) => {
                           setDraft((previous) => ({
                             ...previous,
                             [`${dimension}_description`]: record.description ?? "",
                           }));
                           if (dimension === "12" && taxRateColumn) {
                             setTaxRateDraft(record.data?.tax_rate == null ? "" : String(record.data.tax_rate));
+                          }
+                          if (dimension !== "10") return;
+
+                          const lookupSequence = ++activityLookupSequence.current;
+                          setActivityLookupLoading(true);
+                          setActivityLookupStatus("Loading related analysis codes…");
+                          try {
+                            const response = await sunsystemsAPI.getRelatedActivityAnalysis({ activity_code: record.code });
+                            if (lookupSequence !== activityLookupSequence.current) return;
+                            const relatedCodes = response.data.related_codes ?? {};
+                            const ambiguousSlots = response.data.ambiguous_slots ?? [];
+                            const filledCount = ANALYSIS_PANEL_SLOTS.reduce((count, analysisDimension, index) =>
+                              analysisDimension !== "10" && relatedCodes[String(index + 1)] ? count + 1 : count, 0);
+                            setDraft((previous) => {
+                              // Ignore a response if the user has already
+                              // selected a different Activity while it ran.
+                              if (previous["10"] !== record.code) return previous;
+                              const updated = { ...previous };
+                              ANALYSIS_PANEL_SLOTS.forEach((analysisDimension, index) => {
+                                if (analysisDimension === "10") return;
+                                delete updated[analysisDimension];
+                                delete updated[`${analysisDimension}_description`];
+                                const code = relatedCodes[String(index + 1)];
+                                if (code) updated[analysisDimension] = code;
+                              });
+                              return updated;
+                            });
+                            setActivityLookupStatus(response.data.matched_rows
+                              ? `${filledCount} related code${filledCount === 1 ? "" : "s"} filled from ${response.data.start_period ?? "recent ledger history"}.${ambiguousSlots.length ? ` ${ambiguousSlots.length} dimension${ambiguousSlots.length === 1 ? " has" : "s have"} multiple matches and need manual selection.` : ""}`
+                              : `No matching ledger lines found from ${response.data.start_period ?? "the previous year"}; select the remaining codes manually.`);
+                          } catch (error) {
+                            if (lookupSequence === activityLookupSequence.current) {
+                              const detail = (error as { response?: { data?: { error?: string } } })?.response?.data?.error;
+                              setActivityLookupStatus(detail
+                                ? `Related analysis codes could not be loaded: ${detail}`
+                                : "Related analysis codes could not be loaded. You can select them manually.");
+                            }
+                          } finally {
+                            if (lookupSequence === activityLookupSequence.current) setActivityLookupLoading(false);
                           }
                         }}
                         multi={false}
@@ -1269,6 +1325,12 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
               ) : (
                 <p className="border border-dashed border-border bg-muted/30 p-4 text-sm text-muted-foreground">
                   No analysis dimensions are configured for this Budget Line.
+                </p>
+              )}
+              {activityLookupStatus && (
+                <p role="status" className={`flex items-center gap-2 text-xs ${activityLookupLoading ? "text-muted-foreground" : "text-primary"}`}>
+                  {activityLookupLoading && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {activityLookupStatus}
                 </p>
               )}
             </div>

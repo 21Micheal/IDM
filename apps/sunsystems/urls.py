@@ -15,6 +15,7 @@ from .views import (
     JournalPreviewView,
     PaymentRunView,
     ProductGroupsQueryView,
+    RelatedActivityAnalysisQueryView,
     SunSystemsConnectionView,
     SunSystemsTestConnectionView,
 )
@@ -31,6 +32,7 @@ urlpatterns = [
     path("items/", ItemsQueryView.as_view(), name="sunsystems-items"),
     path("product-groups/", ProductGroupsQueryView.as_view(), name="sunsystems-product-groups"),
     path("analysis-codes/", AnalysisCodesQueryView.as_view(), name="sunsystems-analysis-codes"),
+    path("related-activity-analysis/", RelatedActivityAnalysisQueryView.as_view(), name="sunsystems-related-activity-analysis"),
     path("connection/", SunSystemsConnectionView.as_view(), name="sunsystems-connection"),
     path("connection/test/", SunSystemsTestConnectionView.as_view(), name="sunsystems-connection-test"),
     path("postings/", JournalPostingListView.as_view(), name="sunsystems-posting-list"),

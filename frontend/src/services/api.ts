@@ -1161,6 +1161,8 @@ export const sunsystemsAPI = {
     api.get<ProductGroupsResult>("/sunsystems/product-groups/", { params }),
   getAnalysisCodes: (params: { dimension: string; business_unit?: string }) =>
     api.get<AnalysisCodesResult>("/sunsystems/analysis-codes/", { params }),
+  getRelatedActivityAnalysis: (params: { activity_code: string; business_unit?: string }) =>
+    api.get<{ ok: boolean; related_codes: Record<string, string>; ambiguous_slots: string[]; matched_rows: number; start_period: string; error?: string }>("/sunsystems/related-activity-analysis/", { params }),
   getConnection: () =>
     api.get<SunSystemsConnectionResponse>("/sunsystems/connection/"),
   updateConnection: (conn: SunSystemsConnection) =>
