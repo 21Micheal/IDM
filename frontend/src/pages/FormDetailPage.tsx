@@ -1286,21 +1286,6 @@ export default function FormDetailPage() {
                     <Send className="h-3.5 w-3.5" /> {submitLabel}
                   </button>
                 )}
-                {showRetirementSubmit && (
-                  <button
-                    type="button"
-                    onClick={() => submitMutation.mutate("retirement")}
-                    disabled={submitMutation.isPending || !canSubmitRetirement}
-                    title={canSubmitRetirement ? "Submit this form to the configured Retirement workflow case" : "Available after LPO approval and on or after the configured travel return date"}
-                    className={cn(
-                      "inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50",
-                      canSubmitRetirement ? "bg-[#287EAD] text-white hover:bg-[#1E6F99]" : "border border-[#AEB5BB] bg-[#F5F7F8] text-[#5E6870]",
-                    )}
-                  >
-                    {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                    Submit retirement
-                  </button>
-                )}
                 {!isReturnedReworkEditor && canPreviewSunSystemsPayload && (
                   <button type="button" onClick={() => setShowJournalXml((s) => !s)}
                     className={cn(
@@ -1715,7 +1700,7 @@ export default function FormDetailPage() {
         </div>
       )}
 
-      {(canResubmitAtBottom || canSubmitLpo) && (
+      {(canResubmitAtBottom || canSubmitLpo || showRetirementSubmit) && (
         <div className="fixed bottom-6 right-6 z-[120] flex items-center gap-2">
           {canResubmitAtBottom && (
             <button
@@ -1737,6 +1722,18 @@ export default function FormDetailPage() {
             >
               {submitLpoMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
               Submit for Approval
+            </button>
+          )}
+          {showRetirementSubmit && (
+            <button
+              type="button"
+              onClick={() => submitMutation.mutate("retirement")}
+              disabled={submitMutation.isPending || !canSubmitRetirement}
+              title={canSubmitRetirement ? "Submit this form to the configured Retirement workflow case" : "Available after LPO approval and on or after the configured travel return date"}
+              className="inline-flex items-center gap-2 rounded-full bg-[#287EAD] px-5 py-3 text-sm font-semibold text-white shadow-lg ring-1 ring-white/80 hover:bg-[#1E6F99] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {submitMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              Submit retirement
             </button>
           )}
         </div>

@@ -826,7 +826,10 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
   documentId?: string; attachmentKey?: string; row?: Record<string, unknown>;
   allValues: TemplateFormValues; allFields: Field[]; tableColumns: Column[];
 }) {
-  const base = "w-full bg-transparent py-0.5 text-sm outline-none text-foreground placeholder:text-muted-foreground/50";
+  // Give every cell control a generous, predictable pointer target. This is
+  // especially important for native date/datetime pickers, whose calendar
+  // affordance is otherwise easy to miss in compact General tables.
+  const base = "block w-full min-w-0 min-h-10 bg-transparent px-2 py-1.5 text-sm outline-none text-foreground placeholder:text-muted-foreground/50";
   const columnKey = (configured: string | undefined) => configured
     ? tableColumns.find((candidate) => candidate.key === configured || candidate.id === configured)?.key ?? configured
     : undefined;
@@ -957,7 +960,7 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
     case "boolean":
       return <input type="checkbox" checked={sval === "true"} disabled={dis} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-primary" />;
     case "textarea":
-      return <textarea rows={wrapText ? 2 : 1} value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={`${base} ${wrapText ? "h-9 min-h-9 max-h-9 resize-none overflow-y-auto whitespace-pre-wrap rounded-md border border-slate-300 bg-white px-2 py-1 leading-4 focus:border-sky-600 focus:ring-2 focus:ring-sky-600/15" : "resize-none"}`} />;
+      return <textarea rows={wrapText ? 2 : 1} value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={`${base} ${wrapText ? "h-10 min-h-10 max-h-10 resize-none overflow-y-auto whitespace-pre-wrap rounded-md border border-slate-300 bg-white px-2 py-1 leading-4 focus:border-sky-600 focus:ring-2 focus:ring-sky-600/15" : "resize-none"}`} />;
     case "currency":
     case "number":
     case "percentage": {
@@ -1575,7 +1578,10 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
       </div>
       <div className="overflow-x-auto border border-border bg-white shadow-sm">
         <div className="min-w-full">
-          <table className="w-full text-sm border-separate border-spacing-0">
+          <table
+            className="w-full min-w-full text-sm border-separate border-spacing-0 table-fixed"
+            style={{ minWidth: `${Math.max(cols.length, 1) * 230 + (!readOnly ? 48 : 0)}px` }}
+          >
             <thead>
               <tr className="text-[11px] uppercase tracking-wide text-muted-foreground">
                 {cols.map((col, i) => (
@@ -1611,7 +1617,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                         <td key={col.id ?? ci}
                             data-protected-cell={protectedCell ? "true" : undefined}
                             data-calculated-cell={col.calc?.expression ? "true" : undefined}
-                            className={`w-[230px] flex-shrink-0 ${fillsCell ? "p-0" : "px-2 py-2"} align-top border-r border-border/30 last:border-r-0 focus-within:bg-sky-50/40 ${col.calc?.expression ? "bg-emerald-50/70" : protectedCell ? "bg-sky-50/70" : "bg-white"}`}>
+                            className={`w-[230px] ${fillsCell || !protectedCell ? "p-0" : "px-2 py-2"} align-top border-r border-border/30 last:border-r-0 focus-within:bg-sky-50/40 ${col.calc?.expression ? "bg-emerald-50/70" : protectedCell ? "bg-sky-50/70" : "bg-white"}`}>
                           {shown ? (
                             <div className={cellIssue ? "w-full min-w-0 rounded-sm ring-1 ring-red-500 [&_input]:!border-red-500 [&_textarea]:!border-red-500 [&_select]:!border-red-500 [&_button]:!border-red-500" : "w-full min-w-0"}>
                               <TableColInput
