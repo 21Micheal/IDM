@@ -372,13 +372,17 @@ def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None
         _as_text(line.get("description") or line.get("item")) for line in lines
         if _as_text(line.get("description") or line.get("item"))
     ))
+    purpose = _request_purpose(values, sections) or "; ".join(line_descriptions)
 
     return {
         "line_items": lines,
         "lpo.number": lpo_reference,
+        "lpo.print_date": _today().strftime("%d/%m/%Y"),
+        "lpo.requisition_number": str(getattr(document, "reference_number", "") or ""),
         "lpo.date": today,
         "lpo.valid_until": valid_until,
         "lpo.description": "; ".join(line_descriptions),
+        "lpo.purpose": purpose,
         "lpo.currency": currency,
         "lpo.subtotal": _money(subtotal),
         "lpo.vat_total": _money(vat_total),
@@ -427,6 +431,25 @@ def _build_line_items(values: dict, sections: list, *, table_key=None) -> list[d
     for index, item in enumerate(items, start=1):
         item["number"] = index
     return items
+
+
+def _request_purpose(values: dict, sections: list) -> str:
+    """Find the requisition's top-level purpose for the LPO summary area."""
+    preferred = ("activity description", "purpose of travel", "travel purpose", "justification", "purpose")
+    fields = [
+        field
+        for section in sections or []
+        for field in (section.get("fields") or [])
+        if field.get("type") != "table" and field.get("key")
+    ]
+    for phrase in preferred:
+        for field in fields:
+            label = " ".join(str(field.get(key) or "") for key in ("label", "title")).strip().lower()
+            if phrase in label:
+                value = _as_text(values.get(field["key"]))
+                if value:
+                    return value
+    return ""
 
 
 def _requisition_tables(sections: list, values: dict) -> list[dict]:
