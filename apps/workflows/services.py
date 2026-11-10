@@ -1726,7 +1726,15 @@ class WorkflowService:
                 return False
             requested = get_purchase_order_postings(document)
             if not requested:
-                return False
+                # A step explicitly marked as the LPO generation checkpoint
+                # must never advance the workflow when the saved form has no
+                # usable PO mapping. Failing open here skips posting and the
+                # generated document entirely. Raising rolls back the approval
+                # action, leaving this checkpoint task available for correction.
+                raise WorkflowError(
+                    "This step is configured to generate LPOs, but the form has no usable Purchase Order line mapping. "
+                    "Configure a Travel line amount and its PO fields, then approve this step again."
+                )
             from apps.sunsystems.models import JournalPosting, JournalPostingStatus
             from apps.sunsystems.tasks import post_journal_for_document
 
@@ -1778,6 +1786,8 @@ class WorkflowService:
             # for a task that will not be queued.
             WorkflowService._resume_lpo_workflow_if_ready(document)
             return True
+        except WorkflowError:
+            raise
         except Exception:
             logger.exception("Could not start the LPO posting gate for document %s", document.pk)
             # Keep later approvers blocked if dispatch fails; the failed

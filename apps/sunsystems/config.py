@@ -111,6 +111,56 @@ def get_all_stages(document) -> list[dict]:
     return sorted(_get_stages(cfg), key=lambda s: int(s.get("stage", 1)))
 
 
+def _remap_saved_table_keys(mapping: dict, document, values: dict | None = None) -> dict:
+    """Bind refreshed mappings to the table keys saved with a submitted form.
+
+    A retry refreshes mapping config from the current template, but the filled
+    document intentionally retains the form schema and value keys it was
+    submitted with. If a table was renamed in the builder, its generated
+    suffix remains stable while its label-derived prefix changes (for example
+    ``travel_requisition_ab12`` to ``ticket_ab12``). Remap only references
+    whose target key is absent from submitted values and has one unambiguous
+    saved-table suffix match.
+    """
+    if not isinstance(mapping, dict):
+        return mapping
+    values = values if isinstance(values, dict) else get_form_values(document)
+    meta = getattr(document, "metadata", None) or {}
+    form = meta.get("form") if isinstance(meta.get("form"), dict) else {}
+    saved_tables = {
+        str(field.get("key"))
+        for section in form.get("sections") or [] if isinstance(section, dict)
+        for field in section.get("fields") or []
+        if isinstance(field, dict) and field.get("type") == "table" and field.get("key")
+    }
+    value_tables = {
+        key for key, value in values.items()
+        if isinstance(key, str) and isinstance(value, list)
+    }
+    available = saved_tables & value_tables
+    aliases: dict[str, str] = {}
+
+    def visit(value):
+        if isinstance(value, dict):
+            for key, child in list(value.items()):
+                if key in {"repeat_over", "table"} and isinstance(child, str) and child not in value_tables:
+                    suffix = child.rsplit("_", 1)[-1]
+                    candidates = [table_key for table_key in available if table_key.rsplit("_", 1)[-1] == suffix]
+                    if len(candidates) == 1:
+                        aliases[child] = candidates[0]
+                        value[key] = candidates[0]
+                    elif child in aliases:
+                        value[key] = aliases[child]
+                else:
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(mapping)
+    return mapping
+
+
 def get_purchase_order_postings(document) -> list[dict]:
     """Return table + transaction/product-group PO requests for a workflow stage."""
     config = get_sunsystems_config(document).get("purchase_order")
@@ -131,10 +181,12 @@ def get_purchase_order_postings(document) -> list[dict]:
     ui_config = get_sunsystems_config(document).get("ui")
     if isinstance(ui_config, dict):
         mapping_config.setdefault("ui", deepcopy(ui_config))
+    values = get_form_values(document)
+    _remap_saved_table_keys(mapping_config, document, values)
     form = ((getattr(document, "metadata", None) or {}).get("form") or {})
     expanded = expand_purchase_order_postings(
         mapping_config,
-        get_form_values(document),
+        values,
         lpo_documents=form.get("lpo_documents") or [],
     )
     return [
@@ -203,6 +255,8 @@ def get_imprest_request_postings(document) -> list[dict]:
 
     po = config.get("purchase_order") or {}
     values = get_form_values(document)
+    _remap_saved_table_keys(config, document, values)
+    po = config.get("purchase_order") or {}
     # The Imprest profile can intentionally have no PurchaseOrder line specs;
     # it only carries the separate Imprest request table/account settings. The
     # shared analysis bindings live on the main LPO profile, so use that as the
@@ -210,6 +264,7 @@ def get_imprest_request_postings(document) -> list[dict]:
     # it as well).
     lpo_mapping = deepcopy(sunsystems.get("purchase_order") or {})
     _apply_analysis_panel_mapping(lpo_mapping, document)
+    _remap_saved_table_keys(lpo_mapping, document, values)
     lpo_po = lpo_mapping.get("purchase_order") or {}
     # Imprest request postings share the requisition's Analysis Dimensions with
     # the LPO. Those bindings are often row-scoped on the LPO line spec (for
@@ -288,13 +343,17 @@ def get_imprest_request_postings(document) -> list[dict]:
         # SunSystems "Line amount". Do not reconstruct it from quantity ×
         # unit price: the form may calculate VAT/gross totals in that column.
         line_amount_key = None
+        table_columns = []
+        dsa_amount_column = None
         form = (getattr(document, "metadata", None) or {}).get("form") or {}
         for section in form.get("sections") or []:
             for field in section.get("fields") or []:
                 if field.get("type") != "table" or field.get("key") != table_key:
                     continue
                 columns = [column for column in field.get("columns") or [] if isinstance(column, dict)]
+                table_columns = columns
                 explicit_dsa_amount = next((column for column in columns if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "dsa_line_amount"), None)
+                dsa_amount_column = explicit_dsa_amount
                 has_travel_amount = any(str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "travel_line_amount" for column in columns)
                 for column in columns:
                     role = str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower()
@@ -326,7 +385,33 @@ def get_imprest_request_postings(document) -> list[dict]:
             # Supplier table selectors should resolve against this same row;
             # scalar supplier mappings and their configured fallbacks remain
             # shared with the PurchaseOrder profile.
-            credit_account = spec.get("imprest_request_counter_account") or supplier_spec
+            credit_account = spec.get("imprest_request_counter_account")
+            if not credit_account and isinstance(dsa_amount_column, dict):
+                # Older document snapshots can predate compilation of the
+                # amount column's counter-account settings into the posting
+                # spec. Read the saved column config directly so retries still
+                # honor its configured counter account instead of silently
+                # using the supplier as the ledger counter account.
+                amount_sunsystems = dsa_amount_column.get("sunsystems") or {}
+                counter_source = str(amount_sunsystems.get("counterAccountSource") or "manual").strip().lower()
+                if counter_source == "manual" and amount_sunsystems.get("counterAccount"):
+                    credit_account = {"const": str(amount_sunsystems["counterAccount"]).strip()}
+                elif counter_source == "account_code":
+                    dsa_account_column = next(
+                        (column for column in table_columns if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "dsa_account_code"),
+                        None,
+                    )
+                    budget_line_column = next(
+                        (column for column in table_columns if column.get("type") == "budget_line" or str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "budget_line"),
+                        None,
+                    )
+                    if dsa_account_column:
+                        credit_account = {"row_field": dsa_account_column.get("key")}
+                    elif budget_line_column:
+                        credit_account = {"row_field": budget_line_column.get("key"), "key": "dsa_account_code"}
+                elif counter_source == "supplier_code":
+                    credit_account = supplier_spec
+            credit_account = credit_account or supplier_spec
             if not resolve_value(credit_account, values, row):
                 row_supplier = None
                 for candidate_spec in (supplier_spec, supplier_fallback):
@@ -365,7 +450,16 @@ def get_imprest_request_postings(document) -> list[dict]:
             # row itself, while retaining LPO analysis as the legacy fallback.
             row_analysis = spec.get("analysis") if isinstance(spec.get("analysis"), dict) else {}
             for slot, slot_spec in row_analysis.items():
-                code_spec = slot_spec.get("code") if isinstance(slot_spec, dict) else slot_spec
+                # Builder mappings are saved in either the normalized
+                # {"code": ValueSpec} shape or the compact ValueSpec shape
+                # (for example {"row_field": "budget_line", "key": "04"}).
+                # Do not treat every dict as normalized: doing so turns a
+                # compact mapping into None and silently falls back to '#'.
+                code_spec = (
+                    slot_spec.get("code", slot_spec)
+                    if isinstance(slot_spec, dict)
+                    else slot_spec
+                )
                 code = resolve_value(code_spec, values, row).strip()
                 if code and code != "#":
                     analysis[str(slot)] = {"const": code}

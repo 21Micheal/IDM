@@ -1852,6 +1852,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     const cols = f.columns ?? [];
     const amtCol = travelAmountColumn(cols);
     const dsaAmtCol = dsaAmountColumn(cols);
+    const hasTravelLineAmount = cols.some((c) => c.sunsystems?.role === "travel_line_amount");
     const itemCol = cols.find((c) => c.sunsystems?.role === "item_code")
       ?? cols.find((c) => c.type === "external" && c.external?.source === "items")
       ?? cols.find((c) => (c.label ?? "").trim().toLowerCase() === "item");
@@ -1876,7 +1877,10 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     const imprestRequest = f.sunsystems?.imprestRequest ?? dsaAmtCol?.sunsystems?.imprestRequest ?? amtCol?.sunsystems?.imprestRequest;
     const imprestAccountSource = dsaAmtCol?.sunsystems?.accountSource ?? imprestRequest?.accountSource;
     const imprestManualAccount = dsaAmtCol?.sunsystems?.account ?? imprestRequest?.account;
-    const imprestCounterAccountSource = dsaAmtCol?.sunsystems?.counterAccountSource ?? imprestRequest?.counterAccountSource;
+    // The column editor defaults this picker to Manual account. Persist that
+    // semantic default during compilation so a configured counterAccount is
+    // not dropped when the user leaves the picker untouched.
+    const imprestCounterAccountSource = dsaAmtCol?.sunsystems?.counterAccountSource ?? imprestRequest?.counterAccountSource ?? "manual";
     const imprestManualCounterAccount = dsaAmtCol?.sunsystems?.counterAccount ?? imprestRequest?.counterAccount;
     if (!amtCol && !(qtyCol && upCol)) continue;
     const lineAnalysis: Record<string, unknown> = {};
@@ -1906,7 +1910,10 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         : acctCol
           ? { row_field: acctCol.key }
           : (f.sunsystems?.account ? { const: f.sunsystems.account } : undefined),
-      ...(dsaAccountSpec ? { exclude_if: dsaAccountSpec } : {}),
+      // Separate legacy DSA tables must not also create a Travel PO line.
+      // In the merged Ticket/DSA table, however, the same row can carry both
+      // amounts and must produce both the PO line and the DSA journal lines.
+      ...(dsaAccountSpec && !hasTravelLineAmount ? { exclude_if: dsaAccountSpec } : {}),
       ...(itemCol
         ? { item_code: { row_field: itemCol.key } }
         : itemFieldSpec
@@ -1968,7 +1975,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         : { const: ui.quantity || "1" },
       ...(upCol ? { unit_price: { row_field: upCol.key } } : {}),
       ...(amtCol ? { amount: { row_field: amtCol.key } } : {}),
-      ...(Object.keys(lineAnalysis).length ? { analysis: f.workflowRole === "rfq_required_lines" || dsaAccountSpec ? lineAnalysis : poLineAnalysis } : {}),
+      ...(Object.keys(lineAnalysis).length ? { analysis: f.workflowRole === "rfq_required_lines" ? lineAnalysis : poLineAnalysis } : {}),
     };
     if (dsaAccountSpec && dsaAmtCol && imprestRequest?.enabled) {
       imprestRequestLines.push({
@@ -1976,8 +1983,15 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         include_if: dsaAccountSpec,
         amount: { row_field: dsaAmtCol.key },
         account_code: dsaAccountSpec,
+        analysis: lineAnalysis,
         exclude_if: undefined,
       });
+      // A merged Ticket/DSA row feeds both posting paths independently: the
+      // Travel amount/account become the PurchaseOrder line, while the DSA
+      // amount/account become the balanced Imprest journal pair.
+      if (hasTravelLineAmount && f.workflowRole !== "rfq_required_lines") {
+        poLines.push({ ...lineSpec, exclude_if: undefined });
+      }
     } else if (f.workflowRole === "rfq_required_lines") {
       // Legacy standalone Imprest rows are exclusively the source for the
       // advance journal. They are never PurchaseOrder lines, even when they
