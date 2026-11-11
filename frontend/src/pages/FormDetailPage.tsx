@@ -287,6 +287,8 @@ export default function FormDetailPage() {
   const [awaitingLpoReady, setAwaitingLpoReady] = useState(false);
   const [lpoGateTaskId, setLpoGateTaskId] = useState<string | null>(null);
   const [awaitingImprestPostSince, setAwaitingImprestPostSince] = useState(0);
+  const [awaitingPaymentVoucher, setAwaitingPaymentVoucher] = useState(false);
+  const [paymentVoucherGateDismissed, setPaymentVoucherGateDismissed] = useState(false);
   const [gateRetrying, setGateRetrying] = useState(false);
   const [isSigningOpen, setIsSigningOpen] = useState(false);
   const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
@@ -296,7 +298,7 @@ export default function FormDetailPage() {
   // (not just a toast) so a long list stays on screen while it's being fixed.
   const [missingFields, setMissingFields] = useState<string[]>([]);
 
-  const awaitingPostingGate = awaitingLpo || awaitingLpoReady || awaitingImprestPostSince > 0;
+  const awaitingPostingGate = awaitingLpo || awaitingLpoReady || awaitingImprestPostSince > 0 || awaitingPaymentVoucher;
 
   const { data: doc, isLoading, dataUpdatedAt: formDataUpdatedAt } = useQuery<any>({
     queryKey: ["form", id],
@@ -307,8 +309,11 @@ export default function FormDetailPage() {
     // so a successful retry clears the persistent reminder promptly.
     refetchInterval: (query) => {
       if (awaitingPostingGate) return 1_000;
-      const form = (query.state.data as { metadata?: { form?: { imprest_request_workflow_status?: string } } } | undefined)
+      const form = (query.state.data as { metadata?: { form?: { imprest_request_workflow_status?: string; payment_voucher_document_id?: string; retirement_workflow_status?: string; retirement_variance?: { scenario?: string; kind?: string } } } } | undefined)
         ?.metadata?.form;
+      if (String(form?.retirement_workflow_status || "").toLowerCase() === "approved"
+        && (form?.retirement_variance?.scenario === "over" || form?.retirement_variance?.kind === "over")
+        && !form?.payment_voucher_document_id) return 1_500;
       if (String(form?.imprest_request_workflow_status || "").toLowerCase() === "posting") return 3_000;
       return 8_000;
     },
@@ -322,6 +327,8 @@ export default function FormDetailPage() {
       travel_retirement?: { enabled?: boolean };
       lpo_generation_ready?: boolean;
       imprest_request_workflow_status?: string;
+      retirement_workflow_status?: string;
+      retirement_variance?: RetirementVariance;
       print_config?: Record<string, any>;
       lpo_document_id?: string;
       lpo_reference?: string;
@@ -355,12 +362,22 @@ export default function FormDetailPage() {
     || doc?.builder_workflow_phase
     || "",
   ).toLowerCase();
+  const paymentVoucherId = formData?.payment_voucher_document_id;
+  const paymentVoucherReference = formData?.payment_voucher_reference;
+  const retirementVoucherExpected =
+    (formData?.retirement_variance?.scenario === "over" || formData?.retirement_variance?.kind === "over");
+  const retirementVoucherPending =
+    String(formData?.retirement_workflow_status || "").toLowerCase() === "approved"
+    && retirementVoucherExpected
+    && !paymentVoucherId;
+  const showPaymentVoucherGate = awaitingPaymentVoucher && !paymentVoucherId;
   // PO rows without a generated LPO mean the LPO generation gate is still open.
   const generatedLpoCount = (formData?.lpo_documents?.length || 0)
     || (formData?.lpo_document_id ? 1 : 0);
   // Watch Request/LPO gates after dismiss/reopen so a failed post still surfaces.
   const watchPostingGate = awaitingPostingGate
     || imprestPostingGateActive
+    || showPaymentVoucherGate
     || workflowPhase === "lpo";
 
   const { data: gatePostings = [] } = useQuery({
@@ -370,7 +387,7 @@ export default function FormDetailPage() {
         .then((r) => (Array.isArray(r.data) ? r.data : [] as JournalPosting[]))
         .catch(() => [] as JournalPosting[]),
     enabled: Boolean(id && watchPostingGate),
-    refetchInterval: (awaitingPostingGate || imprestPostingGateActive) ? 2_000 : 10_000,
+    refetchInterval: (awaitingPostingGate || imprestPostingGateActive || showPaymentVoucherGate) ? 2_000 : 10_000,
     staleTime: 0,
   });
 
@@ -383,6 +400,12 @@ export default function FormDetailPage() {
   const failedLpoGatePostings = useMemo(
     () => gatePostings.filter(
       (p) => isLpoPurchaseOrderStage(p.stage) && (p.status === "failed" || p.status === "skipped"),
+    ),
+    [gatePostings],
+  );
+  const failedRetirementGatePostings = useMemo(
+    () => gatePostings.filter(
+      (p) => Number(p.stage) >= 30_000 && (p.status === "failed" || p.status === "skipped"),
     ),
     [gatePostings],
   );
@@ -501,9 +524,23 @@ export default function FormDetailPage() {
   });
   const lpoPdfUrl = lpoPdfQuery.data?.viewer === "pdfjs" ? lpoPdfQuery.data.url : null;
 
-  const paymentVoucherId = formData?.payment_voucher_document_id;
-  const paymentVoucherReference = formData?.payment_voucher_reference;
   const [paymentVoucherModalOpen, setPaymentVoucherModalOpen] = useState(false);
+  useEffect(() => {
+    if (retirementVoucherPending && !paymentVoucherGateDismissed) setAwaitingPaymentVoucher(true);
+    if (paymentVoucherId && (awaitingPaymentVoucher || paymentVoucherGateDismissed)) {
+      setAwaitingPaymentVoucher(false);
+      setGateRetrying(false);
+      setPaymentVoucherGateDismissed(false);
+      setPaymentVoucherModalOpen(true);
+      setWorkflowActionCompleted(false);
+    }
+  }, [awaitingPaymentVoucher, paymentVoucherGateDismissed, paymentVoucherId, retirementVoucherPending]);
+  const dismissPaymentVoucherGate = useCallback(() => {
+    setAwaitingPaymentVoucher(false);
+    setPaymentVoucherGateDismissed(true);
+    setGateRetrying(false);
+    toast.info("Payment Voucher generation is still in progress. You can open it from the form when it is ready.");
+  }, []);
   const paymentVoucherDocumentQuery = useQuery({
     queryKey: ["generated-payment-voucher-document", paymentVoucherId],
     queryFn: () => documentsAPI.get(paymentVoucherId!).then((r) => r.data),
@@ -1769,6 +1806,26 @@ export default function FormDetailPage() {
                 const isLpoGenerationApprover = Boolean((activeTask?.step as any)?.post_lpo_after_approval);
                 const isImprestPostingApprover = phase === "request"
                   && Boolean((activeTask?.step as any)?.post_imprest_request_after_approval);
+                const retirementApprovalSteps = (workflowData?.steps ?? []).filter((step) =>
+                  step.kind === "task"
+                  && /^approver-\d+$/.test(step.id)
+                  && (!step.phase || step.phase === "retirement"),
+                );
+                const laterRetirementStepExists = retirementApprovalSteps.some((step) =>
+                  Number(step.id.slice("approver-".length)) > activeOrder,
+                );
+                const isLastRetirementApprover = phase === "retirement"
+                  && activeOrder > 0
+                  && retirementApprovalSteps.some((step) => step.id === `approver-${activeOrder}`)
+                  && !laterRetirementStepExists;
+
+                if (isLastRetirementApprover && retirementVoucherExpected) {
+                  setAwaitingPaymentVoucher(true);
+                  setPaymentVoucherGateDismissed(false);
+                  setWorkflowActionCompleted(false);
+                  void qc.invalidateQueries({ queryKey: ["form", id] });
+                  return;
+                }
 
                 if (!isLpoGenerationApprover && !isLastLpoApprover) {
                   setAwaitingLpo(false);
@@ -1952,7 +2009,18 @@ export default function FormDetailPage() {
         />
       )}
 
-      {(reworkResubmitted || (workflowActionCompleted && !awaitingLpo && !activeTask && !generatedLpos.length)) && (
+      {showPaymentVoucherGate && (
+        <PostingGateOverlay
+          title="Generating Payment Voucher"
+          pendingMessage="Retirement approval is complete. The Payment Voucher is being generated from the posted retirement journal. This preview will open automatically when it is ready."
+          failedPostings={failedRetirementGatePostings}
+          retrying={gateRetrying}
+          onRetry={() => void retryGatePostings(failedRetirementGatePostings)}
+          onDismiss={dismissPaymentVoucherGate}
+        />
+      )}
+
+      {(reworkResubmitted || (workflowActionCompleted && !awaitingLpo && !showPaymentVoucherGate && !paymentVoucherId && !activeTask && !generatedLpos.length)) && (
         <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
           <div
             role="alertdialog"
