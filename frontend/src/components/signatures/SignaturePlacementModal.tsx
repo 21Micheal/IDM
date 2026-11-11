@@ -12,12 +12,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Loader2, Type as TypeIcon, CalendarClock, Undo2, PenLine,
+  Loader2, Undo2, PenLine,
   Sparkles, FileText
 } from "lucide-react";
 import clsx from "clsx";
 import { documentsAPI, profileAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
+import SignaturePad from "@/components/profile/SignaturePad";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 
 const pdfWorkerPath = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
@@ -242,6 +243,8 @@ export default function SignaturePlacementModal({
 
   // Keep signer identity and signing date fixed for the duration of this session.
   const [compositePreview, setCompositePreview] = useState<string | null>(null);
+  const [capturedSignature, setCapturedSignature] = useState<string | null>(null);
+  const [isCapturingSignature, setIsCapturingSignature] = useState(false);
   const [signedAt] = useState(() => new Date());
 
   // Form mode field mapping selections & below-signature display toggles
@@ -270,7 +273,9 @@ export default function SignaturePlacementModal({
     queryFn: () => profileAPI.getSignature().then((r) => r.data.signature ?? null),
   });
 
-  const activeSignatureImage = savedSignature?.image_data ?? null;
+  const activeSignatureImage = isCapturingSignature
+    ? capturedSignature
+    : savedSignature?.image_data ?? null;
   const hasSignatureSource = !!activeSignatureImage;
 
   // Resolve actual operating mode
@@ -371,7 +376,7 @@ export default function SignaturePlacementModal({
   );
 
   useEffect(() => {
-    if (activeMode !== "form" || !activeSignatureImage) {
+    if (!activeSignatureImage) {
       setCompositePreview(null);
       return;
     }
@@ -386,11 +391,11 @@ export default function SignaturePlacementModal({
       if (!cancelled) setCompositePreview(url);
     });
     return () => { cancelled = true; };
-  }, [activeMode, activeSignatureImage, effectiveSignerName, currentDateText]);
+  }, [activeSignatureImage, effectiveSignerName, currentDateText]);
 
   const addSignatureItem = () => {
     if (!hasSignatureSource) {
-      setError("No saved profile signature was found. Add your signature in your profile to continue.");
+      setError("Create or select a signature before continuing.");
       return;
     }
     setError("");
@@ -402,30 +407,7 @@ export default function SignaturePlacementModal({
       y_percent: 65,
       width_percent: 26,
       height_percent: 10,
-      image_data: activeSignatureImage!,
-    };
-    updateItems([...items, item]);
-    setSelectedId(item.id);
-  };
-
-  const addTextItem = (kind: Extract<PlacedItemKind, "name" | "date" | "text">) => {
-    const text = kind === "name" ? effectiveSignerName : kind === "date" ? currentDateText : "Certified Approved";
-    const item: PlacedItem = {
-      id: uid(),
-      kind,
-      page_number: currentPage,
-      x_percent: 30,
-      y_percent: 78,
-      width_percent: 26,
-      height_percent: 6,
-      text,
-      font_percent: 1.6,
-      font_family: "helvetica",
-      bold: false,
-      italic: false,
-      align: "center",
-      color: "#1F2933",
-      ...(kind === "date" ? { date_iso: signedAt.toISOString(), date_format: "dmy" } : {}),
+      image_data: compositePreview ?? activeSignatureImage!,
     };
     updateItems([...items, item]);
     setSelectedId(item.id);
@@ -434,24 +416,22 @@ export default function SignaturePlacementModal({
   // Submit / Confirm logic
   const handleConfirm = async () => {
     if (!hasSignatureSource) {
-      setError("No saved profile signature was found. Add your signature in your profile to continue.");
+      setError("Create or select a signature before continuing.");
       return;
     }
 
-    // Composite name and date below the signature image into one neat graphic
-    let finalSignatureUrl = activeSignatureImage!;
-    if (activeMode === "form") {
-      finalSignatureUrl = await compositeSignatureWithMetadata(activeSignatureImage!, {
-        name: effectiveSignerName,
-        includeName: true,
-        date: currentDateText,
-        includeDate: true,
-        scale: 2,
-      });
-    }
+    // Keep signer name and EAT date attached to the signature in either mode.
+    const finalSignatureUrl = await compositeSignatureWithMetadata(activeSignatureImage!, {
+      name: effectiveSignerName,
+      includeName: true,
+      date: currentDateText,
+      includeDate: true,
+      scale: 2,
+    });
 
     const roundedItems = items.map((i) => ({
       ...i,
+      ...(i.kind === "signature" ? { image_data: finalSignatureUrl } : {}),
       x_percent: Number(i.x_percent.toFixed(3)),
       y_percent: Number(i.y_percent.toFixed(3)),
       width_percent: Number(i.width_percent.toFixed(3)),
@@ -512,92 +492,61 @@ export default function SignaturePlacementModal({
 
         {/* Content Body */}
         <div className="grid flex-1 grid-cols-1 md:grid-cols-12 overflow-hidden min-h-[460px]">
-          {/* Controls Sidebar */}
-          <div className="md:col-span-4 border-r border-[#E4E7EB] bg-[#F9FAFB] p-5 overflow-y-auto space-y-5">
-            {/* Signature Source */}
+          {/* Signature source */}
+          <div className="md:col-span-4 border-r border-[#E4E7EB] bg-[#F9FAFB] p-5 overflow-y-auto space-y-4">
             <div>
               <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] mb-2 block">
-                Profile Signature
+                Signature
               </label>
-              <div className="rounded border border-[#C8CDD2] bg-white p-3 text-center min-h-[100px] flex items-center justify-center">
-                {signatureLoading ? (
-                  <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
-                ) : savedSignature?.image_data ? (
-                  <img src={savedSignature.image_data} alt="Saved profile signature" className="max-h-20 object-contain mx-auto" />
-                ) : (
-                  <div className="text-xs text-amber-700">
-                    No saved signature found. Add one in your profile before signing.
-                  </div>
-                )}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCapturingSignature(false)}
+                  disabled={!savedSignature?.image_data}
+                  className={clsx(
+                    "flex-1 border px-2.5 py-2 text-xs font-semibold",
+                    !isCapturingSignature && savedSignature?.image_data
+                      ? "border-[#287EAD] bg-[#EEF6FB] text-[#1E6F99]"
+                      : "border-[#C8CDD2] bg-white text-[#35434D]",
+                    !savedSignature?.image_data && "cursor-not-allowed opacity-50",
+                  )}
+                >Use saved</button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCapturedSignature(null);
+                    setIsCapturingSignature(true);
+                  }}
+                  className={clsx(
+                    "flex-1 border px-2.5 py-2 text-xs font-semibold",
+                    isCapturingSignature
+                      ? "border-[#287EAD] bg-[#EEF6FB] text-[#1E6F99]"
+                      : "border-[#C8CDD1] bg-white text-[#35434D]",
+                  )}
+                >Create for this signing</button>
               </div>
-            </div>
-
-            {/* Signature Field Options (Form Mode) */}
-            {activeMode === "form" && (
-              <div className="border-t border-[#E4E7EB] pt-4 space-y-3">
-                <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] block">
-                  Signature Details (Below Signature)
-                </label>
-                <div className="space-y-3 text-xs">
-                  <div>
-                    <label className="text-[#5E6870] block mb-1">Target Signature Field:</label>
-                    <input
-                      type="text"
-                      value={selectedSigField}
-                      onChange={(e) => setSelectedSigField(e.target.value)}
-                      placeholder="e.g. signature or requester_signature"
-                      className="w-full rounded border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs outline-none focus:border-[#287EAD]"
-                    />
-                  </div>
-
-                  <div className="rounded border border-[#E4E7EB] bg-white p-2.5 space-y-2 text-[#5E6870]">
-                    <div>Signer: <span className="font-semibold text-[#1F2933]">{effectiveSignerName}</span></div>
-                    <div>Date (EAT): <span className="font-semibold text-[#1F2933]">{currentDateText}</span></div>
-                    <p className="text-[11px]">Name and date are recorded automatically and cannot be edited.</p>
-                  </div>
+              {isCapturingSignature ? (
+                <>
+                  <SignaturePad
+                    className="mt-3"
+                    defaultName={effectiveSignerName}
+                    onChange={setCapturedSignature}
+                  />
+                  <p className="mt-2 text-[11px] leading-relaxed text-[#5E6870]">
+                    This signature is used for this signing only. Your saved profile signature stays unchanged.
+                  </p>
+                </>
+              ) : (
+                <div className="mt-3 flex min-h-[100px] items-center justify-center border border-[#C8CDD2] bg-white p-3">
+                  {signatureLoading ? (
+                    <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
+                  ) : savedSignature?.image_data ? (
+                    <img src={savedSignature.image_data} alt="Saved profile signature" className="max-h-20 object-contain" />
+                  ) : (
+                    <p className="text-center text-xs text-[#5E6870]">No profile signature saved. Create one for this signing.</p>
+                  )}
                 </div>
-              </div>
-            )}
-
-            {/* Stamp Buttons for Canvas Placement */}
-            <div className="border-t border-[#E4E7EB] pt-4">
-              <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] mb-2 block">
-                Interactive Stamps
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={addSignatureItem}
-                  disabled={!hasSignatureSource}
-                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#287EAD] bg-white px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50"
-                >
-                  <PenLine className="h-3.5 w-3.5" /> Stamp Signature
-                </button>
-                <button
-                  type="button"
-                  onClick={() => addTextItem("date")}
-                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-medium text-[#1F2933] hover:bg-[#F3F5F6]"
-                >
-                  <CalendarClock className="h-3.5 w-3.5" /> Stamp Date
-                </button>
-              </div>
-              <div className="grid grid-cols-2 gap-2 mt-2">
-                <button
-                  type="button"
-                  onClick={() => addTextItem("name")}
-                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-medium text-[#1F2933] hover:bg-[#F3F5F6]"
-                >
-                  <TypeIcon className="h-3.5 w-3.5" /> Stamp Name
-                </button>
-                <button
-                  type="button"
-                  onClick={undo}
-                  disabled={!history.length}
-                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-medium text-[#5E6870] hover:bg-[#F3F5F6] disabled:opacity-40"
-                >
-                  <Undo2 className="h-3.5 w-3.5" /> Undo
-                </button>
-              </div>
+              )}
             </div>
           </div>
 
@@ -610,8 +559,27 @@ export default function SignaturePlacementModal({
             )}
 
             {activeMode === "pdf" ? (
-              <div className="relative border border-[#C8CDD2] bg-white shadow-md">
-                <div ref={setHostEl} />
+              <div className="flex flex-col border border-[#C8CDD2] bg-white shadow-md">
+                <div className="flex items-center justify-between gap-3 border-b border-[#E4E7EB] bg-white px-3 py-2">
+                  <span className="text-xs text-[#5E6870]">Signature includes your name and today’s date.</span>
+                  <div className="flex items-center gap-2">
+                    {history.length > 0 && (
+                      <button type="button" onClick={undo} className="inline-flex items-center gap-1 border border-[#C8CDD2] px-2 py-1 text-xs text-[#35434D] hover:bg-[#F3F5F6]">
+                        <Undo2 className="h-3.5 w-3.5" /> Undo
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={addSignatureItem}
+                      disabled={!hasSignatureSource}
+                      className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+                    >
+                      <PenLine className="h-3.5 w-3.5" /> Add signature
+                    </button>
+                  </div>
+                </div>
+                <div className="relative">
+                  <div ref={setHostEl} />
                 {/* Placed overlay items */}
                 {items
                   .filter((i) => i.page_number === currentPage)
@@ -656,6 +624,7 @@ export default function SignaturePlacementModal({
                       </button>
                     </div>
                   ))}
+                </div>
               </div>
             ) : (
               /* Direct Form Mode Preview Card — shows signature + neat Name & Date below */
@@ -666,7 +635,7 @@ export default function SignaturePlacementModal({
                     <h3 className="text-sm font-semibold text-[#1F2933]">Requisition Signature Preview</h3>
                   </div>
                   <span className="text-xs text-[#5E6870]">
-                    Field: <code className="font-mono text-[#287EAD]">{selectedSigField}</code>
+                    Signer: <span className="font-medium text-[#1F2933]">{effectiveSignerName}</span>
                   </span>
                 </div>
 
@@ -682,7 +651,7 @@ export default function SignaturePlacementModal({
                       </div>
                     ) : (
                       <p className="text-xs text-[#5E6870] py-6">
-                        Add a signature in your profile to enable signing.
+                        Create a signature here or choose your saved profile signature.
                       </p>
                     )}
                   </div>
@@ -697,7 +666,7 @@ export default function SignaturePlacementModal({
         {/* Footer */}
         <div className="flex items-center justify-between border-t border-[#E4E7EB] bg-white px-6 py-4">
           <p className="text-xs text-[#5E6870]">
-            The saved profile signature, account name, and current EAT date are used for this signing action.
+            The signature is appended with {effectiveSignerName} and today’s date ({currentDateText}, EAT).
           </p>
           <div className="flex items-center gap-3">
             <button
@@ -709,7 +678,7 @@ export default function SignaturePlacementModal({
             </button>
             <button
               onClick={handleConfirm}
-              disabled={isSubmitting || !hasSignatureSource}
+              disabled={isSubmitting || !hasSignatureSource || (activeMode === "pdf" && !items.some((item) => item.kind === "signature"))}
               className="inline-flex items-center gap-2 rounded bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
             >
               {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
