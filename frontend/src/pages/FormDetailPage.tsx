@@ -2024,15 +2024,11 @@ export default function FormDetailPage() {
             aria-labelledby="workflow-complete-title"
             className="w-full max-w-sm border border-[#C8CDD2] bg-white shadow-2xl"
           >
-            <div className="px-6 pt-5 pb-4">
+            <div className="flex flex-col items-center px-6 pt-6 pb-5 text-center">
+              <CheckCircle2 className="mb-3 h-10 w-10 text-emerald-600" aria-hidden="true" />
               <h2 id="workflow-complete-title" className="text-sm font-bold text-[#1F2933]">
-                {reworkResubmitted ? "Form resubmitted" : "Workflow action complete"}
+                {reworkResubmitted ? "Form resubmitted" : "Approved Successfully"}
               </h2>
-              <p className="mt-1.5 text-xs leading-relaxed text-[#5E6870]">
-                {reworkResubmitted
-                  ? "Your changes have been submitted back into the workflow. Close this form to return to the requisitions list."
-                  : "This form has moved to the next stage and is no longer actionable from your current access level."}
-              </p>
             </div>
             <div className="flex justify-center pb-5">
               <button

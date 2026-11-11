@@ -403,7 +403,7 @@ export default function RequisitionDashboardPage() {
         <div className="grid min-w-0 grid-cols-1 items-stretch gap-5 xl:grid-cols-3">
           {/* Recent Requisitions — Table */}
           <section className="flex min-w-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white xl:col-span-2">
-            <div className="flex items-center justify-between gap-4 border-b border-[#C8CDD2] px-5 py-4">
+            <div className="flex flex-col items-start justify-between gap-3 border-b border-[#C8CDD2] px-4 py-4 sm:flex-row sm:items-center sm:gap-4 sm:px-5">
               <div>
                 <div className="flex items-center gap-2">
                   <h2 className="text-sm font-bold text-[#1F2933]">Recent requisitions</h2>
@@ -414,7 +414,7 @@ export default function RequisitionDashboardPage() {
                 <p className="mt-0.5 text-xs text-[#5E6870]">Latest activity across requisition pipeline</p>
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex w-full flex-wrap items-center justify-between gap-2 sm:w-auto sm:justify-end sm:gap-3">
                 <div className="flex border border-[#C8CDD2] text-[11px]" role="group" aria-label="Recent requisition filter">
                   <button
                     type="button"
@@ -452,15 +452,50 @@ export default function RequisitionDashboardPage() {
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
               ) : pagedRecentReqs.length > 0 ? (
-                <table className={`w-full table-fixed text-sm ${showDepartmentColumn ? "min-w-[940px]" : "min-w-[700px]"}`}>
+                <>
+                <div className="space-y-3 p-3 md:hidden">
+                  {pagedRecentReqs.map((doc: any) => (
+                    <button
+                      key={doc.id}
+                      type="button"
+                      onClick={() => navigate(`/${doc.id}`)}
+                      className="block w-full border border-[#D3D7DA] bg-white p-3 text-left transition hover:border-[#287EAD]/50 hover:bg-[#F8FBFD]"
+                    >
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <span className="min-w-0 truncate text-sm font-semibold text-[#1F2933]">{doc.reference_number || "—"}</span>
+                        <span className={clsx("max-w-[48%] break-words text-right text-xs font-semibold", getDashboardStatusTextClass(doc.status))}>
+                          {getDashboardStatusLabel(doc.status)}
+                        </span>
+                      </div>
+                      {duplicateActivityTitle(doc) && (
+                        <span title={duplicateActivityTitle(doc)} className="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-200">
+                          <AlertTriangle className="h-3 w-3" /> Possible duplicate
+                        </span>
+                      )}
+                      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                        <span className="text-[#68737B]">Amount</span>
+                        <span className="text-right font-semibold text-[#1F2933]">{formatMoney(getReqAmount(doc), doc.currency)}</span>
+                        <span className="text-[#68737B]">Supplier</span>
+                        <span className="truncate text-right font-medium text-[#1F2933]">{getReqSupplier(doc, accountsData?.accounts ?? [])}</span>
+                        <span className="text-[#68737B]">Updated</span>
+                        <span className="text-right text-[#5E6870]">{doc.updated_at ? formatDistanceToNow(new Date(doc.updated_at), { addSuffix: true }) : "—"}</span>
+                        {showDepartmentColumn && <>
+                          <span className="text-[#68737B]">Department</span>
+                          <span className="truncate text-right text-[#5E6870]">{getReqDepartment(doc)}</span>
+                        </>}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                <table className="hidden w-full table-fixed text-sm md:table md:min-w-[640px] 2xl:min-w-[940px]">
                   <thead>
                     <tr className="border-b border-[#AEB5BB] bg-[#50545A] text-left text-[11px] uppercase tracking-wider text-white">
-                      <th className={`${showDepartmentColumn ? "w-[30%]" : "w-[38%]"} px-5 py-3.5 font-medium`}>Requisition</th>
-                      {showDepartmentColumn && <th className="hidden w-[16%] px-5 py-3.5 font-medium lg:table-cell">Department</th>}
-                      <th className={`${showDepartmentColumn ? "w-[16%]" : "w-[20%]"} hidden px-5 py-3.5 font-medium md:table-cell`}>Supplier</th>
-                      <th className={`${showDepartmentColumn ? "w-[14%]" : "w-[18%]"} px-5 py-3.5 font-medium`}>Amount</th>
-                      <th className="w-[14%] px-5 py-3.5 font-medium">Status</th>
-                      <th className="hidden w-[10%] px-5 py-3.5 font-medium lg:table-cell">Updated</th>
+                      <th className={`${showDepartmentColumn ? "w-[35%] 2xl:w-[28%]" : "w-[35%] 2xl:w-[34%]"} px-3 py-3.5 font-medium xl:px-5`}>Requisition</th>
+                      {showDepartmentColumn && <th className="hidden w-[14%] px-3 py-3.5 font-medium 2xl:table-cell xl:px-5">Department</th>}
+                      <th className={`${showDepartmentColumn ? "w-[24%] 2xl:w-[16%]" : "w-[24%] 2xl:w-[20%]"} hidden px-3 py-3.5 font-medium md:table-cell xl:px-5`}>Supplier</th>
+                      <th className={`${showDepartmentColumn ? "w-[20%] 2xl:w-[14%]" : "w-[20%] 2xl:w-[18%]"} px-3 py-3.5 font-medium xl:px-5`}>Amount</th>
+                      <th className="w-[21%] px-3 py-3.5 font-medium xl:w-[14%] xl:px-5">Status</th>
+                      <th className="hidden w-[14%] px-3 py-3.5 font-medium 2xl:table-cell xl:px-5">Updated</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -470,7 +505,7 @@ export default function RequisitionDashboardPage() {
                         className="cursor-pointer border-t border-[#D3D7DA] transition hover:bg-[#F5F7F8]"
                         onClick={() => navigate(`/${doc.id}`)}
                       >
-                        <td className="max-w-0 px-5 py-4">
+                        <td className="max-w-0 px-3 py-4 xl:px-5">
                           <div className="flex items-center gap-3 min-w-0">
                             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[#287EAD]/25 bg-[#EEF6FB] text-[#287EAD]">
                               <FileText className="h-4 w-4" />
@@ -488,30 +523,31 @@ export default function RequisitionDashboardPage() {
                           </div>
                         </td>
                         {showDepartmentColumn && (
-                          <td className="hidden max-w-0 px-5 py-4 text-xs text-[#5E6870] lg:table-cell">
+                          <td className="hidden max-w-0 px-3 py-4 text-xs text-[#5E6870] 2xl:table-cell xl:px-5">
                             <span className="block truncate">{getReqDepartment(doc)}</span>
                           </td>
                         )}
-                        <td className="hidden max-w-0 px-5 py-4 text-xs text-[#5E6870] md:table-cell">
+                        <td className="hidden max-w-0 px-3 py-4 text-xs text-[#5E6870] md:table-cell xl:px-5">
                           <span className="block truncate font-medium text-[#1F2933]">
                             {getReqSupplier(doc, accountsData?.accounts ?? [])}
                           </span>
                         </td>
-                        <td className="px-5 py-4 font-semibold text-[#1F2933]">
+                        <td className="px-3 py-4 font-semibold text-[#1F2933] xl:px-5">
                           {formatMoney(getReqAmount(doc), doc.currency)}
                         </td>
-                        <td className="px-5 py-4 align-middle">
+                        <td className="px-3 py-4 align-middle xl:px-5">
                           <span className={clsx("text-xs font-semibold", getDashboardStatusTextClass(doc.status))}>
                             {getDashboardStatusLabel(doc.status)}
                           </span>
                         </td>
-                        <td className="hidden whitespace-nowrap px-5 py-4 text-xs text-[#5E6870] lg:table-cell">
+                        <td className="hidden whitespace-normal break-words px-3 py-4 text-xs leading-snug text-[#5E6870] 2xl:table-cell xl:px-5">
                           {doc.updated_at ? formatDistanceToNow(new Date(doc.updated_at), { addSuffix: true }) : "—"}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+                </>
               ) : (
                 <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
                   <FileText className="mx-auto h-12 w-12 text-muted-foreground/50" />

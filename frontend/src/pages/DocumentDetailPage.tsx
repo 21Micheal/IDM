@@ -20,7 +20,7 @@ import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Unlock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw, ChevronDown, FileText,
-  Printer, Trash2, X, Check, ExternalLink, Columns2, Eye, EyeOff, Archive, FileCode, MoreHorizontal, Save,
+  Printer, Trash2, X, Check, CheckCircle2, ExternalLink, Columns2, Eye, EyeOff, Archive, FileCode, MoreHorizontal, Save,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -941,13 +941,11 @@ export default function DocumentDetailPage() {
             aria-labelledby="workflow-complete-title"
             className="w-full max-w-sm border border-[#C8CDD2] bg-white shadow-2xl"
           >
-            <div className="px-6 pt-5 pb-4">
+            <div className="flex flex-col items-center px-6 pt-6 pb-5 text-center">
+              <CheckCircle2 className="mb-3 h-10 w-10 text-emerald-600" aria-hidden="true" />
               <h2 id="workflow-complete-title" className="text-sm font-bold text-[#1F2933]">
-                Workflow action complete
+                Approved Successfully
               </h2>
-              <p className="mt-1.5 text-xs leading-relaxed text-[#5E6870]">
-                This document has moved to the next stage and is no longer actionable from your current access level.
-              </p>
             </div>
             <div className="flex justify-center pb-5">
               <button
