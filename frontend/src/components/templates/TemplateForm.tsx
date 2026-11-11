@@ -42,6 +42,7 @@ import {
 } from "@/lib/formBlocks";
 import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
 import ExternalSelect from "@/components/ui/ExternalSelect";
+import type { ExternalRecord } from "@/components/ui/ExternalSelect";
 import { ANALYSIS_PANEL_DISPLAY_ORDER, ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
 import { formatDateTimeValue, formatDateValue } from "@/lib/dateFormatting";
 import FormattedDateInput from "@/components/templates/FormattedDateInput";
@@ -72,7 +73,7 @@ type Column = {
   editableWhen?: VisibleWhen | null;
   calc?: { expression?: string };
   sunsystems?: { budgetAmountField?: string; monitoredAmountField?: string; account?: string; accountField?: string; [k: string]: unknown } | null;
-  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string; fillDescriptionColumn?: string; fillDescriptionField?: string; fillTaxRateColumn?: string; fillTaxRateField?: string } | null;
+  external?: ExternalConfig | null;
 };
 
 type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
@@ -135,7 +136,7 @@ type Field = {
   /* Table reference (type === "reference" && referenceSource === "table"). */
   tableRef?: AnyTableRef | null;
   /* External (SunSystems-backed) lookup — mirrors the builder's ExternalConfig. */
-  external?: { source?: string; dimension?: string; mode?: "panel" | "single"; multi?: boolean; slots?: string[]; fillColumn?: string; fillField?: string; fillDescriptionColumn?: string; fillDescriptionField?: string; fillTaxRateColumn?: string; fillTaxRateField?: string } | null;
+  external?: ExternalConfig | null;
   sunsystems?: {
     budgetAmountField?: string;
     monitoredAmountField?: string;
@@ -144,6 +145,55 @@ type Field = {
     [k: string]: unknown;
   } | null;
 };
+
+type ExternalConfig = {
+  source?: string;
+  dimension?: string;
+  mode?: "panel" | "single";
+  multi?: boolean;
+  slots?: string[];
+  fillColumn?: string;
+  fillField?: string;
+  fillDescriptionColumn?: string;
+  fillDescriptionField?: string;
+  fillTaxRateColumn?: string;
+  fillTaxRateField?: string;
+};
+
+function HiddenExternalDefaultResolver({
+  config,
+  defaultValue,
+  value,
+  onChange,
+  onSelectRecord,
+}: {
+  config: ExternalConfig;
+  defaultValue: string;
+  value: unknown;
+  onChange: (value: string) => void;
+  onSelectRecord: (record: ExternalRecord) => void;
+}) {
+  useEffect(() => {
+    if (value === undefined || value === null || value === "" || (Array.isArray(value) && value.length === 0)) {
+      onChange(defaultValue);
+    }
+  }, [value, defaultValue, onChange]);
+  if (config.multi) return null;
+  const selected = String(value ?? defaultValue);
+  return (
+    <div className="hidden" aria-hidden="true">
+      <ExternalSelect
+        source={config.source ?? "items"}
+        dimension={config.dimension}
+        value={selected}
+        multi={false}
+        autoFillDefault={Boolean(defaultValue && selected === defaultValue)}
+        onChange={(next) => onChange(Array.isArray(next) ? (next[0] ?? "") : next)}
+        onSelectRecord={onSelectRecord}
+      />
+    </div>
+  );
+}
 
 /** Native date controls use local calendar dates; UTC slicing can be yesterday in some timezones. */
 function minimumDate(configured?: string | number): string {
@@ -1448,6 +1498,10 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   // second write must build on the first, before React re-renders).
   const rowsRef = useRef<Record<string, unknown>[]>(rows);
   useEffect(() => { rowsRef.current = rows; }, [rows]);
+  const hasConfiguredDefaults = allCols.some((col) =>
+    col.key && col.type !== "budget" && col.defaultValue !== undefined && col.defaultValue !== "",
+  );
+  const defaultRowsPersistedRef = useRef(false);
 
   const columnHasIssue = (col: Column) => rows.length
     ? rows.some((row, rowIndex) => columnIssue(col, rowIndex, row[col.key ?? ""]))
@@ -1472,6 +1526,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
       // a full remount) — always resync to the new one's data.
       lastDocRef.current = documentId;
       hydratedRef.current = Array.isArray(value) && value.length > 0;
+      defaultRowsPersistedRef.current = false;
       setRows(Array.isArray(value) && value.length > 0 ? value : Array.from({ length: field.minRows ?? 1 }, emptyRow));
       return;
     }
@@ -1487,6 +1542,20 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
     lastValueRef.current = serialised;
     setRows(value);
   }, [value, documentId]);
+
+  // Rows created from schema defaults are local state until the user edits a
+  // cell. Persist them immediately so hidden/defaulted columns are included in
+  // draft and submission payloads even when no visible control fires onChange.
+  useEffect(() => {
+    if (readOnly || !hasConfiguredDefaults || defaultRowsPersistedRef.current) return;
+    if (Array.isArray(value) && value.length > 0) {
+      defaultRowsPersistedRef.current = true;
+      return;
+    }
+    if (!rows.length) return;
+    defaultRowsPersistedRef.current = true;
+    onChange(rows, { isInternal: true });
+  }, [documentId, value, rows, readOnly, hasConfiguredDefaults, onChange]);
 
   // ── Compute calculated column values for each row ──────────────────────────
   const colTypeByKey = useMemo(() => {
@@ -1523,6 +1592,43 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
     return computedRows.some((row) => colVisibleInRow(c, row));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [allCols, computedRows, allValues, allFields, step]);
+  const hiddenExternalDefaultCols = allCols.filter((col) =>
+    !readOnly
+    && col.type === "external"
+    && col.key
+    && col.external
+    && col.defaultValue
+    && (col.hidden || (computedRows.length
+      ? computedRows.some((row) => !colVisibleInRow(col, row))
+      : !colVisibleInRow(col, null))),
+  );
+
+  const updateHiddenDefaultRows = (column: Column, nextCode?: string, record?: ExternalRecord) => {
+    const key = column.key;
+    if (!key || !column.defaultValue) return;
+    const defaultValue = String(column.defaultValue);
+    const nextRows = rowsRef.current.map((row) => {
+      const next = { ...row };
+      const currentCode = String(row[key] ?? "");
+      const mayNormalize = !currentCode || currentCode === defaultValue || (nextCode && defaultValue.startsWith(currentCode));
+      if (nextCode && mayNormalize) next[key] = nextCode;
+      if (record) {
+        const fillIfEmpty = (target: string | undefined, valueToFill: unknown) => {
+          if (!target || valueToFill === undefined || valueToFill === null || valueToFill === "") return;
+          const current = next[target];
+          if (current === undefined || current === null || current === "") next[target] = valueToFill;
+        };
+        fillIfEmpty(column.external?.fillColumn, record.data?.unit);
+        fillIfEmpty(column.external?.fillDescriptionColumn, record.description);
+        fillIfEmpty(column.external?.fillTaxRateColumn, record.data?.tax_rate);
+      }
+      return next;
+    });
+    if (JSON.stringify(nextRows) === JSON.stringify(rowsRef.current)) return;
+    rowsRef.current = nextRows;
+    setRows(nextRows);
+    onChange(nextRows, { isInternal: true });
+  };
 
   // ── Persist computed column values to parent ───────────────────────────────
   // When any calc column updates, push the merged (raw + computed) rows to the
@@ -1569,6 +1675,16 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
 
   return (
     <div className="form-renderer-table col-span-12 space-y-3">
+      {hiddenExternalDefaultCols.map((col) => (
+        <HiddenExternalDefaultResolver
+          key={`hidden-external-column-${tableKey}-${col.key}`}
+          config={col.external!}
+          defaultValue={String(col.defaultValue)}
+          value={rows[0]?.[col.key!] ?? col.defaultValue}
+          onChange={(value) => updateHiddenDefaultRows(col, value)}
+          onSelectRecord={(record) => updateHiddenDefaultRows(col, undefined, record)}
+        />
+      ))}
       <div className="text-xs font-semibold tracking-wide text-foreground">
         {field.label}
         {field.required && <span className="ml-1 text-red-500">*</span>}
@@ -3091,6 +3207,14 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
 
   // Current process step for "process step" visibility conditions.
   const processStep = documentStatus || "draft";
+  const hiddenExternalDefaults = readOnly ? [] : ordered.flatMap((section) => {
+    const sectionIsVisible = evalVisible(section, liveValues as TemplateFormValues, allFields, processStep, null, viewer)
+      && sectionVisibleToViewer(section, viewer);
+    return (section.fields ?? [])
+      .filter((field) => field.type === "external" && field.external && field.defaultValue && field.key)
+      .filter((field) => !sectionIsVisible || !evalVisible(field, liveValues as TemplateFormValues, allFields, processStep, null, viewer))
+      .map((field) => ({ field, key: field.key! }));
+  });
 
   if (rawSections.length === 0) {
     return <p className="text-sm text-muted-foreground">This form has no fields.</p>;
@@ -3101,6 +3225,27 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // attachment download buttons (the approver needs to open attachments).
   return (
     <div className="form-renderer space-y-5">
+      {hiddenExternalDefaults.map(({ field, key }) => (
+        <HiddenExternalDefaultResolver
+          key={`hidden-external-${key}`}
+          config={field.external!}
+          defaultValue={String(field.defaultValue)}
+          value={liveValues[key]}
+          onChange={(value) => onChange(key, value, { isInternal: true })}
+          onSelectRecord={(record) => {
+            const fillIfEmpty = (target: string | undefined, value: unknown) => {
+              if (!target || value === undefined || value === null || value === "") return;
+              const current = liveValues[target];
+              if (current === undefined || current === null || current === "") {
+                onChange(target, value, { isInternal: true });
+              }
+            };
+            fillIfEmpty(field.external?.fillField, record.data?.unit);
+            fillIfEmpty(field.external?.fillDescriptionField, record.description);
+            fillIfEmpty(field.external?.fillTaxRateField, record.data?.tax_rate);
+          }}
+        />
+      ))}
       <div className="form-renderer-legend flex flex-wrap items-center justify-end gap-2 text-[11px] text-[#587081]" aria-label="Field value legend">
         <span className="inline-flex items-center gap-1.5 rounded-full border border-[#D4E2EB] bg-[#F1F7FB] px-2.5 py-1">
           <span className="h-1.5 w-1.5 rounded-full bg-[#7FB1CF]" /> Protected / auto-filled
