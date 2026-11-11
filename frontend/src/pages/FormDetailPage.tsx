@@ -303,12 +303,16 @@ export default function FormDetailPage() {
   const { data: doc, isLoading, dataUpdatedAt: formDataUpdatedAt } = useQuery<any>({
     queryKey: ["form", id],
     queryFn: () => documentsAPI.get(id!).then((r) => r.data),
-    enabled: !!id,
+    enabled: !!id && (!workflowActionCompleted || awaitingPostingGate),
     ...QUERY_SHORT_STALE,
     // Fast-poll while an overlay is open or the Request posting gate is held,
     // so a successful retry clears the persistent reminder promptly.
     refetchInterval: (query) => {
       if (awaitingPostingGate) return 1_000;
+      // A completed approver can lose document access as the task moves to
+      // another member. The completion overlay is terminal on this page, so
+      // stop polling the detail record while it is shown.
+      if (workflowActionCompleted) return false;
       const form = (query.state.data as { metadata?: { form?: { imprest_request_workflow_status?: string; payment_voucher_document_id?: string; retirement_workflow_status?: string; retirement_variance?: { scenario?: string; kind?: string } } } } | undefined)
         ?.metadata?.form;
       if (String(form?.retirement_workflow_status || "").toLowerCase() === "approved"
@@ -674,9 +678,10 @@ export default function FormDetailPage() {
   const { data: workflowData, isLoading: workflowDataLoading } = useQuery({
     queryKey: ["form-workflow", id, formData?.lpo_generation_ready ? "lpo-ready" : "standard"],
     queryFn: () => loadWorkflowData(id!, doc?.builder_workflow_phase),
-    enabled: !!id && !!doc,
+    enabled: !!id && !!doc && !workflowActionCompleted,
     ...QUERY_SHORT_STALE,
     refetchInterval: (query) => {
+      if (workflowActionCompleted) return false;
       if (awaitingLpoReady) return 1_000;
       return query.state.data?.isActive ? 15_000 : false;
     },
@@ -1779,15 +1784,6 @@ export default function FormDetailPage() {
                   setWorkflowActionCompleted(true);
                   return;
                 }
-                // The approval table and active task are separate queries from
-                // the form/posting state. Refresh them as soon as the action
-                // completes so the approved row and any pending LPO gate do
-                // not wait for the normal workflow polling interval.
-                void Promise.all([
-                  qc.refetchQueries({ queryKey: ["form-workflow", id], type: "active" }),
-                  qc.refetchQueries({ queryKey: ["workflow", "my-tasks"], type: "active" }),
-                  qc.refetchQueries({ queryKey: ["form", id], type: "active" }),
-                ]);
                 setWorkflowActionCompleted(false);
                 const phase = String((formData as any)?.workflow_phase ?? doc?.builder_workflow_phase ?? "").toLowerCase();
                 const lpoApprovalSteps = (workflowData?.steps ?? []).filter((step) =>

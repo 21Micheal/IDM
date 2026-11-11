@@ -310,8 +310,13 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     );
   };
 
-  const refetchWorkflowState = () => {
+  const refetchWorkflowState = (refreshDetails = true) => {
     qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
+    qc.invalidateQueries({ queryKey: ["documents"] });
+    qc.invalidateQueries({ queryKey: ["notifications"] });
+    qc.invalidateQueries({ queryKey: ["documents", "pending"] });
+    qc.invalidateQueries({ queryKey: ["documents", "completed"] });
+    if (!refreshDetails) return;
     if (hasDocument) {
       qc.invalidateQueries({ queryKey: ["document", documentId] });
       qc.invalidateQueries({ queryKey: ["document-workflow", documentId] });
@@ -320,11 +325,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
       qc.invalidateQueries({ queryKey: ["notification-workflow", documentId] });
     }
     qc.invalidateQueries({ queryKey: ["sunsystems-payment-runs"] });
-    qc.invalidateQueries({ queryKey: ["documents"] });
-    qc.invalidateQueries({ queryKey: ["notifications"] });
     qc.invalidateQueries({ queryKey: ["task-history", task.id] });
-    qc.invalidateQueries({ queryKey: ["documents", "pending"] });
-    qc.invalidateQueries({ queryKey: ["documents", "completed"] });
     if (hasDocument) {
       void qc.refetchQueries({ queryKey: ["document", documentId], type: "active" });
       void qc.refetchQueries({ queryKey: ["document-workflow", documentId], type: "active" });
@@ -372,7 +373,11 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     setComment("");
     setNextApproverId("");
     setReturnApproverId("");
-    refetchWorkflowState();
+    // Approval/rejection/return can remove the actor's document access as soon
+    // as the task leaves their queue. The completion overlay is already the
+    // next UI state, so only refresh queue/list data for these actions. Holds
+    // and releases keep the task with this user and can safely refresh details.
+    refetchWorkflowState(action === "hold" || action === "release");
     await onCompleted?.(action);
   };
 
