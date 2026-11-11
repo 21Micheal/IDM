@@ -1381,7 +1381,7 @@ export default function FormDetailPage() {
                   />
                 ) : (
                   <span className="text-xs text-[#5E6870]">
-                    {formEditing ? (formAutosave.status === "saving" || formAutosave.status === "unsaved" ? "Saving changes…" : formAutosave.status === "error" ? "Autosave failed" : formAutosave.status === "saved" ? "Changes saved" : "Editing") : canSubmitLpo ? "LPO generated — submit to continue" : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
+                    {formEditing ? (formAutosave.status === "saving" || formAutosave.status === "unsaved" ? "Saving changes…" : formAutosave.status === "error" ? "Autosave failed" : formAutosave.status === "saved" ? "Changes saved" : "Editing") : canSubmitLpo ? "LPO generated — submit to continue" : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm && isOwnerOrSubmitter ? "Click Edit form to modify" : canEdit && !isOwnerOrSubmitter ? "Your permitted changes save automatically" : "Filled in-app"}
                   </span>
                 )}
               </div>
@@ -1444,13 +1444,13 @@ export default function FormDetailPage() {
                     <Eye className="h-3.5 w-3.5" /> Open PV
                   </button>
                 )}
-                {!formEditing && canEditForm && !reworkResubmitted && (
+                {!formEditing && canEditForm && isOwnerOrSubmitter && !reworkResubmitted && (
                   <button type="button" onClick={startFormEdit}
                     className="inline-flex items-center gap-1.5 border border-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]">
                     <Edit2 className="h-3.5 w-3.5" /> Edit form
                   </button>
                 )}
-                {formEditing && !isReturnedReworkEditor && (
+                {formEditing && isOwnerOrSubmitter && !isReturnedReworkEditor && (
                   <>
                     <button type="button" onClick={cancelFormEdit}
                       disabled={updateFormMutation.isPending || saveFormAsDraftMutation.isPending}
