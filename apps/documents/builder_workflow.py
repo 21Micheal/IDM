@@ -438,16 +438,6 @@ def next_procurement_stage(document: Document) -> str | None:
     completed = completed_procurement_stages(document)
     if phase not in PROCUREMENT_WORKFLOW_STAGES or phase not in completed:
         return None
-    if phase == "requisition":
-        try:
-            from apps.sunsystems.config import has_imprest_request_lines
-            if has_imprest_request_lines(document):
-                return "request"
-        except Exception:
-            # Fail closed: a bad Imprest configuration must not bypass the
-            # approval and posting gate and open the LPO phase.
-            return None
-        return "lpo" if travel_requisition_skips_rfq(document) else "rfq"
     if phase == "request":
         try:
             from apps.sunsystems.config import has_imprest_request_lines
@@ -455,11 +445,33 @@ def next_procurement_stage(document: Document) -> str | None:
                 return None
         except Exception:
             return None
-        # RFQ remains required for non-travel requisitions; Travel skips it.
+    return next_procurement_phase(document, phase=phase)
+
+
+def next_procurement_phase(document: Document, *, phase: str | None = None) -> str | None:
+    """Return the next configured procurement CASE, independent of completion.
+
+    Workflow routing previews use this before the current phase is approved;
+    ``next_procurement_stage`` applies its completion/posting gates separately.
+    """
+    if not is_procurement_document(document):
+        return None
+    form = ((document.metadata or {}).get("form") or {})
+    phase = str(phase or form.get("workflow_phase") or "requisition").strip().lower()
+    if phase == "requisition":
+        try:
+            from apps.sunsystems.config import has_imprest_request_lines
+            if has_imprest_request_lines(document):
+                return "request"
+        except Exception:
+            # Fail closed: never skip an Imprest approval lane because its
+            # amount or table configuration could not be resolved.
+            return None
         return "lpo" if travel_requisition_skips_rfq(document) else "rfq"
-    index = PROCUREMENT_WORKFLOW_STAGES.index(phase)
-    if index + 1 < len(PROCUREMENT_WORKFLOW_STAGES):
-        return PROCUREMENT_WORKFLOW_STAGES[index + 1]
+    if phase == "request":
+        return "lpo" if travel_requisition_skips_rfq(document) else "rfq"
+    if phase == "rfq":
+        return "lpo"
     return None
 
 

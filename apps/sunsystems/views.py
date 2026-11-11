@@ -17,10 +17,14 @@ API surface for the SunSystems integration:
 """
 from __future__ import annotations
 
+import logging
+
 from rest_framework import permissions, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+logger = logging.getLogger(__name__)
 
 
 class IsAdminAccess(permissions.BasePermission):
@@ -1121,6 +1125,7 @@ class ItemsQueryView(APIView):
             client = SunSystemsClient(config)
             response_xml = client.execute("Item", "Query", ssc_payload)
         except SunSystemsError as exc:
+            logger.warning("SunSystems Item/Query failed for business unit %s: %s", business_unit, exc)
             return Response(
                 {"ok": False, "error": str(exc)},
                 status=status.HTTP_502_BAD_GATEWAY,
@@ -1192,6 +1197,7 @@ class ProductGroupsQueryView(APIView):
             client = SunSystemsClient(config)
             response_xml = client.execute("Item", "Query", ssc_payload)
         except SunSystemsError as exc:
+            logger.warning("SunSystems Item/ProductGroup Query failed for business unit %s: %s", business_unit, exc)
             return Response(
                 {"ok": False, "error": str(exc)},
                 status=status.HTTP_502_BAD_GATEWAY,

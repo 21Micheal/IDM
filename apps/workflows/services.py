@@ -671,14 +671,7 @@ class WorkflowService:
             # CASE branches can have unrelated numeric step orders. The actual
             # previous approver is the last approval action completed before
             # this task was created, regardless of phase or branch.
-            previous_approval_action = WorkflowTaskAction.objects.filter(
-                task__workflow_instance=instance,
-                task__execution_lane=task.execution_lane or "main",
-                task__step__step_type="approval",
-                action="approved",
-                actor__isnull=False,
-                created_at__lt=task.created_at,
-            ).select_related("task__step__template", "actor").order_by("-created_at").first()
+            previous_approval_action = WorkflowService._previous_approval_action(task)
             if previous_approval_action is None:
                 raise WorkflowError("There is no previous approval step to return to.")
 
@@ -1083,6 +1076,23 @@ class WorkflowService:
                 selected_approver_step=step,
                 selected_approver__is_active=True,
             ).select_related("selected_approver").first()
+        if selected_action is None:
+            # When a procurement phase completes, its next phase starts from a
+            # fresh activation call with no source_task_id. Carry forward a
+            # member selected on the previous phase's final approval, but only
+            # if that selection is newer than this target step's prior task.
+            latest_target_task = instance.tasks.filter(step=step).order_by("-created_at").first()
+            selected_action = WorkflowTaskAction.objects.filter(
+                task__workflow_instance=instance,
+                action="approved",
+                selected_approver_step=step,
+                selected_approver__is_active=True,
+            ).select_related("selected_approver").order_by("-created_at").first()
+            if (
+                selected_action and latest_target_task
+                and selected_action.created_at <= latest_target_task.created_at
+            ):
+                selected_action = None
         selected_user = selected_action.selected_approver if selected_action else None
         if selected_user and step.assignee_group_id and WorkflowService._is_active_group_member(step.assignee_group, selected_user):
             assignees = [selected_user]
@@ -1550,11 +1560,92 @@ class WorkflowService:
             candidates = instance.template.steps.filter(
                 order__gt=step.order, step_type="approval",
             ).order_by("order")
-        return candidates.first()
+        target = candidates.first()
+        if target:
+            return target
+        if execution_lane == "main":
+            return WorkflowService._next_procurement_phase_approval_step(instance)
+        return None
+
+    @staticmethod
+    def _next_procurement_phase_approval_step(instance: WorkflowInstance):
+        """Resolve the first approval in the next procurement CASE.
+
+        Procurement phases run as separate workflow instances while sharing
+        approval history. A final approver must still be able to nominate the
+        first approver of the following phase when that target step enables
+        assignee selection.
+        """
+        document = instance.document
+        if document is None:
+            return None
+        try:
+            from apps.documents.builder_workflow import (
+                is_procurement_document,
+                is_travel_requisition,
+                next_procurement_phase,
+                travel_retirement_config,
+            )
+
+            if not is_procurement_document(document):
+                return None
+            phase = WorkflowService._document_workflow_phase(document)
+            next_phase = next_procurement_phase(document, phase=phase)
+            if (
+                next_phase is None
+                and phase == "lpo"
+                and is_travel_requisition(document)
+                and travel_retirement_config(document)
+            ):
+                # Retirement is opened after LPO completion, but its first
+                # approver can still be selected on the final LPO approval.
+                next_phase = "retirement"
+            if not next_phase:
+                return None
+
+            original_metadata = document.metadata
+            metadata = dict(original_metadata or {})
+            original_form = metadata.get("form")
+            form = dict(original_form or {})
+            old_phase = form.get("workflow_phase")
+            form["workflow_phase"] = next_phase
+            metadata["form"] = form
+            document.metadata = metadata
+            original_template = instance.template
+            try:
+                _, target_template = WorkflowService._resolve_routing(document)
+                if not target_template:
+                    return None
+
+                # Resolve the target branch while the document still carries
+                # its target phase. Evaluating after restoring the source phase
+                # selects the current branch (for example requisition) and
+                # hides the first approval in Request, so the preceding
+                # approver never gets the configured member picker.
+                instance.template = target_template
+                if WorkflowService.is_v2_workflow(target_template):
+                    orders, _ = WorkflowService._v2_active_step_orders(instance, "main")
+                else:
+                    orders = list(target_template.steps.values_list("order", flat=True))
+                return target_template.steps.filter(
+                    order__in=orders, step_type="approval",
+                ).order_by("order").first()
+            finally:
+                instance.template = original_template
+                restored_form = dict(form)
+                if old_phase is None:
+                    restored_form.pop("workflow_phase", None)
+                else:
+                    restored_form["workflow_phase"] = old_phase
+                metadata["form"] = restored_form
+                document.metadata = original_metadata
+        except Exception:
+            logger.exception("Could not resolve the next procurement approver for workflow %s", instance.pk)
+            return None
 
     @staticmethod
     def _previous_approval_action(task: WorkflowTask):
-        return WorkflowTaskAction.objects.filter(
+        previous = WorkflowTaskAction.objects.filter(
             task__workflow_instance=task.workflow_instance,
             task__execution_lane=task.execution_lane or "main",
             task__step__step_type="approval",
@@ -1562,6 +1653,20 @@ class WorkflowService:
             actor__isnull=False,
             created_at__lt=task.created_at,
         ).select_related("task__step__template", "actor").order_by("-created_at").first()
+        if previous:
+            return previous
+        # Legacy detached Imprest lanes can follow an approval in the main
+        # lane. If there is no history in this lane, allow returning across
+        # that lane boundary to the actual previous approver.
+        return WorkflowTaskAction.objects.filter(
+            task__workflow_instance=task.workflow_instance,
+            task__step__step_type="approval",
+            action="approved",
+            actor__isnull=False,
+            created_at__lt=task.created_at,
+        ).exclude(task__execution_lane=task.execution_lane or "main").select_related(
+            "task__step__template", "actor",
+        ).order_by("-created_at").first()
 
     @staticmethod
     def _validate_selected_approver(step: WorkflowStep | None, user_id):
