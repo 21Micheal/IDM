@@ -38,7 +38,7 @@ const PEN_PRESETS = [
 
 export interface SignaturePadProps {
   /** Called whenever a usable signature exists. Passes a transparent PNG data URL. */
-  onChange: (dataUrl: string | null) => void;
+  onChange: (dataUrl: string | null, method?: SignatureMode) => void;
   defaultName?: string;
   className?: string;
 }
@@ -198,7 +198,7 @@ export default function SignaturePad({ onChange, defaultName = "", className }: 
     strokesRef.current = [];
     setStrokeCount(0);
     redraw();
-    onChange(null);
+    onChange(null, mode);
   };
 
   /* ---- rasterizers (transparent output) ---- */
@@ -229,16 +229,16 @@ export default function SignaturePad({ onChange, defaultName = "", className }: 
   };
 
   const emit = () => {
-    if (mode === "draw") onChange(renderDraw());
-    else if (mode === "type") onChange(renderTyped());
-    else onChange(curatedSignature);
+    if (mode === "draw") onChange(renderDraw(), mode);
+    else if (mode === "type") onChange(renderTyped(), mode);
+    else onChange(curatedSignature, mode);
   };
 
   // re-emit when typed/font/color/mode/upload changes
   useEffect(() => {
-    if (mode === "type") onChange(renderTyped());
-    if (mode === "upload") onChange(curatedSignature);
-    if (mode === "draw") onChange(renderDraw());
+    if (mode === "type") onChange(renderTyped(), mode);
+    if (mode === "upload") onChange(curatedSignature, mode);
+    if (mode === "draw") onChange(renderDraw(), mode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, typed, fontId, color, curatedSignature]);
 

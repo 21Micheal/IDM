@@ -10,7 +10,7 @@
  *     or stamp them onto the form canvas.
  */
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Loader2, Undo2, PenLine,
   Sparkles, FileText
@@ -18,13 +18,19 @@ import {
 import clsx from "clsx";
 import { documentsAPI, profileAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
-import SignaturePad from "@/components/profile/SignaturePad";
+import SignaturePad, { type SignatureMode } from "@/components/profile/SignaturePad";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 
 const pdfWorkerPath = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
 const pdfjsImportPromise = import("pdfjs-dist");
 
 const EAT_TZ = "Africa/Nairobi";
+
+async function signatureFile(dataUrl: string): Promise<File> {
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  return new File([blob], "signature.png", { type: blob.type || "image/png" });
+}
 
 export type PlacedItemKind = "signature" | "date" | "name" | "text";
 
@@ -227,6 +233,7 @@ export default function SignaturePlacementModal({
   onApplyToForm,
   isSubmitting = false,
 }: SignaturePlacementModalProps) {
+  const queryClient = useQueryClient();
   const token = useAuthStore((s) => s.accessToken);
   const user = useAuthStore((s) => s.user);
   const effectiveSignerName = signerName || `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim() || user?.email || "Authorized Signer";
@@ -236,6 +243,7 @@ export default function SignaturePlacementModal({
   const [currentPage, setCurrentPage] = useState(1);
   const scale = 1.2;
   const [error, setError] = useState("");
+  const [isSavingProfileSignature, setIsSavingProfileSignature] = useState(false);
 
   const [items, setItems] = useState<PlacedItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -244,6 +252,7 @@ export default function SignaturePlacementModal({
   // Keep signer identity and signing date fixed for the duration of this session.
   const [compositePreview, setCompositePreview] = useState<string | null>(null);
   const [capturedSignature, setCapturedSignature] = useState<string | null>(null);
+  const [capturedSignatureMethod, setCapturedSignatureMethod] = useState<SignatureMode>("draw");
   const [isCapturingSignature, setIsCapturingSignature] = useState(false);
   const [signedAt] = useState(() => new Date());
 
@@ -277,6 +286,26 @@ export default function SignaturePlacementModal({
     ? capturedSignature
     : savedSignature?.image_data ?? null;
   const hasSignatureSource = !!activeSignatureImage;
+
+  const saveNewProfileSignature = async () => {
+    if (!isCapturingSignature || !capturedSignature || savedSignature?.image_data) return true;
+    setIsSavingProfileSignature(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("method", capturedSignatureMethod);
+      form.append("image", await signatureFile(capturedSignature));
+      const response = await profileAPI.saveSignature(form);
+      queryClient.setQueryData(["profile-signature"], response.data);
+      void queryClient.invalidateQueries({ queryKey: ["profile-signature"] });
+      return true;
+    } catch (saveError: any) {
+      setError(saveError?.response?.data?.detail || "Could not save your signature to your profile. Please try again.");
+      return false;
+    } finally {
+      setIsSavingProfileSignature(false);
+    }
+  };
 
   // Resolve actual operating mode
   const activeMode: "pdf" | "form" = useMemo(() => {
@@ -419,6 +448,7 @@ export default function SignaturePlacementModal({
       setError("Create or select a signature before continuing.");
       return;
     }
+    if (!(await saveNewProfileSignature())) return;
 
     // Keep signer name and EAT date attached to the signature in either mode.
     const finalSignatureUrl = await compositeSignatureWithMetadata(activeSignatureImage!, {
@@ -523,17 +553,22 @@ export default function SignaturePlacementModal({
                       ? "border-[#287EAD] bg-[#EEF6FB] text-[#1E6F99]"
                       : "border-[#C8CDD1] bg-white text-[#35434D]",
                   )}
-                >Create for this signing</button>
+                >Create signature</button>
               </div>
               {isCapturingSignature ? (
                 <>
                   <SignaturePad
                     className="mt-3"
                     defaultName={effectiveSignerName}
-                    onChange={setCapturedSignature}
+                    onChange={(signature, method) => {
+                      setCapturedSignature(signature);
+                      if (method) setCapturedSignatureMethod(method);
+                    }}
                   />
                   <p className="mt-2 text-[11px] leading-relaxed text-[#5E6870]">
-                    This signature is used for this signing only. Your saved profile signature stays unchanged.
+                    {savedSignature?.image_data
+                      ? "This signature is used for this signing only. Your saved profile signature stays unchanged."
+                      : "Your signature will be saved to your profile for future use when you confirm."}
                   </p>
                 </>
               ) : (
@@ -678,11 +713,11 @@ export default function SignaturePlacementModal({
             </button>
             <button
               onClick={handleConfirm}
-              disabled={isSubmitting || !hasSignatureSource || (activeMode === "pdf" && !items.some((item) => item.kind === "signature"))}
+              disabled={isSubmitting || isSavingProfileSignature || signatureLoading || !hasSignatureSource || (activeMode === "pdf" && !items.some((item) => item.kind === "signature"))}
               className="inline-flex items-center gap-2 rounded bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
             >
-              {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              {confirmLabel}
+              {isSubmitting || isSavingProfileSignature ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {isSavingProfileSignature ? "Saving signature…" : confirmLabel}
             </button>
           </div>
         </div>
