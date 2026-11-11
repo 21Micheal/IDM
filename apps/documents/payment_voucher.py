@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -41,15 +41,32 @@ def _find_template_and_type():
 
     doc_type = DocumentType.objects.filter(code=PAYMENT_VOUCHER_DOC_TYPE_CODE).first()
     if doc_type is None:
-        doc_type, _ = DocumentType.objects.get_or_create(
-            code=PAYMENT_VOUCHER_DOC_TYPE_CODE,
-            defaults={
-                "name": "Payment Voucher",
-                "reference_prefix": "PV",
-                "title_field": "filename",
-                "description": "Payment vouchers generated for imprest retirement over-expenditure.",
-            },
-        )
+        # A client may already have created a "Payment Voucher" document type
+        # with a different code. Reuse it instead of trying to create the same
+        # globally unique name again (which would raise IntegrityError).
+        doc_type = DocumentType.objects.filter(name__iexact="Payment Voucher").first()
+    if doc_type is None:
+        try:
+            # Keep creation in a savepoint so a concurrent insert or a unique
+            # name conflict does not poison the caller's voucher transaction.
+            with transaction.atomic():
+                doc_type, _ = DocumentType.objects.get_or_create(
+                    code=PAYMENT_VOUCHER_DOC_TYPE_CODE,
+                    defaults={
+                        "name": "Payment Voucher",
+                        "reference_prefix": "PV",
+                        "title_field": "filename",
+                        "description": "Payment vouchers generated for imprest retirement over-expenditure.",
+                    },
+                )
+        except IntegrityError:
+            # Another request may have inserted the type while this one was
+            # creating it. Resolve by either unique identifier before failing.
+            doc_type = DocumentType.objects.filter(code=PAYMENT_VOUCHER_DOC_TYPE_CODE).first()
+            if doc_type is None:
+                doc_type = DocumentType.objects.filter(name__iexact="Payment Voucher").first()
+            if doc_type is None:
+                raise
     templates = DocumentTemplate.objects.filter(type="built", kind="document")
     template = templates.filter(document_type=doc_type).order_by("-updated_at").first()
     if template is None and doc_type is not None:
@@ -71,7 +88,7 @@ def _find_template_and_type():
 
 def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict | None:
     from apps.sunsystems.config import get_form_values
-    from apps.sunsystems.mapping import classify_retirement
+    from apps.sunsystems.mapping import classify_retirement, resolve_value
 
     values = get_form_values(document)
     classified = classify_retirement(retirement, values)
@@ -82,8 +99,10 @@ def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict 
     table_key = spent.get("table")
     table_rows = values.get(table_key) if table_key else []
     currency = str(getattr(document, "currency", "") or "").strip()
-    period = ""
     line_date = ""
+    sunsystems = ((getattr(document, "metadata", {}) or {}).get("sunsystems") or {})
+    ui_config = sunsystems.get("ui") if isinstance(sunsystems.get("ui"), dict) else {}
+    period = str(ui_config.get("accountingPeriod") or "").strip()
     metadata_form = (getattr(document, "metadata", {}) or {}).get("form") or {}
     for section in metadata_form.get("sections") or []:
         for field in section.get("fields") or []:
@@ -93,8 +112,6 @@ def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict 
             currency_column = next((column for column in columns
                                     if (column.get("sunsystems") or {}).get("role") == "currency"
                                     or str(column.get("label") or "").strip().casefold() == "currency"), None)
-            period_column = next((column for column in columns
-                                  if str(column.get("label") or "").strip().casefold() in ("period", "accounting period")), None)
             date_column = next((column for column in columns
                                 if str(column.get("label") or "").strip().casefold() in ("date", "expense date", "transaction date")), None)
             if currency_column and isinstance(table_rows, list):
@@ -102,8 +119,6 @@ def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict 
                                  for row in table_rows if isinstance(row, dict)
                                  and row.get(currency_column.get("key"))), currency)
             first_row = next((row for row in table_rows if isinstance(row, dict)), {}) if isinstance(table_rows, list) else {}
-            if period_column:
-                period = str(first_row.get(period_column.get("key")) or "").strip()
             if date_column:
                 line_date = str(first_row.get(date_column.get("key")) or "").strip()
             break
@@ -120,12 +135,37 @@ def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict 
     ).exclude(journal_number="").order_by("stage").values_list("journal_number", flat=True))
     journal_reference = ", ".join(dict.fromkeys(str(value).strip() for value in references if value))
     journal_reference = journal_reference or str(getattr(posting, "journal_number", "") or "").strip()
-    description = str(classified.get("description") or "Imprest retirement over-expenditure").strip()
+    # The expense description column is not necessarily the configured ledger
+    # description source. The same mapped description used for the imprest
+    # posting is the authoritative description on the voucher too.
+    description_spec = None
+    for config_key in ("purchase_order", "imprest_request"):
+        profile = sunsystems.get(config_key)
+        if not isinstance(profile, dict):
+            continue
+        po_config = profile.get("purchase_order") if isinstance(profile.get("purchase_order"), dict) else profile
+        if not isinstance(po_config, dict):
+            continue
+        description_spec = po_config.get("comment") or po_config.get("description")
+        if description_spec:
+            break
+    description = resolve_value(description_spec, values).strip() if description_spec else ""
+    description = description or str(classified.get("description") or "Imprest retirement over-expenditure").strip()
+
+    # The refund is charged to the account configured for the debit variance
+    # line in the over-expenditure scenario (issued - spent is negative).
+    account_code = ""
+    for line in ((retirement.get("scenarios") or {}).get("over") or {}).get("lines") or []:
+        if not isinstance(line, dict):
+            continue
+        amount_source = str(line.get("amount_source") or "spent").strip().lower()
+        if amount_source == "variance" and str(line.get("dc") or "D").strip().upper() == "D":
+            account_code = resolve_value(line.get("account"), values).strip()
+            if account_code:
+                break
     return {
         "voucher_payment_to": person_name,
-        # No staff ledger account is configured in the retirement mapping. Keep
-        # Account Code blank rather than incorrectly using a staff number.
-        "voucher_account_code": "",
+        "voucher_account_code": account_code,
         "voucher_name": person_name,
         "voucher_date": today,
         "voucher_period": period,
@@ -142,10 +182,7 @@ def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict 
             "description": description,
             "currency": currency,
             "amount": f'{Decimal(classified["variance"]):.2f}',
-        }] + [{
-            "period": "", "date": "", "reference": "", "description": "",
-            "currency": "", "amount": "",
-        } for _ in range(15)],
+        }],
         # The caller passes the requisitioner as the template's current user so
         # its Prepared By formula resolves to this person's name.
     }

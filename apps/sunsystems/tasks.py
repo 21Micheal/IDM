@@ -52,6 +52,60 @@ def post_journal_for_document(self, document_id: str, stage: int = 1, actor_id: 
     }
 
 
+@shared_task(bind=True, max_retries=5, queue="default")
+def retry_payment_voucher_for_retirement(self, document_id: str, posting_id: str, actor_id: str | None = None):
+    """Retry voucher rendering after a retirement journal has already posted.
+
+    This task never calls SunSystems. It only retries the idempotent document
+    generation step, so a transient PDF/storage failure cannot cause a second
+    journal posting.
+    """
+    from apps.documents.models import Document
+    from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+    posting = JournalPosting.objects.filter(
+        pk=posting_id,
+        document_id=document_id,
+        status=JournalPostingStatus.POSTED,
+    ).first()
+    if not posting:
+        logger.info(
+            "Skipping Payment Voucher retry: retirement posting %s for %s is no longer posted",
+            posting_id,
+            document_id,
+        )
+        return {"ok": False, "detail": "retirement journal posting is not posted"}
+
+    document = Document.objects.filter(pk=document_id).first()
+    if not document:
+        return {"ok": False, "detail": "document not found"}
+
+    actor = None
+    if actor_id:
+        try:
+            from django.contrib.auth import get_user_model
+            actor = get_user_model().objects.filter(pk=actor_id).first()
+        except Exception:
+            actor = None
+
+    try:
+        from apps.documents.payment_voucher import generate_payment_voucher_for_retirement
+
+        voucher = generate_payment_voucher_for_retirement(document, posting, actor=actor)
+        return {
+            "ok": voucher is not None,
+            "voucher_id": str(voucher.pk) if voucher else None,
+            "document_id": str(document_id),
+        }
+    except Exception as exc:
+        logger.exception(
+            "Payment Voucher retry %s failed for retirement document %s",
+            self.request.retries + 1,
+            document_id,
+        )
+        raise self.retry(exc=exc, countdown=min(600, 30 * (2 ** self.request.retries)))
+
+
 @shared_task(bind=True, max_retries=12, queue="default")
 def process_payment_run(self, payment_run_id: str, actor_id: str | None = None):
     """Post an approved payment run to SunSystems and verify payment.

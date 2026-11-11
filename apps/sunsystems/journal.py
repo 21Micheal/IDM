@@ -232,6 +232,22 @@ def _maybe_generate_payment_voucher_after_posting(document, posting, actor=None)
             "Retirement journal stage %s posted, but its Payment Voucher could not be generated for %s",
             getattr(posting, "stage", "?"), document.pk,
         )
+        # The journal is already committed, so the normal journal task must not
+        # fail or repost it. Queue a separate idempotent retry for transient PDF,
+        # storage, or database errors during voucher creation.
+        try:
+            from apps.sunsystems.tasks import retry_payment_voucher_for_retirement
+
+            retry_payment_voucher_for_retirement.delay(
+                str(document.pk),
+                str(posting.pk),
+                str(getattr(actor or posting.posted_by, "pk", "") or ""),
+            )
+        except Exception:
+            logger.exception(
+                "Could not queue Payment Voucher retry for retirement document %s",
+                document.pk,
+            )
 
 
 def _mark(posting: JournalPosting, status: str, **fields) -> None:

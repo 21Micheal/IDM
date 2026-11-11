@@ -326,6 +326,8 @@ export default function FormDetailPage() {
       lpo_document_id?: string;
       lpo_reference?: string;
       lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string }>;
+      payment_voucher_document_id?: string;
+      payment_voucher_reference?: string;
     }
     | undefined;
 
@@ -498,6 +500,27 @@ export default function FormDetailPage() {
     enabled: Boolean(generatedLpoId),
   });
   const lpoPdfUrl = lpoPdfQuery.data?.viewer === "pdfjs" ? lpoPdfQuery.data.url : null;
+
+  const paymentVoucherId = formData?.payment_voucher_document_id;
+  const paymentVoucherReference = formData?.payment_voucher_reference;
+  const [paymentVoucherModalOpen, setPaymentVoucherModalOpen] = useState(false);
+  const paymentVoucherDocumentQuery = useQuery({
+    queryKey: ["generated-payment-voucher-document", paymentVoucherId],
+    queryFn: () => documentsAPI.get(paymentVoucherId!).then((r) => r.data),
+    enabled: Boolean(paymentVoucherId),
+  });
+  const paymentVoucherPdfQuery = useQuery({
+    queryKey: ["payment-voucher-pdf", paymentVoucherId],
+    queryFn: async () => {
+      const { data } = await documentsAPI.previewUrl(paymentVoucherId!);
+      return { ...data, url: normalizeApiFileUrl(data.url) ?? data.url };
+    },
+    enabled: Boolean(paymentVoucherId && paymentVoucherModalOpen),
+    refetchInterval: (query) => query.state.data?.viewer === "processing" ? 1_500 : false,
+  });
+  const paymentVoucherPdfUrl = paymentVoucherPdfQuery.data?.viewer === "pdfjs"
+    ? paymentVoucherPdfQuery.data.url
+    : null;
 
   useEffect(() => {
     if (!doc) return;
@@ -871,6 +894,8 @@ export default function FormDetailPage() {
     && (hasAdminAccess || (doc.permissions ?? []).includes("edit"));
   const canDownload = hasAdminAccess || (doc.permissions ?? []).includes("download");
   const canDownloadLpo = hasAdminAccess || (lpoDocumentQuery.data?.permissions ?? []).includes("download");
+  const canDownloadPaymentVoucher = hasAdminAccess
+    || (paymentVoucherDocumentQuery.data?.permissions ?? []).includes("download");
   const canComment = hasAdminAccess || (doc.permissions ?? []).includes("comment");
   const canApprove = !isUnassignedHandoffViewer
     && (hasAdminAccess || (doc.permissions ?? []).includes("approve"));
@@ -943,6 +968,7 @@ export default function FormDetailPage() {
   const showRetirementSubmit = !isUnassignedHandoffViewer && !isReturnedReworkEditor && Boolean(doc.metadata?.form?.travel_retirement?.enabled)
     && requisitionApproved
     && canInitiateRetirement
+    && canSubmitRetirement
     && hasVisibleRetirementEditSection(formData.sections ?? [], formData.values ?? {}, step, {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
@@ -1086,6 +1112,22 @@ export default function FormDetailPage() {
       window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1_000);
     } catch {
       toast.error("Could not download the LPO. Check your Download permission and retry.");
+    }
+  };
+  const handleDownloadPaymentVoucher = async () => {
+    if (!paymentVoucherId || !canDownloadPaymentVoucher) return;
+    try {
+      const response = await documentsAPI.downloadAsPdf(paymentVoucherId);
+      const blobUrl = URL.createObjectURL(new Blob([response.data], { type: "application/pdf" }));
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = `Payment_Voucher_${paymentVoucherReference || "PV"}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1_000);
+    } catch {
+      toast.error("Could not download the payment voucher. Check your Download permission and retry.");
     }
   };
   const saveForm = () => {
@@ -1348,6 +1390,16 @@ export default function FormDetailPage() {
                 {!isReturnedReworkEditor && generatedLpoId && (
                   <button type="button" onClick={() => { setLpoMinimized(false); setLpoModalOpen(true); }} className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
                     <Eye className="h-3.5 w-3.5" /> Open LPO
+                  </button>
+                )}
+                {!isReturnedReworkEditor && paymentVoucherId && canDownloadPaymentVoucher && (
+                  <button type="button" onClick={() => void handleDownloadPaymentVoucher()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99]">
+                    <Download className="h-3.5 w-3.5" /> Download PV
+                  </button>
+                )}
+                {!isReturnedReworkEditor && paymentVoucherId && (
+                  <button type="button" onClick={() => setPaymentVoucherModalOpen(true)} className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
+                    <Eye className="h-3.5 w-3.5" /> Open PV
                   </button>
                 )}
                 {!formEditing && canEditForm && !reworkResubmitted && (
@@ -1830,6 +1882,47 @@ export default function FormDetailPage() {
                 <div className="flex h-[50vh] flex-col items-center justify-center gap-3 px-6 text-center text-sm text-[#46545E]">
                   <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
                   <p>Loading the LPO PDF.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {paymentVoucherId && paymentVoucherModalOpen && (
+        <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/50 p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={`Payment Voucher ${paymentVoucherReference || "document"}`}>
+          <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden border border-[#AEB5BB] bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD1] bg-[#F5F7F8] px-4 py-3">
+              <div className="min-w-0">
+                <h2 className="truncate text-sm font-bold text-[#1F2933]">Payment Voucher {paymentVoucherReference || ""}</h2>
+                <p className="text-xs text-[#5E6870]">Generated for retirement over-expenditure</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {canDownloadPaymentVoucher && (
+                  <button type="button" onClick={() => void handleDownloadPaymentVoucher()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99]">
+                    <Download className="h-3.5 w-3.5" /> Download PDF
+                  </button>
+                )}
+                <button type="button" aria-label="Close payment voucher" onClick={() => setPaymentVoucherModalOpen(false)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><X className="h-4 w-4" /></button>
+              </div>
+            </div>
+            <div className="min-h-[50vh] flex-1 bg-[#E9EEF1]">
+              {paymentVoucherPdfUrl ? (
+                <LpoPdfPreview
+                  url={paymentVoucherPdfUrl}
+                  title={`Payment Voucher ${paymentVoucherReference || "PV"}`}
+                  canPrint={canDownloadPaymentVoucher}
+                  onPrint={() => documentsAPI.filePrintEvent(paymentVoucherId).then(() => undefined)}
+                />
+              ) : paymentVoucherPdfQuery.isError || paymentVoucherPdfQuery.data?.preview_status === "failed" ? (
+                <div className="flex h-[50vh] flex-col items-center justify-center gap-2 px-6 text-center text-sm text-[#5E6870]">
+                  <p>{paymentVoucherPdfQuery.data?.preview_error || "Could not load the payment voucher PDF. Retry, or reload the page to try again."}</p>
+                  <button type="button" onClick={() => void paymentVoucherPdfQuery.refetch()} className="border border-[#AEB5BB] bg-white px-3 py-2 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">Retry preview</button>
+                </div>
+              ) : (
+                <div className="flex h-[50vh] flex-col items-center justify-center gap-3 px-6 text-center text-sm text-[#46545E]">
+                  <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
+                  <p>Loading the payment voucher PDF.</p>
                 </div>
               )}
             </div>

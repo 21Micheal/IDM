@@ -796,6 +796,14 @@ def get_imprest_retirement_postings(document) -> list[dict]:
                 None,
             )
             line_defaults = {key: base_line[key] for key in ("currency", "date", "description", "analysis") if key in base_line}
+            # The configured description (selected from the builder's mapped
+            # Description field) applies to every reconciliation scenario and
+            # to every line in it. Preserve its ValueSpec so table-backed or
+            # field-backed sources resolve at posting time, rather than using
+            # the generic scenario fallback or the retirement table narrative.
+            mapped_description = po.get("comment") or po.get("description")
+            if mapped_description:
+                line_defaults["description"] = deepcopy(mapped_description)
             if currency_column:
                 row_currency = str(first_row.get(currency_column.get("key")) or "").strip()
                 # The retirement table may have a currency column that the
