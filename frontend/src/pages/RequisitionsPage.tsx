@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import { Plus, Search as SearchIcon, X, ClipboardList, Loader2, FileText, Trash2 } from "lucide-react";
+import { Plus, Search as SearchIcon, X, ClipboardList, Loader2, FileText, Trash2, AlertTriangle } from "lucide-react";
 import { documentsAPI, sunsystemsAPI } from "@/services/api";
 import CustomListbox from "@/components/ui/CustomListbox";
 import { cn } from "@/lib/utils";
@@ -41,6 +41,13 @@ function getLpoDocuments(doc: any): Array<{ id: string; reference?: string }> {
   return form?.lpo_document_id
     ? [{ id: form.lpo_document_id, reference: form.lpo_reference }]
     : [];
+}
+
+function duplicateActivityTitle(doc: any): string {
+  const matches = doc?.form_summary?.duplicate_activity_date?.matches;
+  if (!Array.isArray(matches) || matches.length === 0) return "";
+  const summary = matches.map((match: any) => `${match.activity_code} on ${match.date}`).join(", ");
+  return `Possible duplicate requisition: ${summary}`;
 }
 
 function hasPendingApproval(doc: any): boolean {
@@ -382,7 +389,14 @@ export default function RequisitionsPage() {
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-between gap-2">
                       <div className="min-w-0">
-                        <span className="font-semibold text-[#1F2933]">{doc.reference_number || "—"}</span>
+                        <span className="inline-flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-[#1F2933]">{doc.reference_number || "—"}</span>
+                          {duplicateActivityTitle(doc) && (
+                            <span title={duplicateActivityTitle(doc)} className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-200">
+                              <AlertTriangle className="h-3 w-3" /> Possible duplicate
+                            </span>
+                          )}
+                        </span>
                         <span className="mt-0.5 block max-w-[230px] truncate text-[11px] font-normal text-[#8A949C]">{doc.title || "Purchase requisition"}</span>
                       </div>
                       {String(doc.status).toLowerCase() === "draft"

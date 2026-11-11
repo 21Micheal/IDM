@@ -835,7 +835,35 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
         summary = super().get_form_summary(obj)
         if isinstance(summary, dict):
             summary.pop("values", None)
+            if self._is_requisition_form(obj):
+                summary["duplicate_activity_date"] = self._duplicate_activity_date_info(obj)
         return summary
+
+    @staticmethod
+    def _is_requisition_form(obj):
+        metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+        form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+        return str(form.get("workflow_type") or "").strip().lower() == "requisition"
+
+    def _duplicate_activity_date_info(self, obj):
+        cache_key = "_requisition_activity_date_duplicates"
+        duplicates = self.context.get(cache_key)
+        if duplicates is None:
+            from apps.documents.requisition_duplicates import duplicate_activity_date_map
+
+            candidates = list(
+                Document.objects.filter(
+                    metadata__form__workflow_type="requisition",
+                    deleted_at__isnull=True,
+                )
+                .exclude(status__in=["draft", "void"])
+                .exclude(reference_number="")
+                .only("id", "metadata", "created_at")
+            )
+            duplicates = duplicate_activity_date_map(candidates)
+            self.context[cache_key] = duplicates
+        matches = duplicates.get(str(obj.id), [])
+        return {"is_duplicate": bool(matches), "matches": matches}
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):

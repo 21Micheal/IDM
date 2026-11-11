@@ -1093,6 +1093,33 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         form = ((doc.metadata or {}).get("form") or {})
         current_phase = str(form.get("workflow_phase") or "requisition").strip().lower()
         if (
+            str(form.get("workflow_type") or "").strip().lower() == "requisition"
+            and current_phase == "requisition"
+            and requested_stage in ("", "requisition")
+        ):
+            from apps.documents.requisition_duplicates import find_existing_activity_date_duplicates
+
+            duplicate_matches = find_existing_activity_date_duplicates(doc)
+            if duplicate_matches:
+                details = "; ".join(
+                    f"{match['activity_code']} on {match['date']} (already in {match['reference_number']})"
+                    for match in duplicate_matches[:3]
+                )
+                extra = f" Other matches: {len(duplicate_matches) - 3}." if len(duplicate_matches) > 3 else ""
+                return Response(
+                    {
+                        "detail": (
+                            "This requisition was not submitted because another requisition "
+                            f"already exists for the same activity and date: {details}.{extra} "
+                            "Change the activity or date before submitting."
+                        ),
+                        "code": "duplicate_requisition_activity_date",
+                        "matches": duplicate_matches,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        if (
             is_travel_requisition(doc)
             and current_phase == "requisition"
             and requested_stage in ("", "requisition")

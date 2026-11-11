@@ -115,21 +115,15 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
         label = "LPO pending"
         kind = "not_started"
     elif status == "approved" or retirement_journal_posted(document):
-        # V2 CASE workflows can finish the retirement journal successfully
-        # without a legacy WorkflowRule.phase row. The posted retirement
-        # posting is authoritative even if the workflow outcome mirror is stale.
+        # Approval (and, for older flows, a completed posting) closes the
+        # retirement obligation for now. Keep the variance in its own register
+        # column so an under/overspend remains visible without reading as due.
         try:
             from apps.sunsystems.variance import compute_retirement_variance
             variance_summary = compute_retirement_variance(document) or variance_summary
         except Exception:
             pass
-        scenario = (variance_summary or {}).get("scenario")
-        labels = {
-            "exact": ("Exact", "exact"),
-            "under": ("Refund due", "refund_due"),
-            "over": ("Top-up due", "top_up_due"),
-        }
-        label, kind = labels.get(scenario, ("Retired", "retired"))
+        label, kind = "Reconciled", "reconciled"
     elif status == "in_progress":
         label, kind = "Awaiting Finance", "awaiting_finance"
     elif status == "returned":
@@ -165,10 +159,14 @@ def overdue_travel_retirement_for_user(user, *, exclude_document_id=None) -> Doc
     if exclude_document_id:
         docs = docs.exclude(pk=exclude_document_id)
     docs = list(docs.distinct())
-    submitted = _retirement_workflow_statuses([doc.id for doc in docs])
+    retirement_statuses = _retirement_workflow_statuses([doc.id for doc in docs])
     today = timezone.localdate()
     for doc in docs:
-        if submitted.get(doc.id):
+        # A retirement still in progress, returned, or rejected has not
+        # resolved the outstanding advance. Approval is the current policy's
+        # reconciliation point, regardless of the computed variance; a posted
+        # retirement journal is also authoritative if its status mirror lags.
+        if retirement_statuses.get(doc.id) == "approved" or retirement_journal_posted(doc):
             continue
         if not is_travel_requisition(doc):
             continue
