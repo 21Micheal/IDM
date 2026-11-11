@@ -36,7 +36,7 @@ import { format } from "date-fns";
 import {
   ArrowLeft, Send, Loader2, Edit2, Info, FileCode, Eye, EyeOff, Check, X, Save,
   MessageSquare, Download, AlertTriangle, ShieldCheck, PanelRightOpen, PanelRightClose,
-  TrendingUp, TrendingDown, CheckCircle2, Printer, RefreshCw,
+  TrendingUp, TrendingDown, CheckCircle2, Printer, RefreshCw, Trash2,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -786,6 +786,31 @@ export default function FormDetailPage() {
     onError: (err: any) => toast.error(extractApiError(err, "Failed to save draft")),
   });
 
+  const deleteDraftMutation = useMutation({
+    mutationFn: async () => {
+      if (!doc?.id) return;
+      if (formEditing) {
+        await formAutosave.discardDraft();
+      } else {
+        await documentsAPI.delete(doc.id);
+      }
+    },
+    onSuccess: () => {
+      toast.success("Draft deleted and moved to Trash.");
+      if (doc?.id) {
+        qc.setQueryData(["requisitions", "pool"], (current: any) => current
+          ? { ...current, results: (current.results ?? []).filter((d: any) => String(d.id) !== String(doc.id)) }
+          : current);
+      }
+      void qc.invalidateQueries({ queryKey: ["documents"] });
+      void qc.invalidateQueries({ queryKey: ["requisitions"] });
+      void qc.invalidateQueries({ queryKey: ["requisitions", "pool"] });
+      void qc.invalidateQueries({ queryKey: ["trash"] });
+      navigate("/list");
+    },
+    onError: () => toast.error("Could not delete this draft."),
+  });
+
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center bg-white">
@@ -889,6 +914,8 @@ export default function FormDetailPage() {
     && ["lpo_approved", "retirement_ready"].includes(step),
   );
   const canEditForm = ["draft", "returned"].includes(doc.status) && canEdit;
+  const canManageDraft = String(doc?.status || "").toLowerCase() === "draft"
+    && (user?.has_admin_access || String(doc?.uploaded_by?.id) === String(user?.id));
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
   const purchaseOrderEnabled = Boolean(doc.metadata?.sunsystems?.purchase_order?.enabled)
@@ -1348,6 +1375,21 @@ export default function FormDetailPage() {
                     </button>
                   </>
                 )}
+                {canManageDraft && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm("Delete this requisition draft? It will be moved to Trash.")) {
+                        deleteDraftMutation.mutate();
+                      }
+                    }}
+                    disabled={deleteDraftMutation.isPending || updateFormMutation.isPending || saveFormAsDraftMutation.isPending}
+                    className="inline-flex items-center gap-1.5 border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+                  >
+                    {deleteDraftMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                    Delete draft
+                  </button>
+                )}
               </div>
             </div>
             <div className="space-y-3 p-3">
@@ -1382,7 +1424,10 @@ export default function FormDetailPage() {
                   sections={formData.sections ?? []}
                   values={formEditing ? formValues : (formData.values ?? {})}
                   validationIssues={formEditing ? missingFields : []}
-                  onChange={(k, v) => { markFormDirty(); setFormValues((prev) => ({ ...prev, [k]: v })); }}
+                  onChange={(k, v, meta) => {
+                    if (!meta?.isInternal) markFormDirty();
+                    setFormValues((prev) => ({ ...prev, [k]: v }));
+                  }}
                   readOnly={!formEditing}
                   documentId={doc.id}
                   documentStatus={step}

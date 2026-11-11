@@ -209,9 +209,12 @@ export default function NewRequisitionPage() {
   }, [selectedTemplate?.sections, selectedTemplateId, supplierCode]);
 
   // Recalculate dynamic formulas whenever a field changes
-  const handleFieldChange = (key: string, value: unknown) => {
-    setFormDirty(true);
+  const handleFieldChange = (key: string, value: unknown, meta?: { isInternal?: boolean }) => {
+    if (!meta?.isInternal) {
+      setFormDirty(true);
+    }
     setFormValues((prev) => {
+      if (JSON.stringify(prev[key]) === JSON.stringify(value)) return prev;
       const nextValues = { ...prev, [key]: value };
       if (!selectedTemplate?.sections) return nextValues;
       const secList = (selectedTemplate.sections ?? []) as Array<{ fields?: Array<Record<string, any>> }>;
@@ -266,28 +269,30 @@ export default function NewRequisitionPage() {
   });
 
   const clearDraft = async () => {
-    if (!window.confirm("Delete this requisition draft? It will be moved to Trash, and the entered form values will be cleared.")) return;
+    if (!window.confirm("Delete this requisition draft? It will be moved to Trash.")) return;
     setIsClearingDraft(true);
     try {
-      await autosave.discardDraft();
-      const resetValues = selectedTemplate?.sections
-        ? applyFormulasAndDefaults(
-            selectedTemplate.sections,
-            {},
-            { user, now: new Date(), values: {} },
-            { preserveUserValues: false },
-          )
-        : {};
-      setFormValues(resetValues);
+      const deletedId = await autosave.discardDraft();
       setFormDirty(false);
       setMissingFields([]);
       supplierPrefillRef.current = null;
-      setFormInstanceKey((key) => key + 1);
+      if (deletedId) {
+        qc.setQueryData(["requisitions", "pool"], (current: any) => current
+          ? { ...current, results: (current.results ?? []).filter((doc: any) => String(doc.id) !== String(deletedId)) }
+          : current);
+      }
       void qc.invalidateQueries({ queryKey: ["documents"] });
       void qc.invalidateQueries({ queryKey: ["requisitions"] });
-      toast.success("Draft deleted");
+      void qc.invalidateQueries({ queryKey: ["requisitions", "pool"] });
+      void qc.invalidateQueries({ queryKey: ["trash"] });
+      if (deletedId) {
+        toast.success("Draft deleted and moved to Trash.");
+      } else {
+        toast.success("Draft discarded.");
+      }
+      navigate("/list");
     } catch {
-      toast.error("Could not delete this draft. Your form is still available.");
+      toast.error("Could not delete this draft.");
     } finally {
       setIsClearingDraft(false);
     }

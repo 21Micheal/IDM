@@ -1388,7 +1388,7 @@ function validationMessageFor(issues: string[], label: string, value?: unknown, 
 function TableField({ field, value, onChange, readOnly, tableKey, documentId, allValues, processStep, allFields, viewer, validationIssues = [] }: {
   field: Field;
   value: Record<string, unknown>[];
-  onChange: (rows: Record<string, unknown>[]) => void;
+  onChange: (rows: Record<string, unknown>[], meta?: { isInternal?: boolean }) => void;
   readOnly?: boolean;
   tableKey: string;
   documentId?: string;
@@ -1541,7 +1541,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
     // Update the last-seen value ref too so the VALUE sync effect above won't
     // re-set rows when the parent echoes our own payload back as a new prop.
     lastValueRef.current = serialised;
-    onChange(computedRows as Record<string, unknown>[]);
+    onChange(computedRows as Record<string, unknown>[], { isInternal: true });
   }, [computedRows, allCols, onChange, readOnly]);
 
   // ── Row mutation helpers ───────────────────────────────────────────────────
@@ -2231,7 +2231,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   field: Field;
   control: any;
   errors: Record<string, any>;
-  onChangeCb: (key: string, val: unknown) => void;
+  onChangeCb: (key: string, val: unknown, meta?: { isInternal?: boolean }) => void;
   readOnly?: boolean;
   allValues: TemplateFormValues;
   // Effective editability at the current process step (section ∧ field). When
@@ -2307,7 +2307,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     <TableField
       field={field}
       value={Array.isArray(allValues[key]) ? (allValues[key] as Record<string, unknown>[]) : []}
-      onChange={(rows) => onChangeCb(key, rows)}
+      onChange={(rows, meta) => onChangeCb(key, rows, meta)}
       readOnly={dis}
       tableKey={key}
       documentId={allValues.__document_id as string | undefined}
@@ -2934,7 +2934,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections, retirementOnlyEdit = false, retirementSectionReadOnly = false, onLaunchSignatureModal, validationIssues = [] }: {
   sections: unknown[];
   values: TemplateFormValues;
-  onChange: (key: string, value: unknown) => void;
+  onChange: (key: string, value: unknown, meta?: { isInternal?: boolean }) => void;
   readOnly?: boolean;
   documentId?: string;
   // The document's current workflow status, for "process step" visibility
@@ -3000,7 +3000,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
       const isEmpty = current == null || (typeof current === "string" && current.trim() === "");
       if (!isEmpty) continue;
       const computed = evaluateFormula(f.formula, { user: currentUser, now: new Date() });
-      if (computed) onChange(k, computed);
+      if (computed) onChange(k, computed, { isInternal: true });
     }
   }, [sectionsKey, currentUser, readOnly, documentId]);
 
@@ -3032,7 +3032,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
       }
       result = formatCalcResult(f.type, result);
       scope[k] = result; // let a later formula see this one's result
-      if (String(values[k] ?? "") !== String(result)) onChange(k, result);
+      if (String(values[k] ?? "") !== String(result)) onChange(k, result, { isInternal: true });
     }
   }, [sectionsKey, JSON.stringify(values), readOnly, documentId]);
 

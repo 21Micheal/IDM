@@ -74,6 +74,7 @@ export function useFormDraftAutosave({
   const versionsRef = useRef({ current: 0, saved: 0 });
   const inFlightRef = useRef<Promise<string | null> | null>(null);
   const discardingRef = useRef(false);
+  const timerRef = useRef<number | null>(null);
   const uploadsRef = useRef(new Map<string, CachedUpload>());
   const identityRef = useRef(`${templateId ?? ""}:${existingDocumentId ?? ""}`);
 
@@ -89,7 +90,7 @@ export function useFormDraftAutosave({
   }, [templateId, existingDocumentId]);
 
   const saveNow = useCallback(async (force = false): Promise<string | null> => {
-    if (discardingRef.current) return documentIdRef.current;
+    if (discardingRef.current) return null;
     const current = latestRef.current;
     if (!enabled || !current.templateId) return null;
     if (force && versionsRef.current.current <= versionsRef.current.saved) {
@@ -97,6 +98,7 @@ export function useFormDraftAutosave({
     }
     if (inFlightRef.current) {
       await inFlightRef.current;
+      if (discardingRef.current) return null;
       if (versionsRef.current.saved < versionsRef.current.current) return saveNow(false);
       return documentIdRef.current;
     }
@@ -104,6 +106,7 @@ export function useFormDraftAutosave({
 
     const run = async (): Promise<string | null> => {
       while (versionsRef.current.saved < versionsRef.current.current) {
+        if (discardingRef.current) return null;
         const version = versionsRef.current.current;
         const snapshot = latestRef.current;
         const { jsonValues, pendingAttachments } = prepareValues(snapshot.values, uploadsRef.current);
@@ -123,7 +126,14 @@ export function useFormDraftAutosave({
             ...(snapshot.requisitionSubmission ? { requisition_submission: true } : {}),
             attachments: pendingAttachments,
           });
-          savedId = String(created.data?.document_id || created.data?.id || "") || null;
+          const createdId = String(created.data?.document_id || created.data?.id || "") || null;
+          if (discardingRef.current) {
+            if (createdId) {
+              void documentsAPI.delete(createdId).catch(() => undefined);
+            }
+            return null;
+          }
+          savedId = createdId;
           if (!savedId) throw new Error("The server did not return the saved draft ID.");
           documentIdRef.current = savedId;
           setDocumentId(savedId);
@@ -142,6 +152,7 @@ export function useFormDraftAutosave({
         }
         versionsRef.current.saved = version;
       }
+      if (discardingRef.current) return null;
       setStatus("saved");
       latestRef.current.onSaved?.();
       return documentIdRef.current;
@@ -152,7 +163,9 @@ export function useFormDraftAutosave({
     try {
       return await pending;
     } catch (error) {
-      setStatus("error");
+      if (!discardingRef.current) {
+        setStatus("error");
+      }
       throw error;
     } finally {
       inFlightRef.current = null;
@@ -171,8 +184,12 @@ export function useFormDraftAutosave({
     return savedId;
   }, [saveNow]);
 
-  const discardDraft = useCallback(async (): Promise<void> => {
+  const discardDraft = useCallback(async (): Promise<string | null> => {
     discardingRef.current = true;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     try {
       // Let any request already in progress finish so a just-created draft is
       // known before we delete it. A failed save may still have created a doc.
@@ -184,8 +201,10 @@ export function useFormDraftAutosave({
       versionsRef.current = { current: 0, saved: 0 };
       uploadsRef.current.clear();
       setStatus("idle");
-    } finally {
+      return id;
+    } catch (err) {
       discardingRef.current = false;
+      throw err;
     }
   }, []);
 
@@ -196,6 +215,10 @@ export function useFormDraftAutosave({
   // the latest state during unmount so ordinary navigation does not discard
   // the last keystrokes.
   useEffect(() => () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     if (!discardingRef.current && latestRef.current.dirty && versionsRef.current.current > versionsRef.current.saved) {
       void saveNowRef.current(true).catch(() => undefined);
     }
@@ -203,10 +226,20 @@ export function useFormDraftAutosave({
 
   useEffect(() => {
     if (!enabled || !dirty || !templateId) return;
+    discardingRef.current = false;
     versionsRef.current.current += 1;
     setStatus("unsaved");
-    const timer = window.setTimeout(() => { void saveNow().catch(() => undefined); }, 600);
-    return () => window.clearTimeout(timer);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      void saveNow().catch(() => undefined);
+    }, 600);
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
   }, [dirty, enabled, templateId, title, values, saveNow]);
 
   useEffect(() => {
