@@ -155,6 +155,10 @@ export default function RequisitionsPage() {
         page_size: STATS_POOL_SIZE,
       }).then((r) => r.data),
     staleTime: 15_000,
+    // The list is frequently revisited after editing or approving a form.
+    // Refresh even when the shared cache is still inside its stale window.
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
     refetchInterval: openLpoFor ? 1_200 : false,
   });
 

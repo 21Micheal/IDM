@@ -253,6 +253,10 @@ export default function RequisitionDashboardPage() {
         page_size: 200,
       }).then((r) => r.data),
     ...QUERY_SHORT_STALE,
+    // Requisition data can change while this page is unmounted in a detail,
+    // approval, or creation flow. Always refresh the cached snapshot on return.
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 
   const requisitionRows = useMemo(() => {
@@ -323,6 +327,8 @@ export default function RequisitionDashboardPage() {
         })
         .then((r) => r.data as PaginatedResponse<DashboardAuditEvent>),
     ...QUERY_SHORT_STALE,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
   const recentAuditCount = recentAudit?.count ?? recentAudit?.results?.length ?? 0;
   const recentAuditPages = Math.max(1, Math.ceil(recentAuditCount / RECENT_AUDIT_PAGE_SIZE));
@@ -332,6 +338,8 @@ export default function RequisitionDashboardPage() {
     queryKey: ["workflow", "my-tasks"],
     queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
     ...QUERY_SHORT_STALE,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 
   return (
