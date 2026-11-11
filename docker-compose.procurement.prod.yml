@@ -80,6 +80,7 @@ x-procurement-app: &procurement-app
   extra_hosts:
     - "host.docker.internal:host-gateway"
     - "financeserver.eacassoa.org:${SUNSYSTEMS_HOST_IP:-192.168.0.7}"
+    - "sunsrv02.flaxem.int:${SUNSYSTEMS_WSDL_HOST_IP:-192.168.100.225}"
   depends_on:
     postgres:
       condition: service_healthy
