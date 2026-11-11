@@ -3196,7 +3196,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   const ordered = active;
 
   // Keep a live snapshot of form values for conditional visibility
-  const liveValues = { ...(watch() as TemplateFormValues), ...values, __document_id: documentId };
+  const liveValues: TemplateFormValues = { ...(watch() as TemplateFormValues), ...values, __document_id: documentId };
 
   // Viewer context for role-restricted sections.
   const viewer: FormViewer = {
