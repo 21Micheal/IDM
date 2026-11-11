@@ -20,6 +20,20 @@ function normalized(value: unknown): string {
   return text(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+function lineManagerValue(fields: AnyRecord[], values: AnyRecord, document: AnyRecord): string {
+  // User profile fields store the manager's UUID, while the user serializer
+  // also provides the resolved name. Prefer that name for printable output.
+  const resolvedName = text(document.uploaded_by?.line_manager_name);
+  if (resolvedName) return resolvedName;
+
+  const formValue = findField(fields, values, [/line manager/]);
+  if (formValue && !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(formValue)) return formValue;
+
+  const profileValue = text(document.uploaded_by?.line_manager);
+  if (profileValue && !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(profileValue)) return profileValue;
+  return "";
+}
+
 function fieldLabel(field: AnyRecord): string {
   return text(field.label || field.title || field.key);
 }
@@ -350,7 +364,7 @@ export default function PrintableRequisition({
     ["Staff Code", findField(fields, values, [/staff code/, /staff number/, /employee number/]) || text(document.uploaded_by?.staff_number)],
     ["Department", findField(fields, values, [/department/]) || text(document.uploaded_by_department_name || document.department_name || document.uploaded_by?.department_name || document.department) || "—"],
     ["Grade", findField(fields, values, [/^grade$/]) || text(document.uploaded_by?.grade)],
-    ["Line Manager", findField(fields, values, [/line manager/]) || text(document.uploaded_by?.line_manager_name || document.uploaded_by?.line_manager)],
+    ["Line Manager", lineManagerValue(fields, values, document)],
     ["DSA", findField(fields, values, [/^dsa$/, /daily subsistence allowance/]) || text(document.uploaded_by?.dsa)],
     ["Accounting Period", accountingPeriod || findField(fields, values, [/accounting period/, /^period$/])],
     ["Purpose of Travel", findField(fields, values, [/activity description/, /purpose of travel/])],
@@ -396,7 +410,7 @@ export default function PrintableRequisition({
       </section>
       <section><h2>D. Finance Department Verification of Budget Availability</h2><div className="rq-print-answer"><b>Is budget available?</b><span>{budgetAvailability}</span><b>Comments:</b><span>—</span></div><WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.finance} roleLabel="Finance" /></section>
       <section><h2>E. Travel Itinerary</h2>{itinerary ? <PrintableTable table={itinerary} rows={itineraryRows} /> : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.bookingOfficer} roleLabel="Booking Officer" /></section>
-      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestTables.length ? imprestTables.map(({ table, rows }) => <div key={table.key}><h3 className="rq-print-subheading">{fieldLabel(table)}</h3><PrintableTable table={table} rows={rows} /></div>) : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.imprestRequest} roleLabel="Imprest Request" showPlaceholder /></section>
+      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestTables.length ? imprestTables.map(({ table, rows }) => <div key={table.key}><h3 className="rq-print-subheading">{fieldLabel(table)}</h3><PrintableTable table={table} rows={rows} /></div>) : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.imprestRequest} roleLabel={imprestTables.length ? "DSA" : "Imprest Request"} showPlaceholder /></section>
       <section><h2>G. Authorisation of the Trip</h2>
         <div className="rq-print-details rq-print-details-three"><div><b>Trip Authorised?</b><span>{lpoApprover ? "Yes" : "Pending"}</span></div><div><b>Authorised By</b><span>{lpoApprover?.approverFullName || lpoApprover?.approver || "—"}</span></div><div><b>Position</b><span>{lpoApprover?.approverPosition || "—"}</span></div></div>
         <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.authorization} roleLabel="Signature" showPlaceholder showName={false} showDate />
