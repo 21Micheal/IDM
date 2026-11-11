@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CalendarDays } from "lucide-react";
 import { formatDateValue, parseFormattedDate } from "@/lib/dateFormatting";
+import DatePickerPopover from "@/components/templates/DatePickerPopover";
 
 type Props = {
   value: string;
@@ -24,6 +25,8 @@ export default function FormattedDateInput({
   ariaLabel = "Date",
 }: Props) {
   const [draft, setDraft] = useState(() => formatDateValue(value, dateFormat));
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setDraft(formatDateValue(value, dateFormat));
@@ -38,7 +41,7 @@ export default function FormattedDateInput({
   };
 
   return (
-    <div className="relative">
+    <div className="relative min-w-0" ref={anchorRef}>
       <input
         type="text"
         inputMode="numeric"
@@ -63,24 +66,22 @@ export default function FormattedDateInput({
           }
         }}
       />
-      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground">
+      <button type="button" disabled={disabled} aria-label={`Choose ${ariaLabel.toLowerCase()}`}
+        aria-expanded={open} onClick={() => setOpen((current) => !current)}
+        className="absolute right-0 top-0 flex h-full w-10 items-center justify-center rounded-r-md text-muted-foreground hover:text-[#287EAD] disabled:cursor-not-allowed">
         <CalendarDays className="h-4 w-4" />
-      </span>
-      <input
-        type="date"
-        tabIndex={-1}
-        aria-hidden="true"
-        data-template-date-picker="true"
+      </button>
+      <DatePickerPopover
+        open={open}
+        anchorRef={anchorRef}
         value={value}
         min={min}
         max={max}
-        disabled={disabled}
-        className="absolute right-0 top-0 h-full w-10 cursor-pointer opacity-0"
-        onChange={(event) => {
-          const next = event.target.value;
+        onSelect={(next) => {
           setDraft(formatDateValue(next, dateFormat));
           onChange(next);
         }}
+        onClose={() => setOpen(false)}
       />
     </div>
   );

@@ -42,7 +42,7 @@ import {
 } from "@/lib/formBlocks";
 import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
 import ExternalSelect from "@/components/ui/ExternalSelect";
-import { ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
+import { ANALYSIS_PANEL_DISPLAY_ORDER, ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
 import { formatDateTimeValue, formatDateValue } from "@/lib/dateFormatting";
 import FormattedDateInput from "@/components/templates/FormattedDateInput";
 import FormattedDateTimeInput from "@/components/templates/FormattedDateTimeInput";
@@ -1236,7 +1236,7 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
               </div>
               {selectedDimensions.length > 0 ? (
                 <div className="grid gap-3 sm:grid-cols-2">
-                  {selectedDimensions.map((dimension) => (
+                  {ANALYSIS_PANEL_DISPLAY_ORDER.filter((dimension) => selectedDimensions.includes(dimension)).map((dimension) => (
                     <div key={dimension} className="min-w-0">
                       <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                         Analysis {ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1} · {analysisDimensionName(dimension)} <span className="font-mono font-normal">(ID {dimension})</span>
@@ -2192,12 +2192,12 @@ function AnalysisPanelInput({ value, onChange, disabled, slots }: {
   const dimensionSlots = Array.isArray(slots) && slots.length === 10 ? slots : ANALYSIS_PANEL_SLOTS;
   return (
     <div className="grid gap-2 border border-border bg-card p-3 sm:grid-cols-2">
-      {dimensionSlots.map((dimensionId, idx) => {
-        const slot = String(idx + 1);
+      {ANALYSIS_PANEL_DISPLAY_ORDER.filter((dimensionId) => dimensionSlots.includes(dimensionId)).map((dimensionId) => {
+        const slot = String(dimensionSlots.indexOf(dimensionId) + 1);
         const slotValue = current[slot] ?? "";
         return (
           <div key={slot} className="flex items-start gap-2">
-            <span className="mt-4 w-4 shrink-0 text-right text-xs text-muted-foreground">{idx + 1}</span>
+            <span className="mt-4 w-4 shrink-0 text-right text-xs text-muted-foreground">{slot}</span>
             <div className="min-w-0 flex-1">
               <div className="mb-1 break-words text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 {analysisDimensionName(dimensionId)}

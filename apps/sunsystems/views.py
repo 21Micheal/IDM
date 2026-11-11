@@ -1270,6 +1270,7 @@ class AnalysisCodesQueryView(APIView):
             "  <User/>\n"
             "  <SunSystemsContext>\n"
             f"    <BusinessUnit>{business_unit}</BusinessUnit>\n"
+            "    <BudgetCode>B</BudgetCode>\n"
             "  </SunSystemsContext>\n"
             "  <Payload>\n"
             "    <Filter>\n"

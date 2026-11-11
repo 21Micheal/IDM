@@ -54,6 +54,16 @@ export const ANALYSIS_PANEL_SLOTS: string[] = [
   "12", // 10 Tax
 ];
 
+/**
+ * Display order for analysis pickers. Activity is shown first because picking
+ * it can populate the related analysis codes; canonical slot order above stays
+ * unchanged so existing SunSystems AnalysisCode mappings are preserved.
+ */
+export const ANALYSIS_PANEL_DISPLAY_ORDER: string[] = [
+  "10", // Activity
+  ...ANALYSIS_PANEL_SLOTS.filter((dimensionId) => dimensionId !== "10"),
+];
+
 export function analysisDimensionName(id: string | undefined): string {
   if (!id) return "";
   return ANALYSIS_DIMENSIONS.find((d) => d.id === id)?.name ?? `Dimension ${id}`;

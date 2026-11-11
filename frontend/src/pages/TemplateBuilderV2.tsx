@@ -54,7 +54,7 @@ import { useForm, type UseFormRegister, type FieldErrors } from "react-hook-form
 import { toast } from "sonner";
 import CustomListbox from "@/components/ui/CustomListbox";
 import ExternalSelect, { EXTERNAL_SOURCES } from "@/components/ui/ExternalSelect";
-import { ANALYSIS_DIMENSIONS, ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
+import { ANALYSIS_DIMENSIONS, ANALYSIS_PANEL_DISPLAY_ORDER, ANALYSIS_PANEL_SLOTS, analysisDimensionName } from "@/lib/analysisDimensions";
 import {
   ArrowLeft, Save, Undo2, Redo2, Eye, LayoutGrid, Settings,
   Plus, Trash2, GripVertical, Copy, Search, CheckCircle2,
@@ -3533,7 +3533,7 @@ function ColumnConfigModal({
                   </Row>
                   <Row label="Analysis dimensions" hint="Choose which dimension lookups appear in the modal. Selected codes map to their SunSystems analysis slots and dimension IDs.">
                     <div className="grid grid-cols-1 gap-1.5 border border-[#C8CDD2] bg-[#F8FAFB] p-2 sm:grid-cols-2">
-                      {ANALYSIS_PANEL_SLOTS.map((dimensionId) => {
+                      {ANALYSIS_PANEL_DISPLAY_ORDER.map((dimensionId) => {
                         const selected = draft.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS;
                         return (
                           <label key={dimensionId} className="flex min-w-0 items-center gap-2 px-1 py-1 text-xs text-[#34414A]">
