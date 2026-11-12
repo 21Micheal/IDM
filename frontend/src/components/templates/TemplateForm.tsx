@@ -1243,47 +1243,13 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
             <div className="flex items-center justify-between border-b border-border px-5 py-4">
               <div>
                 <h2 className="text-base font-semibold text-foreground">Budget Line</h2>
-                <p className="mt-0.5 text-xs text-muted-foreground">Select the account and configured analysis codes.</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">Select the configured analysis codes, then choose the account codes.</p>
               </div>
               <button type="button" onClick={() => setOpen(false)} className="rounded p-1 text-muted-foreground hover:bg-muted" aria-label="Close Budget Line editor">
                 <X className="h-5 w-5" />
               </button>
             </div>
             <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">Ticket Account code</label>
-                  <CustomListbox
-                    value={draft.account_code ?? ""}
-                    onChange={(next) => setDraft((previous) => ({ ...previous, account_code: next }))}
-                    options={[
-                      { value: "", label: "Select Ticket account code…" },
-                      ...availableAccountCodes.map((code) => ({ value: code, label: code })),
-                    ]}
-                    className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
-                    buttonClassName="w-full"
-                    ariaLabel="Budget Line Ticket account code"
-                    disabled={disabled || availableAccountCodes.length === 0}
-                  />
-                  {availableAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add Ticket account codes in the Budget Line settings.</p>}
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">DSA Account code</label>
-                  <CustomListbox
-                    value={draft.dsa_account_code ?? ""}
-                    onChange={(next) => setDraft((previous) => ({ ...previous, dsa_account_code: next }))}
-                    options={[
-                      { value: "", label: "Select DSA account code…" },
-                      ...availableDsaAccountCodes.map((code) => ({ value: code, label: code })),
-                    ]}
-                    className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
-                    buttonClassName="w-full"
-                    ariaLabel="Budget Line DSA account code"
-                    disabled={disabled || availableDsaAccountCodes.length === 0}
-                  />
-                  {availableDsaAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add DSA account codes in the Budget Line settings.</p>}
-                </div>
-              </div>
               {selectedDimensions.length > 0 ? (
                 <div className="grid gap-3 sm:grid-cols-2">
                   {ANALYSIS_PANEL_DISPLAY_ORDER.filter((dimension) => selectedDimensions.includes(dimension)).map((dimension) => (
@@ -1386,6 +1352,40 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
                   {activityLookupStatus}
                 </p>
               )}
+              <div className="grid gap-4 border-t border-border pt-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">Ticket Account code</label>
+                  <CustomListbox
+                    value={draft.account_code ?? ""}
+                    onChange={(next) => setDraft((previous) => ({ ...previous, account_code: next }))}
+                    options={[
+                      { value: "", label: "Select Ticket account code…" },
+                      ...availableAccountCodes.map((code) => ({ value: code, label: code })),
+                    ]}
+                    className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
+                    buttonClassName="w-full"
+                    ariaLabel="Budget Line Ticket account code"
+                    disabled={disabled || availableAccountCodes.length === 0}
+                  />
+                  {availableAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add Ticket account codes in the Budget Line settings.</p>}
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">DSA Account code</label>
+                  <CustomListbox
+                    value={draft.dsa_account_code ?? ""}
+                    onChange={(next) => setDraft((previous) => ({ ...previous, dsa_account_code: next }))}
+                    options={[
+                      { value: "", label: "Select DSA account code…" },
+                      ...availableDsaAccountCodes.map((code) => ({ value: code, label: code })),
+                    ]}
+                    className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
+                    buttonClassName="w-full"
+                    ariaLabel="Budget Line DSA Account code"
+                    disabled={disabled || availableDsaAccountCodes.length === 0}
+                  />
+                  {availableDsaAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add DSA account codes in the Budget Line settings.</p>}
+                </div>
+              </div>
             </div>
             <div className="flex justify-end gap-2 border-t border-border bg-muted/20 px-5 py-3">
               <button type="button" onClick={() => setOpen(false)} className="border border-border bg-white px-4 py-2 text-sm font-medium text-foreground hover:bg-muted">Cancel</button>
