@@ -1190,7 +1190,7 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [taxRateDraft, setTaxRateDraft] = useState("");
   const [activityLookupLoading, setActivityLookupLoading] = useState(false);
-  const [activityLookupStatus, setActivityLookupStatus] = useState("");
+  const [relatedAccountCodes, setRelatedAccountCodes] = useState<string[]>([]);
   const activityLookupSequence = useRef(0);
   const selectedDimensions = Array.isArray(dimensions) ? dimensions : ANALYSIS_PANEL_SLOTS;
   const availableAccountCodes = Array.isArray(accountCodes) ? accountCodes : [];
@@ -1205,8 +1205,54 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
     dsaAccountCode,
     ...selectedDimensions
       .filter((dimension) => current[dimension])
-      .map((dimension) => `A${ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1} ${analysisDimensionName(dimension)}: ${String(current[dimension])}`),
+      .map((dimension) => `A${ANALYSIS_PANEL_DISPLAY_ORDER.indexOf(dimension) + 1} ${analysisDimensionName(dimension)}: ${String(current[dimension])}`),
   ].filter(Boolean).join(" · ");
+
+  const lookupActivity = async (activityCode: string, applyPairedValues = true) => {
+    const lookupSequence = ++activityLookupSequence.current;
+    setActivityLookupLoading(true);
+    try {
+      const response = await sunsystemsAPI.getRelatedActivityAnalysis({ activity_code: activityCode });
+      if (lookupSequence !== activityLookupSequence.current) return;
+      const relatedCodes = response.data.related_codes ?? {};
+      const returnedAccounts = [...new Set((response.data.account_codes ?? []).map((code) => String(code).trim()).filter(Boolean))];
+      setRelatedAccountCodes(returnedAccounts);
+      if (!applyPairedValues) return;
+      setDraft((previous) => {
+        // Ignore a response if the user has already selected a different Activity while it ran.
+        if (previous["10"] !== activityCode) return previous;
+        const updated = { ...previous };
+        ANALYSIS_PANEL_SLOTS.forEach((analysisDimension, index) => {
+          if (analysisDimension === "10") return;
+          delete updated[analysisDimension];
+          delete updated[`${analysisDimension}_description`];
+          const code = relatedCodes[String(index + 1)];
+          if (code) updated[analysisDimension] = code;
+        });
+        const ticketMatches = returnedAccounts.filter((code) => availableAccountCodes.includes(code));
+        const dsaMatches = returnedAccounts.filter((code) => availableDsaAccountCodes.includes(code));
+        if (ticketMatches.length === 1) updated.account_code = ticketMatches[0];
+        if (dsaMatches.length === 1) updated.dsa_account_code = dsaMatches[0];
+        return updated;
+      });
+    } catch {
+      // Paired analysis is a convenience; users can still select codes manually.
+      if (lookupSequence === activityLookupSequence.current) setRelatedAccountCodes([]);
+    } finally {
+      if (lookupSequence === activityLookupSequence.current) setActivityLookupLoading(false);
+    }
+  };
+
+  const configuredTicketCodes = Array.isArray(accountCodes) ? accountCodes : [];
+  const configuredDsaCodes = Array.isArray(dsaAccountCodes) ? dsaAccountCodes : [];
+  const ticketCodeOptions = [...new Set([
+    ...(relatedAccountCodes.length ? relatedAccountCodes : configuredTicketCodes),
+    ...(draft.account_code ? [draft.account_code] : []),
+  ])];
+  const dsaCodeOptions = [...new Set([
+    ...(relatedAccountCodes.length ? relatedAccountCodes : configuredDsaCodes),
+    ...(draft.dsa_account_code ? [draft.dsa_account_code] : []),
+  ])];
 
   const openEditor = () => {
     if (disabled) return;
@@ -1215,11 +1261,12 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
       if (item != null && typeof item !== "object") next[key] = String(item);
     });
     setDraft(next);
-    setActivityLookupStatus("");
+    setRelatedAccountCodes([]);
     setTaxRateDraft(current.tax_rate == null
       ? (taxRateValue == null ? "" : String(taxRateValue))
       : String(current.tax_rate));
     setOpen(true);
+    if (next["10"]) void lookupActivity(next["10"], false);
   };
 
   return (
@@ -1251,11 +1298,14 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
             </div>
             <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
               {selectedDimensions.length > 0 ? (
-                <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-3">
                   {ANALYSIS_PANEL_DISPLAY_ORDER.filter((dimension) => selectedDimensions.includes(dimension)).map((dimension) => (
                     <div key={dimension} className="min-w-0">
                       <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                        Analysis {ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1} · {analysisDimensionName(dimension)} <span className="font-mono font-normal">(ID {dimension})</span>
+                        <span className="inline-flex items-center gap-2">
+                          Analysis {ANALYSIS_PANEL_DISPLAY_ORDER.indexOf(dimension) + 1} · {analysisDimensionName(dimension)} <span className="font-mono font-normal">(ID {dimension})</span>
+                          {dimension === "10" && activityLookupLoading && <Loader2 aria-label="Loading paired analysis" className="h-3.5 w-3.5 animate-spin" />}
+                        </span>
                       </label>
                       <ExternalSelect
                         source="analysis_codes"
@@ -1279,7 +1329,7 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
                           if (dimension === "10" && !code) {
                             activityLookupSequence.current += 1;
                             setActivityLookupLoading(false);
-                            setActivityLookupStatus("");
+                            setRelatedAccountCodes([]);
                           }
                           if (dimension === "12" && !code) setTaxRateDraft("");
                         }}
@@ -1288,49 +1338,15 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
                           setDraft((previous) => ({
                             ...previous,
                             [`${dimension}_description`]: record.description ?? "",
+                            ...(dimension === "10" ? { account_code: "", dsa_account_code: "" } : {}),
                           }));
                           if (dimension === "12" && taxRateColumn) {
                             setTaxRateDraft(record.data?.tax_rate == null ? "" : String(record.data.tax_rate));
                           }
                           if (dimension !== "10") return;
 
-                          const lookupSequence = ++activityLookupSequence.current;
-                          setActivityLookupLoading(true);
-                          setActivityLookupStatus("Loading related analysis codes…");
-                          try {
-                            const response = await sunsystemsAPI.getRelatedActivityAnalysis({ activity_code: record.code });
-                            if (lookupSequence !== activityLookupSequence.current) return;
-                            const relatedCodes = response.data.related_codes ?? {};
-                            const ambiguousSlots = response.data.ambiguous_slots ?? [];
-                            const filledCount = ANALYSIS_PANEL_SLOTS.reduce((count, analysisDimension, index) =>
-                              analysisDimension !== "10" && relatedCodes[String(index + 1)] ? count + 1 : count, 0);
-                            setDraft((previous) => {
-                              // Ignore a response if the user has already
-                              // selected a different Activity while it ran.
-                              if (previous["10"] !== record.code) return previous;
-                              const updated = { ...previous };
-                              ANALYSIS_PANEL_SLOTS.forEach((analysisDimension, index) => {
-                                if (analysisDimension === "10") return;
-                                delete updated[analysisDimension];
-                                delete updated[`${analysisDimension}_description`];
-                                const code = relatedCodes[String(index + 1)];
-                                if (code) updated[analysisDimension] = code;
-                              });
-                              return updated;
-                            });
-                            setActivityLookupStatus(response.data.matched_rows
-                              ? `${filledCount} related code${filledCount === 1 ? "" : "s"} filled from ${response.data.start_period ?? "recent ledger history"}.${ambiguousSlots.length ? ` ${ambiguousSlots.length} dimension${ambiguousSlots.length === 1 ? " has" : "s have"} multiple matches and need manual selection.` : ""}`
-                              : `No matching ledger lines found from ${response.data.start_period ?? "the previous year"}; select the remaining codes manually.`);
-                          } catch (error) {
-                            if (lookupSequence === activityLookupSequence.current) {
-                              const detail = (error as { response?: { data?: { error?: string } } })?.response?.data?.error;
-                              setActivityLookupStatus(detail
-                                ? `Related analysis codes could not be loaded: ${detail}`
-                                : "Related analysis codes could not be loaded. You can select them manually.");
-                            }
-                          } finally {
-                            if (lookupSequence === activityLookupSequence.current) setActivityLookupLoading(false);
-                          }
+                          setRelatedAccountCodes([]);
+                          await lookupActivity(record.code);
                         }}
                         multi={false}
                         compact
@@ -1346,12 +1362,6 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
                   No analysis dimensions are configured for this Budget Line.
                 </p>
               )}
-              {activityLookupStatus && (
-                <p role="status" className={`flex items-center gap-2 text-xs ${activityLookupLoading ? "text-muted-foreground" : "text-primary"}`}>
-                  {activityLookupLoading && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                  {activityLookupStatus}
-                </p>
-              )}
               <div className="grid gap-4 border-t border-border pt-4 sm:grid-cols-2">
                 <div>
                   <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">Ticket Account code</label>
@@ -1360,14 +1370,14 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
                     onChange={(next) => setDraft((previous) => ({ ...previous, account_code: next }))}
                     options={[
                       { value: "", label: "Select Ticket account code…" },
-                      ...availableAccountCodes.map((code) => ({ value: code, label: code })),
+                      ...ticketCodeOptions.map((code) => ({ value: code, label: code })),
                     ]}
                     className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
                     buttonClassName="w-full"
                     ariaLabel="Budget Line Ticket account code"
-                    disabled={disabled || availableAccountCodes.length === 0}
+                    disabled={disabled || ticketCodeOptions.length === 0}
                   />
-                  {availableAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add Ticket account codes in the Budget Line settings.</p>}
+                  {ticketCodeOptions.length === 0 && <p className="mt-1 text-xs text-muted-foreground">Select an Activity to load related account codes.</p>}
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">DSA Account code</label>
@@ -1376,14 +1386,14 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
                     onChange={(next) => setDraft((previous) => ({ ...previous, dsa_account_code: next }))}
                     options={[
                       { value: "", label: "Select DSA account code…" },
-                      ...availableDsaAccountCodes.map((code) => ({ value: code, label: code })),
+                      ...dsaCodeOptions.map((code) => ({ value: code, label: code })),
                     ]}
                     className="h-10 w-full border border-border bg-white px-3 text-left text-sm text-foreground"
                     buttonClassName="w-full"
                     ariaLabel="Budget Line DSA Account code"
-                    disabled={disabled || availableDsaAccountCodes.length === 0}
+                    disabled={disabled || dsaCodeOptions.length === 0}
                   />
-                  {availableDsaAccountCodes.length === 0 && <p className="mt-1 text-xs text-amber-700">Add DSA account codes in the Budget Line settings.</p>}
+                  {dsaCodeOptions.length === 0 && <p className="mt-1 text-xs text-muted-foreground">Select an Activity to load related account codes.</p>}
                 </div>
               </div>
             </div>

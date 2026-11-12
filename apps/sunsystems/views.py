@@ -1353,7 +1353,7 @@ class RelatedActivityAnalysisQueryView(APIView):
         business_unit = str(
             request.query_params.get("business_unit") or config.business_unit or "CAS"
         ).strip()
-        start_period = f"001{timezone.localdate().year - 1}"
+        start_period = f"001{timezone.localdate().year}"
 
         root = ET.Element("SSC")
         ET.SubElement(root, "ErrorContext")
@@ -1419,11 +1419,18 @@ class RelatedActivityAnalysisQueryView(APIView):
             elif len(values) > 1:
                 ambiguous_slots.append(str(slot))
 
+        account_codes = sorted({
+            (node.findtext("AccountCode") or "").strip()
+            for node in rows
+            if (node.findtext("AccountCode") or "").strip()
+        })
+
         return Response({
             "ok": True,
             "activity_code": activity_code,
             "start_period": start_period,
             "related_codes": related_codes,
+            "account_codes": account_codes,
             "ambiguous_slots": ambiguous_slots,
             "matched_rows": len(rows),
         })
