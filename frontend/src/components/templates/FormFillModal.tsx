@@ -395,7 +395,7 @@ export default function FormFillModal({
 
           {/* Start workflow — validates then create + submit */}
           <button
-            onClick={handleStartWorkflow}
+            onClick={() => handleStartWorkflow()}
             disabled={isPending}
             className="flex items-center gap-2 rounded-lg bg-[#287EAD] px-7 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-[#1E6F99] hover:shadow transition-colors disabled:opacity-60"
           >

@@ -447,7 +447,7 @@ export default function Layout({
   const roleLabel = user?.has_admin_access ? "Administrator" : "Procurement User";
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#F4F6F8] font-sans antialiased text-[#1F2933]">
+    <div className="flex h-full w-full max-w-full overflow-hidden bg-[#F4F6F8] font-sans antialiased text-[#1F2933]">
       {/* ── Scoped Sidebar ── */}
       <aside
         className={cn(

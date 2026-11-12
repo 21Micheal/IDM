@@ -258,7 +258,7 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
+    <div className="h-full min-h-full w-full overflow-y-auto bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
       <div className="w-full max-w-[440px]">
         <div className="shadow-[0_2px_6px_rgba(0,0,0,0.15)]">
           {/* Light-blue header strip so the logo is visible but still reads as part of the blue card */}

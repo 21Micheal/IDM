@@ -109,7 +109,7 @@ export default function ForceChangePasswordPage() {
     "block h-9 w-full border border-white/40 bg-white/10 px-2.5 pr-10 text-[14px] text-white placeholder:text-white/50 transition-colors focus:border-white focus:outline-none";
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
+    <div className="h-full min-h-full w-full overflow-y-auto bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
       <div className="w-full max-w-[500px]">
         <div className="shadow-[0_2px_6px_rgba(0,0,0,0.15)]">
           {/* Light-blue header strip — logo + context, same treatment as the login card */}

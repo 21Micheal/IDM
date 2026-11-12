@@ -339,7 +339,7 @@ export default function NewRequisitionPage() {
   };
 
   // Submit mutation
-  const submitMutation = useMutation({
+  const submitMutation = useMutation<any, Error, boolean | void>({
     mutationFn: async (allowDuplicateTravelDate = false) => {
       if (!selectedTemplateId) throw new Error("No template selected");
       // New requisitions are still in the draft process step — using "submit"
@@ -467,7 +467,7 @@ export default function NewRequisitionPage() {
 
   // ── Main render ────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-full bg-[#F0F2F5] pb-20">
+    <div className="flex min-h-full flex-col bg-[#F0F2F5]">
 
       {/* ── Top Navigation Bar ── */}
       <div className="sticky top-0 z-10 border-b border-[#D9DDE2] bg-white shadow-sm">
@@ -521,7 +521,18 @@ export default function NewRequisitionPage() {
           <div className="flex flex-shrink-0 items-center gap-3">
             {selectedTemplate && (
               <span className="inline-flex items-center gap-1.5 rounded border border-[#C8CDD2] bg-[#F5F7F8] px-2.5 py-1 text-[11px] font-semibold text-[#5E6870]">
-                <span className="h-1.5 w-1.5 rounded-full bg-slate-400" />
+                <span
+                  className={cn(
+                    "h-1.5 w-1.5 rounded-full",
+                    autosave.status === "saving"
+                      ? "bg-amber-400 animate-pulse"
+                      : autosave.status === "saved"
+                        ? "bg-emerald-500"
+                        : autosave.status === "error"
+                          ? "bg-red-500"
+                          : "bg-slate-400"
+                  )}
+                />
                 {autosave.status === "saving" || autosave.status === "unsaved"
                   ? "Saving…"
                   : autosave.status === "saved"
@@ -572,7 +583,7 @@ export default function NewRequisitionPage() {
       </div>
 
       {/* ── Main Document Area ── */}
-      <div className="px-6 pt-6 pb-4">
+      <div className="flex-1 px-6 pt-6 pb-6">
 
         {/* ── Document Card ── */}
         {loadingTemplate ? (
@@ -614,53 +625,55 @@ export default function NewRequisitionPage() {
         )}
       </div>
 
-      {/* ── Floating Action Buttons (fixed bottom-right, no panel) ── */}
+      {/* ── Docked Bottom Action Bar ── */}
       {selectedTemplate && !loadingTemplate && (
-        <div className="fixed bottom-6 right-6 z-40 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={clearDraft}
-            disabled={isClearingDraft || isSavingDraft || isSubmitting || (!formDirty && !autosave.documentId)}
-            className="inline-flex h-9 items-center gap-1.5 border border-red-300 bg-white px-3 text-sm font-medium text-red-700 shadow-md hover:bg-red-50 disabled:opacity-50 transition-colors"
-          >
-            {isClearingDraft ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-            Delete Draft
-          </button>
-          <button
-            type="button"
-            onClick={async () => {
-              if (formDirty) {
-                try {
-                  await autosave.saveNow(true);
-                } catch {
-                  toast.error("Could not save this requisition before leaving.");
-                  return;
+        <div className="sticky bottom-0 z-20 border-t border-[#D9DDE2] bg-white/95 px-6 py-3 shadow-[0_-4px_16px_rgba(0,0,0,0.06)] backdrop-blur">
+          <div className="flex w-full items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={clearDraft}
+              disabled={isClearingDraft || isSavingDraft || isSubmitting || (!formDirty && !autosave.documentId)}
+              className="inline-flex h-9 items-center gap-1.5 border border-red-300 bg-white px-3 text-sm font-medium text-red-700 shadow-sm hover:bg-red-50 disabled:opacity-50 transition-colors"
+            >
+              {isClearingDraft ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+              Delete Draft
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                if (formDirty) {
+                  try {
+                    await autosave.saveNow(true);
+                  } catch {
+                    toast.error("Could not save this requisition before leaving.");
+                    return;
+                  }
                 }
-              }
-              navigate("/list");
-            }}
-            className="h-9 border border-[#C8CDD2] bg-white px-4 text-sm font-medium text-[#1F2933] shadow-md hover:bg-[#F5F7F8] transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => saveDraftMutation.mutate()}
-            disabled={isSavingDraft || isClearingDraft}
-            className="inline-flex h-9 items-center gap-1.5 border border-[#287EAD] bg-white px-4 text-sm font-semibold text-[#287EAD] shadow-md hover:bg-[#EEF6FB] disabled:opacity-50 transition-colors"
-          >
-            {isSavingDraft && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            Save Draft
-          </button>
-          <button
-            type="button"
-            onClick={() => submitMutation.mutate()}
-            disabled={isSubmitting || isClearingDraft}
-            className="inline-flex h-9 items-center gap-1.5 bg-[#287EAD] px-5 text-sm font-semibold text-white shadow-md hover:bg-[#1E6F99] disabled:opacity-50 transition-colors"
-          >
-            {isSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-            Submit Requisition
-          </button>
+                navigate("/list");
+              }}
+              className="h-9 border border-[#C8CDD2] bg-white px-4 text-sm font-medium text-[#1F2933] shadow-sm hover:bg-[#F5F7F8] transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => saveDraftMutation.mutate()}
+              disabled={isSavingDraft || isClearingDraft}
+              className="inline-flex h-9 items-center gap-1.5 border border-[#287EAD] bg-white px-4 text-sm font-semibold text-[#287EAD] shadow-sm hover:bg-[#EEF6FB] disabled:opacity-50 transition-colors"
+            >
+              {isSavingDraft && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              Save Draft
+            </button>
+            <button
+              type="button"
+              onClick={() => submitMutation.mutate()}
+              disabled={isSubmitting || isClearingDraft}
+              className="inline-flex h-9 items-center gap-1.5 bg-[#287EAD] px-5 text-sm font-semibold text-white shadow-sm hover:bg-[#1E6F99] disabled:opacity-50 transition-colors"
+            >
+              {isSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+              Submit Requisition
+            </button>
+          </div>
         </div>
       )}
 

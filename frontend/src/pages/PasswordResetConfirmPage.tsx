@@ -9,7 +9,7 @@ import dmsLogo from "@/assets/images/FSEDMSlogo.png";
 // it as a stable reference and never unmounts/remounts it on re-renders.
 function PageShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
+    <div className="h-full min-h-full w-full overflow-y-auto bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
       <div className="w-full max-w-[440px]">
         <div className="shadow-[0_2px_6px_rgba(0,0,0,0.15)]">
           {/* Logo strip — same light-blue header as LoginPage */}
