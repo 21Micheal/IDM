@@ -1,4 +1,4 @@
-"""Generate a CASSOA payment voucher after an over-expenditure retirement posts."""
+"""Generate CASSOA payment vouchers after Imprest posting and retirement."""
 from __future__ import annotations
 
 import logging
@@ -56,7 +56,7 @@ def _find_template_and_type():
                         "name": "Payment Voucher",
                         "reference_prefix": "PV",
                         "title_field": "filename",
-                        "description": "Payment vouchers generated for imprest retirement over-expenditure.",
+                        "description": "Payment vouchers generated for Imprest advances and retirement refunds.",
                     },
                 )
         except IntegrityError:
@@ -224,9 +224,12 @@ def generate_payment_voucher_for_retirement(document, posting, actor=None):
         incoming_relationships__relation_type=DocumentRelationship.RelationType.REFERENCES,
         document_type__code=PAYMENT_VOUCHER_DOC_TYPE_CODE,
         metadata__payment_voucher__source_document_id=str(locked.pk),
+        metadata__payment_voucher__kind="retirement",
     ).first()
     if existing:
         form_meta["payment_voucher_document_id"] = str(existing.pk)
+        form_meta["payment_voucher_reference"] = existing.reference_number
+        form_meta["retirement_payment_voucher_status"] = "generated"
         metadata["form"] = form_meta
         locked.metadata = metadata
         locked.save(update_fields=["metadata", "updated_at"])
@@ -259,6 +262,7 @@ def generate_payment_voucher_for_retirement(document, posting, actor=None):
     )
     voucher_metadata = dict(voucher.metadata or {})
     voucher_metadata["payment_voucher"] = {
+        "kind": "retirement",
         "source_document_id": str(locked.pk),
         "source_reference": locked.reference_number,
         "journal_reference": str(getattr(posting, "journal_number", "") or ""),
@@ -276,6 +280,151 @@ def generate_payment_voucher_for_retirement(document, posting, actor=None):
     )
     form_meta["payment_voucher_document_id"] = str(voucher.pk)
     form_meta["payment_voucher_reference"] = voucher.reference_number
+    form_meta["retirement_payment_voucher_status"] = "generated"
+    metadata["form"] = form_meta
+    locked.metadata = metadata
+    locked.save(update_fields=["metadata", "updated_at"])
+    return voucher
+
+
+@transaction.atomic
+def generate_payment_voucher_for_imprest(document, posting, actor=None):
+    """Create the advance DSA voucher after every Imprest journal is posted."""
+    from decimal import Decimal, InvalidOperation
+    from apps.documents.models import Document, DocumentRelationship
+    from apps.sunsystems.config import get_imprest_request_postings, get_sunsystems_config
+    from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+    requested = get_imprest_request_postings(document)
+    stages = {int(item["stage"]) for item in requested}
+    stage = int(getattr(posting, "stage", 0) or 0)
+    if not stages or stage not in stages:
+        return None
+    posted = set(JournalPosting.objects.filter(
+        document=document, stage__in=stages, status=JournalPostingStatus.POSTED,
+    ).values_list("stage", flat=True))
+    if not stages.issubset(posted):
+        return None
+
+    locked = Document.objects.select_for_update().get(pk=document.pk)
+    metadata = dict(locked.metadata or {})
+    form_meta = dict(metadata.get("form") or {})
+    existing_id = form_meta.get("imprest_payment_voucher_document_id")
+    if existing_id:
+        existing = Document.objects.filter(pk=existing_id).first()
+        if existing:
+            return existing
+    existing = Document.objects.filter(
+        incoming_relationships__source_document=locked,
+        incoming_relationships__relation_type=DocumentRelationship.RelationType.REFERENCES,
+        document_type__code=PAYMENT_VOUCHER_DOC_TYPE_CODE,
+        metadata__payment_voucher__source_document_id=str(locked.pk),
+        metadata__payment_voucher__kind="imprest",
+    ).first()
+    if existing:
+        form_meta["imprest_payment_voucher_document_id"] = str(existing.pk)
+        form_meta["imprest_payment_voucher_reference"] = existing.reference_number
+        form_meta["imprest_payment_voucher_status"] = "generated"
+        metadata["form"] = form_meta
+        locked.metadata = metadata
+        locked.save(update_fields=["metadata", "updated_at"])
+        return existing
+
+    debit_lines = []
+    for item in requested:
+        for line in ((item.get("mapping") or {}).get("lines") or []):
+            if not isinstance(line, dict) or str(line.get("dc") or "D").upper() != "D":
+                continue
+            amount_spec = line.get("amount")
+            account_spec = line.get("account")
+            try:
+                amount = Decimal(str(amount_spec.get("const") if isinstance(amount_spec, dict) else amount_spec or "0"))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            account = str(account_spec.get("const") if isinstance(account_spec, dict) else account_spec or "").strip()
+            if amount > 0:
+                debit_lines.append((amount, account, line))
+    total_dsa = sum((amount for amount, _, _ in debit_lines), Decimal("0"))
+    if total_dsa <= 0 or not debit_lines:
+        raise RuntimeError("No positive DSA debit lines were found in the posted Imprest mapping.")
+    account_codes = {account for _, account, _ in debit_lines if account}
+    if not account_codes:
+        raise RuntimeError("No DSA account code was resolved from the posted Imprest mapping.")
+    if len(account_codes) != 1:
+        raise RuntimeError("The DSA Payment Voucher requires one configured DSA account code across its posted lines.")
+
+    sunsystems = get_sunsystems_config(locked)
+    ui = sunsystems.get("ui") if isinstance(sunsystems.get("ui"), dict) else {}
+    first_line = debit_lines[0][2]
+    requisitioner = getattr(locked, "uploaded_by", None)
+    person_name = requisitioner.get_full_name().strip() if requisitioner else ""
+    person_name = person_name or (requisitioner.get_username() if requisitioner else "")
+    today = timezone.localdate().strftime("%d-%m-%Y")
+    period = str(ui.get("accountingPeriod") or "").strip()
+    description_spec = first_line.get("description")
+    from apps.sunsystems.mapping import resolve_value
+    from apps.sunsystems.config import get_form_values
+    description = resolve_value(description_spec, get_form_values(locked)).strip()
+    def const_value(line, key, default=""):
+        spec = line.get(key)
+        return str(spec.get("const") or default) if isinstance(spec, dict) else str(spec or default)
+
+    currency = const_value(first_line, "currency", locked.currency or "").strip()
+    reference = ", ".join(dict.fromkeys(
+        str(value).strip() for value in JournalPosting.objects.filter(
+            document=locked, stage__in=stages, status=JournalPostingStatus.POSTED,
+        ).exclude(journal_number="").order_by("stage").values_list("journal_number", flat=True) if value
+    )) or str(locked.reference_number or "")
+    render_values = {
+        "voucher_payment_to": person_name,
+        "voucher_account_code": next(iter(account_codes)),
+        "voucher_name": person_name,
+        "voucher_date": today,
+        "voucher_period": period,
+        "voucher_line_date": const_value(first_line, "date", today),
+        "voucher_reference": reference,
+        "voucher_description": description or const_value(first_line, "description", "Imprest DSA payment"),
+        "voucher_currency": currency,
+        "voucher_amount": f"{total_dsa:.2f}",
+        "voucher_total": f"{total_dsa:.2f}",
+        "voucher_lines": [{
+            "period": period,
+            "date": const_value(line, "date", today),
+            "reference": reference,
+            "description": const_value(line, "description", description),
+            "currency": const_value(line, "currency", currency),
+            "amount": f"{amount:.2f}",
+        } for amount, _, line in debit_lines],
+    }
+    template, doc_type = _find_template_and_type()
+    if template is None or doc_type is None:
+        raise RuntimeError("No Payment Voucher template or PV document type is configured.")
+    from apps.documents.serializers import _generate_unique_reference
+    from apps.templates_engine.tasks import generate_document_from_template_sync
+    user = requisitioner or actor or locked.owned_by
+    if user is None:
+        raise RuntimeError("Cannot create the Imprest Payment Voucher without a user.")
+    voucher = generate_document_from_template_sync(
+        template, render_values, fmt="pdf", title=f"Imprest Payment Voucher — {locked.reference_number}",
+        user=user, type_id=doc_type.id, reference_number=_generate_unique_reference(doc_type),
+    )
+    voucher_metadata = dict(voucher.metadata or {})
+    voucher_metadata["payment_voucher"] = {
+        "kind": "imprest", "source_document_id": str(locked.pk),
+        "source_reference": locked.reference_number, "journal_reference": reference,
+        "imprest_stages": sorted(stages), "amount": f"{total_dsa:.2f}", "currency": currency,
+    }
+    voucher.metadata = voucher_metadata
+    voucher.save(update_fields=["metadata", "updated_at"])
+    DocumentRelationship.objects.get_or_create(
+        source_document=locked, target_document=voucher,
+        relation_type=DocumentRelationship.RelationType.REFERENCES,
+        defaults={"created_by": user, "note": "Payment voucher generated for the Imprest DSA advance"},
+    )
+    form_meta["imprest_payment_voucher_document_id"] = str(voucher.pk)
+    form_meta["imprest_payment_voucher_reference"] = voucher.reference_number
+    form_meta["imprest_payment_voucher_status"] = "generated"
+    form_meta.pop("imprest_payment_voucher_error", None)
     metadata["form"] = form_meta
     locked.metadata = metadata
     locked.save(update_fields=["metadata", "updated_at"])

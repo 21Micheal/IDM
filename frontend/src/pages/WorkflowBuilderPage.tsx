@@ -1011,7 +1011,7 @@ function StepEditPanel({
             </span>
             <span>
               <span className="block text-xs font-semibold">Generate LPOs after this approval</span>
-              <span className="block text-[11px] mt-1 opacity-80">Post the purchase orders and generate their LPO documents. The assigned approver must then submit the generated LPOs to continue.</span>
+              <span className="block text-[11px] mt-1 opacity-80">Post the purchase orders and generate their LPO documents. If Imprest posting is also selected, both posting sets run together before the LPO can be submitted.</span>
             </span>
           </button>
           {isRequisitionWorkflow && (
@@ -1028,7 +1028,7 @@ function StepEditPanel({
               </span>
               <span>
                 <span className="block text-xs font-semibold">Post Imprest request after this approval</span>
-                <span className="block text-[11px] mt-1 opacity-80">Use on one approval in the Request CASE. The next Request approver waits until SunSystems confirms the posting.</span>
+                <span className="block text-[11px] mt-1 opacity-80">Use on one Request approval, or select it together with LPO generation to post the DSA and LPO at the same checkpoint.</span>
               </span>
             </button>
           )}

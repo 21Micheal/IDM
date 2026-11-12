@@ -220,34 +220,69 @@ def _maybe_generate_lpo_after_posting(document, posting, actor=None) -> None:
 
 
 def _maybe_generate_payment_voucher_after_posting(document, posting, actor=None) -> None:
-    """Generate the refund voucher after all configured retirement stages post."""
+    """Generate the appropriate PV once, after its source posting set completes."""
+    stage = int(getattr(posting, "stage", 0) or 0)
+    kind = "imprest" if 20000 <= stage < 30000 else "retirement" if stage >= 30000 else None
+    if not kind:
+        return
+    form_meta = (((document.metadata or {}).get("form") or {}) if isinstance(document.metadata, dict) else {})
+    voucher_id_key = "imprest_payment_voucher_document_id" if kind == "imprest" else "payment_voucher_document_id"
+    voucher_status = form_meta.get(f"{kind}_payment_voucher_status")
+    if form_meta.get(voucher_id_key) or voucher_status in {"pending", "generated", "failed"}:
+        return
     try:
-        from apps.documents.payment_voucher import generate_payment_voucher_for_retirement
-
-        generate_payment_voucher_for_retirement(document, posting, actor=actor or posting.posted_by)
-    except Exception:
-        # Journal posting is already committed in SunSystems. Voucher generation
-        # must be recoverable without making the external posting appear failed.
-        logger.exception(
-            "Retirement journal stage %s posted, but its Payment Voucher could not be generated for %s",
-            getattr(posting, "stage", "?"), document.pk,
+        from apps.documents.payment_voucher import (
+            _retirement_stages, generate_payment_voucher_for_imprest,
+            generate_payment_voucher_for_retirement,
         )
-        # The journal is already committed, so the normal journal task must not
-        # fail or repost it. Queue a separate idempotent retry for transient PDF,
-        # storage, or database errors during voucher creation.
+        if kind == "imprest":
+            from apps.sunsystems.config import get_imprest_request_postings
+            from apps.sunsystems.models import JournalPostingStatus
+            stages = {int(item["stage"]) for item in get_imprest_request_postings(document)}
+            posted = set(JournalPosting.objects.filter(
+                document=document, stage__in=stages, status=JournalPostingStatus.POSTED,
+            ).values_list("stage", flat=True))
+            if not stages or not stages.issubset(posted):
+                return
+            voucher = generate_payment_voucher_for_imprest(document, posting, actor=actor or posting.posted_by)
+        else:
+            stages = _retirement_stages(document)
+            if not stages or stage not in stages:
+                return
+            voucher = generate_payment_voucher_for_retirement(document, posting, actor=actor or posting.posted_by)
+        if voucher is None:
+            return
+    except Exception:
+        # The journal has already posted. Keep document generation bounded and
+        # separate so a PV problem never repeats the financial posting.
+        logger.exception("%s Payment Voucher generation failed for %s", kind, document.pk)
         try:
-            from apps.sunsystems.tasks import retry_payment_voucher_for_retirement
-
-            retry_payment_voucher_for_retirement.delay(
-                str(document.pk),
-                str(posting.pk),
+            metadata = dict(document.metadata or {})
+            form = dict(metadata.get("form") or {})
+            status_key = f"{kind}_payment_voucher_status"
+            if form.get(voucher_id_key) or form.get(status_key) in {"pending", "generated", "failed"}:
+                return
+            form[status_key] = "pending"
+            metadata["form"] = form
+            document.metadata = metadata
+            document.save(update_fields=["metadata", "updated_at"])
+            from apps.sunsystems.tasks import retry_payment_voucher_generation
+            retry_payment_voucher_generation.delay(
+                str(document.pk), kind, str(posting.pk),
                 str(getattr(actor or posting.posted_by, "pk", "") or ""),
             )
         except Exception:
-            logger.exception(
-                "Could not queue Payment Voucher retry for retirement document %s",
-                document.pk,
-            )
+            logger.exception("Could not queue %s Payment Voucher retry for %s", kind, document.pk)
+            try:
+                metadata = dict(document.metadata or {})
+                form = dict(metadata.get("form") or {})
+                form[f"{kind}_payment_voucher_status"] = "failed"
+                form[f"{kind}_payment_voucher_error"] = "Could not queue the bounded voucher generation retry."
+                metadata["form"] = form
+                document.metadata = metadata
+                document.save(update_fields=["metadata", "updated_at"])
+            except Exception:
+                logger.exception("Could not record failed %s voucher queue state for %s", kind, document.pk)
 
 
 def _mark(posting: JournalPosting, status: str, **fields) -> None:

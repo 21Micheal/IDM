@@ -1846,6 +1846,21 @@ class WorkflowService:
             metadata = document.metadata if isinstance(document.metadata, dict) else {}
             form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
             form["lpo_generation_ready"] = False
+            joint_imprest_posting = bool(getattr(step, "post_imprest_request_after_approval", False))
+            if joint_imprest_posting:
+                from apps.sunsystems.config import get_imprest_request_postings
+                imprest_requested = get_imprest_request_postings(document)
+                if not imprest_requested:
+                    raise WorkflowError(
+                        "This approval step is configured to post the Imprest request, but no DSA lines are mapped."
+                    )
+                WorkflowService._queue_imprest_request_postings(
+                    document,
+                    actor=actor,
+                    message=f"Queued with the LPO after {step.name}; this approval is waiting for both posting sets.",
+                )
+                form["imprest_request_workflow_status"] = "posting"
+                form["imprest_request_posting_required_for_lpo"] = True
             metadata["form"] = form
             document.metadata = metadata
             WorkflowService._save_document(document, update_fields=["metadata"])
@@ -1930,6 +1945,11 @@ class WorkflowService:
             if not set(stages).issubset(generated):
                 return False
 
+            if form.get("imprest_request_posting_required_for_lpo"):
+                from apps.documents.builder_workflow import imprest_request_postings_complete
+                if not imprest_request_postings_complete(document):
+                    return False
+
             instances = WorkflowInstance.objects.filter(document=document, status="in_progress").select_related("template")
             for instance in instances:
                 try:
@@ -1956,14 +1976,24 @@ class WorkflowService:
                     if gate_task.status == "approved":
                         gate_task.status = "awaiting_posting"
                         gate_task.save(update_fields=["status", "updated_at"])
-                    metadata = document.metadata if isinstance(document.metadata, dict) else {}
+                    latest_document = type(document).objects.select_for_update().get(pk=document.pk)
+                    metadata = latest_document.metadata if isinstance(latest_document.metadata, dict) else {}
                     form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
                     if form.get("lpo_generation_ready"):
+                        if form.get("imprest_request_posting_required_for_lpo"):
+                            form["imprest_request_posting_required_for_lpo"] = False
+                            form["imprest_request_workflow_status"] = "in_progress"
+                            metadata["form"] = form
+                            latest_document.metadata = metadata
+                            WorkflowService._save_document(latest_document, update_fields=["metadata"])
                         return False
                     form["lpo_generation_ready"] = True
+                    if form.get("imprest_request_posting_required_for_lpo"):
+                        form["imprest_request_posting_required_for_lpo"] = False
+                        form["imprest_request_workflow_status"] = "in_progress"
                     metadata["form"] = form
-                    document.metadata = metadata
-                    WorkflowService._save_document(document, update_fields=["metadata"])
+                    latest_document.metadata = metadata
+                    WorkflowService._save_document(latest_document, update_fields=["metadata"])
                 return True
         except Exception:
             logger.exception("Could not resume LPO workflow after generation for %s", document.pk)
@@ -2588,6 +2618,14 @@ class WorkflowService:
         JournalPosting row's unique_together constraint makes each stage
         idempotent — a stage that is already POSTED is never re-posted.
         """
+        if outcome != "approved":
+            try:
+                from apps.documents.builder_workflow import is_procurement_document
+                if is_procurement_document(document):
+                    return
+            except Exception:
+                logger.exception("Could not identify procurement document %s for rejection posting guard", document.id)
+                return
         try:
             # These are used by the procurement-specific dispatch blocks
             # below even when there are no ordinary journal stages to post.

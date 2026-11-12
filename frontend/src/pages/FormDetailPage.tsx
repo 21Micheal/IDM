@@ -74,6 +74,7 @@ function PostingGateOverlay({
   title,
   pendingMessage,
   failedPostings,
+  generationError,
   retrying,
   onRetry,
   onDismiss,
@@ -81,6 +82,7 @@ function PostingGateOverlay({
   title: string;
   pendingMessage: string;
   failedPostings: JournalPosting[];
+  generationError?: string;
   retrying: boolean;
   onRetry: () => void;
   onDismiss: () => void;
@@ -95,7 +97,7 @@ function PostingGateOverlay({
         className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-2xl"
       >
         <div className="flex items-start gap-3 px-6 pt-5 pb-4">
-          {failed ? (
+          {failed || generationError ? (
             <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
           ) : (
             <Loader2 className="mt-0.5 h-5 w-5 shrink-0 animate-spin text-[#287EAD]" />
@@ -107,6 +109,8 @@ function PostingGateOverlay({
             <p className="mt-1.5 text-xs leading-relaxed text-[#5E6870]">
               {failed
                 ? postingGateErrorSummary(failedPostings)
+                : generationError
+                  ? generationError
                 : retrying
                   ? "Retrying the SunSystems posting…"
                   : pendingMessage}
@@ -134,6 +138,11 @@ function PostingGateOverlay({
             >
               <RefreshCw className="h-3.5 w-3.5" /> Retry posting
             </button>
+          </div>
+        )}
+        {!failed && generationError && (
+          <div className="flex justify-end border-t border-[#E8EDF2] bg-[#F8FAFC] px-4 py-3">
+            <button type="button" onClick={onDismiss} className="border border-[#AEB5BB] bg-white px-3 py-2 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">Close reminder</button>
           </div>
         )}
       </div>
@@ -350,6 +359,11 @@ export default function FormDetailPage() {
       lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string }>;
       payment_voucher_document_id?: string;
       payment_voucher_reference?: string;
+      imprest_payment_voucher_document_id?: string;
+      imprest_payment_voucher_reference?: string;
+      imprest_payment_voucher_status?: string;
+      imprest_payment_voucher_error?: string;
+      imprest_request_posting_required_for_lpo?: boolean;
       booked_early?: { travel_date?: string; matches?: Array<{ reference_number: string; date: string }>; raised_at?: string };
     }
     | undefined;
@@ -414,6 +428,8 @@ export default function FormDetailPage() {
   ).toLowerCase();
   const paymentVoucherId = formData?.payment_voucher_document_id;
   const paymentVoucherReference = formData?.payment_voucher_reference;
+  const imprestPaymentVoucherId = formData?.imprest_payment_voucher_document_id;
+  const imprestPaymentVoucherReference = formData?.imprest_payment_voucher_reference;
   const retirementVoucherExpected =
     (formData?.retirement_variance?.scenario === "over" || formData?.retirement_variance?.kind === "over");
   const retirementVoucherPending =
@@ -453,6 +469,9 @@ export default function FormDetailPage() {
     ),
     [gatePostings],
   );
+  const failedCombinedLpoGatePostings = formData?.imprest_request_posting_required_for_lpo
+    ? [...failedLpoGatePostings, ...failedImprestGatePostings]
+    : failedLpoGatePostings;
   const failedRetirementGatePostings = useMemo(
     () => gatePostings.filter(
       (p) => Number(p.stage) >= 30_000 && (p.status === "failed" || p.status === "skipped"),
@@ -467,7 +486,7 @@ export default function FormDetailPage() {
   // failure — otherwise show it whenever the gate is still blocked.
   const showImprestGateBanner = imprestPostingGateActive && failedImprestGatePostings.length > 0
     && awaitingImprestPostSince === 0;
-  const showLpoGateBanner = lpoPostingGateActive && failedLpoGatePostings.length > 0
+  const showLpoGateBanner = lpoPostingGateActive && failedCombinedLpoGatePostings.length > 0
     && !awaitingLpo;
 
   const retryGatePostings = useCallback(async (postings: JournalPosting[]) => {
@@ -547,6 +566,7 @@ export default function FormDetailPage() {
   const lpoSetKey = generatedLpos.map((lpo) => lpo.id).join(",");
   const [lpoModalOpen, setLpoModalOpen] = useState(false);
   const [lpoMinimized, setLpoMinimized] = useState(false);
+  const [lpoAutoPresentationPending, setLpoAutoPresentationPending] = useState(false);
 
   useEffect(() => {
     if (!generatedLpos.length) return;
@@ -555,6 +575,7 @@ export default function FormDetailPage() {
     if (!generatedLpos.some((lpo) => lpo.id === selectedLpoId)) setSelectedLpoId(generatedLpos[0].id);
     setLpoModalOpen(true);
     setLpoMinimized(false);
+    setLpoAutoPresentationPending(true);
     setWorkflowActionCompleted(false);
   }, [lpoSetKey]);
 
@@ -575,6 +596,21 @@ export default function FormDetailPage() {
   const lpoPdfUrl = lpoPdfQuery.data?.viewer === "pdfjs" ? lpoPdfQuery.data.url : null;
 
   const [paymentVoucherModalOpen, setPaymentVoucherModalOpen] = useState(false);
+  const [imprestPaymentVoucherModalOpen, setImprestPaymentVoucherModalOpen] = useState(false);
+  const [queuedImprestVoucherOpen, setQueuedImprestVoucherOpen] = useState(false);
+  const seenImprestPaymentVoucherId = useRef("");
+  useEffect(() => {
+    if (!imprestPaymentVoucherId || seenImprestPaymentVoucherId.current === imprestPaymentVoucherId) return;
+    seenImprestPaymentVoucherId.current = imprestPaymentVoucherId;
+    if (formData?.imprest_request_posting_required_for_lpo || generatedLpos.length) setQueuedImprestVoucherOpen(true);
+    else setImprestPaymentVoucherModalOpen(true);
+  }, [formData?.imprest_request_posting_required_for_lpo, generatedLpos.length, imprestPaymentVoucherId]);
+  useEffect(() => {
+    if (!queuedImprestVoucherOpen || formData?.imprest_request_posting_required_for_lpo
+      || lpoAutoPresentationPending || (lpoModalOpen && !lpoMinimized) || !imprestPaymentVoucherId) return;
+    setQueuedImprestVoucherOpen(false);
+    setImprestPaymentVoucherModalOpen(true);
+  }, [formData?.imprest_request_posting_required_for_lpo, imprestPaymentVoucherId, lpoAutoPresentationPending, lpoMinimized, lpoModalOpen, queuedImprestVoucherOpen]);
   useEffect(() => {
     if (retirementVoucherPending && !paymentVoucherGateDismissed) setAwaitingPaymentVoucher(true);
     if (paymentVoucherId && (awaitingPaymentVoucher || paymentVoucherGateDismissed)) {
@@ -607,6 +643,23 @@ export default function FormDetailPage() {
   });
   const paymentVoucherPdfUrl = paymentVoucherPdfQuery.data?.viewer === "pdfjs"
     ? paymentVoucherPdfQuery.data.url
+    : null;
+  const imprestPaymentVoucherDocumentQuery = useQuery({
+    queryKey: ["generated-imprest-payment-voucher-document", imprestPaymentVoucherId],
+    queryFn: () => documentsAPI.get(imprestPaymentVoucherId!).then((r) => r.data),
+    enabled: Boolean(imprestPaymentVoucherId),
+  });
+  const imprestPaymentVoucherPdfQuery = useQuery({
+    queryKey: ["imprest-payment-voucher-pdf", imprestPaymentVoucherId],
+    queryFn: async () => {
+      const { data } = await documentsAPI.previewUrl(imprestPaymentVoucherId!);
+      return { ...data, url: normalizeApiFileUrl(data.url) ?? data.url };
+    },
+    enabled: Boolean(imprestPaymentVoucherId && imprestPaymentVoucherModalOpen),
+    refetchInterval: (query) => query.state.data?.viewer === "processing" ? 1_500 : false,
+  });
+  const imprestPaymentVoucherPdfUrl = imprestPaymentVoucherPdfQuery.data?.viewer === "pdfjs"
+    ? imprestPaymentVoucherPdfQuery.data.url
     : null;
 
   useEffect(() => {
@@ -1001,6 +1054,8 @@ export default function FormDetailPage() {
   const canDownloadLpo = hasAdminAccess || (lpoDocumentQuery.data?.permissions ?? []).includes("download");
   const canDownloadPaymentVoucher = hasAdminAccess
     || (paymentVoucherDocumentQuery.data?.permissions ?? []).includes("download");
+  const canDownloadImprestPaymentVoucher = hasAdminAccess
+    || (imprestPaymentVoucherDocumentQuery.data?.permissions ?? []).includes("download");
   const canComment = hasAdminAccess || (doc.permissions ?? []).includes("comment");
   const canApprove = !isUnassignedHandoffViewer
     && (hasAdminAccess || (doc.permissions ?? []).includes("approve"));
@@ -1235,6 +1290,22 @@ export default function FormDetailPage() {
       toast.error("Could not download the payment voucher. Check your Download permission and retry.");
     }
   };
+  const handleDownloadImprestPaymentVoucher = async () => {
+    if (!imprestPaymentVoucherId || !canDownloadImprestPaymentVoucher) return;
+    try {
+      const response = await documentsAPI.downloadAsPdf(imprestPaymentVoucherId);
+      const blobUrl = URL.createObjectURL(new Blob([response.data], { type: "application/pdf" }));
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = `Imprest_Payment_Voucher_${imprestPaymentVoucherReference || "PV"}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1_000);
+    } catch {
+      toast.error("Could not download the Imprest Payment Voucher. Check your Download permission and retry.");
+    }
+  };
   const saveForm = () => {
     const missing = requiredFieldLabels(formData.sections ?? [], formValues, {
       groupNames: user?.group_names ?? [],
@@ -1447,7 +1518,7 @@ export default function FormDetailPage() {
                     kind={showImprestGateBanner ? "imprest" : "lpo"}
                     retrying={gateRetrying}
                     onRetry={() => void retryGatePostings(
-                      showImprestGateBanner ? failedImprestGatePostings : failedLpoGatePostings,
+                      showImprestGateBanner ? failedImprestGatePostings : failedCombinedLpoGatePostings,
                     )}
                   />
                 ) : (
@@ -1513,6 +1584,16 @@ export default function FormDetailPage() {
                 {!isReturnedReworkEditor && paymentVoucherId && (
                   <button type="button" onClick={() => setPaymentVoucherModalOpen(true)} className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
                     <Eye className="h-3.5 w-3.5" /> Open PV
+                  </button>
+                )}
+                {!isReturnedReworkEditor && imprestPaymentVoucherId && canDownloadImprestPaymentVoucher && (
+                  <button type="button" onClick={() => void handleDownloadImprestPaymentVoucher()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99]">
+                    <Download className="h-3.5 w-3.5" /> Download DSA PV
+                  </button>
+                )}
+                {!isReturnedReworkEditor && imprestPaymentVoucherId && (
+                  <button type="button" onClick={() => setImprestPaymentVoucherModalOpen(true)} className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
+                    <Eye className="h-3.5 w-3.5" /> Open DSA PV
                   </button>
                 )}
                 {!formEditing && canEditForm && isOwnerOrSubmitter && !reworkResubmitted && (
@@ -1985,8 +2066,8 @@ export default function FormDetailPage() {
                     <Download className="h-3.5 w-3.5" /> Download PDF
                   </button>
                 )}
-                <button type="button" aria-label="Minimize LPO" onClick={() => setLpoMinimized(true)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><PanelRightClose className="h-4 w-4" /></button>
-                <button type="button" aria-label="Close LPO" onClick={() => setLpoModalOpen(false)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><X className="h-4 w-4" /></button>
+                <button type="button" aria-label="Minimize LPO" onClick={() => { setLpoMinimized(true); setLpoAutoPresentationPending(false); }} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><PanelRightClose className="h-4 w-4" /></button>
+                <button type="button" aria-label="Close LPO" onClick={() => { setLpoModalOpen(false); setLpoAutoPresentationPending(false); }} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><X className="h-4 w-4" /></button>
               </div>
             </div>
             <div className="min-h-[50vh] flex-1 bg-[#E9EEF1]">
@@ -2054,13 +2135,59 @@ export default function FormDetailPage() {
         </div>
       )}
 
+      {imprestPaymentVoucherId && imprestPaymentVoucherModalOpen && (
+        <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/50 p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={`Imprest Payment Voucher ${imprestPaymentVoucherReference || "document"}`}>
+          <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden border border-[#AEB5BB] bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD1] bg-[#F5F7F8] px-4 py-3">
+              <div className="min-w-0">
+                <h2 className="truncate text-sm font-bold text-[#1F2933]">Imprest Payment Voucher {imprestPaymentVoucherReference || ""}</h2>
+                <p className="text-xs text-[#5E6870]">Generated for the DSA advance journal</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {canDownloadImprestPaymentVoucher && (
+                  <button type="button" onClick={() => void handleDownloadImprestPaymentVoucher()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99]">
+                    <Download className="h-3.5 w-3.5" /> Download PDF
+                  </button>
+                )}
+                <button type="button" aria-label="Close Imprest payment voucher" onClick={() => setImprestPaymentVoucherModalOpen(false)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><X className="h-4 w-4" /></button>
+              </div>
+            </div>
+            <div className="min-h-[50vh] flex-1 bg-[#E9EEF1]">
+              {imprestPaymentVoucherPdfUrl ? (
+                <LpoPdfPreview
+                  url={imprestPaymentVoucherPdfUrl}
+                  title={`Imprest Payment Voucher ${imprestPaymentVoucherReference || "PV"}`}
+                  canPrint={canDownloadImprestPaymentVoucher}
+                  onPrint={() => documentsAPI.filePrintEvent(imprestPaymentVoucherId).then(() => undefined)}
+                />
+              ) : imprestPaymentVoucherPdfQuery.isError || imprestPaymentVoucherPdfQuery.data?.preview_status === "failed" ? (
+                <div className="flex h-[50vh] flex-col items-center justify-center gap-2 px-6 text-center text-sm text-[#5E6870]">
+                  <p>{imprestPaymentVoucherPdfQuery.data?.preview_error || "Could not load the Imprest Payment Voucher PDF. Retry, or reload the page to try again."}</p>
+                  <button type="button" onClick={() => void imprestPaymentVoucherPdfQuery.refetch()} className="border border-[#AEB5BB] bg-white px-3 py-2 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">Retry preview</button>
+                </div>
+              ) : (
+                <div className="flex h-[50vh] flex-col items-center justify-center gap-3 px-6 text-center text-sm text-[#46545E]">
+                  <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
+                  <p>Loading the Imprest Payment Voucher.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {awaitingLpo && !generatedLpos.length && (
         <PostingGateOverlay
-          title="Approval complete"
-          pendingMessage="Preparing the generated LPO after SunSystems returns the purchase order number…"
-          failedPostings={failedLpoGatePostings}
+          title={formData?.imprest_request_posting_required_for_lpo ? "LPO and Imprest posting in progress" : "Approval complete"}
+          pendingMessage={formData?.imprest_request_posting_required_for_lpo
+            ? "Preparing the LPO and DSA Payment Voucher after both SunSystems postings complete…"
+            : "Preparing the generated LPO after SunSystems returns the purchase order number…"}
+          failedPostings={failedCombinedLpoGatePostings}
+          generationError={formData?.imprest_payment_voucher_status === "failed"
+            ? `The DSA Payment Voucher could not be generated after several attempts. ${formData.imprest_payment_voucher_error || "The Imprest journal remains posted; request administrator review to retry voucher generation."}`
+            : undefined}
           retrying={gateRetrying}
-          onRetry={() => void retryGatePostings(failedLpoGatePostings)}
+          onRetry={() => void retryGatePostings(failedCombinedLpoGatePostings)}
           onDismiss={dismissLpoGenerationGate}
         />
       )}
@@ -2085,6 +2212,13 @@ export default function FormDetailPage() {
           onRetry={() => void retryGatePostings(failedRetirementGatePostings)}
           onDismiss={dismissPaymentVoucherGate}
         />
+      )}
+
+      {formData?.imprest_payment_voucher_status === "failed" && !imprestPaymentVoucherId && !awaitingLpo && (
+        <div className="fixed bottom-4 right-4 z-[150] max-w-md border border-amber-300 bg-white px-4 py-3 shadow-lg" role="status">
+          <p className="text-sm font-semibold text-amber-900">The DSA Payment Voucher could not be generated.</p>
+          <p className="mt-1 text-xs text-[#5E6870]">The Imprest journal is posted. Voucher generation stopped after several attempts to avoid creating duplicates. Ask an administrator to review the voucher error and retry generation.</p>
+        </div>
       )}
 
       {duplicateDateNotice && (

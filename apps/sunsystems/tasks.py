@@ -16,6 +16,54 @@ from celery.exceptions import MaxRetriesExceededError
 logger = logging.getLogger(__name__)
 
 
+@shared_task(bind=True, max_retries=5, queue="default")
+def retry_payment_voucher_generation(self, document_id: str, kind: str, posting_id: str, actor_id: str | None = None):
+    """Retry PV document rendering only; never replays the posted journal."""
+    from apps.documents.models import Document
+    from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+    document = Document.objects.filter(pk=document_id).first()
+    posting = JournalPosting.objects.filter(
+        pk=posting_id, document_id=document_id, status=JournalPostingStatus.POSTED,
+    ).first()
+    if not document or not posting:
+        return {"ok": False, "detail": "source document or posted journal not found"}
+    actor = None
+    if actor_id:
+        try:
+            from django.contrib.auth import get_user_model
+            actor = get_user_model().objects.filter(pk=actor_id).first()
+        except Exception:
+            pass
+    try:
+        from apps.documents.payment_voucher import (
+            generate_payment_voucher_for_imprest,
+            generate_payment_voucher_for_retirement,
+        )
+        voucher = (
+            generate_payment_voucher_for_imprest(document, posting, actor)
+            if kind == "imprest"
+            else generate_payment_voucher_for_retirement(document, posting, actor)
+        )
+        if voucher:
+            return {"ok": True, "voucher_id": str(voucher.pk)}
+        # An Imprest task is queued only once every DSA journal has posted.
+        raise RuntimeError("The Payment Voucher could not be built from the saved posting configuration.")
+    except Exception as exc:
+        metadata = dict(document.metadata or {})
+        form = dict(metadata.get("form") or {})
+        if self.request.retries >= self.max_retries:
+            form[f"{kind}_payment_voucher_status"] = "failed"
+            form[f"{kind}_payment_voucher_error"] = str(exc)[:500]
+            metadata["form"] = form
+            document.metadata = metadata
+            document.save(update_fields=["metadata", "updated_at"])
+            logger.exception("PV generation exhausted retries for %s (%s)", document_id, kind)
+            return {"ok": False, "detail": str(exc)}
+        logger.warning("PV generation attempt %s failed for %s (%s): %s", self.request.retries + 1, document_id, kind, exc)
+        raise self.retry(exc=exc, countdown=min(600, 30 * (2 ** self.request.retries)))
+
+
 @shared_task(bind=True, max_retries=0, queue="default")
 def post_journal_for_document(self, document_id: str, stage: int = 1, actor_id: str | None = None):
     """Post one document's journal stage to SunSystems (idempotent).
