@@ -278,13 +278,16 @@ export default function PrintableRequisition({
     staleTime: 10 * 60 * 1000,
   });
   const analysisName = (codes: typeof activityCodes, code: string) => text(codes.find((item) => item.analysis_code === code)?.name);
-  const fields = sections.flatMap((section) => section.fields || []).filter((field) => field.type !== "table" && !field.hidden);
+  const allScalarFields = sections.flatMap((section) => section.fields || []).filter((field) => field.type !== "table");
+  const fields = allScalarFields.filter((field) => !field.hidden);
   const tables = sections.flatMap((section) => section.fields || []).filter((field) => field.type === "table");
   // Section B summarizes both posted funding lines. The separate detailed
   // Travel table is not printed; Section E contains the Travel Itinerary.
-  // For Imprest, use the issued itinerary rather than the request table.
+  // The merged Ticket table carries both Ticket and DSA lines. Use the DSA
+  // account/amount mappings from that table for Part F rather than relying on
+  // the retired standalone DSA/Imprest table.
   const postingTables = tables.filter((table) => ["requisition_lines", "rfq_required_lines"].includes(table.workflowRole));
-  const travelLines = postingTables.flatMap((table) => {
+  const postingLines = postingTables.flatMap((table) => {
     const rows = Array.isArray(values[table.key]) ? values[table.key] : [];
     const cols = tableColumns(table);
     // Posting roles can be assigned to hidden calculated columns (for example,
@@ -297,12 +300,14 @@ export default function PrintableRequisition({
     const dsaAccountColumn = roleColumn("dsa_account_code");
     const travelAmountColumn = roleColumn("travel_line_amount") || roleColumn("line_amount");
     const dsaAmountColumn = roleColumn("dsa_line_amount") || (!roleColumn("travel_line_amount") ? roleColumn("line_amount") : undefined);
-    return rows.map((row: AnyRecord) => {
+    return rows.flatMap((row: AnyRecord) => {
       const budget = budgetColumn && row?.[budgetColumn.key] && typeof row[budgetColumn.key] === "object" ? row[budgetColumn.key] : {};
       const activityCode = text(row?.[activityColumn?.key] || budget["10"]);
       const costCode = text(row?.[costCentreColumn?.key] || budget["05"]);
+      const ticketAccount = text(row?.[accountColumn?.key] || budget.account_code);
       const dsaAccount = text(row?.[dsaAccountColumn?.key] || budget.dsa_account_code);
-      const account = text(dsaAccount || row?.[accountColumn?.key] || budget.account_code);
+      const ticketAmount = text(row?.[travelAmountColumn?.key]);
+      const dsaAmount = text(row?.[dsaAmountColumn?.key]);
       const activityDescription = text(
         budget["10_description"]
         || budget["10_name"]
@@ -310,38 +315,80 @@ export default function PrintableRequisition({
         || row?.[activityColumn?.key + "_description"],
       ) || analysisName(activityCodes, activityCode);
       const costCentreName = text(budget["05_description"] || budget["05_name"] || row?.[costCentreColumn?.external?.fillDescriptionColumn] || row?.[costCentreColumn?.key + "_description"]) || analysisName(costCentreCodes, costCode);
-      return {
+      const common = {
         activityCode: activityCode || "—",
         activityDescription: activityDescription || "—",
         costCentre: costCentreName || costCode || "—",
-        accountCode: account || "—",
-        description: table.workflowRole === "rfq_required_lines" || dsaAccount ? "DSA" : "Ticket",
-        estimated: text(row?.[(dsaAccount ? dsaAmountColumn : travelAmountColumn)?.key]) || "—",
       };
+      if (table.workflowRole === "rfq_required_lines") {
+        const amount = dsaAmount || ticketAmount;
+        if (!amount || Number(amount.replace(/,/g, "")) === 0) return [];
+        return [{
+          ...common,
+          accountCode: dsaAccount || ticketAccount || "—",
+          description: "Imprest",
+          estimated: amount,
+        }];
+      }
+      const hasTicketAmount = Boolean(ticketAmount) && Number(ticketAmount.replace(/,/g, "")) !== 0;
+      const hasDsaAmount = Boolean(dsaAmount) && Number(dsaAmount.replace(/,/g, "")) !== 0;
+      if (!hasTicketAmount && !hasDsaAmount) return [];
+      return [
+        ...(hasTicketAmount ? [{ ...common, accountCode: ticketAccount || "—", description: "Travel", estimated: ticketAmount }] : []),
+        ...(hasDsaAmount ? [{ ...common, accountCode: dsaAccount || "—", description: "Imprest", estimated: dsaAmount }] : []),
+      ];
     });
   });
+  const travelLines = (() => {
+    const groups = new Map<string, AnyRecord[]>();
+    postingLines.forEach((line) => {
+      const key = JSON.stringify([line.activityCode, line.activityDescription, line.costCentre]);
+      groups.set(key, [...(groups.get(key) || []), line]);
+    });
+    return [...groups.values()].flatMap((lines) => lines.map((line, index) => index === 0 ? line : ({
+      ...line,
+      activityCode: "—",
+      activityDescription: "—",
+      costCentre: "—",
+    })));
+  })();
   const isTravelItinerary = (table: AnyRecord) => {
     if (/itinerary/i.test(fieldLabel(table)) && !/imprest/i.test(fieldLabel(table))) return true;
     const labels = tableColumns(table).map((column) => normalized(fieldLabel(column))).join(" ");
     return /destination/.test(labels) && /(date|nights|accommodation|departure|arrival)/.test(labels) && table.workflowRole !== "rfq_required_lines";
   };
   const itinerary = tables.find(isTravelItinerary);
-  // Only the approved/issued itinerary is printed here; never substitute the
-  // requester-entered amount from the separate Imprest Request table.
-  const imprestTables = tables.flatMap((table) => {
+  const dsaProfileRate = findField(allScalarFields, values, [/^dsa$/, /daily subsistence allowance/])
+    || text(document.uploaded_by?.dsa);
+  const dsaLines = postingTables.filter((table) => table.workflowRole === "requisition_lines").flatMap((table) => {
+    const columns = table.columns || [];
+    const roleColumn = (role: string) => columns.find((column: AnyRecord) => column.key && column.sunsystems?.role === role);
+    const dsaAmountColumn = roleColumn("dsa_line_amount")
+      || (!roleColumn("travel_line_amount") ? roleColumn("line_amount") : undefined);
+    const currencyColumn = roleColumn("currency")
+      || columns.find((column: AnyRecord) => /currency/.test(normalized(fieldLabel(column))));
+    const rateColumn = roleColumn("unit_price")
+      || columns.find((column: AnyRecord) => /daily rate|rate per day|rate\/day/.test(normalized(fieldLabel(column))));
+    const uomColumn = roleColumn("uom")
+      || columns.find((column: AnyRecord) => /^(uom|unit of measure)$/.test(normalized(fieldLabel(column))));
     const rows = Array.isArray(values[table.key]) ? values[table.key] as AnyRecord[] : [];
-    const dsaAccountColumn = (table.columns || []).find((column: AnyRecord) => column.sunsystems?.role === "dsa_account_code");
-    const budgetLineColumn = (table.columns || []).find((column: AnyRecord) => column.type === "budget_line" && column.budgetLine?.dsaAccountCodes?.length);
-    if (table.workflowRole !== "rfq_required_lines" && !dsaAccountColumn && !budgetLineColumn) return [];
-    return [{
-      table,
-      rows: dsaAccountColumn || budgetLineColumn
-        ? rows.filter((row) => text(dsaAccountColumn
-          ? row?.[dsaAccountColumn.key]
-          : row?.[budgetLineColumn?.key]?.dsa_account_code))
-        : rows,
-    }];
+    return rows.flatMap((row) => {
+      const dsaAmount = text(row?.[dsaAmountColumn?.key]);
+      if (!dsaAmount || Number(dsaAmount.replace(/,/g, "")) === 0) return [];
+      return [{
+        currency: text(row?.[currencyColumn?.key]) || text(document.currency) || "—",
+        dailyRate: text(row?.[rateColumn?.key]) || dsaProfileRate || "—",
+        nights: text(row?.[uomColumn?.key]) || "—",
+        dsaAmount,
+      }];
+    });
   });
+  const configuredTotalDsa = findField(allScalarFields, values, [/^total dsa$/, /dsa total/, /total daily subsistence allowance/]);
+  const totalDsa = configuredTotalDsa || (dsaLines.length ? dsaLines.reduce((sum, line) =>
+    sum + (Number(String(line.dsaAmount).replace(/,/g, "")) || 0), 0).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }) : "");
   const itineraryRows = itinerary ? (Array.isArray(values[itinerary.key]) ? values[itinerary.key] : []) : [];
   const destination = itinerary ? (() => {
     const columns = tableColumns(itinerary);
@@ -357,7 +404,7 @@ export default function PrintableRequisition({
       ? "Yes"
       : "Pending confirmation";
   const lpoApprover = [...workflowSteps].reverse().find((step) => step.phase === "lpo" && /approv|complete/i.test(String(step.status)));
-  const totalEstimated = travelLines.reduce((sum, line) => sum + (Number(String(line.estimated).replace(/,/g, "")) || 0), 0);
+  const totalEstimated = travelLines.reduce((sum, line) => sum + (Number(String(line.estimated || "").replace(/,/g, "")) || 0), 0);
   const top = [
     ["Name of Requesting Officer", findField(fields, values, [/requesting officer/, /requester name/, /requisitioner/, /requested by/]) || text(document.uploaded_by?.full_name) || "—"],
     ["Position", findField(fields, values, [/^position$/]) || text(document.uploaded_by?.job_description)],
@@ -408,9 +455,15 @@ export default function PrintableRequisition({
           <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.lineManager} roleLabel="Line Manager" showPlaceholder />
         </div>
       </section>
-      <section><h2>D. Finance Department Verification of Budget Availability</h2><div className="rq-print-answer"><b>Is budget available?</b><span>{budgetAvailability}</span><b>Comments:</b><span>—</span></div><WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.finance} roleLabel="Finance" /></section>
+      <section><h2>D. Finance Department Verification of Budget Availability</h2><div className="rq-print-answer"><b>Is budget available?</b><span>{budgetAvailability}</span><b>Comments:</b><span>—</span></div><WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.finance} roleLabel="Finance" showPlaceholder /></section>
       <section><h2>E. Travel Itinerary</h2>{itinerary ? <PrintableTable table={itinerary} rows={itineraryRows} /> : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.bookingOfficer} roleLabel="Booking Officer" /></section>
-      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>{imprestTables.length ? imprestTables.map(({ table, rows }) => <div key={table.key}><h3 className="rq-print-subheading">{fieldLabel(table)}</h3><PrintableTable table={table} rows={rows} /></div>) : <p>—</p>}<WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.imprestRequest} roleLabel={imprestTables.length ? "DSA" : "Imprest Request"} showPlaceholder /></section>
+      <section><h2>F. Travel Funds Requirement &amp; Computation of Funds Payable</h2>
+        <table className="rq-print-table"><thead><tr>{["Currency", "Daily Rate", "Total Number of Nights", "Total DSA"].map((label) => <th key={label}>{label}</th>)}</tr></thead>
+          <tbody>{dsaLines.length ? dsaLines.map((line, index) => <tr key={index}><td>{line.currency}</td><td>{line.dailyRate}</td><td>{line.nights}</td><td>{line.dsaAmount || "—"}</td></tr>) : <tr><td colSpan={4}>—</td></tr>}</tbody>
+          <tfoot><tr><td colSpan={3}>TOTAL DSA</td><td>{totalDsa || "—"}</td></tr></tfoot>
+        </table>
+        <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.imprestRequest} roleLabel="DSA" showPlaceholder />
+      </section>
       <section><h2>G. Authorisation of the Trip</h2>
         <div className="rq-print-details rq-print-details-three"><div><b>Trip Authorised?</b><span>{lpoApprover ? "Yes" : "Pending"}</span></div><div><b>Authorised By</b><span>{lpoApprover?.approverFullName || lpoApprover?.approver || "—"}</span></div><div><b>Position</b><span>{lpoApprover?.approverPosition || "—"}</span></div></div>
         <WorkflowApprovalSignatures document={document} workflowSteps={workflowSteps} mapping={signatureSlots.authorization} roleLabel="Signature" showPlaceholder showName={false} showDate />
