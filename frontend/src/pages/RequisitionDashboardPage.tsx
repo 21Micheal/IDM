@@ -80,10 +80,10 @@ function getDashboardStatusTextClass(status: string): string {
   return "text-[#3F474F]";
 }
 
-function duplicateActivityTitle(doc: any): string {
-  const matches = doc?.form_summary?.duplicate_activity_date?.matches;
+function duplicateTravelDateTitle(doc: any): string {
+  const matches = doc?.form_summary?.duplicate_travel_date?.matches;
   if (!Array.isArray(matches) || matches.length === 0) return "";
-  return `Possible duplicate requisition: ${matches.map((match: any) => `${match.activity_code} on ${match.date}`).join(", ")}`;
+  return `Same travel start date as your other requisition: ${matches.map((match: any) => `${match.reference_number || "Another requisition"} starts ${match.date}`).join(", ")}`;
 }
 
 function isRequisitionDoc(doc: any): boolean {
@@ -467,8 +467,8 @@ export default function RequisitionDashboardPage() {
                           {getDashboardStatusLabel(doc.status)}
                         </span>
                       </div>
-                      {duplicateActivityTitle(doc) && (
-                        <span title={duplicateActivityTitle(doc)} className="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-200">
+                      {duplicateTravelDateTitle(doc) && (
+                        <span title={duplicateTravelDateTitle(doc)} className="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-200">
                           <AlertTriangle className="h-3 w-3" /> Possible duplicate
                         </span>
                       )}
@@ -514,8 +514,8 @@ export default function RequisitionDashboardPage() {
                               <p className="truncate font-semibold text-[#1F2933]">
                                 {doc.reference_number || "—"}
                               </p>
-                              {duplicateActivityTitle(doc) && (
-                                <span title={duplicateActivityTitle(doc)} className="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-200">
+                              {duplicateTravelDateTitle(doc) && (
+                                <span title={duplicateTravelDateTitle(doc)} className="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-200">
                                   <AlertTriangle className="h-3 w-3" /> Possible duplicate
                                 </span>
                               )}

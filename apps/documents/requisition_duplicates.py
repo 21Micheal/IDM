@@ -1,4 +1,4 @@
-"""Helpers for identifying requisitions with a repeated activity and date."""
+"""Owner-scoped duplicate checks for requisitions with the same travel date."""
 
 from __future__ import annotations
 
@@ -7,63 +7,47 @@ import re
 from typing import Any
 
 
-_DATE_LABEL = re.compile(r"(?:activity\s+start|activity\s+date|date\s+of\s+activity|date\s+of\s+travel|travel\s+date|expected\s+travel\s+date)", re.I)
-
-
-def _code(value: Any) -> str:
-    if isinstance(value, dict):
-        value = value.get("code") or value.get("value") or value.get("id") or value.get("10")
-    if value is None or isinstance(value, (dict, list)):
-        return ""
-    result = str(value).strip()
-    if not result or result == "#":
-        return ""
-    return result.upper()
-
-
 def _date_value(value: Any) -> str:
     if not value or isinstance(value, (dict, list)):
         return ""
-    text = str(value).strip()
-    if not text:
+    raw = str(value).strip()
+    if not raw:
         return ""
     try:
-        return date.fromisoformat(text[:10]).isoformat()
+        return date.fromisoformat(raw[:10]).isoformat()
     except ValueError:
         try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).date().isoformat()
         except ValueError:
             return ""
 
 
-def _is_activity_field(field: dict[str, Any]) -> bool:
-    external = field.get("external") if isinstance(field.get("external"), dict) else {}
-    sunsystems = field.get("sunsystems") if isinstance(field.get("sunsystems"), dict) else {}
-    label_key = f"{field.get('label', '')} {field.get('key', '')}"
-    return (
-        str(external.get("dimension") or "") in {"10", "10.0"}
-        or str(sunsystems.get("role") or "").lower() in {"analysis_code_10", "activity_code"}
-        or bool(re.search(r"activity\s*code", label_key, re.I))
-        or field.get("type") in {"budget_line", "budgetline", "budget"}
-    )
+def _date_priority(field: dict[str, Any]) -> int:
+    """Rank likely trip start date fields ahead of itinerary/date fallbacks."""
+    if field.get("type") not in {"date", "datetime", "date_time", "calc_date"}:
+        return 0
+    label = re.sub(r"[^a-z0-9]+", " ", f"{field.get('label', '')} {field.get('key', '')}".lower()).strip()
+    if "activity start date" in label or "travel start date" in label or "workshop from" in label:
+        return 100
+    if re.search(r"\bstart date\b", label):
+        return 90
+    if "expected travel date" in label:
+        return 80
+    if "date of travel" in label or re.search(r"\btravel date\b", label):
+        return 70
+    if "departure date" in label:
+        return 60
+    return 0
 
 
-def _is_activity_date(field: dict[str, Any]) -> bool:
-    if field.get("type") not in {"date", "datetime", "date_time"}:
-        return False
-    return bool(_DATE_LABEL.search(f"{field.get('label', '')} {field.get('key', '')}"))
-
-
-def activity_date_pairs(document: Any) -> set[tuple[str, str]]:
-    """Return (activity code, ISO date) pairs found in a requisition's form."""
+def travel_start_date(document: Any, values_override: dict[str, Any] | None = None) -> str:
+    """Extract the most relevant travel start date from a requisition form."""
     metadata = document.metadata if isinstance(document.metadata, dict) else {}
     form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
-    values = form.get("values") if isinstance(form.get("values"), dict) else {}
+    values = values_override if isinstance(values_override, dict) else form.get("values", {})
+    values = values if isinstance(values, dict) else {}
     sections = form.get("sections") if isinstance(form.get("sections"), list) else []
-    top_activities: set[str] = set()
-    top_dates: set[str] = set()
-    rows_without_dates: set[str] = set()
-    pairs: set[tuple[str, str]] = set()
+    candidates: list[tuple[int, str]] = []
 
     for section in sections:
         fields = section.get("fields") if isinstance(section, dict) else []
@@ -73,89 +57,85 @@ def activity_date_pairs(document: Any) -> set[tuple[str, str]]:
             key = field.get("key")
             if not key:
                 continue
-            value = values.get(key)
             if field.get("type") == "table":
                 columns = [column for column in field.get("columns", []) if isinstance(column, dict)]
-                activity_columns = [column for column in columns if _is_activity_field(column)]
-                date_columns = [column for column in columns if _is_activity_date(column)]
-                rows = value if isinstance(value, list) else []
-                for row in rows:
-                    if not isinstance(row, dict):
+                rows = values.get(key)
+                for column in columns:
+                    priority = _date_priority(column)
+                    if not priority:
                         continue
-                    activities = {_code(row.get(column.get("key"))) for column in activity_columns}
-                    activities.discard("")
-                    if not activities:
-                        continue
-                    row_dates = {_date_value(row.get(column.get("key"))) for column in date_columns}
-                    row_dates.discard("")
-                    if row_dates:
-                        pairs.update((activity, row_date) for activity in activities for row_date in row_dates)
-                    else:
-                        rows_without_dates.update(activities)
+                    column_key = column.get("key")
+                    for row in rows if isinstance(rows, list) else []:
+                        if isinstance(row, dict):
+                            parsed = _date_value(row.get(column_key))
+                            if parsed:
+                                candidates.append((priority, parsed))
                 continue
 
-            if _is_activity_field(field):
-                activity = _code(value)
-                if activity:
-                    top_activities.add(activity)
-            if _is_activity_date(field):
-                date_text = _date_value(value)
-                if date_text:
-                    top_dates.add(date_text)
+            priority = _date_priority(field)
+            if priority:
+                parsed = _date_value(values.get(key))
+                if parsed:
+                    candidates.append((priority, parsed))
 
-    # Top-level activity/date fields commonly sit outside the itinerary table.
-    if top_activities and top_dates:
-        pairs.update((activity, date_text) for activity in top_activities for date_text in top_dates)
-    # Some forms keep the activity on the itinerary row but put its date in the
-    # top-level Activity Start Date field.
-    if rows_without_dates and top_dates:
-        pairs.update((activity, date_text) for activity in rows_without_dates for date_text in top_dates)
-    return pairs
+    if not candidates:
+        return ""
+    best_priority = max(priority for priority, _ in candidates)
+    # If the itinerary is the only source and contains multiple dates, its
+    # earliest date is the start of travel.
+    return min(value for priority, value in candidates if priority == best_priority)
 
 
-def duplicate_activity_date_map(documents: list[Any]) -> dict[str, list[dict[str, str]]]:
-    """Flag later requisitions sharing at least one activity/date pair."""
+def duplicate_travel_date_map(documents: list[Any]) -> dict[str, list[dict[str, str]]]:
+    """Flag later requisitions sharing a travel date with the same owner."""
     ordered = sorted(documents, key=lambda item: (item.created_at, str(item.id)))
-    first_seen: dict[tuple[str, str], Any] = {}
+    first_seen: dict[tuple[Any, str], Any] = {}
     duplicates: dict[str, list[dict[str, str]]] = {}
     for document in ordered:
-        for activity, date_text in activity_date_pairs(document):
-            pair = (activity, date_text)
-            original = first_seen.get(pair)
-            if original is None:
-                first_seen[pair] = document
-            elif original.id != document.id:
-                duplicates.setdefault(str(document.id), []).append({
-                    "activity_code": activity,
-                    "date": date_text,
-                })
+        date_text = travel_start_date(document)
+        owner_id = getattr(document, "uploaded_by_id", None)
+        if not date_text or owner_id is None:
+            continue
+        key = (owner_id, date_text)
+        original = first_seen.get(key)
+        if original is None:
+            first_seen[key] = document
+        elif original.id != document.id:
+            duplicates.setdefault(str(document.id), []).append({
+                "date": date_text,
+                "reference_number": original.reference_number,
+            })
     return duplicates
 
 
-def find_existing_activity_date_duplicates(document: Any) -> list[dict[str, str]]:
-    """Find already submitted requisitions sharing this form's activity/date."""
-    pairs = activity_date_pairs(document)
-    if not pairs:
+def find_existing_travel_date_duplicates(
+    document: Any,
+    values_override: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    """Find same-owner requisitions that already use this travel start date."""
+    date_text = travel_start_date(document, values_override)
+    owner_id = getattr(document, "uploaded_by_id", None)
+    if not date_text or owner_id is None:
         return []
 
     from apps.documents.models import Document
 
     candidates = (
         Document.objects.filter(
+            uploaded_by_id=owner_id,
             metadata__form__workflow_type="requisition",
             deleted_at__isnull=True,
         )
         .exclude(id=document.id)
-        .exclude(status__in=["draft", "void"])
-        .exclude(reference_number="")
-        .only("id", "metadata", "created_at", "reference_number")
+        .exclude(status="void")
+        .order_by("created_at")
+        .only("id", "metadata", "created_at", "reference_number", "uploaded_by_id")
     )
-    matches: list[dict[str, str]] = []
+    matches = []
     for candidate in candidates:
-        for activity, date_text in activity_date_pairs(candidate) & pairs:
+        if travel_start_date(candidate) == date_text:
             matches.append({
                 "reference_number": candidate.reference_number,
-                "activity_code": activity,
                 "date": date_text,
             })
     return matches

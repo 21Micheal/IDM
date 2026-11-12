@@ -836,7 +836,7 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
         if isinstance(summary, dict):
             summary.pop("values", None)
             if self._is_requisition_form(obj):
-                summary["duplicate_activity_date"] = self._duplicate_activity_date_info(obj)
+                summary["duplicate_travel_date"] = self._duplicate_travel_date_info(obj)
         return summary
 
     @staticmethod
@@ -845,11 +845,11 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
         form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
         return str(form.get("workflow_type") or "").strip().lower() == "requisition"
 
-    def _duplicate_activity_date_info(self, obj):
-        cache_key = "_requisition_activity_date_duplicates"
+    def _duplicate_travel_date_info(self, obj):
+        cache_key = "_requisition_travel_date_duplicates"
         duplicates = self.context.get(cache_key)
         if duplicates is None:
-            from apps.documents.requisition_duplicates import duplicate_activity_date_map
+            from apps.documents.requisition_duplicates import duplicate_travel_date_map
 
             candidates = list(
                 Document.objects.filter(
@@ -858,9 +858,9 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
                 )
                 .exclude(status__in=["draft", "void"])
                 .exclude(reference_number="")
-                .only("id", "metadata", "created_at")
+                .only("id", "metadata", "created_at", "reference_number", "uploaded_by_id")
             )
-            duplicates = duplicate_activity_date_map(candidates)
+            duplicates = duplicate_travel_date_map(candidates)
             self.context[cache_key] = duplicates
         matches = duplicates.get(str(obj.id), [])
         return {"is_duplicate": bool(matches), "matches": matches}

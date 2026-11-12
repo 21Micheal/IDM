@@ -1070,6 +1070,28 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         queue_deindex_document(doc_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @action(detail=True, methods=["post"], url_path="check_requisition_duplicate")
+    def check_requisition_duplicate(self, request, pk=None):
+        doc = self.get_object()
+        form = ((doc.metadata or {}).get("form") or {})
+        if str(form.get("workflow_type") or "").strip().lower() != "requisition":
+            return Response({"detail": "Duplicate travel date checks apply to requisitions only."}, status=400)
+        # A user's requisition dates must not reveal or be blocked by another
+        # user's documents. Only the requisition owner receives live feedback.
+        if doc.uploaded_by_id != request.user.id:
+            return Response({"exists": False, "travel_date": "", "matches": []})
+        values = request.data.get("values")
+        if not isinstance(values, dict):
+            values = None
+        from apps.documents.requisition_duplicates import (
+            find_existing_travel_date_duplicates,
+            travel_start_date,
+        )
+
+        travel_date = travel_start_date(doc, values)
+        matches = find_existing_travel_date_duplicates(doc, values)
+        return Response({"exists": bool(matches), "travel_date": travel_date, "matches": matches})
+
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
         doc = self.get_object()
@@ -1097,23 +1119,20 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             and current_phase == "requisition"
             and requested_stage in ("", "requisition")
         ):
-            from apps.documents.requisition_duplicates import find_existing_activity_date_duplicates
+            from apps.documents.requisition_duplicates import find_existing_travel_date_duplicates
 
-            duplicate_matches = find_existing_activity_date_duplicates(doc)
+            duplicate_matches = find_existing_travel_date_duplicates(doc)
             if duplicate_matches:
-                details = "; ".join(
-                    f"{match['activity_code']} on {match['date']} (already in {match['reference_number']})"
-                    for match in duplicate_matches[:3]
-                )
+                details = ", ".join(match["reference_number"] for match in duplicate_matches[:3])
                 extra = f" Other matches: {len(duplicate_matches) - 3}." if len(duplicate_matches) > 3 else ""
                 return Response(
                     {
                         "detail": (
-                            "This requisition was not submitted because another requisition "
-                            f"already exists for the same activity and date: {details}.{extra} "
-                            "Change the activity or date before submitting."
+                            "This requisition was not submitted because you already have a "
+                            f"requisition starting on {duplicate_matches[0]['date']} ({details}).{extra} "
+                            "Choose a different travel start date before submitting."
                         ),
-                        "code": "duplicate_requisition_activity_date",
+                        "code": "duplicate_requisition_travel_date",
                         "matches": duplicate_matches,
                     },
                     status=status.HTTP_400_BAD_REQUEST,

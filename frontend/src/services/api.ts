@@ -419,6 +419,13 @@ export const documentsAPI = {
     });
   },
 
+  checkRequisitionDuplicate: (id: string, values: Record<string, unknown>) =>
+    api.post<{
+      exists: boolean;
+      travel_date: string;
+      matches: Array<{ reference_number: string; date: string }>;
+    }>(`/documents/${id}/check_requisition_duplicate/`, { values }),
+
   rfq: (id: string) => api.get(`/documents/${id}/rfq/`),
   sendRfq: (id: string) => api.post(`/documents/${id}/rfq/`),
 

@@ -59,6 +59,43 @@ function isLpoPurchaseOrderStage(stage: number) {
   return stage >= 1000 && stage < 20000;
 }
 
+function requisitionTravelStartDate(sections: unknown[], values: Record<string, unknown>): string {
+  const priorities = (field: Record<string, any>) => {
+    const type = String(field.type || "").toLowerCase();
+    if (!["date", "datetime", "date_time", "calc_date", "table"].includes(type)) return 0;
+    const label = `${field.label || ""} ${field.key || ""}`.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (label.includes("activity start date") || label.includes("travel start date") || label.includes("workshop from")) return 100;
+    if (/\bstart date\b/.test(label)) return 90;
+    if (label.includes("expected travel date")) return 80;
+    if (label.includes("date of travel") || /\btravel date\b/.test(label)) return 70;
+    if (label.includes("departure date")) return 60;
+    return 0;
+  };
+  const candidates: Array<{ priority: number; date: string }> = [];
+  for (const section of sections as Array<Record<string, any>>) {
+    for (const field of (Array.isArray(section?.fields) ? section.fields : []) as Array<Record<string, any>>) {
+      if (field.type === "table") {
+        const rows = values[field.key];
+        for (const column of (Array.isArray(field.columns) ? field.columns : []) as Array<Record<string, any>>) {
+          const priority = priorities(column);
+          if (!priority) continue;
+          for (const row of Array.isArray(rows) ? rows as Array<Record<string, any>> : []) {
+            const raw = String(row?.[column.key] || "").slice(0, 10);
+            if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) candidates.push({ priority, date: raw });
+          }
+        }
+      } else {
+        const priority = priorities(field);
+        const raw = String(values[field.key] || "").slice(0, 10);
+        if (priority && /^\d{4}-\d{2}-\d{2}$/.test(raw)) candidates.push({ priority, date: raw });
+      }
+    }
+  }
+  if (!candidates.length) return "";
+  const highest = Math.max(...candidates.map((candidate) => candidate.priority));
+  return candidates.filter((candidate) => candidate.priority === highest).map((candidate) => candidate.date).sort()[0];
+}
+
 function postingGateErrorSummary(postings: JournalPosting[]): string {
   const failed = postings.filter((p) => p.status === "failed" || p.status === "skipped");
   const first = failed[0];
@@ -325,6 +362,7 @@ export default function FormDetailPage() {
 
   const formData = (doc?.metadata as Record<string, any> | undefined)?.form as
     | {
+      workflow_type?: string;
       template_id?: string;
       sections?: unknown[];
       values?: Record<string, unknown>;
@@ -341,6 +379,23 @@ export default function FormDetailPage() {
       payment_voucher_reference?: string;
     }
     | undefined;
+
+  const duplicateCheckValues = formEditing ? formValues : (formData?.values ?? {});
+  const duplicateTravelDate = String(formData?.workflow_type || "").toLowerCase() === "requisition"
+    ? requisitionTravelStartDate(formData?.sections ?? [], duplicateCheckValues)
+    : "";
+  const { data: duplicateCheck } = useQuery({
+    queryKey: ["requisition-travel-date-duplicate", id, duplicateTravelDate],
+    queryFn: () => documentsAPI.checkRequisitionDuplicate(id!, duplicateCheckValues).then((response) => response.data),
+    enabled: Boolean(
+      id
+      && formEditing
+      && duplicateTravelDate
+      && String(formData?.workflow_type || "").toLowerCase() === "requisition"
+      && String(doc?.uploaded_by?.id ?? "") === String(user?.id ?? "")
+    ),
+    staleTime: 0,
+  });
 
   const formAutosave = useFormDraftAutosave({
     enabled: Boolean(formEditing && formData),
@@ -1514,6 +1569,15 @@ export default function FormDetailPage() {
                 />
               </div>
               <div className="form-renderer bg-white px-4 py-3 sm:px-5 sm:py-4">
+                {formEditing && duplicateCheck?.exists && (
+                  <div role="alert" className="mb-4 flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
+                    <div>
+                      <p className="font-semibold">You already have a requisition starting on {duplicateCheck.travel_date}.</p>
+                      <p className="mt-1">{duplicateCheck.matches.map((match) => match.reference_number).filter(Boolean).join(", ")} uses this travel start date. Change the date before submitting.</p>
+                    </div>
+                  </div>
+                )}
                 <TemplateForm
                   sections={formData.sections ?? []}
                   values={formEditing ? formValues : (formData.values ?? {})}

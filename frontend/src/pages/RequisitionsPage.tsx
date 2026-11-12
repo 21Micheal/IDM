@@ -43,11 +43,11 @@ function getLpoDocuments(doc: any): Array<{ id: string; reference?: string }> {
     : [];
 }
 
-function duplicateActivityTitle(doc: any): string {
-  const matches = doc?.form_summary?.duplicate_activity_date?.matches;
+function duplicateTravelDateTitle(doc: any): string {
+  const matches = doc?.form_summary?.duplicate_travel_date?.matches;
   if (!Array.isArray(matches) || matches.length === 0) return "";
-  const summary = matches.map((match: any) => `${match.activity_code} on ${match.date}`).join(", ");
-  return `Possible duplicate requisition: ${summary}`;
+  const summary = matches.map((match: any) => `${match.reference_number || "Another requisition"} starts ${match.date}`).join(", ");
+  return `Same travel start date as your other requisition: ${summary}`;
 }
 
 function hasPendingApproval(doc: any): boolean {
@@ -395,8 +395,8 @@ export default function RequisitionsPage() {
                       <div className="min-w-0">
                         <span className="inline-flex flex-wrap items-center gap-2">
                           <span className="font-semibold text-[#1F2933]">{doc.reference_number || "—"}</span>
-                          {duplicateActivityTitle(doc) && (
-                            <span title={duplicateActivityTitle(doc)} className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-200">
+                          {duplicateTravelDateTitle(doc) && (
+                            <span title={duplicateTravelDateTitle(doc)} className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-200">
                               <AlertTriangle className="h-3 w-3" /> Possible duplicate
                             </span>
                           )}
