@@ -19,6 +19,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { extractApiError } from "@/lib/apiError";
 import { templatesAPI, documentsAPI, authAPI } from "@/services/api";
 import TemplateForm, { pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
+import TravelPolicyNoticeModal from "@/components/templates/TravelPolicyNoticeModal";
 import { useFormDraftAutosave } from "@/hooks/useFormDraftAutosave";
 import { toast } from "@/components/ui/vault-toast";
 import { cn } from "@/lib/utils";
@@ -58,6 +59,7 @@ export default function NewRequisitionPage() {
     travel_date: string;
     matches: Array<{ reference_number: string; date: string }>;
   } | null>(null);
+  const [travelPolicyNotice, setTravelPolicyNotice] = useState<string | null>(null);
   const duplicateNoticeDismissedDate = useRef("");
   const duplicateNoticeObservedDate = useRef("");
 
@@ -338,7 +340,7 @@ export default function NewRequisitionPage() {
 
   // Submit mutation
   const submitMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (allowDuplicateTravelDate = false) => {
       if (!selectedTemplateId) throw new Error("No template selected");
       // New requisitions are still in the draft process step — using "submit"
       // here skipped any column/field with draft-only editableWhen rules, so
@@ -366,7 +368,7 @@ export default function NewRequisitionPage() {
         throw new Error("FORM_REQUIRED_FIELDS");
       }
       setMissingFields([]);
-      if (duplicateTravelDate) {
+      if (duplicateTravelDate && !allowDuplicateTravelDate) {
         const duplicateResponse = await documentsAPI.checkRequisitionDuplicateForTemplate(selectedTemplateId, formValues);
         if (duplicateResponse.data.exists) {
           setDuplicateDateNotice(duplicateResponse.data);
@@ -374,7 +376,10 @@ export default function NewRequisitionPage() {
         }
       }
       const docId = await autosave.finalizeNow();
-      if (docId) return documentsAPI.submit(docId, { workflow_stage: "requisition" });
+      if (docId) return documentsAPI.submit(docId, {
+        workflow_stage: "requisition",
+        ...(allowDuplicateTravelDate ? { allow_duplicate_travel_date: true } : {}),
+      });
       throw new Error("Failed to initialize requisition document");
     },
     onSuccess: () => {
@@ -386,6 +391,11 @@ export default function NewRequisitionPage() {
     },
     onError: (err: any) => {
       if (err?.message === "FORM_REQUIRED_FIELDS" || err?.message === "DUPLICATE_REQUISITION_TRAVEL_DATE") return;
+      if (err?.response?.data?.code === "overdue_retirement_policy") {
+        setDuplicateDateNotice(null);
+        setTravelPolicyNotice(String(err.response.data.detail || "Reconciliation for an earlier requisition is still outstanding. Reconcile that requisition before raising another one."));
+        return;
+      }
       if (err?.response?.data?.code === "duplicate_requisition_travel_date") {
         setDuplicateDateNotice({
           travel_date: String(err.response.data.travel_date || duplicateTravelDate || ""),
@@ -656,9 +666,9 @@ export default function NewRequisitionPage() {
 
       {duplicateDateNotice && (
         <div className="fixed inset-0 z-[300] flex items-center justify-center bg-slate-950/45 px-4 py-6" role="presentation">
-          <div role="alertdialog" aria-modal="true" aria-labelledby="duplicate-travel-date-title" className="w-full max-w-md overflow-hidden rounded-xl border border-amber-200 bg-white shadow-2xl">
+          <div role="alertdialog" aria-modal="true" aria-labelledby="duplicate-travel-date-title" className="w-full max-w-md overflow-hidden border border-amber-200 bg-white shadow-2xl">
             <div className="flex items-start gap-4 px-6 pt-6 pb-5">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700"><Info className="h-5 w-5" aria-hidden="true" /></div>
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center bg-amber-100 text-amber-700"><Info className="h-5 w-5" aria-hidden="true" /></div>
               <div>
                 <h2 id="duplicate-travel-date-title" className="text-base font-semibold text-slate-900">Check the travel start date</h2>
                 <p className="mt-2 text-sm leading-relaxed text-slate-600">
@@ -668,14 +678,21 @@ export default function NewRequisitionPage() {
                 <p className="mt-2 text-sm leading-relaxed text-slate-600">Please check the date before continuing. Requisitions for different dates can still be submitted as usual.</p>
               </div>
             </div>
-            <div className="flex justify-end border-t border-slate-100 bg-slate-50 px-6 py-4">
+            <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-6 py-4">
               <button type="button" onClick={() => {
                 duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
                 setDuplicateDateNotice(null);
-              }} className="rounded-lg bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99]">Got it</button>
+              }} className="border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100">Dismiss</button>
+              <button type="button" onClick={() => submitMutation.mutate(true)} disabled={submitMutation.isPending} className="bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99] disabled:opacity-60">
+                {submitMutation.isPending ? "Submitting…" : "Raise anyway"}
+              </button>
             </div>
           </div>
         </div>
+      )}
+
+      {travelPolicyNotice && (
+        <TravelPolicyNoticeModal message={travelPolicyNotice} onDismiss={() => setTravelPolicyNotice(null)} />
       )}
 
       {/* ── Signature Placement Modal ── */}

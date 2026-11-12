@@ -23,6 +23,7 @@ import { useParams, useNavigate, useLocation, useSearchParams, Link } from "reac
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, sunsystemsAPI, workflowAPI, type JournalPosting } from "@/services/api";
 import TemplateForm, { hasVisibleEditableSection, hasVisibleRetirementEditSection, pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
+import TravelPolicyNoticeModal from "@/components/templates/TravelPolicyNoticeModal";
 import { useFormDraftAutosave } from "@/hooks/useFormDraftAutosave";
 import PrintableRequisition from "@/components/templates/PrintableRequisition";
 import BudgetBanner from "@/components/templates/BudgetBanner";
@@ -272,6 +273,7 @@ export default function FormDetailPage() {
     travel_date: string;
     matches: Array<{ reference_number: string; date: string }>;
   } | null>(null);
+  const [travelPolicyNotice, setTravelPolicyNotice] = useState<string | null>(null);
   const duplicateNoticeDismissedDate = useRef("");
   const duplicateNoticeObservedDate = useRef("");
   const [reworkResubmitted, setReworkResubmitted] = useState(false);
@@ -348,6 +350,7 @@ export default function FormDetailPage() {
       lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string }>;
       payment_voucher_document_id?: string;
       payment_voucher_reference?: string;
+      booked_early?: { travel_date?: string; matches?: Array<{ reference_number: string; date: string }>; raised_at?: string };
     }
     | undefined;
 
@@ -361,6 +364,7 @@ export default function FormDetailPage() {
     enabled: Boolean(
       id
       && formEditing
+      && String(doc?.status || "").toLowerCase() === "draft"
       && duplicateTravelDate
       && String(formData?.workflow_type || "").toLowerCase() === "requisition"
       && String(doc?.uploaded_by?.id ?? "") === String(user?.id ?? "")
@@ -375,13 +379,14 @@ export default function FormDetailPage() {
     }
     if (
       formEditing
+      && String(doc?.status || "").toLowerCase() === "draft"
       && duplicateCheck?.exists
       && duplicateCheck.travel_date
       && duplicateNoticeDismissedDate.current !== duplicateCheck.travel_date
     ) {
       setDuplicateDateNotice(duplicateCheck);
     }
-  }, [formEditing, duplicateTravelDate, duplicateCheck]);
+  }, [formEditing, doc?.status, duplicateTravelDate, duplicateCheck]);
 
   const formAutosave = useFormDraftAutosave({
     enabled: Boolean(formEditing && formData),
@@ -772,7 +777,8 @@ export default function FormDetailPage() {
   };
 
   const submitMutation = useMutation({
-    mutationFn: async (workflowStage?: "requisition" | "rfq" | "lpo" | "retirement") => {
+    mutationFn: async (options?: { workflowStage?: "requisition" | "rfq" | "lpo" | "retirement"; allowDuplicateTravelDate?: boolean }) => {
+      const workflowStage = options?.workflowStage;
       // Always gate submission on required fields (including table columns),
       // even when the form was not dirtied — blank mandatory table cells were
       // previously skipped whenever the user submitted without an edit.
@@ -806,7 +812,10 @@ export default function FormDetailPage() {
         // Never advance a workflow with values that exist only in this tab.
         await updateFormMutation.mutateAsync();
       }
-      return documentsAPI.submit(id!, workflowStage ? { workflow_stage: workflowStage } : undefined);
+      return documentsAPI.submit(id!, {
+        ...(workflowStage ? { workflow_stage: workflowStage } : {}),
+        ...(options?.allowDuplicateTravelDate ? { allow_duplicate_travel_date: true } : {}),
+      });
     },
     onSuccess: async () => {
       toast.success("Submitted for approval");
@@ -836,6 +845,11 @@ export default function FormDetailPage() {
     onError: (err: any) => {
       if (err?.message === "FORM_REQUIRED_FIELDS") return;
       const responseData = err?.response?.data;
+      if (responseData?.code === "overdue_retirement_policy") {
+        setDuplicateDateNotice(null);
+        setTravelPolicyNotice(String(responseData.detail || "Reconciliation for an earlier requisition is still outstanding. Reconcile that requisition before raising another one."));
+        return;
+      }
       if (responseData?.code === "duplicate_requisition_travel_date") {
         setDuplicateDateNotice({
           travel_date: String(responseData.travel_date || duplicateTravelDate || ""),
@@ -1382,6 +1396,14 @@ export default function FormDetailPage() {
                 </span>
               );
             })()}
+            {formData?.booked_early && (
+              <span
+                className="inline-flex items-center gap-1.5 border border-amber-300 bg-amber-100 px-2.5 py-0.5 text-xs font-bold text-amber-900 shadow-sm"
+                title={`Raised despite an existing requisition for ${formData.booked_early.travel_date || "the same travel date"}.`}
+              >
+                <Info className="h-3 w-3" aria-hidden="true" /> Booked early
+              </span>
+            )}
           </div>
           <p className="mt-0.5 truncate text-[11px] text-white/75">
             {doc.reference_number} · {doc.document_type?.name || "Form"}
@@ -1438,7 +1460,7 @@ export default function FormDetailPage() {
                 {canSubmit && !canResubmitAtBottom && (
                   <button
                     type="button"
-                    onClick={() => submitMutation.mutate(procurementNextStage ?? undefined)}
+                    onClick={() => submitMutation.mutate({ workflowStage: procurementNextStage ?? undefined })}
                     disabled={submitMutation.isPending}
                     className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
                   >
@@ -1904,7 +1926,7 @@ export default function FormDetailPage() {
           {canResubmitAtBottom && (
             <button
               type="button"
-              onClick={() => submitMutation.mutate(procurementNextStage ?? undefined)}
+              onClick={() => submitMutation.mutate({ workflowStage: procurementNextStage ?? undefined })}
               disabled={submitMutation.isPending}
               className="inline-flex items-center gap-2 rounded-full bg-[#287EAD] px-5 py-3 text-sm font-semibold text-white shadow-lg ring-1 ring-white/80 hover:bg-[#1E6F99] disabled:cursor-wait disabled:opacity-60"
             >
@@ -1926,7 +1948,7 @@ export default function FormDetailPage() {
           {showRetirementSubmit && (
             <button
               type="button"
-              onClick={() => submitMutation.mutate("retirement")}
+              onClick={() => submitMutation.mutate({ workflowStage: "retirement" })}
               disabled={submitMutation.isPending || !canSubmitRetirement}
               title={canSubmitRetirement ? "Submit this form to the configured Retirement workflow case" : "Available after LPO approval and on or after the configured travel return date"}
               className="inline-flex items-center gap-2 rounded-full bg-[#287EAD] px-5 py-3 text-sm font-semibold text-white shadow-lg ring-1 ring-white/80 hover:bg-[#1E6F99] disabled:cursor-not-allowed disabled:opacity-50"
@@ -2073,10 +2095,10 @@ export default function FormDetailPage() {
             role="alertdialog"
             aria-modal="true"
             aria-labelledby="duplicate-travel-date-title"
-            className="w-full max-w-md overflow-hidden rounded-xl border border-amber-200 bg-white shadow-2xl"
+            className="w-full max-w-md overflow-hidden border border-amber-200 bg-white shadow-2xl"
           >
             <div className="flex items-start gap-4 px-6 pt-6 pb-5">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center bg-amber-100 text-amber-700">
                 <Info className="h-5 w-5" aria-hidden="true" />
               </div>
               <div>
@@ -2088,20 +2110,32 @@ export default function FormDetailPage() {
                 <p className="mt-2 text-sm leading-relaxed text-slate-600">Please check the date before continuing. Requisitions for different dates can still be submitted as usual.</p>
               </div>
             </div>
-            <div className="flex justify-end border-t border-slate-100 bg-slate-50 px-6 py-4">
+            <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-6 py-4">
               <button
                 type="button"
                 onClick={() => {
                   duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
                   setDuplicateDateNotice(null);
                 }}
-                className="rounded-lg bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99]"
+                className="border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
               >
-                Got it
+                Dismiss
+              </button>
+              <button
+                type="button"
+                onClick={() => submitMutation.mutate({ workflowStage: "requisition", allowDuplicateTravelDate: true })}
+                disabled={submitMutation.isPending}
+                className="bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99] disabled:opacity-60"
+              >
+                {submitMutation.isPending ? "Submitting…" : "Raise anyway"}
               </button>
             </div>
           </div>
         </div>
+      )}
+
+      {travelPolicyNotice && (
+        <TravelPolicyNoticeModal message={travelPolicyNotice} onDismiss={() => setTravelPolicyNotice(null)} />
       )}
 
       {(reworkResubmitted || (workflowActionCompleted && !awaitingLpo && !showPaymentVoucherGate && !paymentVoucherId && !activeTask && !generatedLpos.length)) && (

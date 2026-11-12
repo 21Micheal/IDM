@@ -446,7 +446,7 @@ export const documentsAPI = {
   restore: (id: string) => api.post(`/documents/${id}/restore/`),
   /** Permanently delete a document that is in Trash. */
   purge: (id: string) => api.post(`/documents/${id}/purge/`),
-  submit: (id: string, options?: { workflow_stage?: "requisition" | "rfq" | "lpo" | "retirement" }) =>
+  submit: (id: string, options?: { workflow_stage?: "requisition" | "rfq" | "lpo" | "retirement"; allow_duplicate_travel_date?: boolean }) =>
     api.post(`/documents/${id}/submit/`, options),
   archive: (id: string) => api.post(`/documents/${id}/archive/`),
 

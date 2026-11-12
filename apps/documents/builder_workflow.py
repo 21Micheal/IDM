@@ -148,7 +148,7 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
 
 
 def overdue_travel_retirement_for_user(user, *, exclude_document_id=None) -> Document | None:
-    """Find a user's travel requisition with an overdue, unsubmitted retirement."""
+    """Find a user's overdue travel requisition whose retirement is unreconciled."""
     if not user or not getattr(user, "is_authenticated", False):
         return None
     docs = Document.objects.filter(
@@ -162,10 +162,11 @@ def overdue_travel_retirement_for_user(user, *, exclude_document_id=None) -> Doc
     retirement_statuses = _retirement_workflow_statuses([doc.id for doc in docs])
     today = timezone.localdate()
     for doc in docs:
-        # A retirement still in progress, returned, or rejected has not
-        # resolved the outstanding advance. Approval is the current policy's
-        # reconciliation point, regardless of the computed variance; a posted
-        # retirement journal is also authoritative if its status mirror lags.
+        # A retirement still in progress, returned, rejected, or not yet
+        # submitted has not resolved the outstanding advance. Approval is the
+        # current policy's reconciliation point, regardless of computed
+        # variance; a posted retirement journal is also authoritative if its
+        # status mirror lags.
         if retirement_statuses.get(doc.id) == "approved" or retirement_journal_posted(doc):
             continue
         if not is_travel_requisition(doc):

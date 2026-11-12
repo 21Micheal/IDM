@@ -1140,6 +1140,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # another phase of an existing requisition.
         form = ((doc.metadata or {}).get("form") or {})
         current_phase = str(form.get("workflow_phase") or "requisition").strip().lower()
+        booked_early_matches = []
         if (
             str(form.get("workflow_type") or "").strip().lower() == "requisition"
             and current_phase == "requisition"
@@ -1149,25 +1150,47 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
             duplicate_matches = find_existing_travel_date_duplicates(doc)
             if duplicate_matches:
-                details = ", ".join(match["reference_number"] for match in duplicate_matches[:3])
-                extra = f" Other matches: {len(duplicate_matches) - 3}." if len(duplicate_matches) > 3 else ""
-                return Response(
-                    {
-                        "detail": (
-                            "This requisition was not submitted because you already have a "
-                            f"requisition starting on {duplicate_matches[0]['date']} ({details}).{extra} "
-                            "Choose a different travel start date before submitting."
-                        ),
-                        "code": "duplicate_requisition_travel_date",
-                        "travel_date": duplicate_matches[0]["date"],
-                        "matches": duplicate_matches,
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                allow_duplicate_date = request.data.get("allow_duplicate_travel_date") is True
+                if allow_duplicate_date and doc.uploaded_by_id == request.user.id:
+                    booked_early_matches = duplicate_matches
+                else:
+                    details = ", ".join(match["reference_number"] for match in duplicate_matches[:3])
+                    extra = f" Other matches: {len(duplicate_matches) - 3}." if len(duplicate_matches) > 3 else ""
+                    return Response(
+                        {
+                            "detail": (
+                                "This requisition was not submitted because you already have a "
+                                f"requisition starting on {duplicate_matches[0]['date']} ({details}).{extra} "
+                                "Choose a different travel start date before submitting."
+                            ),
+                            "code": "duplicate_requisition_travel_date",
+                            "travel_date": duplicate_matches[0]["date"],
+                            "matches": duplicate_matches,
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+        def record_booked_early_override():
+            if not booked_early_matches:
+                return
+            # WorkflowService.start may update the form metadata. Reload first
+            # so recording this marker does not overwrite its phase/status data.
+            doc.refresh_from_db(fields=["metadata", "updated_at"])
+            metadata = dict(doc.metadata or {})
+            form_metadata = dict(metadata.get("form") or {})
+            form_metadata["booked_early"] = {
+                "travel_date": booked_early_matches[0]["date"],
+                "matches": booked_early_matches,
+                "raised_at": timezone.now().isoformat(),
+                "raised_by_id": str(request.user.id),
+            }
+            metadata["form"] = form_metadata
+            doc.metadata = metadata
+            doc.save(update_fields=["metadata", "updated_at"])
 
         if (
             is_travel_requisition(doc)
-            and current_phase == "requisition"
+            and current_phase != "retirement"
             and requested_stage in ("", "requisition")
         ):
             overdue = overdue_travel_retirement_for_user(
@@ -1175,7 +1198,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             )
             if overdue:
                 return Response(
-                    {"detail": f"Travel requisition blocked: retirement for {overdue.reference_number} is overdue. Submit that retirement before raising another travel requisition."},
+                    {
+                        "detail": f"Reconciliation for requisition {overdue.reference_number} is still outstanding. Reconcile that requisition before raising another one.",
+                        "code": "overdue_retirement_policy",
+                        "blocking_reference": overdue.reference_number,
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -1219,6 +1246,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 WorkflowService.start(doc, request.user)
             except WorkflowError as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            record_booked_early_override()
             self.record_audit("document.submitted", doc, {"workflow_stage": requested_stage})
             doc.refresh_from_db()
             return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
@@ -1239,6 +1267,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             WorkflowService.start(doc, request.user)
         except WorkflowError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        record_booked_early_override()
         self.record_audit("document.submitted", doc)
         doc.refresh_from_db()
         return Response(DocumentDetailSerializer(doc, context={"request": request}).data)

@@ -36,6 +36,7 @@ import { toast } from "@/components/ui/vault-toast";
 import { X, Loader2, Send, Save, FileText, LayoutTemplate, Paperclip, Info } from "lucide-react";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import { requisitionStartDate } from "@/lib/requisitionDates";
+import TravelPolicyNoticeModal from "@/components/templates/TravelPolicyNoticeModal";
 
 type DocumentTemplateOption = {
   id: string;
@@ -76,6 +77,7 @@ export default function FormFillModal({
     travel_date: string;
     matches: Array<{ reference_number: string; date: string }>;
   } | null>(null);
+  const [travelPolicyNotice, setTravelPolicyNotice] = useState<string | null>(null);
   const duplicateNoticeDismissedDate = useRef("");
   const duplicateNoticeObservedDate = useRef("");
   // Required fields flagged by the last "Start workflow" attempt — shown inline
@@ -119,7 +121,7 @@ export default function FormFillModal({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (duplicateDateNotice) {
+      if (duplicateDateNotice || travelPolicyNotice) {
         e.preventDefault();
         return;
       }
@@ -127,7 +129,7 @@ export default function FormFillModal({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [duplicateDateNotice, requestClose]);
+  }, [duplicateDateNotice, travelPolicyNotice, requestClose]);
 
   const sections = (template.sections ?? []) as Array<{ title?: string; fields?: unknown[] }>;
   const duplicateValues = collectFormAttachments(values).jsonValues;
@@ -178,7 +180,7 @@ export default function FormFillModal({
   // Validates required fields, creates the document, then immediately submits
   // it for approval. If submit fails the form lands in draft — the user can
   // retry from the forms list.
-  const handleStartWorkflow = async () => {
+  const handleStartWorkflow = async (allowDuplicateTravelDate = false) => {
     if (!title.trim()) {
       toast.error("Please enter a form title.");
       return;
@@ -210,7 +212,7 @@ export default function FormFillModal({
 
     setSubmitting(true);
     try {
-      if (duplicateTravelDate) {
+      if (duplicateTravelDate && !allowDuplicateTravelDate) {
         const duplicateResponse = await documentsAPI.checkRequisitionDuplicateForTemplate(template.id, duplicateValues);
         if (duplicateResponse.data.exists) {
           setDuplicateDateNotice(duplicateResponse.data);
@@ -220,7 +222,7 @@ export default function FormFillModal({
       const docId = await autosave.finalizeNow();
       if (!docId) throw new Error("Could not save the form before starting its workflow.");
       try {
-        await documentsAPI.submit(docId);
+        await documentsAPI.submit(docId, allowDuplicateTravelDate ? { allow_duplicate_travel_date: true } : undefined);
         queryClient.invalidateQueries({ queryKey: ["forms"] });
         queryClient.invalidateQueries({ queryKey: ["documents"] });
         toast.success("Workflow started — form submitted for approval.");
@@ -231,6 +233,11 @@ export default function FormFillModal({
         queryClient.invalidateQueries({ queryKey: ["forms"] });
         queryClient.invalidateQueries({ queryKey: ["documents"] });
         const responseData = submitErr?.response?.data;
+        if (responseData?.code === "overdue_retirement_policy") {
+          setDuplicateDateNotice(null);
+          setTravelPolicyNotice(String(responseData.detail || "Reconciliation for an earlier requisition is still outstanding. Reconcile that requisition before raising another one."));
+          return;
+        }
         if (responseData?.code === "duplicate_requisition_travel_date") {
           setDuplicateDateNotice({
             travel_date: String(responseData.travel_date || duplicateTravelDate || ""),
@@ -409,9 +416,9 @@ export default function FormFillModal({
 
       {duplicateDateNotice && (
         <div className="fixed inset-0 z-[300] flex items-center justify-center bg-slate-950/45 px-4 py-6" role="presentation">
-          <div role="alertdialog" aria-modal="true" aria-labelledby="duplicate-travel-date-title" className="w-full max-w-md overflow-hidden rounded-xl border border-amber-200 bg-white shadow-2xl">
+          <div role="alertdialog" aria-modal="true" aria-labelledby="duplicate-travel-date-title" className="w-full max-w-md overflow-hidden border border-amber-200 bg-white shadow-2xl">
             <div className="flex items-start gap-4 px-6 pt-6 pb-5">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700"><Info className="h-5 w-5" aria-hidden="true" /></div>
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center bg-amber-100 text-amber-700"><Info className="h-5 w-5" aria-hidden="true" /></div>
               <div>
                 <h2 id="duplicate-travel-date-title" className="text-base font-semibold text-slate-900">Check the travel start date</h2>
                 <p className="mt-2 text-sm leading-relaxed text-slate-600">
@@ -421,14 +428,20 @@ export default function FormFillModal({
                 <p className="mt-2 text-sm leading-relaxed text-slate-600">Please check the date before continuing. Requisitions for different dates can still be submitted as usual.</p>
               </div>
             </div>
-            <div className="flex justify-end border-t border-slate-100 bg-slate-50 px-6 py-4">
+            <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-6 py-4">
               <button type="button" onClick={() => {
                 duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
                 setDuplicateDateNotice(null);
-              }} className="rounded-lg bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99]">Got it</button>
+              }} className="border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100">Dismiss</button>
+              <button type="button" onClick={() => void handleStartWorkflow(true)} disabled={submitting} className="bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99] disabled:opacity-60">
+                {submitting ? "Submitting…" : "Raise anyway"}
+              </button>
             </div>
           </div>
         </div>
+      )}
+      {travelPolicyNotice && (
+        <TravelPolicyNoticeModal message={travelPolicyNotice} onDismiss={() => setTravelPolicyNotice(null)} />
       )}
     </div>
   );
