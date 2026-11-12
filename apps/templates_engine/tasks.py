@@ -1734,6 +1734,7 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
             "travel_type_value": getattr(template, "travel_type_value", "Travel") or "Travel",
             "skip_rfq": bool(getattr(template, "skip_rfq", False)),
             "requisition_category": getattr(template, "requisition_category", "standard") or "standard",
+            "travel_start_date_field": getattr(template, "travel_start_date_field", "") or "",
             "travel_retirement": getattr(template, "travel_retirement", {}) or {},
             "print_config": getattr(template, "print_config", {}) or {},
             "sections": template.sections,

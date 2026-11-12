@@ -777,6 +777,7 @@ export interface Template {
   travel_type_value?: string;
   skip_rfq?: boolean;
   requisition_category?: "standard" | "travel";
+  travel_start_date_field?: string;
   travel_retirement?: TravelRetirementConfig;
   print_config?: PrintConfig;
 }
@@ -8054,6 +8055,34 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
                         ariaLabel="Requisition type"
                       />
                       <p className="text-[10px] text-[#8C969E]">This type is set on the template; requesters do not choose it in the form.</p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Travel start date used for duplicate checks</label>
+                      <CustomListbox
+                        value={template.travel_start_date_field ?? ""}
+                        onChange={(value) => onCommit({ travel_start_date_field: value })}
+                        options={[
+                          { value: "", label: "Auto-detect a start date field" },
+                          ...template.sections.flatMap((section) => (section.fields ?? []).flatMap((field) => {
+                            if ((field.type === "date" || field.type === "datetime") && field.key) {
+                              return [{ value: field.key, label: `${field.label || field.key} (${field.key})` }];
+                            }
+                            if (field.type === "table" && field.key) {
+                              return (field.columns ?? [])
+                                .filter((column) => (column.type === "date" || column.type === "datetime") && column.key)
+                                .map((column) => ({
+                                  value: `${field.key}.${column.key}`,
+                                  label: `${field.label || field.key} → ${column.label || column.key}`,
+                                }));
+                            }
+                            return [];
+                          })),
+                        ]}
+                        className={iCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Travel start date used for duplicate checks"
+                      />
+                      <p className="text-[10px] text-[#8C969E]">Only this field is checked for duplicate requisition dates. Expected Travel and other date fields do not affect the check.</p>
                     </div>
                     <label className="flex cursor-pointer items-start gap-3 text-sm text-[#1F2933]">
                       <input

@@ -24,11 +24,12 @@ import { toast } from "@/components/ui/vault-toast";
 import { cn } from "@/lib/utils";
 import {
   Loader2, ArrowLeft, FileText, CheckCircle2, Trash2,
-  RefreshCw, Sparkles, ChevronDown, ClipboardList,
+  RefreshCw, Sparkles, ChevronDown, ClipboardList, Info,
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { applyFormulasAndDefaults, evaluateDynamicFormula } from "@/components/templates/formulas";
+import { requisitionStartDate } from "@/lib/requisitionDates";
 import SignaturePlacementModal, {
   FormTargetField,
   SignaturePlacementResult,
@@ -53,6 +54,12 @@ export default function NewRequisitionPage() {
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [formInstanceKey, setFormInstanceKey] = useState(0);
   const [isClearingDraft, setIsClearingDraft] = useState(false);
+  const [duplicateDateNotice, setDuplicateDateNotice] = useState<{
+    travel_date: string;
+    matches: Array<{ reference_number: string; date: string }>;
+  } | null>(null);
+  const duplicateNoticeDismissedDate = useRef("");
+  const duplicateNoticeObservedDate = useRef("");
 
   // Refresh the signed-in user's profile before applying current-user formulas.
   // The persisted auth store can predate newly added profile fields, so relying
@@ -104,6 +111,34 @@ export default function NewRequisitionPage() {
     refetchInterval: 30_000,
   });
 
+  const duplicateTravelDate = selectedTemplate
+    ? requisitionStartDate(selectedTemplate.sections ?? [], formValues, selectedTemplate.travel_start_date_field)
+    : "";
+  const { data: duplicateCheck } = useQuery({
+    queryKey: ["requisition-travel-date-duplicate", selectedTemplateId, duplicateTravelDate],
+    queryFn: () => documentsAPI.checkRequisitionDuplicateForTemplate(selectedTemplateId!, formValues).then((response) => response.data),
+    enabled: Boolean(
+      selectedTemplateId
+      && duplicateTravelDate
+      && String(selectedTemplate?.workflow_type || "requisition").toLowerCase() === "requisition"
+    ),
+    staleTime: 0,
+  });
+
+  useEffect(() => {
+    if (duplicateNoticeObservedDate.current !== duplicateTravelDate) {
+      duplicateNoticeObservedDate.current = duplicateTravelDate;
+      duplicateNoticeDismissedDate.current = "";
+    }
+    if (
+      duplicateCheck?.exists
+      && duplicateCheck.travel_date
+      && duplicateNoticeDismissedDate.current !== duplicateCheck.travel_date
+    ) {
+      setDuplicateDateNotice(duplicateCheck);
+    }
+  }, [duplicateTravelDate, duplicateCheck]);
+
   const autosave = useFormDraftAutosave({
     enabled: Boolean(selectedTemplateId && selectedTemplate),
     dirty: formDirty,
@@ -149,6 +184,9 @@ export default function NewRequisitionPage() {
       setTemplatePickerOpen(false);
       return;
     }
+    setDuplicateDateNotice(null);
+    duplicateNoticeDismissedDate.current = "";
+    duplicateNoticeObservedDate.current = "";
     if (formDirty) {
       try {
         await autosave.saveNow(true);
@@ -328,6 +366,13 @@ export default function NewRequisitionPage() {
         throw new Error("FORM_REQUIRED_FIELDS");
       }
       setMissingFields([]);
+      if (duplicateTravelDate) {
+        const duplicateResponse = await documentsAPI.checkRequisitionDuplicateForTemplate(selectedTemplateId, formValues);
+        if (duplicateResponse.data.exists) {
+          setDuplicateDateNotice(duplicateResponse.data);
+          throw new Error("DUPLICATE_REQUISITION_TRAVEL_DATE");
+        }
+      }
       const docId = await autosave.finalizeNow();
       if (docId) return documentsAPI.submit(docId, { workflow_stage: "requisition" });
       throw new Error("Failed to initialize requisition document");
@@ -340,7 +385,14 @@ export default function NewRequisitionPage() {
       navigate("/list");
     },
     onError: (err: any) => {
-      if (err?.message === "FORM_REQUIRED_FIELDS") return;
+      if (err?.message === "FORM_REQUIRED_FIELDS" || err?.message === "DUPLICATE_REQUISITION_TRAVEL_DATE") return;
+      if (err?.response?.data?.code === "duplicate_requisition_travel_date") {
+        setDuplicateDateNotice({
+          travel_date: String(err.response.data.travel_date || duplicateTravelDate || ""),
+          matches: Array.isArray(err.response.data.matches) ? err.response.data.matches : [],
+        });
+        return;
+      }
       const message = extractApiError(err, "Failed to submit requisition");
       if (/required fields missing/i.test(message)) {
         const fieldList = message.split(/required fields missing:\s*/i)[1];
@@ -599,6 +651,30 @@ export default function NewRequisitionPage() {
             {isSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
             Submit Requisition
           </button>
+        </div>
+      )}
+
+      {duplicateDateNotice && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-slate-950/45 px-4 py-6" role="presentation">
+          <div role="alertdialog" aria-modal="true" aria-labelledby="duplicate-travel-date-title" className="w-full max-w-md overflow-hidden rounded-xl border border-amber-200 bg-white shadow-2xl">
+            <div className="flex items-start gap-4 px-6 pt-6 pb-5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700"><Info className="h-5 w-5" aria-hidden="true" /></div>
+              <div>
+                <h2 id="duplicate-travel-date-title" className="text-base font-semibold text-slate-900">Check the travel start date</h2>
+                <p className="mt-2 text-sm leading-relaxed text-slate-600">
+                  You already have a requisition starting on <strong className="font-semibold text-slate-800">{duplicateDateNotice.travel_date}</strong>
+                  {duplicateDateNotice.matches.length > 0 && <> ({duplicateDateNotice.matches.map((match) => match.reference_number).filter(Boolean).join(", ") || "another requisition"})</>}.
+                </p>
+                <p className="mt-2 text-sm leading-relaxed text-slate-600">Please check the date before continuing. Requisitions for different dates can still be submitted as usual.</p>
+              </div>
+            </div>
+            <div className="flex justify-end border-t border-slate-100 bg-slate-50 px-6 py-4">
+              <button type="button" onClick={() => {
+                duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
+                setDuplicateDateNotice(null);
+              }} className="rounded-lg bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99]">Got it</button>
+            </div>
+          </div>
         </div>
       )}
 

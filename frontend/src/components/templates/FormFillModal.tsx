@@ -22,9 +22,9 @@
  * into one (BuiltTemplateFormModal taking a `basePath` prop, e.g.).
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { extractApiError } from "@/lib/apiError";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI } from "@/services/api";
 import { pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
 import { useAuthStore } from "@/store/authStore";
@@ -33,8 +33,9 @@ import BudgetBanner from "@/components/templates/BudgetBanner";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { useFormDraftAutosave } from "@/hooks/useFormDraftAutosave";
 import { toast } from "@/components/ui/vault-toast";
-import { X, Loader2, Send, Save, FileText, LayoutTemplate, Paperclip } from "lucide-react";
+import { X, Loader2, Send, Save, FileText, LayoutTemplate, Paperclip, Info } from "lucide-react";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import { requisitionStartDate } from "@/lib/requisitionDates";
 
 type DocumentTemplateOption = {
   id: string;
@@ -44,6 +45,8 @@ type DocumentTemplateOption = {
   document_type?: string;
   document_type_id?: string;
   sections?: unknown[];
+  workflow_type?: string;
+  travel_start_date_field?: string;
   sunsystems?: { budget?: Record<string, unknown>; journal?: Record<string, unknown> } | null;
 };
 
@@ -69,6 +72,12 @@ export default function FormFillModal({
   const [title, setTitle] = useState((initialTitle ?? "").trim() || template.name);
   const [values, setValues] = useState<Record<string, unknown>>(() => initialValues);
   const [submitting, setSubmitting] = useState(false);
+  const [duplicateDateNotice, setDuplicateDateNotice] = useState<{
+    travel_date: string;
+    matches: Array<{ reference_number: string; date: string }>;
+  } | null>(null);
+  const duplicateNoticeDismissedDate = useRef("");
+  const duplicateNoticeObservedDate = useRef("");
   // Required fields flagged by the last "Start workflow" attempt — shown inline
   // (a toast with a long list is unreadable and disappears).
   const [missingFields, setMissingFields] = useState<string[]>([]);
@@ -108,12 +117,43 @@ export default function FormFillModal({
     onClose();
   };
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") requestClose(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (duplicateDateNotice) {
+        e.preventDefault();
+        return;
+      }
+      requestClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, [duplicateDateNotice, requestClose]);
 
   const sections = (template.sections ?? []) as Array<{ title?: string; fields?: unknown[] }>;
+  const duplicateValues = collectFormAttachments(values).jsonValues;
+  const duplicateTravelDate = String(template.workflow_type || "").toLowerCase() === "requisition"
+    ? requisitionStartDate(template.sections ?? [], duplicateValues, template.travel_start_date_field)
+    : "";
+  const { data: duplicateCheck } = useQuery({
+    queryKey: ["requisition-template-travel-date-duplicate", template.id, duplicateTravelDate],
+    queryFn: () => documentsAPI.checkRequisitionDuplicateForTemplate(template.id, duplicateValues).then((response) => response.data),
+    enabled: Boolean(duplicateTravelDate && String(template.workflow_type || "").toLowerCase() === "requisition"),
+    staleTime: 0,
+  });
+
+  useEffect(() => {
+    if (duplicateNoticeObservedDate.current !== duplicateTravelDate) {
+      duplicateNoticeObservedDate.current = duplicateTravelDate;
+      duplicateNoticeDismissedDate.current = "";
+    }
+    if (
+      duplicateCheck?.exists
+      && duplicateCheck.travel_date
+      && duplicateNoticeDismissedDate.current !== duplicateCheck.travel_date
+    ) {
+      setDuplicateDateNotice(duplicateCheck);
+    }
+  }, [duplicateTravelDate, duplicateCheck]);
 
   // ── Save as draft ──────────────────────────────────────────────────────────
   // No validation gate — partial forms are allowed (mirrors FormDetailPage's
@@ -170,6 +210,13 @@ export default function FormFillModal({
 
     setSubmitting(true);
     try {
+      if (duplicateTravelDate) {
+        const duplicateResponse = await documentsAPI.checkRequisitionDuplicateForTemplate(template.id, duplicateValues);
+        if (duplicateResponse.data.exists) {
+          setDuplicateDateNotice(duplicateResponse.data);
+          return;
+        }
+      }
       const docId = await autosave.finalizeNow();
       if (!docId) throw new Error("Could not save the form before starting its workflow.");
       try {
@@ -183,6 +230,14 @@ export default function FormFillModal({
         // so the user can retry from the forms list.
         queryClient.invalidateQueries({ queryKey: ["forms"] });
         queryClient.invalidateQueries({ queryKey: ["documents"] });
+        const responseData = submitErr?.response?.data;
+        if (responseData?.code === "duplicate_requisition_travel_date") {
+          setDuplicateDateNotice({
+            travel_date: String(responseData.travel_date || duplicateTravelDate || ""),
+            matches: Array.isArray(responseData.matches) ? responseData.matches : [],
+          });
+          return;
+        }
         toast.warn(
           "Form saved, but workflow could not be started. Open it from the list to retry.",
         );
@@ -351,6 +406,30 @@ export default function FormFillModal({
           </button>
         </div>
       </div>
+
+      {duplicateDateNotice && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-slate-950/45 px-4 py-6" role="presentation">
+          <div role="alertdialog" aria-modal="true" aria-labelledby="duplicate-travel-date-title" className="w-full max-w-md overflow-hidden rounded-xl border border-amber-200 bg-white shadow-2xl">
+            <div className="flex items-start gap-4 px-6 pt-6 pb-5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700"><Info className="h-5 w-5" aria-hidden="true" /></div>
+              <div>
+                <h2 id="duplicate-travel-date-title" className="text-base font-semibold text-slate-900">Check the travel start date</h2>
+                <p className="mt-2 text-sm leading-relaxed text-slate-600">
+                  You already have a requisition starting on <strong className="font-semibold text-slate-800">{duplicateDateNotice.travel_date}</strong>
+                  {duplicateDateNotice.matches.length > 0 && <> ({duplicateDateNotice.matches.map((match) => match.reference_number).filter(Boolean).join(", ") || "another requisition"})</>}.
+                </p>
+                <p className="mt-2 text-sm leading-relaxed text-slate-600">Please check the date before continuing. Requisitions for different dates can still be submitted as usual.</p>
+              </div>
+            </div>
+            <div className="flex justify-end border-t border-slate-100 bg-slate-50 px-6 py-4">
+              <button type="button" onClick={() => {
+                duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
+                setDuplicateDateNotice(null);
+              }} className="rounded-lg bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99]">Got it</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

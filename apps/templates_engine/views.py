@@ -198,6 +198,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             travel_type_value=original.travel_type_value,
             skip_rfq=original.skip_rfq,
             requisition_category=original.requisition_category,
+            travel_start_date_field=original.travel_start_date_field,
             travel_retirement=original.travel_retirement,
             created_by=request.user,
         )

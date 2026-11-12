@@ -42,6 +42,7 @@ import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
 import { cn } from "@/lib/utils";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
+import { requisitionStartDate } from "@/lib/requisitionDates";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import SignaturePlacementModal, {
   FormTargetField,
@@ -57,43 +58,6 @@ function isImprestRequestPostingStage(stage: number) {
 }
 function isLpoPurchaseOrderStage(stage: number) {
   return stage >= 1000 && stage < 20000;
-}
-
-function requisitionTravelStartDate(sections: unknown[], values: Record<string, unknown>): string {
-  const priorities = (field: Record<string, any>) => {
-    const type = String(field.type || "").toLowerCase();
-    if (!["date", "datetime", "date_time", "calc_date", "table"].includes(type)) return 0;
-    const label = `${field.label || ""} ${field.key || ""}`.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    if (label.includes("activity start date") || label.includes("travel start date") || label.includes("workshop from")) return 100;
-    if (/\bstart date\b/.test(label)) return 90;
-    if (label.includes("expected travel date")) return 80;
-    if (label.includes("date of travel") || /\btravel date\b/.test(label)) return 70;
-    if (label.includes("departure date")) return 60;
-    return 0;
-  };
-  const candidates: Array<{ priority: number; date: string }> = [];
-  for (const section of sections as Array<Record<string, any>>) {
-    for (const field of (Array.isArray(section?.fields) ? section.fields : []) as Array<Record<string, any>>) {
-      if (field.type === "table") {
-        const rows = values[field.key];
-        for (const column of (Array.isArray(field.columns) ? field.columns : []) as Array<Record<string, any>>) {
-          const priority = priorities(column);
-          if (!priority) continue;
-          for (const row of Array.isArray(rows) ? rows as Array<Record<string, any>> : []) {
-            const raw = String(row?.[column.key] || "").slice(0, 10);
-            if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) candidates.push({ priority, date: raw });
-          }
-        }
-      } else {
-        const priority = priorities(field);
-        const raw = String(values[field.key] || "").slice(0, 10);
-        if (priority && /^\d{4}-\d{2}-\d{2}$/.test(raw)) candidates.push({ priority, date: raw });
-      }
-    }
-  }
-  if (!candidates.length) return "";
-  const highest = Math.max(...candidates.map((candidate) => candidate.priority));
-  return candidates.filter((candidate) => candidate.priority === highest).map((candidate) => candidate.date).sort()[0];
 }
 
 function postingGateErrorSummary(postings: JournalPosting[]): string {
@@ -304,6 +268,12 @@ export default function FormDetailPage() {
   );
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [formEditing, setFormEditing] = useState(false);
+  const [duplicateDateNotice, setDuplicateDateNotice] = useState<{
+    travel_date: string;
+    matches: Array<{ reference_number: string; date: string }>;
+  } | null>(null);
+  const duplicateNoticeDismissedDate = useRef("");
+  const duplicateNoticeObservedDate = useRef("");
   const [reworkResubmitted, setReworkResubmitted] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const formDirtyRef = useRef(false);
@@ -363,6 +333,7 @@ export default function FormDetailPage() {
   const formData = (doc?.metadata as Record<string, any> | undefined)?.form as
     | {
       workflow_type?: string;
+      travel_start_date_field?: string;
       template_id?: string;
       sections?: unknown[];
       values?: Record<string, unknown>;
@@ -382,7 +353,7 @@ export default function FormDetailPage() {
 
   const duplicateCheckValues = formEditing ? formValues : (formData?.values ?? {});
   const duplicateTravelDate = String(formData?.workflow_type || "").toLowerCase() === "requisition"
-    ? requisitionTravelStartDate(formData?.sections ?? [], duplicateCheckValues)
+    ? requisitionStartDate(formData?.sections ?? [], duplicateCheckValues, formData?.travel_start_date_field)
     : "";
   const { data: duplicateCheck } = useQuery({
     queryKey: ["requisition-travel-date-duplicate", id, duplicateTravelDate],
@@ -396,6 +367,21 @@ export default function FormDetailPage() {
     ),
     staleTime: 0,
   });
+
+  useEffect(() => {
+    if (duplicateNoticeObservedDate.current !== duplicateTravelDate) {
+      duplicateNoticeObservedDate.current = duplicateTravelDate;
+      duplicateNoticeDismissedDate.current = "";
+    }
+    if (
+      formEditing
+      && duplicateCheck?.exists
+      && duplicateCheck.travel_date
+      && duplicateNoticeDismissedDate.current !== duplicateCheck.travel_date
+    ) {
+      setDuplicateDateNotice(duplicateCheck);
+    }
+  }, [formEditing, duplicateTravelDate, duplicateCheck]);
 
   const formAutosave = useFormDraftAutosave({
     enabled: Boolean(formEditing && formData),
@@ -849,6 +835,14 @@ export default function FormDetailPage() {
     },
     onError: (err: any) => {
       if (err?.message === "FORM_REQUIRED_FIELDS") return;
+      const responseData = err?.response?.data;
+      if (responseData?.code === "duplicate_requisition_travel_date") {
+        setDuplicateDateNotice({
+          travel_date: String(responseData.travel_date || duplicateTravelDate || ""),
+          matches: Array.isArray(responseData.matches) ? responseData.matches : [],
+        });
+        return;
+      }
       const message = extractApiError(err, "Submission failed");
       if (/required fields missing/i.test(message)) {
         const fieldList = message.split(/required fields missing:\s*/i)[1];
@@ -1569,15 +1563,6 @@ export default function FormDetailPage() {
                 />
               </div>
               <div className="form-renderer bg-white px-4 py-3 sm:px-5 sm:py-4">
-                {formEditing && duplicateCheck?.exists && (
-                  <div role="alert" className="mb-4 flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">
-                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
-                    <div>
-                      <p className="font-semibold">You already have a requisition starting on {duplicateCheck.travel_date}.</p>
-                      <p className="mt-1">{duplicateCheck.matches.map((match) => match.reference_number).filter(Boolean).join(", ")} uses this travel start date. Change the date before submitting.</p>
-                    </div>
-                  </div>
-                )}
                 <TemplateForm
                   sections={formData.sections ?? []}
                   values={formEditing ? formValues : (formData.values ?? {})}
@@ -2078,6 +2063,45 @@ export default function FormDetailPage() {
           onRetry={() => void retryGatePostings(failedRetirementGatePostings)}
           onDismiss={dismissPaymentVoucherGate}
         />
+      )}
+
+      {duplicateDateNotice && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-slate-950/45 px-4 py-6" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) return;
+        }}>
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="duplicate-travel-date-title"
+            className="w-full max-w-md overflow-hidden rounded-xl border border-amber-200 bg-white shadow-2xl"
+          >
+            <div className="flex items-start gap-4 px-6 pt-6 pb-5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+                <Info className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <div>
+                <h2 id="duplicate-travel-date-title" className="text-base font-semibold text-slate-900">Check the travel start date</h2>
+                <p className="mt-2 text-sm leading-relaxed text-slate-600">
+                  You already have a requisition starting on <strong className="font-semibold text-slate-800">{duplicateDateNotice.travel_date}</strong>
+                  {duplicateDateNotice.matches.length > 0 && <> ({duplicateDateNotice.matches.map((match) => match.reference_number).filter(Boolean).join(", ") || "another requisition"})</>}.
+                </p>
+                <p className="mt-2 text-sm leading-relaxed text-slate-600">Please check the date before continuing. Requisitions for different dates can still be submitted as usual.</p>
+              </div>
+            </div>
+            <div className="flex justify-end border-t border-slate-100 bg-slate-50 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => {
+                  duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
+                  setDuplicateDateNotice(null);
+                }}
+                className="rounded-lg bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99]"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {(reworkResubmitted || (workflowActionCompleted && !awaitingLpo && !showPaymentVoucherGate && !paymentVoucherId && !activeTask && !generatedLpos.length)) && (

@@ -116,6 +116,12 @@ class DocumentTemplate(models.Model):
         default="standard",
         help_text="Identifies the requisition lifecycle without asking the requester to choose a type on the form.",
     )
+    travel_start_date_field = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Form field key used as the travel start date for duplicate requisition checks.",
+    )
     available_to_groups = models.ManyToManyField(
         "accounts.UserGroup",
         blank=True,

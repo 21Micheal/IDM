@@ -27,26 +27,61 @@ def _date_priority(field: dict[str, Any]) -> int:
     if field.get("type") not in {"date", "datetime", "date_time", "calc_date"}:
         return 0
     label = re.sub(r"[^a-z0-9]+", " ", f"{field.get('label', '')} {field.get('key', '')}".lower()).strip()
+    if "expected travel" in label:
+        return 0
     if "activity start date" in label or "travel start date" in label or "workshop from" in label:
         return 100
     if re.search(r"\bstart date\b", label):
         return 90
-    if "expected travel date" in label:
-        return 80
     if "date of travel" in label or re.search(r"\btravel date\b", label):
-        return 70
+        return 80
     if "departure date" in label:
-        return 60
+        return 70
     return 0
 
 
-def travel_start_date(document: Any, values_override: dict[str, Any] | None = None) -> str:
+def _configured_start_date(sections: list[Any], values: dict[str, Any], field_key: str) -> str:
+    if not field_key:
+        return ""
+    if "." in field_key:
+        table_key, column_key = field_key.split(".", 1)
+        rows = values.get(table_key)
+        dates = [
+            parsed
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict)
+            if (parsed := _date_value(row.get(column_key)))
+        ]
+        return min(dates) if dates else ""
+    for section in sections:
+        for field in (section.get("fields", []) if isinstance(section, dict) else []):
+            if isinstance(field, dict) and str(field.get("key") or "") == field_key:
+                if field.get("type") == "table":
+                    return ""
+                return _date_value(values.get(field_key))
+    return _date_value(values.get(field_key))
+
+
+def travel_start_date(
+    document: Any,
+    values_override: dict[str, Any] | None = None,
+    *,
+    sections_override: list[Any] | None = None,
+    start_date_field: str | None = None,
+) -> str:
     """Extract the most relevant travel start date from a requisition form."""
-    metadata = document.metadata if isinstance(document.metadata, dict) else {}
+    raw_metadata = getattr(document, "metadata", {})
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
     form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
     values = values_override if isinstance(values_override, dict) else form.get("values", {})
     values = values if isinstance(values, dict) else {}
-    sections = form.get("sections") if isinstance(form.get("sections"), list) else []
+    sections = sections_override if isinstance(sections_override, list) else form.get("sections")
+    sections = sections if isinstance(sections, list) else []
+    configured_field = str(
+        start_date_field if start_date_field is not None else form.get("travel_start_date_field") or ""
+    ).strip()
+    if configured_field:
+        return _configured_start_date(sections, values, configured_field)
     candidates: list[tuple[int, str]] = []
 
     for section in sections:
@@ -115,6 +150,20 @@ def find_existing_travel_date_duplicates(
     """Find same-owner requisitions that already use this travel start date."""
     date_text = travel_start_date(document, values_override)
     owner_id = getattr(document, "uploaded_by_id", None)
+    return find_existing_travel_date_duplicates_for_owner(
+        owner_id,
+        date_text,
+        exclude_document_id=getattr(document, "id", None),
+    )
+
+
+def find_existing_travel_date_duplicates_for_owner(
+    owner_id: Any,
+    date_text: str,
+    *,
+    exclude_document_id: Any = None,
+) -> list[dict[str, str]]:
+    """Find matching requisitions for a known owner and ISO start date."""
     if not date_text or owner_id is None:
         return []
 
@@ -126,11 +175,12 @@ def find_existing_travel_date_duplicates(
             metadata__form__workflow_type="requisition",
             deleted_at__isnull=True,
         )
-        .exclude(id=document.id)
         .exclude(status="void")
         .order_by("created_at")
         .only("id", "metadata", "created_at", "reference_number", "uploaded_by_id")
     )
+    if exclude_document_id:
+        candidates = candidates.exclude(id=exclude_document_id)
     matches = []
     for candidate in candidates:
         if travel_start_date(candidate) == date_text:

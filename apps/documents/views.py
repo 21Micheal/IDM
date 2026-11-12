@@ -1092,6 +1092,32 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         matches = find_existing_travel_date_duplicates(doc, values)
         return Response({"exists": bool(matches), "travel_date": travel_date, "matches": matches})
 
+    @action(detail=False, methods=["post"], url_path="check_requisition_duplicate")
+    def check_requisition_duplicate_for_template(self, request):
+        from apps.documents.requisition_duplicates import (
+            find_existing_travel_date_duplicates_for_owner,
+            travel_start_date,
+        )
+        from apps.templates_engine.models import DocumentTemplate
+
+        template = get_object_or_404(
+            DocumentTemplate.objects.filter(is_active=True),
+            pk=request.data.get("template_id"),
+        )
+        if str(template.workflow_type or "").strip().lower() != "requisition":
+            return Response({"detail": "Duplicate travel date checks apply to requisitions only."}, status=400)
+        values = request.data.get("values")
+        if not isinstance(values, dict):
+            values = {}
+        travel_date = travel_start_date(
+            None,
+            values,
+            sections_override=template.sections,
+            start_date_field=template.travel_start_date_field,
+        )
+        matches = find_existing_travel_date_duplicates_for_owner(request.user.id, travel_date)
+        return Response({"exists": bool(matches), "travel_date": travel_date, "matches": matches})
+
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
         doc = self.get_object()
@@ -1133,6 +1159,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                             "Choose a different travel start date before submitting."
                         ),
                         "code": "duplicate_requisition_travel_date",
+                        "travel_date": duplicate_matches[0]["date"],
                         "matches": duplicate_matches,
                     },
                     status=status.HTTP_400_BAD_REQUEST,
