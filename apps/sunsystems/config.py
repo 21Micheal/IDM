@@ -305,13 +305,130 @@ def get_imprest_request_postings(document) -> list[dict]:
     ui = sunsystems.get("ui") if isinstance(sunsystems.get("ui"), dict) else {}
     imprest_groups: dict[str, dict] = {}
     request_specs = po.get("imprest_request_lines")
-    if not isinstance(request_specs, list):
+    if not isinstance(request_specs, list) or not request_specs:
         # Backwards compatibility for mappings saved before Imprest lines were
         # separated from the PurchaseOrder profile.
         request_specs = [
             spec for spec in _po_line_specs(po)
             if isinstance(spec, dict) and spec.get("imprest_request_transaction_type")
         ]
+    if not request_specs:
+        # Older requisitions can have the merged Ticket/DSA table schema and
+        # its enabled Imprest profile saved in form metadata, while their
+        # compiled SunSystems snapshot predates the DSA line amount role. Build
+        # the missing request line specs from that immutable form snapshot so
+        # a later configured Procurement checkpoint can still post its DSA
+        # amount without asking users to edit and resubmit the requisition.
+        form = (getattr(document, "metadata", None) or {}).get("form") or {}
+        for section in form.get("sections") or []:
+            for field in section.get("fields") or []:
+                if not isinstance(field, dict) or field.get("type") != "table":
+                    continue
+                table_key = str(field.get("key") or "")
+                if not table_key:
+                    continue
+                columns = [column for column in field.get("columns") or [] if isinstance(column, dict)]
+                field_sunsystems = field.get("sunsystems") if isinstance(field.get("sunsystems"), dict) else {}
+                amount_column = next(
+                    (column for column in columns
+                     if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "dsa_line_amount"),
+                    None,
+                )
+                if not amount_column:
+                    continue
+                amount_sunsystems = amount_column.get("sunsystems") or {}
+                request_config = field_sunsystems.get("imprestRequest") or amount_sunsystems.get("imprestRequest") or {}
+                if not isinstance(request_config, dict) or not request_config.get("enabled"):
+                    continue
+
+                dsa_account_column = next(
+                    (column for column in columns
+                     if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "dsa_account_code"),
+                    None,
+                )
+                budget_line_column = next(
+                    (column for column in columns
+                     if column.get("type") == "budget_line"
+                     or str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "budget_line"),
+                    None,
+                )
+                dsa_account_spec = (
+                    {"row_field": dsa_account_column.get("key")}
+                    if dsa_account_column else
+                    {"row_field": budget_line_column.get("key"), "key": "dsa_account_code"}
+                    if budget_line_column else None
+                )
+                supplier_column = next(
+                    (column for column in columns
+                     if str(((column.get("sunsystems") or {}).get("role") or "")).strip().lower() == "supplier_code"),
+                    None,
+                )
+                supplier_row_spec = {"row_field": supplier_column.get("key")} if supplier_column else None
+
+                # Match the existing PO line for shared description, currency,
+                # date, analysis, and quantity mappings. The DSA account and
+                # amount always come from the DSA-specific fields below.
+                base_spec = next(
+                    (spec for spec in _po_line_specs(lpo_po)
+                     if isinstance(spec, dict) and str(spec.get("repeat_over") or "") == table_key),
+                    {},
+                )
+                account_source = str(
+                    amount_sunsystems.get("accountSource")
+                    or request_config.get("accountSource")
+                    or ("account_code" if dsa_account_spec else "manual")
+                ).strip().lower()
+                if account_source == "account_code":
+                    debit_account = dsa_account_spec or (
+                        {"const": str(amount_sunsystems.get("account") or "").strip()}
+                        if amount_sunsystems.get("account") else None
+                    )
+                elif account_source == "supplier_code":
+                    debit_account = supplier_row_spec or po.get("supplier_code")
+                else:
+                    debit_account = (
+                        {"const": str(amount_sunsystems.get("account")).strip()}
+                        if amount_sunsystems.get("account") else dsa_account_spec
+                    )
+
+                counter_source = str(
+                    amount_sunsystems.get("counterAccountSource")
+                    or request_config.get("counterAccountSource")
+                    or "manual"
+                ).strip().lower()
+                if counter_source == "account_code":
+                    counter_account = dsa_account_spec
+                elif counter_source == "supplier_code":
+                    counter_account = supplier_row_spec or po.get("supplier_code")
+                else:
+                    counter_account = (
+                        {"const": str(amount_sunsystems.get("counterAccount")).strip()}
+                        if amount_sunsystems.get("counterAccount") else None
+                    )
+
+                request_spec = {
+                    **base_spec,
+                    "repeat_over": table_key,
+                    "table_label": str(field.get("label") or table_key),
+                    "amount": {"row_field": amount_column.get("key")},
+                    "imprest_request_dc": str(amount_sunsystems.get("dc") or "D").upper(),
+                    "imprest_request_counter_dc": str(
+                        amount_sunsystems.get("counterDc")
+                        or ("D" if str(amount_sunsystems.get("dc") or "D").upper() == "C" else "C")
+                    ).upper(),
+                    "imprest_request_parameters": {
+                        "JournalType": request_config.get("journalType") or "FGJ",
+                        "PostingType": request_config.get("postingType") or "2",
+                        **(request_config.get("parameters") if isinstance(request_config.get("parameters"), dict) else {}),
+                    },
+                }
+                if dsa_account_spec:
+                    request_spec["include_if"] = dsa_account_spec
+                if debit_account:
+                    request_spec["imprest_request_account"] = debit_account
+                if counter_account:
+                    request_spec["imprest_request_counter_account"] = counter_account
+                request_specs.append(request_spec)
     for spec in request_specs:
         table_key = str(spec.get("repeat_over") or "")
         if not table_key:

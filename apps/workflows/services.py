@@ -2341,8 +2341,8 @@ class WorkflowService:
         items = get_imprest_request_postings(document)
         if not items:
             raise WorkflowError(
-                "The Imprest request cannot be approved because its General / Imprest table "
-                "has no positive mapped Line amount. Check the itinerary rows and mappings."
+                "The Imprest request cannot be posted because the merged Ticket/DSA table "
+                "has no positive mapped DSA line amount. Check the DSA account and amount mappings."
             )
 
         actor_id = str(actor.pk) if actor and getattr(actor, "pk", None) else None
@@ -2379,6 +2379,13 @@ class WorkflowService:
                 not is_procurement_document(document)
                 or WorkflowService._document_workflow_phase(document) != "request"
             ):
+                return False
+            # A configured checkpoint owns the posting timing. In particular,
+            # do not let the legacy Request-completion fallback post early when
+            # the template places the Imprest journal at a later Procurement
+            # approval step.
+            from apps.documents.builder_workflow import imprest_request_posting_checkpoint_configured
+            if imprest_request_posting_checkpoint_configured(document):
                 return False
             WorkflowService._queue_imprest_request_postings(
                 document,
