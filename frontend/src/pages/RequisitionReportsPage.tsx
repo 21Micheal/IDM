@@ -1307,7 +1307,7 @@ export default function RequisitionReportsPage() {
 
             {/* Sub-Tab 4: Visual Breakdown */}
             {financialTab === "visuals" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs">
+              <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs print:break-inside-avoid print:border-none print:shadow-none">
                 <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider mb-2">
                   Top Activities by Financial Spend
                 </h3>
@@ -2110,9 +2110,9 @@ export default function RequisitionReportsPage() {
             )}
             {/* Sub-Tab 4: Aging Visual Analytics */}
             {retirementsTab === "visuals" && (
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 print:grid-cols-2">
                 {/* Chart 1: Outstanding Balance by Aging Bucket */}
-                <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs">
+                <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs print:break-inside-avoid print:border-none print:shadow-none">
                   <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider mb-1">
                     Outstanding Exposure by Aging Category
                   </h3>
@@ -2139,7 +2139,7 @@ export default function RequisitionReportsPage() {
                 </div>
 
                 {/* Chart 2: Outstanding Balance by Department */}
-                <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs">
+                <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs print:break-inside-avoid print:border-none print:shadow-none">
                   <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider mb-1">
                     Outstanding Balance by Department
                   </h3>
