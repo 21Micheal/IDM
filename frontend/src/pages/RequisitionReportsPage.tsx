@@ -21,7 +21,7 @@
  *
  * 3. Print-friendly layout (clean formal print header, hiding all nav, sidebars, filters, and controls).
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -96,47 +96,47 @@ function formatDateDisplay(raw?: string): string {
 function AgingBadge({ bucket, label, days }: { bucket: string; label: string; days: number }) {
   if (bucket === "reconciled") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700 border border-indigo-200">
-        <CheckCircle2 className="h-3 w-3" />
+      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700 border border-indigo-200 print:border-none print:px-1 print:py-0 print:text-[9px]">
+        <CheckCircle2 className="h-3 w-3 print:hidden" />
         Reconciled
       </span>
     );
   }
   if (bucket === "current") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 border border-emerald-200">
-        <Clock className="h-3 w-3" />
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 border border-emerald-200 print:border-none print:px-1 print:py-0 print:text-[9px]">
+        <Clock className="h-3 w-3 print:hidden" />
         Current / Not Due
       </span>
     );
   }
   if (bucket === "1_30") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800 border border-amber-300">
-        <AlertTriangle className="h-3 w-3 text-amber-600" />
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800 border border-amber-300 print:border-none print:px-1 print:py-0 print:text-[9px]">
+        <AlertTriangle className="h-3 w-3 text-amber-600 print:hidden" />
         1–30d ({days}d)
       </span>
     );
   }
   if (bucket === "31_60") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-0.5 text-[11px] font-semibold text-orange-800 border border-orange-300">
-        <AlertTriangle className="h-3 w-3 text-orange-600" />
+      <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-0.5 text-[11px] font-semibold text-orange-800 border border-orange-300 print:border-none print:px-1 print:py-0 print:text-[9px]">
+        <AlertTriangle className="h-3 w-3 text-orange-600 print:hidden" />
         31–60d ({days}d)
       </span>
     );
   }
   if (bucket === "61_90") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-800 border border-rose-300">
-        <ShieldAlert className="h-3 w-3 text-rose-600" />
+      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-800 border border-rose-300 print:border-none print:px-1 print:py-0 print:text-[9px]">
+        <ShieldAlert className="h-3 w-3 text-rose-600 print:hidden" />
         61–90d ({days}d)
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-900 border border-red-400">
-      <ShieldAlert className="h-3 w-3 text-red-700" />
+    <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-900 border border-red-400 print:border-none print:px-1 print:py-0 print:text-[9px]">
+      <ShieldAlert className="h-3 w-3 text-red-700 print:hidden" />
       90+ Days ({days}d)
     </span>
   );
@@ -145,38 +145,38 @@ function AgingBadge({ bucket, label, days }: { bucket: string; label: string; da
 function JournalStatusBadge({ status, journalNumber }: { status: string; journalNumber?: string }) {
   if (journalNumber && journalNumber !== "—") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200">
-        <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200 print:border-none print:px-0 print:py-0 print:text-[9px]">
+        <CheckCircle2 className="h-3 w-3 text-emerald-600 print:hidden" />
         <span className="font-mono">#{journalNumber}</span>
       </span>
     );
   }
   if (status === "posted") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200">
-        <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200 print:border-none print:px-0 print:py-0 print:text-[9px]">
+        <CheckCircle2 className="h-3 w-3 text-emerald-600 print:hidden" />
         Posted
       </span>
     );
   }
   if (status === "failed") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700 border border-rose-200">
-        <AlertTriangle className="h-3 w-3 text-rose-600" />
+      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700 border border-rose-200 print:border-none print:px-0 print:py-0 print:text-[9px]">
+        <AlertTriangle className="h-3 w-3 text-rose-600 print:hidden" />
         Failed
       </span>
     );
   }
   if (status === "pending") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 border border-amber-200">
-        <Clock className="h-3 w-3 text-amber-600" />
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 border border-amber-200 print:border-none print:px-0 print:py-0 print:text-[9px]">
+        <Clock className="h-3 w-3 text-amber-600 print:hidden" />
         Pending
       </span>
     );
   }
   return (
-    <span className="text-xs text-[#9AA5B1] font-mono">
+    <span className="text-xs text-[#9AA5B1] font-mono print:text-[9px]">
       —
     </span>
   );
@@ -242,6 +242,20 @@ export default function RequisitionReportsPage() {
   const [scheduleFrequency, setScheduleFrequency] = useState("weekly");
   const [scheduleRecipients, setScheduleRecipients] = useState("hods_finance");
   const [scheduleSendingTest, setScheduleSendingTest] = useState(false);
+
+  // Print mode detection for unpaginated full print rendering
+  const [isPrinting, setIsPrinting] = useState(false);
+
+  useEffect(() => {
+    const handleBefore = () => setIsPrinting(true);
+    const handleAfter = () => setIsPrinting(false);
+    window.addEventListener("beforeprint", handleBefore);
+    window.addEventListener("afterprint", handleAfter);
+    return () => {
+      window.removeEventListener("beforeprint", handleBefore);
+      window.removeEventListener("afterprint", handleAfter);
+    };
+  }, []);
 
   // ── Query: Financial Lines Report ──────────────────────────────────────────
   const financialParams = useMemo<RequisitionReportParams>(() => {
@@ -351,6 +365,9 @@ export default function RequisitionReportsPage() {
     return sortedFinancialLines.slice(start, start + finPageSize);
   }, [sortedFinancialLines, finPage, finPageSize]);
 
+  // When printing, render all filtered lines across multiple printed pages
+  const displayedFinancialLines = isPrinting ? sortedFinancialLines : paginatedFinancialLines;
+
   const totalFinancialPages = Math.ceil(sortedFinancialLines.length / finPageSize) || 1;
 
   // ── Retirements Sorting & Pagination ───────────────────────────────────────
@@ -384,6 +401,9 @@ export default function RequisitionReportsPage() {
     const start = (retPage - 1) * retPageSize;
     return sortedRetirements.slice(start, start + retPageSize);
   }, [sortedRetirements, retPage, retPageSize]);
+
+  // When printing, render all filtered retirements across multiple printed pages
+  const displayedRetirements = isPrinting ? sortedRetirements : paginatedRetirements;
 
   const totalRetirementPages = Math.ceil(sortedRetirements.length / retPageSize) || 1;
 
@@ -533,7 +553,10 @@ export default function RequisitionReportsPage() {
   };
 
   const handlePrint = () => {
-    window.print();
+    setIsPrinting(true);
+    setTimeout(() => {
+      window.print();
+    }, 150);
   };
 
   const handleSendTestSchedule = () => {
@@ -645,30 +668,30 @@ export default function RequisitionReportsPage() {
   ], []);
 
   return (
-    <div className="flex h-full flex-col bg-[#F8FAFC] overflow-y-auto print:bg-white print:overflow-visible">
+    <div className="flex h-full flex-col bg-[#F8FAFC] overflow-y-auto print:bg-white print:overflow-visible print:h-auto print:block">
       {/* ── Official Print Header (Visible ONLY on print) ── */}
-      <div className="hidden print:block p-6 border-b-2 border-[#1E293B] mb-6">
+      <div className="hidden print:block pb-2.5 mb-2.5 border-b border-[#1E293B]">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-[#1E293B]">
+            <h1 className="text-base font-bold tracking-tight text-[#1E293B]">
               IDM FINANCIAL & REQUISITION MANAGEMENT SYSTEM
             </h1>
-            <p className="text-sm font-semibold text-[#287EAD] uppercase tracking-wider mt-0.5">
+            <p className="text-xs font-semibold text-[#287EAD] uppercase tracking-wider">
               {activeMainTab === "financial"
                 ? "Requisition Financial Lines & SunSystems GL Analysis Report"
                 : "Outstanding Travel Retirements Aging Report (by Traveller & Department)"}
             </p>
           </div>
-          <div className="text-right text-xs text-slate-600">
+          <div className="text-right text-[10px] text-slate-600">
             <p>Printed: {new Date().toLocaleString()}</p>
             <p className="font-semibold text-rose-700">CONFIDENTIAL</p>
           </div>
         </div>
-        <div className="mt-3 flex items-center justify-between text-xs text-slate-500 border-t border-slate-200 pt-2">
+        <div className="mt-1.5 flex items-center justify-between text-[10px] text-slate-500 border-t border-slate-200 pt-1">
           <span>
             {activeMainTab === "financial"
-              ? `Activity: ${finActivityCode || "All"} | Account: ${finAccountCode || "All"} | Total Lines: ${finSummary.total_lines}`
-              : `Department: ${retDepartment || "All"} | Aging: ${retAgingBucket || "All"} | Overdue: ${retSummary.total_overdue_records}`}
+              ? `Activity: ${finActivityCode || "All"} | Account: ${finAccountCode || "All"} | Total Lines: ${sortedFinancialLines.length}`
+              : `Department: ${retDepartment || "All"} | Aging: ${retAgingBucket || "All"} | Overdue: ${retSummary.total_overdue_records} | Total Records: ${sortedRetirements.length}`}
           </span>
           <span>Currency: USD / Functional</span>
         </div>
@@ -787,101 +810,101 @@ export default function RequisitionReportsPage() {
         {activeMainTab === "financial" && (
           <div className="space-y-4">
             {/* ── Light-Colored Stat Cards for Financial Lines ── */}
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-3">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-6 print:gap-1.5 print:mb-2.5">
               {/* Card 1: Total Requisition Amount */}
-              <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68]">
+              <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68] print:text-[10px]">
                   <span>Total Requisitions</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD]">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD] print:hidden">
                     <TrendingUp className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B]">
+                <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B] print:mt-0.5 print:text-sm">
                   {formatCurrency(finSummary.total_amount)}
                 </div>
-                <div className="mt-0.5 text-[11px] text-[#475569]">
+                <div className="mt-0.5 text-[11px] text-[#475569] print:text-[9px] print:mt-0">
                   Across {finSummary.total_lines} lines
                 </div>
               </div>
 
               {/* Card 2: Posted to SunSystems */}
-              <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
+              <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-emerald-800 print:text-[10px]">
                   <span>Posted to SunSystems</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700 print:hidden">
                     <CheckCircle2 className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-emerald-700">
+                <div className="mt-2 text-xl font-bold tabular-nums text-emerald-700 print:mt-0.5 print:text-sm">
                   {formatCurrency(finSummary.posted_amount)}
                 </div>
-                <div className="mt-0.5 text-[11px] text-emerald-600 font-medium">
+                <div className="mt-0.5 text-[11px] text-emerald-600 font-medium print:text-[9px] print:mt-0">
                   {finSummary.posted_lines} lines posted
                 </div>
               </div>
 
               {/* Card 3: Pending / Unposted */}
-              <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-amber-800">
+              <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-amber-800 print:text-[10px]">
                   <span>Pending / Unposted</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700 print:hidden">
                     <Clock className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-amber-700">
+                <div className="mt-2 text-xl font-bold tabular-nums text-amber-700 print:mt-0.5 print:text-sm">
                   {formatCurrency(finSummary.total_amount - finSummary.posted_amount)}
                 </div>
-                <div className="mt-0.5 text-[11px] text-amber-600">
+                <div className="mt-0.5 text-[11px] text-amber-600 print:text-[9px] print:mt-0">
                   {finSummary.total_lines - finSummary.posted_lines} unposted lines
                 </div>
               </div>
 
               {/* Card 4: Unique Activities */}
-              <div className="rounded-xl border border-[#DDD6FE] bg-[#F5F3FF] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-indigo-800">
+              <div className="rounded-xl border border-[#DDD6FE] bg-[#F5F3FF] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-indigo-800 print:text-[10px]">
                   <span>Unique Activities</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700 print:hidden">
                     <Layers className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-indigo-900">
+                <div className="mt-2 text-xl font-bold tabular-nums text-indigo-900 print:mt-0.5 print:text-sm">
                   {finSummary.distinct_activities}
                 </div>
-                <div className="mt-0.5 text-[11px] text-indigo-700">
+                <div className="mt-0.5 text-[11px] text-indigo-700 print:text-[9px] print:mt-0">
                   SunSystems Dim 10
                 </div>
               </div>
 
               {/* Card 5: Unique Accounts */}
-              <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-teal-800">
+              <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-teal-800 print:text-[10px]">
                   <span>GL Account Codes</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700 print:hidden">
                     <Building2 className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-teal-900">
+                <div className="mt-2 text-xl font-bold tabular-nums text-teal-900 print:mt-0.5 print:text-sm">
                   {finSummary.distinct_accounts}
                 </div>
-                <div className="mt-0.5 text-[11px] text-teal-700">
+                <div className="mt-0.5 text-[11px] text-teal-700 print:text-[9px] print:mt-0">
                   Chart of accounts
                 </div>
               </div>
 
               {/* Card 6: Posting Rate */}
-              <div className="rounded-xl border border-[#BFDBFE] bg-[#EFF6FF] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-blue-800">
+              <div className="rounded-xl border border-[#BFDBFE] bg-[#EFF6FF] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-blue-800 print:text-[10px]">
                   <span>Posting Rate</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-blue-100 text-blue-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-blue-100 text-blue-700 print:hidden">
                     <BarChart3 className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-blue-900">
+                <div className="mt-2 text-xl font-bold tabular-nums text-blue-900 print:mt-0.5 print:text-sm">
                   {finSummary.total_lines > 0
                     ? `${Math.round((finSummary.posted_lines / finSummary.total_lines) * 100)}%`
                     : "0%"}
                 </div>
-                <div className="mt-0.5 text-[11px] text-blue-700">
+                <div className="mt-0.5 text-[11px] text-blue-700 print:text-[9px] print:mt-0">
                   Requisitions posted
                 </div>
               </div>
@@ -1082,36 +1105,48 @@ export default function RequisitionReportsPage() {
 
             {/* Sub-Tab 1: Detailed Financial Lines Table */}
             {financialTab === "lines" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-left text-xs">
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden print:overflow-visible print:border-none print:shadow-none print:w-full">
+                <div className="overflow-x-auto print:overflow-visible print:w-full">
+                  <table className="w-full border-collapse text-left text-xs print:text-[9.5px] print:w-full print:table-fixed">
+                    <colgroup className="hidden print:table-column-group">
+                      <col className="w-[10%]" />
+                      <col className="w-[8%]" />
+                      <col className="w-[13%]" />
+                      <col className="w-[9%]" />
+                      <col className="w-[20%]" />
+                      <col className="w-[8%]" />
+                      <col className="w-[7%]" />
+                      <col className="w-[10%]" />
+                      <col className="w-[8%]" />
+                      <col className="w-[7%]" />
+                    </colgroup>
                     <thead>
-                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
-                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("document_reference")}>
+                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
+                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("document_reference")}>
                           <div className="flex items-center gap-1">
                             <span>Req Ref</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("date")}>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("date")}>
                           <div className="flex items-center gap-1">
                             <span>Date</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3">Dept / Requester</th>
-                        <th className="py-2.5 px-3">Activity Code (Dim 10)</th>
-                        <th className="py-2.5 px-3">Description</th>
-                        <th className="py-2.5 px-3">Account Code</th>
-                        <th className="py-2.5 px-3">Cost Centre</th>
-                        <th className="py-2.5 px-3 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("amount")}>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1">Dept / Requester</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1">Activity Code (Dim 10)</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1">Description</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1">Account Code</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1">Cost Centre</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("amount")}>
                           <div className="flex items-center justify-end gap-1">
                             <span>Amount</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3">Journal #</th>
-                        <th className="py-2.5 px-3">Status</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1">Journal #</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1">Status</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#F1F5F9]">
@@ -1122,7 +1157,7 @@ export default function RequisitionReportsPage() {
                             <p className="mt-2 font-medium">Loading financial lines…</p>
                           </td>
                         </tr>
-                      ) : paginatedFinancialLines.length === 0 ? (
+                      ) : displayedFinancialLines.length === 0 ? (
                         <tr>
                           <td colSpan={10} className="py-12 text-center text-xs text-[#64748B]">
                             <FileSpreadsheet className="mx-auto h-8 w-8 text-[#9AA5B1] mb-2" />
@@ -1131,41 +1166,41 @@ export default function RequisitionReportsPage() {
                           </td>
                         </tr>
                       ) : (
-                        paginatedFinancialLines.map((line) => (
+                        displayedFinancialLines.map((line) => (
                           <tr key={line.id} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
-                            <td className="py-2.5 px-3 font-semibold text-[#287EAD] whitespace-nowrap">
-                              <Link to={`/forms/${line.document_id}`} className="hover:underline flex items-center gap-1">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 font-semibold text-[#287EAD] whitespace-nowrap">
+                              <Link to={`/${line.document_id || line.id}`} className="hover:underline flex items-center gap-1">
                                 {line.document_reference}
                                 <ExternalLink className="h-3 w-3 text-[#94A3B8] print:hidden" />
                               </Link>
                             </td>
-                            <td className="py-2.5 px-3 text-[#64748B] whitespace-nowrap">{line.date}</td>
-                            <td className="py-2.5 px-3">
-                              <div className="font-semibold text-[#1E293B]">{line.department || "—"}</div>
-                              <div className="text-[10px] text-[#64748B]">{line.requester}</div>
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-[#64748B] whitespace-nowrap">{line.date}</td>
+                            <td className="py-2.5 px-3 print:py-1 print:px-1">
+                              <div className="font-semibold text-[#1E293B] truncate">{line.department || "—"}</div>
+                              <div className="text-[10px] text-[#64748B] truncate print:text-[8.5px]">{line.requester}</div>
                             </td>
-                            <td className="py-2.5 px-3">
-                              <span className="inline-flex items-center rounded bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-0.5 text-[11px] font-mono font-semibold text-[#0A4D68]">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1">
+                              <span className="inline-flex items-center rounded bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-0.5 text-[11px] font-mono font-semibold text-[#0A4D68] print:border-none print:bg-transparent print:px-0 print:py-0 print:text-[9px]">
                                 {line.activity_code}
                               </span>
                             </td>
-                            <td className="py-2.5 px-3 max-w-xs truncate" title={line.description}>
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 max-w-xs truncate print:max-w-none print:whitespace-normal print:line-clamp-2" title={line.description}>
                               {line.description}
                             </td>
-                            <td className="py-2.5 px-3">
-                              <span className="inline-flex items-center rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono font-semibold text-[#1E293B]">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1">
+                              <span className="inline-flex items-center rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono font-semibold text-[#1E293B] print:bg-transparent print:px-0 print:py-0 print:text-[9px]">
                                 {line.account_code}
                               </span>
                             </td>
-                            <td className="py-2.5 px-3 font-mono text-slate-600">{line.cost_centre || "—"}</td>
-                            <td className="py-2.5 px-3 text-right font-bold tabular-nums text-[#1E293B]">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 font-mono text-slate-600">{line.cost_centre || "—"}</td>
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-right font-bold tabular-nums text-[#1E293B]">
                               {formatCurrency(line.amount, line.currency)}
                             </td>
-                            <td className="py-2.5 px-3 whitespace-nowrap">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
                               <JournalStatusBadge status={line.journal_status} journalNumber={line.journal_number} />
                             </td>
-                            <td className="py-2.5 px-3">
-                              <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-[#475569]">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1">
+                              <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-[#475569] print:bg-transparent print:px-0 print:text-[9px]">
                                 {line.document_status}
                               </span>
                             </td>
@@ -1207,30 +1242,36 @@ export default function RequisitionReportsPage() {
                     </div>
                   </div>
                 )}
+
+                {/* Print Footer Summary */}
+                <div className="hidden print:flex items-center justify-between text-[9.5px] text-slate-500 border-t border-slate-300 pt-1.5 mt-3">
+                  <span>End of Report • {sortedFinancialLines.length} lines total • IDM Financial & Requisition Management System</span>
+                  <span>CONFIDENTIAL</span>
+                </div>
               </div>
             )}
 
             {/* Sub-Tab 2: Summary by Activity Code */}
             {financialTab === "activities" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
-                <table className="w-full border-collapse text-left text-xs">
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden print:overflow-visible print:border-none print:shadow-none print:w-full">
+                <table className="w-full border-collapse text-left text-xs print:text-[9.5px]">
                   <thead>
-                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
-                      <th className="py-2.5 px-3">Activity Code (Dim 10)</th>
-                      <th className="py-2.5 px-3">Activity Description</th>
-                      <th className="py-2.5 px-3 text-center">Lines</th>
-                      <th className="py-2.5 px-3 text-right">Total Amount</th>
-                      <th className="py-2.5 px-3 text-right text-emerald-800">Posted Amount</th>
+                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
+                      <th className="py-2.5 px-3 print:py-1 print:px-1.5">Activity Code (Dim 10)</th>
+                      <th className="py-2.5 px-3 print:py-1 print:px-1.5">Activity Description</th>
+                      <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-center">Lines</th>
+                      <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right">Total Amount</th>
+                      <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right text-emerald-800">Posted Amount</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#F1F5F9]">
                     {(financialData?.by_activity || []).map((row) => (
-                      <tr key={row.activity_code} className="hover:bg-[#F8FAFC]">
-                        <td className="py-2.5 px-3 font-mono font-bold text-[#0A4D68]">{row.activity_code}</td>
-                        <td className="py-2.5 px-3 text-[#1E293B]">{row.activity_description || "—"}</td>
-                        <td className="py-2.5 px-3 text-center tabular-nums">{row.line_count}</td>
-                        <td className="py-2.5 px-3 text-right font-bold tabular-nums">{formatCurrency(row.total_amount, row.currency)}</td>
-                        <td className="py-2.5 px-3 text-right tabular-nums text-emerald-700">{formatCurrency(row.posted_amount, row.currency)}</td>
+                      <tr key={row.activity_code} className="hover:bg-[#F8FAFC] print:break-inside-avoid">
+                        <td className="py-2.5 px-3 print:py-1 print:px-1.5 font-mono font-bold text-[#0A4D68]">{row.activity_code}</td>
+                        <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-[#1E293B]">{row.activity_description || "—"}</td>
+                        <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-center tabular-nums">{row.line_count}</td>
+                        <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right font-bold tabular-nums">{formatCurrency(row.total_amount, row.currency)}</td>
+                        <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right tabular-nums text-emerald-700">{formatCurrency(row.posted_amount, row.currency)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1240,23 +1281,23 @@ export default function RequisitionReportsPage() {
 
             {/* Sub-Tab 3: Summary by Account Code */}
             {financialTab === "accounts" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
-                <table className="w-full border-collapse text-left text-xs">
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden print:overflow-visible print:border-none print:shadow-none print:w-full">
+                <table className="w-full border-collapse text-left text-xs print:text-[9.5px]">
                   <thead>
-                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
-                      <th className="py-2.5 px-3">Account Code</th>
-                      <th className="py-2.5 px-3 text-center">Lines</th>
-                      <th className="py-2.5 px-3 text-right">Total Amount</th>
-                      <th className="py-2.5 px-3 text-right text-emerald-800">Posted Amount</th>
+                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
+                      <th className="py-2.5 px-3 print:py-1 print:px-1.5">Account Code</th>
+                      <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-center">Lines</th>
+                      <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right">Total Amount</th>
+                      <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right text-emerald-800">Posted Amount</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#F1F5F9]">
                     {(financialData?.by_account || []).map((row) => (
-                      <tr key={row.account_code} className="hover:bg-[#F8FAFC]">
-                        <td className="py-2.5 px-3 font-mono font-bold text-[#1E293B]">{row.account_code}</td>
-                        <td className="py-2.5 px-3 text-center tabular-nums">{row.line_count}</td>
-                        <td className="py-2.5 px-3 text-right font-bold tabular-nums">{formatCurrency(row.total_amount, row.currency)}</td>
-                        <td className="py-2.5 px-3 text-right tabular-nums text-emerald-700">{formatCurrency(row.posted_amount, row.currency)}</td>
+                      <tr key={row.account_code} className="hover:bg-[#F8FAFC] print:break-inside-avoid">
+                        <td className="py-2.5 px-3 print:py-1 print:px-1.5 font-mono font-bold text-[#1E293B]">{row.account_code}</td>
+                        <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-center tabular-nums">{row.line_count}</td>
+                        <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right font-bold tabular-nums">{formatCurrency(row.total_amount, row.currency)}</td>
+                        <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right tabular-nums text-emerald-700">{formatCurrency(row.posted_amount, row.currency)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1298,99 +1339,99 @@ export default function RequisitionReportsPage() {
         {activeMainTab === "retirements" && (
           <div className="space-y-4">
             {/* ── Light-Colored Stat Cards for Outstanding Retirements ── */}
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-3">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-6 print:gap-1.5 print:mb-2.5">
               {/* Card 1: Total Outstanding */}
-              <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68]">
+              <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68] print:text-[10px]">
                   <span>Outstanding Balance</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD]">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD] print:hidden">
                     <TrendingUp className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B]">
+                <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B] print:mt-0.5 print:text-sm">
                   {formatCurrency(retSummary.total_outstanding_amount)}
                 </div>
-                <div className="mt-0.5 text-[11px] text-[#475569]">
+                <div className="mt-0.5 text-[11px] text-[#475569] print:text-[9px] print:mt-0">
                   Across {retSummary.total_records} travel forms
                 </div>
               </div>
 
               {/* Card 2: Overdue Retirements */}
-              <div className="rounded-xl border border-[#FECDD3] bg-[#FFF1F2] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-rose-800">
+              <div className="rounded-xl border border-[#FECDD3] bg-[#FFF1F2] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-rose-800 print:text-[10px]">
                   <span>Overdue Retirements</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-rose-100 text-rose-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-rose-100 text-rose-700 print:hidden">
                     <ShieldAlert className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-rose-700">
+                <div className="mt-2 text-xl font-bold tabular-nums text-rose-700 print:mt-0.5 print:text-sm">
                   {retSummary.total_overdue_records}
                 </div>
-                <div className="mt-0.5 text-[11px] font-medium text-rose-600">
+                <div className="mt-0.5 text-[11px] font-medium text-rose-600 print:text-[9px] print:mt-0">
                   {formatCurrency(retSummary.total_overdue_amount)} delinquent
                 </div>
               </div>
 
               {/* Card 3: Average Aging */}
-              <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-amber-800">
+              <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-amber-800 print:text-[10px]">
                   <span>Avg. Aging (Overdue)</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700 print:hidden">
                     <Clock className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-amber-800">
+                <div className="mt-2 text-xl font-bold tabular-nums text-amber-800 print:mt-0.5 print:text-sm">
                   {retSummary.average_days_aged} days
                 </div>
-                <div className="mt-0.5 text-[11px] text-amber-700">
+                <div className="mt-0.5 text-[11px] text-amber-700 print:text-[9px] print:mt-0">
                   Past return grace period
                 </div>
               </div>
 
               {/* Card 4: Awaiting Finance Review */}
-              <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-teal-800">
+              <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-teal-800 print:text-[10px]">
                   <span>Awaiting Finance</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700 print:hidden">
                     <ClipboardList className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-teal-800">
+                <div className="mt-2 text-xl font-bold tabular-nums text-teal-800 print:mt-0.5 print:text-sm">
                   {retSummary.total_awaiting_finance}
                 </div>
-                <div className="mt-0.5 text-[11px] text-teal-700">
+                <div className="mt-0.5 text-[11px] text-teal-700 print:text-[9px] print:mt-0">
                   Expense review in progress
                 </div>
               </div>
 
               {/* Card 5: Total Advance Issued */}
-              <div className="rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
+              <div className="rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-slate-700 print:text-[10px]">
                   <span>Total Advance Issued</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-slate-200 text-slate-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-slate-200 text-slate-700 print:hidden">
                     <Building2 className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-slate-800">
+                <div className="mt-2 text-xl font-bold tabular-nums text-slate-800 print:mt-0.5 print:text-sm">
                   {formatCurrency(retSummary.total_advance_amount)}
                 </div>
-                <div className="mt-0.5 text-[11px] text-slate-500">
+                <div className="mt-0.5 text-[11px] text-slate-500 print:text-[9px] print:mt-0">
                   {formatCurrency(retSummary.total_retired_amount)} expensed
                 </div>
               </div>
 
               {/* Card 6: Current & Reconciled */}
-              <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs">
-                <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
+              <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+                <div className="flex items-center justify-between text-xs font-semibold text-emerald-800 print:text-[10px]">
                   <span>Current / Not Due</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700 print:hidden">
                     <CheckCircle2 className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-2 text-xl font-bold tabular-nums text-emerald-800">
+                <div className="mt-2 text-xl font-bold tabular-nums text-emerald-800 print:mt-0.5 print:text-sm">
                   {retSummary.aging_totals["current"]?.count || 0}
                 </div>
-                <div className="mt-0.5 text-[11px] text-emerald-700">
+                <div className="mt-0.5 text-[11px] text-emerald-700 print:text-[9px] print:mt-0">
                   {retSummary.total_reconciled} reconciled
                 </div>
               </div>
@@ -1705,51 +1746,63 @@ export default function RequisitionReportsPage() {
 
             {/* Sub-Tab 1: Aging Register Table */}
             {retirementsTab === "register" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-left text-xs">
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden print:overflow-visible print:border-none print:shadow-none print:w-full">
+                <div className="overflow-x-auto print:overflow-visible print:w-full">
+                  <table className="w-full border-collapse text-left text-xs print:text-[9.5px] print:w-full print:table-fixed">
+                    <colgroup className="hidden print:table-column-group">
+                      <col className="w-[10%]" />
+                      <col className="w-[14%]" />
+                      <col className="w-[10%]" />
+                      <col className="w-[11%]" />
+                      <col className="w-[8%]" />
+                      <col className="w-[12%]" />
+                      <col className="w-[9%]" />
+                      <col className="w-[9%]" />
+                      <col className="w-[9%]" />
+                      <col className="w-[8%]" />
+                    </colgroup>
                     <thead>
-                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
-                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("document_reference")}>
+                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
+                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("document_reference")}>
                           <div className="flex items-center gap-1">
                             <span>Req Ref</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("traveller_name")}>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("traveller_name")}>
                           <div className="flex items-center gap-1">
                             <span>Traveller</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3">Department</th>
-                        <th className="py-2.5 px-3">Travel Dates</th>
-                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("due_date")}>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1">Department</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1">Travel Dates</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("due_date")}>
                           <div className="flex items-center gap-1">
                             <span>Due Date</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("days_overdue")}>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("days_overdue")}>
                           <div className="flex items-center gap-1">
                             <span>Aging Status</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("advance_amount")}>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("advance_amount")}>
                           <div className="flex items-center justify-end gap-1">
                             <span>Advance</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3 text-right">Retired / Spent</th>
-                        <th className="py-2.5 px-3 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("outstanding_amount")}>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1 text-right">Retired / Spent</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("outstanding_amount")}>
                           <div className="flex items-center justify-end gap-1">
                             <span>Outstanding</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3">Workflow State</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1">Workflow State</th>
                         <th className="py-2.5 px-3 text-center print:hidden">Action</th>
                       </tr>
                     </thead>
@@ -1761,7 +1814,7 @@ export default function RequisitionReportsPage() {
                             <p className="mt-2 font-medium">Analyzing outstanding travel retirements…</p>
                           </td>
                         </tr>
-                      ) : paginatedRetirements.length === 0 ? (
+                      ) : displayedRetirements.length === 0 ? (
                         <tr>
                           <td colSpan={11} className="py-12 text-center text-xs text-[#64748B]">
                             <CheckCircle2 className="mx-auto h-8 w-8 text-emerald-500 mb-2" />
@@ -1772,12 +1825,12 @@ export default function RequisitionReportsPage() {
                           </td>
                         </tr>
                       ) : (
-                        paginatedRetirements.map((line) => (
+                        displayedRetirements.map((line) => (
                           <tr key={line.id} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
                             {/* Requisition Ref */}
-                            <td className="py-2.5 px-3 font-semibold text-[#287EAD] whitespace-nowrap">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 font-semibold text-[#287EAD] whitespace-nowrap">
                               <Link
-                                to={`/forms/${line.id}`}
+                                to={`/${line.document_id || line.id}`}
                                 className="hover:underline flex items-center gap-1"
                               >
                                 {line.document_reference}
@@ -1786,28 +1839,28 @@ export default function RequisitionReportsPage() {
                             </td>
 
                             {/* Traveller */}
-                            <td className="py-2.5 px-3">
-                              <div className="font-semibold text-[#1E293B]">{line.traveller_name}</div>
+                            <td className="py-2.5 px-3 print:py-1 print:px-1">
+                              <div className="font-semibold text-[#1E293B] truncate">{line.traveller_name}</div>
                               {line.traveller_email && (
-                                <div className="text-[10px] text-[#64748B]">{line.traveller_email}</div>
+                                <div className="text-[10px] text-[#64748B] truncate print:text-[8.5px]">{line.traveller_email}</div>
                               )}
                             </td>
 
                             {/* Department */}
-                            <td className="py-2.5 px-3">
-                              <span className="inline-flex items-center rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] font-medium text-[#475569]">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1">
+                              <span className="inline-flex items-center rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] font-medium text-[#475569] print:bg-transparent print:px-0 print:py-0 print:text-[9px]">
                                 {line.department}
                               </span>
                             </td>
 
                             {/* Travel Dates */}
-                            <td className="py-2.5 px-3 text-[#475569] whitespace-nowrap">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-[#475569] whitespace-nowrap">
                               <div>{formatDateDisplay(line.departure_date)}</div>
-                              <div className="text-[10px] text-[#94A3B8]">Ret: {formatDateDisplay(line.return_date)}</div>
+                              <div className="text-[10px] text-[#94A3B8] print:text-[8.5px]">Ret: {formatDateDisplay(line.return_date)}</div>
                             </td>
 
                             {/* Due Date */}
-                            <td className="py-2.5 px-3 whitespace-nowrap">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
                               <div className={cn(
                                 "font-medium",
                                 line.days_overdue > 0 ? "text-rose-700 font-bold" : "text-[#475569]",
@@ -1817,7 +1870,7 @@ export default function RequisitionReportsPage() {
                             </td>
 
                             {/* Aging Status */}
-                            <td className="py-2.5 px-3 whitespace-nowrap">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
                               <AgingBadge
                                 bucket={line.aging_bucket}
                                 label={line.aging_bucket_label}
@@ -1826,17 +1879,17 @@ export default function RequisitionReportsPage() {
                             </td>
 
                             {/* Advance Amount */}
-                            <td className="py-2.5 px-3 text-right font-medium tabular-nums text-[#475569]">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-right font-medium tabular-nums text-[#475569]">
                               {formatCurrency(line.advance_amount, line.currency)}
                             </td>
 
                             {/* Retired / Spent */}
-                            <td className="py-2.5 px-3 text-right tabular-nums text-[#64748B]">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-right tabular-nums text-[#64748B]">
                               {line.retired_amount > 0 ? formatCurrency(line.retired_amount, line.currency) : "—"}
                             </td>
 
                             {/* Outstanding Balance */}
-                            <td className="py-2.5 px-3 text-right font-bold tabular-nums text-[#1E293B]">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-right font-bold tabular-nums text-[#1E293B]">
                               <span className={cn(
                                 line.outstanding_amount > 0 && line.days_overdue > 0 ? "text-rose-700" : "text-[#1E293B]",
                               )}>
@@ -1845,8 +1898,8 @@ export default function RequisitionReportsPage() {
                             </td>
 
                             {/* Workflow State */}
-                            <td className="py-2.5 px-3 whitespace-nowrap">
-                              <span className="text-[11px] text-[#475569] font-medium">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
+                              <span className="text-[11px] text-[#475569] font-medium print:text-[9px]">
                                 {line.retirement_status_label}
                               </span>
                             </td>
@@ -1854,7 +1907,7 @@ export default function RequisitionReportsPage() {
                             {/* Action Link */}
                             <td className="py-2.5 px-3 text-center print:hidden">
                               <Link
-                                to={`/forms/${line.id}`}
+                                to={`/${line.document_id || line.id}`}
                                 className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#287EAD] hover:underline"
                               >
                                 View
@@ -1898,73 +1951,79 @@ export default function RequisitionReportsPage() {
                     </div>
                   </div>
                 )}
+
+                {/* Print Footer Summary */}
+                <div className="hidden print:flex items-center justify-between text-[9.5px] text-slate-500 border-t border-slate-300 pt-1.5 mt-3">
+                  <span>End of Report • {sortedRetirements.length} retirement records total • IDM Financial & Requisition Management System</span>
+                  <span>CONFIDENTIAL</span>
+                </div>
               </div>
             )}
 
             {/* Sub-Tab 2: Aged by Department Matrix */}
             {retirementsTab === "by_department" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
-                <div className="border-b border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3">
-                  <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider">
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden print:overflow-visible print:border-none print:shadow-none print:w-full">
+                <div className="border-b border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3 print:py-1.5 print:px-2">
+                  <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider print:text-[10px]">
                     Department Aging Analysis Matrix
                   </h3>
-                  <p className="mt-0.5 text-xs text-[#64748B]">
+                  <p className="mt-0.5 text-xs text-[#64748B] print:text-[8.5px]">
                     Breakdown of travel advances and outstanding obligations by aging bucket for each department.
                   </p>
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-left text-xs">
+                <div className="overflow-x-auto print:overflow-visible print:w-full">
+                  <table className="w-full border-collapse text-left text-xs print:text-[9.5px]">
                     <thead>
-                      <tr className="border-b border-[#E2E8F0] bg-[#F1F5F9] text-[11px] font-semibold text-[#475569]">
-                        <th className="py-2.5 px-3">Department</th>
-                        <th className="py-2.5 px-3 text-center">Total Req</th>
-                        <th className="py-2.5 px-3 text-center">Overdue</th>
-                        <th className="py-2.5 px-3 text-right">Total Advance</th>
-                        <th className="py-2.5 px-3 text-right text-emerald-800 bg-emerald-50/50">Current / Not Due</th>
-                        <th className="py-2.5 px-3 text-right text-amber-800 bg-amber-50/50">1–30 Days</th>
-                        <th className="py-2.5 px-3 text-right text-orange-800 bg-orange-50/50">31–60 Days</th>
-                        <th className="py-2.5 px-3 text-right text-rose-800 bg-rose-50/50">61–90 Days</th>
-                        <th className="py-2.5 px-3 text-right text-red-900 bg-red-50/50">90+ Days</th>
-                        <th className="py-2.5 px-3 text-right font-bold text-[#1E293B]">Total Outstanding</th>
+                      <tr className="border-b border-[#E2E8F0] bg-[#F1F5F9] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5">Department</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-center">Total Req</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-center">Overdue</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right">Total Advance</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right text-emerald-800 bg-emerald-50/50">Current / Not Due</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right text-amber-800 bg-amber-50/50">1–30 Days</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right text-orange-800 bg-orange-50/50">31–60 Days</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right text-rose-800 bg-rose-50/50">61–90 Days</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right text-red-900 bg-red-50/50">90+ Days</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right font-bold text-[#1E293B]">Total Outstanding</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#F1F5F9]">
                       {(retirementsData?.by_department || []).map((dept) => (
                         <tr key={dept.department} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
-                          <td className="py-2.5 px-3 font-semibold text-[#1E293B]">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 font-semibold text-[#1E293B]">
                             {dept.department}
                           </td>
-                          <td className="py-2.5 px-3 text-center tabular-nums text-[#475569]">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-center tabular-nums text-[#475569]">
                             {dept.total_records}
                           </td>
-                          <td className="py-2.5 px-3 text-center">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-center">
                             {dept.overdue_count > 0 ? (
-                              <span className="inline-flex items-center justify-center rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-bold text-rose-800">
+                              <span className="inline-flex items-center justify-center rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-bold text-rose-800 print:text-[9px]">
                                 {dept.overdue_count}
                               </span>
                             ) : (
                               <span className="text-slate-400 font-mono">0</span>
                             )}
                           </td>
-                          <td className="py-2.5 px-3 text-right font-medium tabular-nums text-[#475569]">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right font-medium tabular-nums text-[#475569]">
                             {formatCurrency(dept.total_advance)}
                           </td>
-                          <td className="py-2.5 px-3 text-right tabular-nums text-emerald-800 bg-emerald-50/30">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right tabular-nums text-emerald-800 bg-emerald-50/30">
                             {formatCurrency(dept.aging_buckets.current || 0)}
                           </td>
-                          <td className="py-2.5 px-3 text-right tabular-nums text-amber-800 bg-amber-50/30">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right tabular-nums text-amber-800 bg-amber-50/30">
                             {formatCurrency(dept.aging_buckets["1_30"] || 0)}
                           </td>
-                          <td className="py-2.5 px-3 text-right tabular-nums text-orange-800 bg-orange-50/30">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right tabular-nums text-orange-800 bg-orange-50/30">
                             {formatCurrency(dept.aging_buckets["31_60"] || 0)}
                           </td>
-                          <td className="py-2.5 px-3 text-right tabular-nums text-rose-800 bg-rose-50/30">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right tabular-nums text-rose-800 bg-rose-50/30">
                             {formatCurrency(dept.aging_buckets["61_90"] || 0)}
                           </td>
-                          <td className="py-2.5 px-3 text-right tabular-nums text-red-900 bg-red-50/30 font-semibold">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right tabular-nums text-red-900 bg-red-50/30 font-semibold">
                             {formatCurrency(dept.aging_buckets.over_90 || 0)}
                           </td>
-                          <td className="py-2.5 px-3 text-right font-bold tabular-nums text-[#1E293B]">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right font-bold tabular-nums text-[#1E293B]">
                             {formatCurrency(dept.total_outstanding)}
                           </td>
                         </tr>
@@ -1977,69 +2036,69 @@ export default function RequisitionReportsPage() {
 
             {/* Sub-Tab 3: Aged by Traveller Summary */}
             {retirementsTab === "by_traveller" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
-                <div className="border-b border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3">
-                  <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider">
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden print:overflow-visible print:border-none print:shadow-none print:w-full">
+                <div className="border-b border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3 print:py-1.5 print:px-2">
+                  <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider print:text-[10px]">
                     Traveller Aging Summary
                   </h3>
-                  <p className="mt-0.5 text-xs text-[#64748B]">
+                  <p className="mt-0.5 text-xs text-[#64748B] print:text-[8.5px]">
                     Individual employee travel advance exposure, aging delinquency, and unreconciled amounts.
                   </p>
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-left text-xs">
+                <div className="overflow-x-auto print:overflow-visible print:w-full">
+                  <table className="w-full border-collapse text-left text-xs print:text-[9.5px]">
                     <thead>
-                      <tr className="border-b border-[#E2E8F0] bg-[#F1F5F9] text-[11px] font-semibold text-[#475569]">
-                        <th className="py-2.5 px-3">Traveller</th>
-                        <th className="py-2.5 px-3">Department</th>
-                        <th className="py-2.5 px-3 text-center">Req Count</th>
-                        <th className="py-2.5 px-3 text-center">Overdue</th>
-                        <th className="py-2.5 px-3 text-right">Total Advance</th>
-                        <th className="py-2.5 px-3 text-right text-emerald-800">Current</th>
-                        <th className="py-2.5 px-3 text-right text-amber-800">1–30d</th>
-                        <th className="py-2.5 px-3 text-right text-rose-800">31d+</th>
-                        <th className="py-2.5 px-3 text-right font-bold text-[#1E293B]">Outstanding Balance</th>
+                      <tr className="border-b border-[#E2E8F0] bg-[#F1F5F9] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5">Traveller</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5">Department</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-center">Req Count</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-center">Overdue</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right">Total Advance</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right text-emerald-800">Current</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right text-amber-800">1–30d</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right text-rose-800">31d+</th>
+                        <th className="py-2.5 px-3 print:py-1 print:px-1.5 text-right font-bold text-[#1E293B]">Outstanding Balance</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#F1F5F9]">
                       {(retirementsData?.by_traveller || []).map((tr) => (
                         <tr key={tr.traveller_name} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
-                          <td className="py-2.5 px-3">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5">
                             <div className="font-semibold text-[#1E293B]">{tr.traveller_name}</div>
                             {tr.traveller_email && (
-                              <div className="text-[10px] text-[#64748B]">{tr.traveller_email}</div>
+                              <div className="text-[10px] text-[#64748B] print:text-[8.5px]">{tr.traveller_email}</div>
                             )}
                           </td>
-                          <td className="py-2.5 px-3">
-                            <span className="inline-flex items-center rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] font-medium text-[#475569]">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5">
+                            <span className="inline-flex items-center rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] font-medium text-[#475569] print:bg-transparent print:px-0 print:py-0 print:text-[9px]">
                               {tr.department}
                             </span>
                           </td>
-                          <td className="py-2.5 px-3 text-center tabular-nums text-[#475569]">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-center tabular-nums text-[#475569]">
                             {tr.total_records}
                           </td>
-                          <td className="py-2.5 px-3 text-center">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-center">
                             {tr.overdue_count > 0 ? (
-                              <span className="inline-flex items-center justify-center rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-bold text-rose-800">
+                              <span className="inline-flex items-center justify-center rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-bold text-rose-800 print:text-[9px]">
                                 {tr.overdue_count}
                               </span>
                             ) : (
                               <span className="text-slate-400 font-mono">0</span>
                             )}
                           </td>
-                          <td className="py-2.5 px-3 text-right font-medium tabular-nums text-[#475569]">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right font-medium tabular-nums text-[#475569]">
                             {formatCurrency(tr.total_advance)}
                           </td>
-                          <td className="py-2.5 px-3 text-right tabular-nums text-emerald-800">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right tabular-nums text-emerald-800">
                             {formatCurrency(tr.aging_buckets.current || 0)}
                           </td>
-                          <td className="py-2.5 px-3 text-right tabular-nums text-amber-800">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right tabular-nums text-amber-800">
                             {formatCurrency(tr.aging_buckets["1_30"] || 0)}
                           </td>
-                          <td className="py-2.5 px-3 text-right tabular-nums text-rose-800 font-semibold">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right tabular-nums text-rose-800">
                             {formatCurrency((tr.aging_buckets["31_60"] || 0) + (tr.aging_buckets["61_90"] || 0) + (tr.aging_buckets.over_90 || 0))}
                           </td>
-                          <td className="py-2.5 px-3 text-right font-bold tabular-nums text-[#1E293B]">
+                          <td className="py-2.5 px-3 print:py-1 print:px-1.5 text-right font-bold tabular-nums text-[#1E293B]">
                             {formatCurrency(tr.total_outstanding)}
                           </td>
                         </tr>
@@ -2049,7 +2108,6 @@ export default function RequisitionReportsPage() {
                 </div>
               </div>
             )}
-
             {/* Sub-Tab 4: Aging Visual Analytics */}
             {retirementsTab === "visuals" && (
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

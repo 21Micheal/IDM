@@ -396,6 +396,7 @@ export default function App() {
               <Route path="notifications" element={<NotificationsPage />} />
               <Route path="notifications/workflow/:documentId" element={<NotificationWorkflowPage />} />
               <Route path=":id" element={<FormDetailPage />} />
+              <Route path="forms/:id" element={<FormDetailPage />} />
               <Route path="forms/new/builder" element={<RequisitionFormBuilder />} />
               <Route path="profile" element={<ProfilePage />} />
               

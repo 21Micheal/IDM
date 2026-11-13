@@ -73,6 +73,7 @@ export interface RequisitionReportParams {
 
 export interface OutstandingRetirementLine {
   id: string;
+  document_id?: string;
   document_reference: string;
   title: string;
   document_status: string;

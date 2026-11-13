@@ -454,3 +454,55 @@
     padding: 1rem;
   }
 }
+
+/* ── Global Print Optimization ──────────────────────────────────────────────── */
+@media print {
+  @page {
+    size: landscape;
+    margin: 8mm 10mm;
+  }
+
+  html,
+  body,
+  #root,
+  #root > *,
+  .app-root,
+  main,
+  [class*="overflow-"] {
+    overflow: visible !important;
+  }
+
+  html,
+  body,
+  #root,
+  #root > *,
+  .app-root,
+  main {
+    height: auto !important;
+    min-height: auto !important;
+    max-height: none !important;
+    width: 100% !important;
+    background: #ffffff !important;
+  }
+
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  table {
+    page-break-inside: auto;
+    break-inside: auto;
+    width: 100% !important;
+  }
+  tr {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+  thead {
+    display: table-header-group !important;
+  }
+  tfoot {
+    display: table-footer-group !important;
+  }
+}

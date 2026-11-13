@@ -614,6 +614,7 @@ def build_outstanding_retirements_report(
 
         item = {
             "id": str(doc.id),
+            "document_id": str(doc.id),
             "document_reference": doc_ref,
             "title": doc.title or "Travel Requisition",
             "document_status": str(doc.status or "draft"),
