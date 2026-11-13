@@ -1469,7 +1469,10 @@ function dsaAccountValueSpec(field: TemplateField): Record<string, string> | und
   const direct = columns.find((column) => column.sunsystems?.role === "dsa_account_code");
   if (direct) return { row_field: direct.key };
   const budgetLine = columns.find((column) => column.type === "budget_line" || column.sunsystems?.role === "budget_line");
-  return budgetLine?.budgetLine?.dsaAccountCodes?.length
+  // DSA account codes can come from the paired Activity lookup at runtime, so
+  // an empty static options list must not hide the journal configuration or
+  // prevent the selected `dsa_account_code` value from being mapped.
+  return budgetLine && (budgetLine.budgetLine?.dsaAccountCodes?.length || dsaAmountColumn(columns))
     ? { row_field: budgetLine.key, key: "dsa_account_code" }
     : undefined;
 }
@@ -5482,6 +5485,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               </InspectorRow>
               {(field.workflowRole === "rfq_required_lines" || (field.columns ?? []).some((column) =>
                 column.sunsystems?.role === "dsa_account_code"
+                || column.sunsystems?.role === "dsa_line_amount"
                 || (column.type === "budget_line" && Boolean(column.budgetLine?.dsaAccountCodes?.length)))) && (
                 <ImprestRequestConfigEditor
                   field={field}
