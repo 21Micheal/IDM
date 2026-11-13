@@ -1,20 +1,28 @@
 /**
  * RequisitionReportsPage.tsx
  *
- * Comprehensive financial and compliance reporting for the Requisition System:
- * 1. Outstanding Retirements Report (Aged by Traveller and Department)
- *    - Client specification: Aging analysis (Current, 1-30d, 31-60d, 61-90d, 90+d)
- *    - Interactive Q&A Assistant ("Ask the Report")
- *    - Scheduled automated report configuration
+ * Consolidated Financial & Compliance Reporting Hub for Requisitions:
+ *
+ * Organized into two primary focused tabs so users are never overwhelmed:
+ * 1. [Requisition Financial Lines]
+ *    - Core fields: Activity Code (Dim 10), Line Description, Account Code, Amount, and Journal #
+ *    - Sub-tabs: Detailed Lines, By Activity Code, By Account Code, Visual Spend Charts
  *    - Light-colored stat cards with HEX: #C5E6F5 accents
- *    - CustomListbox dropdowns
- * 2. Requisition Financial Lines Report
- *    - Activity code (Dimension 10), Line Description, Account code, Amount, and Journal #
- *    - Aggregations by Activity and Account
- * 3. Clean, print-friendly layout (hiding all controls, sidebars, and headers).
+ *    - CustomListbox dropdowns (Account, Activity, Department, Status, Page Size)
+ *
+ * 2. [Outstanding Retirements Aging]
+ *    - Client requirement: Outstanding travel retirements aged by traveller and department
+ *    - Aging brackets: Current / Not Due, 1–30d, 31–60d, 61–90d, 90+d, and Reconciled
+ *    - Sub-tabs: Aging Register, Aged by Department Matrix, Aged by Traveller Summary, Aging Analytics
+ *    - Interactive Q&A Assistant ("Ask the Report")
+ *    - Automated Schedule Configuration Modal
+ *    - Light-colored stat cards with HEX: #C5E6F5 accents
+ *    - CustomListbox dropdowns (Aging Category, Department, Traveller, Status, Page Size)
+ *
+ * 3. Print-friendly layout (clean formal print header, hiding all nav, sidebars, filters, and controls).
  */
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   FileSpreadsheet, Download, Printer, Search, X, Filter,
@@ -22,7 +30,7 @@ import {
   Building2, ClipboardList, RefreshCw, ExternalLink, Layers,
   ChevronLeft, ChevronRight, SlidersHorizontal, Loader2,
   Calendar, Mail, User, ShieldAlert, Sparkles, Send, BellRing,
-  HelpCircle, ArrowUpDown, Check, CheckCircle,
+  HelpCircle, ArrowUpDown, Check, CheckCircle, ChevronDown, ChevronUp,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
@@ -43,22 +51,16 @@ import type {
 } from "@/types/reports";
 import { cn } from "@/lib/utils";
 
-type ReportMode = "retirements" | "financial_lines";
-type RetirementsTab = "register" | "by_department" | "by_traveller" | "visuals";
+type MainTab = "financial" | "retirements";
 type FinancialLinesTab = "lines" | "activities" | "accounts" | "visuals";
+type RetirementsTab = "register" | "by_department" | "by_traveller" | "visuals";
 type SortDirection = "asc" | "desc";
 
-const CHART_COLORS = [
-  "#287EAD", "#0D9488", "#6366F1", "#F59E0B",
-  "#EC4899", "#8B5CF6", "#10B981", "#3B82F6",
-  "#F97316", "#14B8A6",
-];
-
 const AGING_BAR_COLORS: Record<string, string> = {
-  current: "#10B981", // Emerald
-  "1_30": "#F59E0B",  // Amber
-  "31_60": "#F97316", // Orange
-  "61_90": "#EF4444", // Red
+  current: "#10B981",  // Emerald
+  "1_30": "#F59E0B",   // Amber
+  "31_60": "#F97316",  // Orange
+  "61_90": "#EF4444",  // Red
   "over_90": "#991B1B", // Dark Red
   reconciled: "#6366F1", // Indigo
 };
@@ -181,23 +183,19 @@ function JournalStatusBadge({ status, journalNumber }: { status: string; journal
 }
 
 export default function RequisitionReportsPage() {
-  // Top Report Switcher: Outstanding Retirements Aging vs Requisition Financial Lines
-  const [reportMode, setReportMode] = useState<ReportMode>("retirements");
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  // Retirements View state
-  const [retirementsTab, setRetirementsTab] = useState<RetirementsTab>("register");
-  const [retSearch, setRetSearch] = useState("");
-  const [retDepartment, setRetDepartment] = useState("");
-  const [retTraveller, setRetTraveller] = useState("");
-  const [retStatus, setRetStatus] = useState("");
-  const [retAgingBucket, setRetAgingBucket] = useState("all");
-  const [retStartDate, setRetStartDate] = useState("");
-  const [retEndDate, setRetEndDate] = useState("");
-  const [retIncludeReconciled, setRetIncludeReconciled] = useState(false);
-  const [retPage, setRetPage] = useState(1);
-  const [retPageSize, setRetPageSize] = useState(25);
+  // Active Main Tab ("financial" or "retirements")
+  const activeMainTab: MainTab = (searchParams.get("tab") === "retirements" ? "retirements" : "financial");
+  const setActiveMainTab = (tab: MainTab) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("tab", tab);
+      return next;
+    });
+  };
 
-  // Financial Lines View state
+  // ── Tab 1: Financial Lines State ───────────────────────────────────────────
   const [financialTab, setFinancialTab] = useState<FinancialLinesTab>("lines");
   const [finSearch, setFinSearch] = useState("");
   const [finStartDate, setFinStartDate] = useState("");
@@ -209,19 +207,26 @@ export default function RequisitionReportsPage() {
   const [finHasJournal, setFinHasJournal] = useState<boolean | null>(null);
   const [finPage, setFinPage] = useState(1);
   const [finPageSize, setFinPageSize] = useState(25);
+  const [finSortField, setFinSortField] = useState<string>("date");
+  const [finSortDirection, setFinSortDirection] = useState<SortDirection>("desc");
 
-  // Sorting state for lines
-  const [sortField, setSortField] = useState<string>("due_date");
-  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  // ── Tab 2: Outstanding Retirements State ────────────────────────────────────
+  const [retirementsTab, setRetirementsTab] = useState<RetirementsTab>("register");
+  const [retSearch, setRetSearch] = useState("");
+  const [retDepartment, setRetDepartment] = useState("");
+  const [retTraveller, setRetTraveller] = useState("");
+  const [retStatus, setRetStatus] = useState("");
+  const [retAgingBucket, setRetAgingBucket] = useState("all");
+  const [retStartDate, setRetStartDate] = useState("");
+  const [retEndDate, setRetEndDate] = useState("");
+  const [retIncludeReconciled, setRetIncludeReconciled] = useState(false);
+  const [retPage, setRetPage] = useState(1);
+  const [retPageSize, setRetPageSize] = useState(25);
+  const [retSortField, setRetSortField] = useState<string>("due_date");
+  const [retSortDirection, setRetSortDirection] = useState<SortDirection>("asc");
 
-  // Export & Schedule Modals
-  const [exportingCsv, setExportingCsv] = useState(false);
-  const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
-  const [scheduleFrequency, setScheduleFrequency] = useState("weekly");
-  const [scheduleRecipients, setScheduleRecipients] = useState("hods_finance");
-  const [scheduleSendingTest, setScheduleSendingTest] = useState(false);
-
-  // Q&A Natural Query Assistant state
+  // Q&A Assistant state in Retirements tab
+  const [qaOpen, setQaOpen] = useState(false);
   const [qaQuery, setQaQuery] = useState("");
   const [qaAnswer, setQaAnswer] = useState<{
     queryText: string;
@@ -231,33 +236,12 @@ export default function RequisitionReportsPage() {
     matchAmount: number;
   } | null>(null);
 
-  // ── Query: Outstanding Retirements Report ──────────────────────────────────
-  const retirementsParams = useMemo<RetirementsAgingReportParams>(() => {
-    return {
-      search: retSearch.trim() || undefined,
-      department: retDepartment || undefined,
-      traveller: retTraveller || undefined,
-      status: retStatus || undefined,
-      aging_bucket: retAgingBucket !== "all" ? retAgingBucket : undefined,
-      start_date: retStartDate || undefined,
-      end_date: retEndDate || undefined,
-      include_reconciled: retIncludeReconciled ? "true" : undefined,
-    };
-  }, [
-    retSearch, retDepartment, retTraveller, retStatus,
-    retAgingBucket, retStartDate, retEndDate, retIncludeReconciled,
-  ]);
-
-  const {
-    data: retirementsData,
-    isLoading: isLoadingRetirements,
-    isFetching: isFetchingRetirements,
-    refetch: refetchRetirements,
-  } = useQuery({
-    queryKey: ["report-retirements-aging", retirementsParams],
-    queryFn: () => documentsAPI.retirementsAgingReport(retirementsParams).then((r) => r.data),
-    staleTime: 60_000,
-  });
+  // Export & Schedule Modals
+  const [exportingCsv, setExportingCsv] = useState(false);
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
+  const [scheduleFrequency, setScheduleFrequency] = useState("weekly");
+  const [scheduleRecipients, setScheduleRecipients] = useState("hods_finance");
+  const [scheduleSendingTest, setScheduleSendingTest] = useState(false);
 
   // ── Query: Financial Lines Report ──────────────────────────────────────────
   const financialParams = useMemo<RequisitionReportParams>(() => {
@@ -279,67 +263,88 @@ export default function RequisitionReportsPage() {
   const {
     data: financialData,
     isLoading: isLoadingFinancial,
-    isFetching: isFetchingFinancial,
     refetch: refetchFinancial,
   } = useQuery({
     queryKey: ["report-financial-lines", financialParams],
     queryFn: () => documentsAPI.requisitionReport(financialParams).then((r) => r.data),
     staleTime: 60_000,
-    enabled: reportMode === "financial_lines",
   });
 
-  // ── Sorting helper ─────────────────────────────────────────────────────────
-  const handleSort = (field: string) => {
-    if (sortField === field) {
-      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+  // ── Query: Outstanding Retirements Aging Report ─────────────────────────────
+  const retirementsParams = useMemo<RetirementsAgingReportParams>(() => {
+    return {
+      search: retSearch.trim() || undefined,
+      department: retDepartment || undefined,
+      traveller: retTraveller || undefined,
+      status: retStatus || undefined,
+      aging_bucket: retAgingBucket !== "all" ? retAgingBucket : undefined,
+      start_date: retStartDate || undefined,
+      end_date: retEndDate || undefined,
+      include_reconciled: retIncludeReconciled ? "true" : undefined,
+    };
+  }, [
+    retSearch, retDepartment, retTraveller, retStatus,
+    retAgingBucket, retStartDate, retEndDate, retIncludeReconciled,
+  ]);
+
+  const {
+    data: retirementsData,
+    isLoading: isLoadingRetirements,
+    refetch: refetchRetirements,
+  } = useQuery({
+    queryKey: ["report-retirements-aging", retirementsParams],
+    queryFn: () => documentsAPI.retirementsAgingReport(retirementsParams).then((r) => r.data),
+    staleTime: 60_000,
+  });
+
+  const finSummary = financialData?.summary || {
+    total_amount: 0,
+    total_lines: 0,
+    posted_amount: 0,
+    posted_lines: 0,
+    distinct_activities: 0,
+    distinct_accounts: 0,
+  };
+
+  const retSummary = retirementsData?.summary || {
+    total_records: 0,
+    total_advance_amount: 0,
+    total_outstanding_amount: 0,
+    total_retired_amount: 0,
+    total_overdue_records: 0,
+    total_overdue_amount: 0,
+    total_awaiting_finance: 0,
+    total_reconciled: 0,
+    average_days_aged: 0,
+    aging_totals: {},
+  };
+
+  // ── Financial Lines Sorting & Pagination ───────────────────────────────────
+  const handleFinSort = (field: string) => {
+    if (finSortField === field) {
+      setFinSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
     } else {
-      setSortField(field);
-      setSortDirection("asc");
+      setFinSortField(field);
+      setFinSortDirection("asc");
     }
   };
 
-  // ── Outstanding Retirements Sorted & Paginated Lines ───────────────────────
-  const sortedRetirements = useMemo(() => {
-    const list = [...(retirementsData?.retirements || [])];
-    list.sort((a, b) => {
-      let va = (a as any)[sortField];
-      let vb = (b as any)[sortField];
-      if (typeof va === "number" && typeof vb === "number") {
-        return sortDirection === "asc" ? va - vb : vb - va;
-      }
-      va = String(va || "").toLowerCase();
-      vb = String(vb || "").toLowerCase();
-      if (va < vb) return sortDirection === "asc" ? -1 : 1;
-      if (va > vb) return sortDirection === "asc" ? 1 : -1;
-      return 0;
-    });
-    return list;
-  }, [retirementsData?.retirements, sortField, sortDirection]);
-
-  const paginatedRetirements = useMemo(() => {
-    const start = (retPage - 1) * retPageSize;
-    return sortedRetirements.slice(start, start + retPageSize);
-  }, [sortedRetirements, retPage, retPageSize]);
-
-  const totalRetirementPages = Math.ceil(sortedRetirements.length / retPageSize) || 1;
-
-  // ── Financial Sorted & Paginated Lines ─────────────────────────────────────
   const sortedFinancialLines = useMemo(() => {
     const list = [...(financialData?.lines || [])];
     list.sort((a, b) => {
-      let va = (a as any)[sortField];
-      let vb = (b as any)[sortField];
+      let va = (a as any)[finSortField];
+      let vb = (b as any)[finSortField];
       if (typeof va === "number" && typeof vb === "number") {
-        return sortDirection === "asc" ? va - vb : vb - va;
+        return finSortDirection === "asc" ? va - vb : vb - va;
       }
       va = String(va || "").toLowerCase();
       vb = String(vb || "").toLowerCase();
-      if (va < vb) return sortDirection === "asc" ? -1 : 1;
-      if (va > vb) return sortDirection === "asc" ? 1 : -1;
+      if (va < vb) return finSortDirection === "asc" ? -1 : 1;
+      if (va > vb) return finSortDirection === "asc" ? 1 : -1;
       return 0;
     });
     return list;
-  }, [financialData?.lines, sortField, sortDirection]);
+  }, [financialData?.lines, finSortField, finSortDirection]);
 
   const paginatedFinancialLines = useMemo(() => {
     const start = (finPage - 1) * finPageSize;
@@ -348,11 +353,46 @@ export default function RequisitionReportsPage() {
 
   const totalFinancialPages = Math.ceil(sortedFinancialLines.length / finPageSize) || 1;
 
-  // ── Q&A Smart Query Processing ─────────────────────────────────────────────
+  // ── Retirements Sorting & Pagination ───────────────────────────────────────
+  const handleRetSort = (field: string) => {
+    if (retSortField === field) {
+      setRetSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setRetSortField(field);
+      setRetSortDirection("asc");
+    }
+  };
+
+  const sortedRetirements = useMemo(() => {
+    const list = [...(retirementsData?.retirements || [])];
+    list.sort((a, b) => {
+      let va = (a as any)[retSortField];
+      let vb = (b as any)[retSortField];
+      if (typeof va === "number" && typeof vb === "number") {
+        return retSortDirection === "asc" ? va - vb : vb - va;
+      }
+      va = String(va || "").toLowerCase();
+      vb = String(vb || "").toLowerCase();
+      if (va < vb) return retSortDirection === "asc" ? -1 : 1;
+      if (va > vb) return retSortDirection === "asc" ? 1 : -1;
+      return 0;
+    });
+    return list;
+  }, [retirementsData?.retirements, retSortField, retSortDirection]);
+
+  const paginatedRetirements = useMemo(() => {
+    const start = (retPage - 1) * retPageSize;
+    return sortedRetirements.slice(start, start + retPageSize);
+  }, [sortedRetirements, retPage, retPageSize]);
+
+  const totalRetirementPages = Math.ceil(sortedRetirements.length / retPageSize) || 1;
+
+  // ── Q&A Smart Query Handler ────────────────────────────────────────────────
   const executeQaQuery = (questionText: string) => {
     const text = questionText.trim().toLowerCase();
     if (!text) return;
     setQaQuery(questionText);
+    setQaOpen(true);
 
     const rows = retirementsData?.retirements || [];
 
@@ -366,7 +406,7 @@ export default function RequisitionReportsPage() {
           ? `Found ${matches.length} retirement${matches.length === 1 ? "" : "s"} overdue by > 30 days.`
           : "No retirements are currently overdue by more than 30 days.",
         detail: matches.length > 0
-          ? `Total delinquent balance: ${formatCurrency(totalAmt)}. Filter applied to 31–60+ days overdue.`
+          ? `Total delinquent balance: ${formatCurrency(totalAmt)}. Table filtered to 31–60+ days overdue.`
           : "All active travel retirements are either current or within the initial 30-day grace period.",
         matchCount: matches.length,
         matchAmount: totalAmt,
@@ -423,7 +463,7 @@ export default function RequisitionReportsPage() {
       setQaAnswer({
         queryText: questionText,
         headline: `${matches.length} overdue retirement${matches.length === 1 ? "" : "s"} detected across all departments.`,
-        detail: `Total overdue balance: ${formatCurrency(totalAmt)}. Filter set to Overdue.`,
+        detail: `Total overdue balance: ${formatCurrency(totalAmt)}. Table filter set to Overdue.`,
         matchCount: matches.length,
         matchAmount: totalAmt,
       });
@@ -456,23 +496,11 @@ export default function RequisitionReportsPage() {
     setRetAgingBucket("all");
   };
 
-  // ── CSV Export Handling ────────────────────────────────────────────────────
+  // ── CSV Export ─────────────────────────────────────────────────────────────
   const handleExportCsv = async () => {
     try {
       setExportingCsv(true);
-      if (reportMode === "retirements") {
-        const res = await documentsAPI.downloadRetirementsAgingReportCsv(retirementsParams);
-        const blob = new Blob([res.data], { type: "text/csv;charset=utf-8;" });
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = `outstanding_retirements_aged_${new Date().toISOString().slice(0, 10)}.csv`;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(url);
-        toast.success("Outstanding Retirements Aging report CSV downloaded.");
-      } else {
+      if (activeMainTab === "financial") {
         const res = await documentsAPI.downloadRequisitionReportCsv(financialParams);
         const blob = new Blob([res.data], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
@@ -484,6 +512,18 @@ export default function RequisitionReportsPage() {
         anchor.remove();
         URL.revokeObjectURL(url);
         toast.success("Requisition financial report CSV downloaded.");
+      } else {
+        const res = await documentsAPI.downloadRetirementsAgingReportCsv(retirementsParams);
+        const blob = new Blob([res.data], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `outstanding_retirements_aged_${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+        toast.success("Outstanding Retirements Aging report CSV downloaded.");
       }
     } catch {
       toast.error("Failed to export report CSV. Please try again.");
@@ -505,29 +545,7 @@ export default function RequisitionReportsPage() {
     }, 1200);
   };
 
-  const retSummary = retirementsData?.summary || {
-    total_records: 0,
-    total_advance_amount: 0,
-    total_outstanding_amount: 0,
-    total_retired_amount: 0,
-    total_overdue_records: 0,
-    total_overdue_amount: 0,
-    total_awaiting_finance: 0,
-    total_reconciled: 0,
-    average_days_aged: 0,
-    aging_totals: {},
-  };
-
-  const finSummary = financialData?.summary || {
-    total_amount: 0,
-    total_lines: 0,
-    posted_amount: 0,
-    posted_lines: 0,
-    distinct_activities: 0,
-    distinct_accounts: 0,
-  };
-
-  // Visual data for retirements
+  // Visuals for Retirements
   const departmentAgingChartData = useMemo(() => {
     return (retirementsData?.by_department || []).map((d) => ({
       name: d.department,
@@ -551,7 +569,39 @@ export default function RequisitionReportsPage() {
     ];
   }, [retSummary.aging_totals]);
 
-  // Options for CustomListbox
+  // Dropdown options
+  const finAccountOptions = useMemo(() => [
+    { value: "", label: "All Account Codes" },
+    ...(financialData?.filter_options.accounts || []).map((a) => ({
+      value: a,
+      label: `Account: ${a}`,
+    })),
+  ], [financialData?.filter_options.accounts]);
+
+  const finActivityOptions = useMemo(() => [
+    { value: "", label: "All Activity Codes" },
+    ...(financialData?.filter_options.activities || []).map((a) => ({
+      value: a,
+      label: `Activity: ${a}`,
+    })),
+  ], [financialData?.filter_options.activities]);
+
+  const finDeptOptions = useMemo(() => [
+    { value: "", label: "All Departments" },
+    ...(financialData?.filter_options.departments || []).map((d) => ({
+      value: d,
+      label: d,
+    })),
+  ], [financialData?.filter_options.departments]);
+
+  const finStatusOptions = useMemo(() => [
+    { value: "", label: "All Document Statuses" },
+    ...(financialData?.filter_options.statuses || []).map((s) => ({
+      value: s,
+      label: s.charAt(0).toUpperCase() + s.slice(1),
+    })),
+  ], [financialData?.filter_options.statuses]);
+
   const retAgingBucketOptions = useMemo(() => [
     { value: "all", label: "All Aging Categories" },
     { value: "current", label: "Current / Not Due" },
@@ -587,38 +637,6 @@ export default function RequisitionReportsPage() {
     { value: "not_due", label: "Not Yet Returned" },
   ], []);
 
-  const finAccountOptions = useMemo(() => [
-    { value: "", label: "All Account Codes" },
-    ...(financialData?.filter_options.accounts || []).map((a) => ({
-      value: a,
-      label: `Account: ${a}`,
-    })),
-  ], [financialData?.filter_options.accounts]);
-
-  const finActivityOptions = useMemo(() => [
-    { value: "", label: "All Activity Codes" },
-    ...(financialData?.filter_options.activities || []).map((a) => ({
-      value: a,
-      label: `Activity: ${a}`,
-    })),
-  ], [financialData?.filter_options.activities]);
-
-  const finDeptOptions = useMemo(() => [
-    { value: "", label: "All Departments" },
-    ...(financialData?.filter_options.departments || []).map((d) => ({
-      value: d,
-      label: d,
-    })),
-  ], [financialData?.filter_options.departments]);
-
-  const finStatusOptions = useMemo(() => [
-    { value: "", label: "All Document Statuses" },
-    ...(financialData?.filter_options.statuses || []).map((s) => ({
-      value: s,
-      label: s.charAt(0).toUpperCase() + s.slice(1),
-    })),
-  ], [financialData?.filter_options.statuses]);
-
   const pageSizeOptions = useMemo(() => [
     { value: "10", label: "10 rows / page" },
     { value: "25", label: "25 rows / page" },
@@ -636,420 +654,861 @@ export default function RequisitionReportsPage() {
               IDM FINANCIAL & REQUISITION MANAGEMENT SYSTEM
             </h1>
             <p className="text-sm font-semibold text-[#287EAD] uppercase tracking-wider mt-0.5">
-              {reportMode === "retirements"
-                ? "Outstanding Travel Retirements Aging Report (by Traveller & Department)"
-                : "Requisition Financial Lines & SunSystems GL Analysis Report"}
+              {activeMainTab === "financial"
+                ? "Requisition Financial Lines & SunSystems GL Analysis Report"
+                : "Outstanding Travel Retirements Aging Report (by Traveller & Department)"}
             </p>
           </div>
           <div className="text-right text-xs text-slate-600">
             <p>Printed: {new Date().toLocaleString()}</p>
-            <p className="font-semibold text-rose-700">STRICTLY CONFIDENTIAL</p>
+            <p className="font-semibold text-rose-700">CONFIDENTIAL</p>
           </div>
         </div>
         <div className="mt-3 flex items-center justify-between text-xs text-slate-500 border-t border-slate-200 pt-2">
           <span>
-            Scope: {reportMode === "retirements"
-              ? `Department: ${retDepartment || "All"} | Aging: ${retAgingBucket || "All"} | Overdue Records: ${retSummary.total_overdue_records}`
-              : `Activity: ${finActivityCode || "All"} | Account: ${finAccountCode || "All"} | Total Lines: ${finSummary.total_lines}`}
+            {activeMainTab === "financial"
+              ? `Activity: ${finActivityCode || "All"} | Account: ${finAccountCode || "All"} | Total Lines: ${finSummary.total_lines}`
+              : `Department: ${retDepartment || "All"} | Aging: ${retAgingBucket || "All"} | Overdue: ${retSummary.total_overdue_records}`}
           </span>
           <span>Currency: USD / Functional</span>
         </div>
       </div>
 
-      {/* ── Top Header & Report Navigation ── */}
-      <div className="border-b border-[#E2E8F0] bg-white px-6 py-5 shadow-xs print:hidden">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+      {/* ── Top Header Bar with Report Actions ── */}
+      <div className="border-b border-[#E2E8F0] bg-white px-6 pt-5 pb-0 shadow-2xs print:hidden">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-4">
           <div>
             <div className="flex items-center gap-2">
               <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#F0F8FD] border border-[#C5E6F5] text-[#287EAD]">
                 <FileSpreadsheet className="h-5 w-5" />
               </span>
               <h1 className="text-xl font-bold tracking-tight text-[#1E293B]">
-                Requisition Financial & Aging Reports
+                Financial & Compliance Reports
               </h1>
             </div>
             <p className="mt-1 text-xs text-[#64748B]">
-              Real-time financial line reporting, SunSystems general ledger postings, and travel imprest retirement aging analysis.
+              Consolidated financial reporting hub for requisitions, SunSystems GL postings, and travel retirement aging.
             </p>
           </div>
 
-          {/* Primary Report Mode Switcher with HEX: #C5E6F5 */}
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="inline-flex rounded-lg border border-[#C5E6F5] bg-[#F0F8FD] p-1 shadow-2xs">
+          {/* Global Actions */}
+          <div className="flex items-center gap-2">
+            {activeMainTab === "retirements" && (
               <button
                 type="button"
-                onClick={() => setReportMode("retirements")}
-                className={cn(
-                  "inline-flex items-center gap-2 rounded-md px-3.5 py-1.5 text-xs font-semibold transition-all",
-                  reportMode === "retirements"
-                    ? "bg-[#C5E6F5] text-[#0A4D68] shadow-xs border border-[#287EAD]/20"
-                    : "text-[#475569] hover:text-[#0A4D68] hover:bg-[#E2F2FA]",
-                )}
+                onClick={() => setScheduleModalOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#C5E6F5] bg-[#F0F8FD] px-3 py-1.5 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors"
+                title="Configure automated scheduled reports"
               >
-                <Clock className="h-3.5 w-3.5 text-[#287EAD]" />
-                Outstanding Retirements
-                {retSummary.total_overdue_records > 0 && (
-                  <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-600 px-1 text-[10px] font-bold text-white">
-                    {retSummary.total_overdue_records}
-                  </span>
-                )}
+                <BellRing className="h-3.5 w-3.5 text-[#287EAD]" />
+                Schedule Report
               </button>
-              <button
-                type="button"
-                onClick={() => setReportMode("financial_lines")}
-                className={cn(
-                  "inline-flex items-center gap-2 rounded-md px-3.5 py-1.5 text-xs font-semibold transition-all",
-                  reportMode === "financial_lines"
-                    ? "bg-[#C5E6F5] text-[#0A4D68] shadow-xs border border-[#287EAD]/20"
-                    : "text-[#475569] hover:text-[#0A4D68] hover:bg-[#E2F2FA]",
-                )}
-              >
-                <Layers className="h-3.5 w-3.5 text-[#287EAD]" />
-                Requisition Lines (GL / Dim10)
-              </button>
-            </div>
-
-            {/* Actions */}
-            <div className="flex items-center gap-2">
-              {reportMode === "retirements" && (
-                <button
-                  type="button"
-                  onClick={() => setScheduleModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#C5E6F5] bg-[#F0F8FD] px-3 py-1.5 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors"
-                  title="Configure automated scheduled reports"
-                >
-                  <BellRing className="h-3.5 w-3.5 text-[#287EAD]" />
-                  Schedule Report
-                </button>
+            )}
+            <button
+              type="button"
+              onClick={handlePrint}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-2xs hover:bg-[#F8FAFC] transition-colors"
+            >
+              <Printer className="h-3.5 w-3.5" />
+              Print
+            </button>
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              disabled={exportingCsv}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] transition-colors disabled:opacity-60"
+            >
+              {exportingCsv ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Exporting…
+                </>
+              ) : (
+                <>
+                  <Download className="h-3.5 w-3.5" />
+                  Export CSV
+                </>
               )}
-              <button
-                type="button"
-                onClick={handlePrint}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-2xs hover:bg-[#F8FAFC] transition-colors"
-              >
-                <Printer className="h-3.5 w-3.5" />
-                Print Report
-              </button>
-              <button
-                type="button"
-                onClick={handleExportCsv}
-                disabled={exportingCsv}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] transition-colors disabled:opacity-60"
-              >
-                {exportingCsv ? (
-                  <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    Exporting…
-                  </>
-                ) : (
-                  <>
-                    <Download className="h-3.5 w-3.5" />
-                    Export CSV
-                  </>
-                )}
-              </button>
-            </div>
+            </button>
           </div>
         </div>
 
-        {/* ── LIGHT-COLORED STAT CARDS (Styled with #C5E6F5 and Soft Pastels) ── */}
-        {reportMode === "retirements" ? (
-          <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-3">
-            {/* Card 1: Total Outstanding */}
-            <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs transition-all hover:border-[#287EAD]/40">
-              <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68]">
-                <span>Outstanding Balance</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD]">
-                  <TrendingUp className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B]">
-                {formatCurrency(retSummary.total_outstanding_amount)}
-              </div>
-              <div className="mt-0.5 text-[11px] text-[#475569]">
-                Across {retSummary.total_records} travel forms
-              </div>
-            </div>
+        {/* ── Primary Top-Level Tab Switcher ── */}
+        <div className="flex gap-8 border-b border-[#E2E8F0] -mb-px">
+          {/* Tab 1 Button */}
+          <button
+            type="button"
+            onClick={() => setActiveMainTab("financial")}
+            className={cn(
+              "flex items-center gap-2 pb-3.5 pt-1 text-sm font-semibold border-b-2 transition-all cursor-pointer",
+              activeMainTab === "financial"
+                ? "border-[#287EAD] text-[#287EAD]"
+                : "border-transparent text-[#64748B] hover:text-[#1E293B]",
+            )}
+          >
+            <Layers className="h-4 w-4" />
+            <span>Requisition Financial Lines</span>
+            <span className="rounded-full bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-0.5 text-[11px] font-bold text-[#0A4D68]">
+              {finSummary.total_lines} lines
+            </span>
+          </button>
 
-            {/* Card 2: Overdue Retirements */}
-            <div className="rounded-xl border border-[#FECDD3] bg-[#FFF1F2] p-3.5 shadow-xs transition-all hover:border-rose-400">
-              <div className="flex items-center justify-between text-xs font-semibold text-rose-800">
-                <span>Overdue Retirements</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-rose-100 text-rose-700">
-                  <ShieldAlert className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-rose-700">
-                {retSummary.total_overdue_records}
-              </div>
-              <div className="mt-0.5 text-[11px] font-medium text-rose-600">
-                {formatCurrency(retSummary.total_overdue_amount)} delinquent
-              </div>
-            </div>
-
-            {/* Card 3: Average Aging */}
-            <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs transition-all hover:border-amber-400">
-              <div className="flex items-center justify-between text-xs font-semibold text-amber-800">
-                <span>Avg. Aging (Overdue)</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
-                  <Clock className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-amber-800">
-                {retSummary.average_days_aged} days
-              </div>
-              <div className="mt-0.5 text-[11px] text-amber-700">
-                Past 7-day return grace
-              </div>
-            </div>
-
-            {/* Card 4: Awaiting Finance Review */}
-            <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs transition-all hover:border-teal-400">
-              <div className="flex items-center justify-between text-xs font-semibold text-teal-800">
-                <span>Awaiting Finance</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700">
-                  <ClipboardList className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-teal-800">
-                {retSummary.total_awaiting_finance}
-              </div>
-              <div className="mt-0.5 text-[11px] text-teal-700">
-                Expense review in progress
-              </div>
-            </div>
-
-            {/* Card 5: Total Advance Issued */}
-            <div className="rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-3.5 shadow-xs transition-all hover:border-slate-300">
-              <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
-                <span>Total Advance Issued</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-slate-200 text-slate-700">
-                  <Building2 className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-slate-800">
-                {formatCurrency(retSummary.total_advance_amount)}
-              </div>
-              <div className="mt-0.5 text-[11px] text-slate-500">
-                {formatCurrency(retSummary.total_retired_amount)} expensed
-              </div>
-            </div>
-
-            {/* Card 6: Current / Reconciled */}
-            <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs transition-all hover:border-emerald-400">
-              <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
-                <span>Current & Reconciled</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-emerald-800">
-                {retSummary.aging_totals["current"]?.count || 0}
-              </div>
-              <div className="mt-0.5 text-[11px] text-emerald-700">
-                {retSummary.total_reconciled} fully closed
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-3">
-            {/* Card 1: Total Requisition Amount */}
-            <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs">
-              <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68]">
-                <span>Total Requisitions</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD]">
-                  <TrendingUp className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B]">
-                {formatCurrency(finSummary.total_amount)}
-              </div>
-              <div className="mt-0.5 text-[11px] text-[#475569]">
-                Across {finSummary.total_lines} lines
-              </div>
-            </div>
-
-            {/* Card 2: Posted to SunSystems */}
-            <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs">
-              <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
-                <span>Posted to SunSystems</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-emerald-700">
-                {formatCurrency(finSummary.posted_amount)}
-              </div>
-              <div className="mt-0.5 text-[11px] text-emerald-600 font-medium">
-                {finSummary.posted_lines} lines posted
-              </div>
-            </div>
-
-            {/* Card 3: Pending / Unposted */}
-            <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs">
-              <div className="flex items-center justify-between text-xs font-semibold text-amber-800">
-                <span>Pending / Unposted</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
-                  <Clock className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-amber-700">
-                {formatCurrency(finSummary.total_amount - finSummary.posted_amount)}
-              </div>
-              <div className="mt-0.5 text-[11px] text-amber-600">
-                {finSummary.total_lines - finSummary.posted_lines} unposted lines
-              </div>
-            </div>
-
-            {/* Card 4: Unique Activities */}
-            <div className="rounded-xl border border-[#DDD6FE] bg-[#F5F3FF] p-3.5 shadow-xs">
-              <div className="flex items-center justify-between text-xs font-semibold text-indigo-800">
-                <span>Unique Activities</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700">
-                  <Layers className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-indigo-900">
-                {finSummary.distinct_activities}
-              </div>
-              <div className="mt-0.5 text-[11px] text-indigo-700">
-                SunSystems Dim 10
-              </div>
-            </div>
-
-            {/* Card 5: Unique Accounts */}
-            <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs">
-              <div className="flex items-center justify-between text-xs font-semibold text-teal-800">
-                <span>GL Account Codes</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700">
-                  <Building2 className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-teal-900">
-                {finSummary.distinct_accounts}
-              </div>
-              <div className="mt-0.5 text-[11px] text-teal-700">
-                Chart of accounts
-              </div>
-            </div>
-
-            {/* Card 6: Posting Rate */}
-            <div className="rounded-xl border border-[#BFDBFE] bg-[#EFF6FF] p-3.5 shadow-xs">
-              <div className="flex items-center justify-between text-xs font-semibold text-blue-800">
-                <span>Posting Rate</span>
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-blue-100 text-blue-700">
-                  <BarChart3 className="h-3.5 w-3.5" />
-                </span>
-              </div>
-              <div className="mt-2 text-xl font-bold tabular-nums text-blue-900">
-                {finSummary.total_lines > 0
-                  ? `${Math.round((finSummary.posted_lines / finSummary.total_lines) * 100)}%`
-                  : "0%"}
-              </div>
-              <div className="mt-0.5 text-[11px] text-blue-700">
-                Requisitions in SunSystems
-              </div>
-            </div>
-          </div>
-        )}
+          {/* Tab 2 Button */}
+          <button
+            type="button"
+            onClick={() => setActiveMainTab("retirements")}
+            className={cn(
+              "flex items-center gap-2 pb-3.5 pt-1 text-sm font-semibold border-b-2 transition-all cursor-pointer",
+              activeMainTab === "retirements"
+                ? "border-[#287EAD] text-[#287EAD]"
+                : "border-transparent text-[#64748B] hover:text-[#1E293B]",
+            )}
+          >
+            <Clock className="h-4 w-4" />
+            <span>Outstanding Retirements (Aging)</span>
+            {retSummary.total_overdue_records > 0 ? (
+              <span className="rounded-full bg-rose-600 px-2 py-0.5 text-[11px] font-bold text-white shadow-2xs">
+                {retSummary.total_overdue_records} overdue
+              </span>
+            ) : (
+              <span className="rounded-full bg-[#F0FDF4] border border-[#BBF7D0] px-2 py-0.5 text-[11px] font-bold text-emerald-800">
+                {retSummary.total_records} forms
+              </span>
+            )}
+          </button>
+        </div>
       </div>
 
-      {/* ── Main Workspace ── */}
-      <div className="flex-1 p-6 space-y-4 print:p-0 print:space-y-2">
-        {reportMode === "retirements" ? (
-          <>
-            {/* ── Interactive Q&A Assistant ("Ask the Report") ── */}
-            <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD]/80 p-4 shadow-xs print:hidden">
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2 text-xs font-bold text-[#0A4D68]">
-                  <Sparkles className="h-4 w-4 text-[#287EAD]" />
-                  <span>Ask the Aging Report (Smart Q&A Assistant)</span>
+      {/* ── Main Content Area (Tab-Scoped so users are never overloaded) ── */}
+      <div className="flex-1 p-6 space-y-5 print:p-0 print:space-y-3">
+        {/* =========================================================================
+            TAB 1: REQUISITION FINANCIAL LINES (GL / DIM 10)
+        ========================================================================= */}
+        {activeMainTab === "financial" && (
+          <div className="space-y-4">
+            {/* ── Light-Colored Stat Cards for Financial Lines ── */}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-3">
+              {/* Card 1: Total Requisition Amount */}
+              <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68]">
+                  <span>Total Requisitions</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD]">
+                    <TrendingUp className="h-3.5 w-3.5" />
+                  </span>
                 </div>
-                <div className="relative flex items-center gap-2">
+                <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B]">
+                  {formatCurrency(finSummary.total_amount)}
+                </div>
+                <div className="mt-0.5 text-[11px] text-[#475569]">
+                  Across {finSummary.total_lines} lines
+                </div>
+              </div>
+
+              {/* Card 2: Posted to SunSystems */}
+              <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
+                  <span>Posted to SunSystems</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-emerald-700">
+                  {formatCurrency(finSummary.posted_amount)}
+                </div>
+                <div className="mt-0.5 text-[11px] text-emerald-600 font-medium">
+                  {finSummary.posted_lines} lines posted
+                </div>
+              </div>
+
+              {/* Card 3: Pending / Unposted */}
+              <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-amber-800">
+                  <span>Pending / Unposted</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+                    <Clock className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-amber-700">
+                  {formatCurrency(finSummary.total_amount - finSummary.posted_amount)}
+                </div>
+                <div className="mt-0.5 text-[11px] text-amber-600">
+                  {finSummary.total_lines - finSummary.posted_lines} unposted lines
+                </div>
+              </div>
+
+              {/* Card 4: Unique Activities */}
+              <div className="rounded-xl border border-[#DDD6FE] bg-[#F5F3FF] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-indigo-800">
+                  <span>Unique Activities</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700">
+                    <Layers className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-indigo-900">
+                  {finSummary.distinct_activities}
+                </div>
+                <div className="mt-0.5 text-[11px] text-indigo-700">
+                  SunSystems Dim 10
+                </div>
+              </div>
+
+              {/* Card 5: Unique Accounts */}
+              <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-teal-800">
+                  <span>GL Account Codes</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700">
+                    <Building2 className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-teal-900">
+                  {finSummary.distinct_accounts}
+                </div>
+                <div className="mt-0.5 text-[11px] text-teal-700">
+                  Chart of accounts
+                </div>
+              </div>
+
+              {/* Card 6: Posting Rate */}
+              <div className="rounded-xl border border-[#BFDBFE] bg-[#EFF6FF] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-blue-800">
+                  <span>Posting Rate</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-blue-100 text-blue-700">
+                    <BarChart3 className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-blue-900">
+                  {finSummary.total_lines > 0
+                    ? `${Math.round((finSummary.posted_lines / finSummary.total_lines) * 100)}%`
+                    : "0%"}
+                </div>
+                <div className="mt-0.5 text-[11px] text-blue-700">
+                  Requisitions posted
+                </div>
+              </div>
+            </div>
+
+            {/* ── Financial Filter Toolbar (CustomListbox Dropdowns) ── */}
+            <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs print:hidden">
+              <div className="flex flex-wrap items-center gap-3">
+                {/* Search */}
+                <div className="relative flex-1 min-w-[220px]">
+                  <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-[#94A3B8]" />
                   <input
                     type="text"
-                    value={qaQuery}
-                    onChange={(e) => setQaQuery(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") executeQaQuery(qaQuery);
+                    placeholder="Search description, activity code, account code, journal #, req #…"
+                    value={finSearch}
+                    onChange={(e) => {
+                      setFinSearch(e.target.value);
+                      setFinPage(1);
                     }}
-                    placeholder="Ask any question (e.g., 'Who has retirements overdue > 30 days?', 'Show Travel department outstanding', 'Top debtors')…"
-                    className="flex-1 rounded-lg border border-[#CBD5E1] bg-white px-3.5 py-2 text-xs text-[#1E293B] placeholder-[#94A3B8] shadow-2xs focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
+                    className="w-full rounded-lg border border-[#CBD5E1] bg-white py-1.5 pl-8 pr-7 text-xs text-[#1E293B] placeholder-[#94A3B8] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
                   />
-                  <button
-                    type="button"
-                    onClick={() => executeQaQuery(qaQuery)}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-3.5 py-2 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] transition-colors"
-                  >
-                    <Send className="h-3.5 w-3.5" />
-                    Ask
-                  </button>
-                  {(qaAnswer || qaQuery) && (
+                  {finSearch && (
                     <button
                       type="button"
-                      onClick={clearQa}
-                      className="inline-flex items-center gap-1 rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-2 text-xs font-medium text-[#64748B] hover:text-[#1E293B] shadow-2xs"
-                      title="Clear Q&A filter"
+                      onClick={() => setFinSearch("")}
+                      className="absolute right-2 top-2 text-[#94A3B8] hover:text-[#475569]"
                     >
                       <X className="h-3.5 w-3.5" />
-                      Clear
                     </button>
                   )}
                 </div>
 
-                {/* Instant Quick Question Prompts */}
-                <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px]">
-                  <span className="text-[#64748B]">Quick queries:</span>
-                  <button
-                    type="button"
-                    onClick={() => executeQaQuery("Who has retirements overdue by more than 30 days?")}
-                    className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors"
-                  >
-                    Overdue &gt; 30 Days
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => executeQaQuery("Show outstanding retirements for Travel department")}
-                    className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors"
-                  >
-                    Travel Department
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => executeQaQuery("Show retirements awaiting finance verification")}
-                    className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors"
-                  >
-                    Awaiting Finance Review
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => executeQaQuery("Which advances exceed $2,000?")}
-                    className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors"
-                  >
-                    High Value (&gt; $2,000)
-                  </button>
+                {/* Account Code Dropdown (CustomListbox) */}
+                <div className="w-48">
+                  <CustomListbox
+                    value={finAccountCode}
+                    onChange={(v) => {
+                      setFinAccountCode(v);
+                      setFinPage(1);
+                    }}
+                    options={finAccountOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
                 </div>
 
-                {/* Answer Banner */}
-                {qaAnswer && (
-                  <div className="mt-2 rounded-lg border border-[#287EAD]/30 bg-white p-3 shadow-xs">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <CheckCircle className="h-4 w-4 text-emerald-600 shrink-0" />
-                          <h4 className="text-xs font-bold text-[#1E293B]">{qaAnswer.headline}</h4>
-                        </div>
-                        <p className="mt-1 text-xs text-[#475569] pl-6 leading-relaxed">
-                          {qaAnswer.detail}
-                        </p>
-                      </div>
-                      <span className="shrink-0 rounded-md bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-1 text-[11px] font-semibold text-[#0A4D68]">
-                        {qaAnswer.matchCount} records
+                {/* Activity Code Dropdown (CustomListbox) */}
+                <div className="w-48">
+                  <CustomListbox
+                    value={finActivityCode}
+                    onChange={(v) => {
+                      setFinActivityCode(v);
+                      setFinPage(1);
+                    }}
+                    options={finActivityOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Department Dropdown (CustomListbox) */}
+                <div className="w-44">
+                  <CustomListbox
+                    value={finDepartment}
+                    onChange={(v) => {
+                      setFinDepartment(v);
+                      setFinPage(1);
+                    }}
+                    options={finDeptOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Status Dropdown (CustomListbox) */}
+                <div className="w-44">
+                  <CustomListbox
+                    value={finStatus}
+                    onChange={(v) => {
+                      setFinStatus(v);
+                      setFinPage(1);
+                    }}
+                    options={finStatusOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Journal Only Checkbox */}
+                <label className="flex items-center gap-1.5 text-xs text-[#475569] cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={finHasJournal === true}
+                    onChange={(e) => {
+                      setFinHasJournal(e.target.checked ? true : null);
+                      setFinPage(1);
+                    }}
+                    className="rounded border-[#CBD5E1] text-[#287EAD] focus:ring-[#287EAD]"
+                  />
+                  <span>With Journal # only</span>
+                </label>
+
+                {/* Reset Filters */}
+                {(finSearch || finStartDate || finEndDate || finAccountCode || finActivityCode || finDepartment || finStatus || finHasJournal !== null) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFinSearch("");
+                      setFinStartDate("");
+                      setFinEndDate("");
+                      setFinAccountCode("");
+                      setFinActivityCode("");
+                      setFinDepartment("");
+                      setFinStatus("");
+                      setFinHasJournal(null);
+                      setFinPage(1);
+                    }}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* ── Sub-Tabs & View Switcher for Financial Lines ── */}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between print:hidden">
+              <div className="inline-flex rounded-lg border border-[#E2E8F0] bg-white p-1 shadow-2xs">
+                <button
+                  type="button"
+                  onClick={() => setFinancialTab("lines")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
+                    financialTab === "lines"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  Detailed Lines ({sortedFinancialLines.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFinancialTab("activities")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
+                    financialTab === "activities"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  By Activity Code ({(financialData?.by_activity || []).length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFinancialTab("accounts")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
+                    financialTab === "accounts"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  By Account Code ({(financialData?.by_account || []).length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFinancialTab("visuals")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
+                    financialTab === "visuals"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  Visual Spend Charts
+                </button>
+              </div>
+
+              {financialTab === "lines" && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-[#64748B]">Page size:</span>
+                  <div className="w-36">
+                    <CustomListbox
+                      value={String(finPageSize)}
+                      onChange={(v) => {
+                        setFinPageSize(Number(v));
+                        setFinPage(1);
+                      }}
+                      options={pageSizeOptions}
+                      className="text-xs"
+                      buttonClassName="h-7 border-[#CBD5E1] bg-white text-xs rounded-lg"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Sub-Tab 1: Detailed Financial Lines Table */}
+            {financialTab === "lines" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
+                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("document_reference")}>
+                          <div className="flex items-center gap-1">
+                            <span>Req Ref</span>
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                          </div>
+                        </th>
+                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("date")}>
+                          <div className="flex items-center gap-1">
+                            <span>Date</span>
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                          </div>
+                        </th>
+                        <th className="py-2.5 px-3">Dept / Requester</th>
+                        <th className="py-2.5 px-3">Activity Code (Dim 10)</th>
+                        <th className="py-2.5 px-3">Description</th>
+                        <th className="py-2.5 px-3">Account Code</th>
+                        <th className="py-2.5 px-3">Cost Centre</th>
+                        <th className="py-2.5 px-3 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("amount")}>
+                          <div className="flex items-center justify-end gap-1">
+                            <span>Amount</span>
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                          </div>
+                        </th>
+                        <th className="py-2.5 px-3">Journal #</th>
+                        <th className="py-2.5 px-3">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#F1F5F9]">
+                      {isLoadingFinancial ? (
+                        <tr>
+                          <td colSpan={10} className="py-12 text-center text-xs text-[#64748B]">
+                            <Loader2 className="mx-auto h-6 w-6 animate-spin text-[#287EAD]" />
+                            <p className="mt-2 font-medium">Loading financial lines…</p>
+                          </td>
+                        </tr>
+                      ) : paginatedFinancialLines.length === 0 ? (
+                        <tr>
+                          <td colSpan={10} className="py-12 text-center text-xs text-[#64748B]">
+                            <FileSpreadsheet className="mx-auto h-8 w-8 text-[#9AA5B1] mb-2" />
+                            <p className="text-sm font-semibold text-[#1E293B]">No requisition lines found</p>
+                            <p className="mt-1 text-xs text-[#64748B]">Try clearing your search or filter criteria.</p>
+                          </td>
+                        </tr>
+                      ) : (
+                        paginatedFinancialLines.map((line) => (
+                          <tr key={line.id} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
+                            <td className="py-2.5 px-3 font-semibold text-[#287EAD] whitespace-nowrap">
+                              <Link to={`/forms/${line.document_id}`} className="hover:underline flex items-center gap-1">
+                                {line.document_reference}
+                                <ExternalLink className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </Link>
+                            </td>
+                            <td className="py-2.5 px-3 text-[#64748B] whitespace-nowrap">{line.date}</td>
+                            <td className="py-2.5 px-3">
+                              <div className="font-semibold text-[#1E293B]">{line.department || "—"}</div>
+                              <div className="text-[10px] text-[#64748B]">{line.requester}</div>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className="inline-flex items-center rounded bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-0.5 text-[11px] font-mono font-semibold text-[#0A4D68]">
+                                {line.activity_code}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 max-w-xs truncate" title={line.description}>
+                              {line.description}
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className="inline-flex items-center rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono font-semibold text-[#1E293B]">
+                                {line.account_code}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 font-mono text-slate-600">{line.cost_centre || "—"}</td>
+                            <td className="py-2.5 px-3 text-right font-bold tabular-nums text-[#1E293B]">
+                              {formatCurrency(line.amount, line.currency)}
+                            </td>
+                            <td className="py-2.5 px-3 whitespace-nowrap">
+                              <JournalStatusBadge status={line.journal_status} journalNumber={line.journal_number} />
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-[#475569]">
+                                {line.document_status}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Pagination */}
+                {totalFinancialPages > 1 && (
+                  <div className="flex items-center justify-between border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2 text-xs text-[#64748B] print:hidden">
+                    <div>
+                      Showing {(finPage - 1) * finPageSize + 1} to{" "}
+                      {Math.min(finPage * finPageSize, sortedFinancialLines.length)} of{" "}
+                      {sortedFinancialLines.length} lines
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setFinPage((p) => Math.max(1, p - 1))}
+                        disabled={finPage === 1}
+                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                      </button>
+                      <span className="px-2 font-medium text-[#1E293B]">
+                        Page {finPage} of {totalFinancialPages}
                       </span>
+                      <button
+                        type="button"
+                        onClick={() => setFinPage((p) => Math.min(totalFinancialPages, p + 1))}
+                        disabled={finPage === totalFinancialPages}
+                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                      >
+                        <ChevronRight className="h-4 w-4" />
+                      </button>
                     </div>
                   </div>
                 )}
               </div>
+            )}
+
+            {/* Sub-Tab 2: Summary by Activity Code */}
+            {financialTab === "activities" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
+                <table className="w-full border-collapse text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
+                      <th className="py-2.5 px-3">Activity Code (Dim 10)</th>
+                      <th className="py-2.5 px-3">Activity Description</th>
+                      <th className="py-2.5 px-3 text-center">Lines</th>
+                      <th className="py-2.5 px-3 text-right">Total Amount</th>
+                      <th className="py-2.5 px-3 text-right text-emerald-800">Posted Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F1F5F9]">
+                    {(financialData?.by_activity || []).map((row) => (
+                      <tr key={row.activity_code} className="hover:bg-[#F8FAFC]">
+                        <td className="py-2.5 px-3 font-mono font-bold text-[#0A4D68]">{row.activity_code}</td>
+                        <td className="py-2.5 px-3 text-[#1E293B]">{row.activity_description || "—"}</td>
+                        <td className="py-2.5 px-3 text-center tabular-nums">{row.line_count}</td>
+                        <td className="py-2.5 px-3 text-right font-bold tabular-nums">{formatCurrency(row.total_amount, row.currency)}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums text-emerald-700">{formatCurrency(row.posted_amount, row.currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Sub-Tab 3: Summary by Account Code */}
+            {financialTab === "accounts" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
+                <table className="w-full border-collapse text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
+                      <th className="py-2.5 px-3">Account Code</th>
+                      <th className="py-2.5 px-3 text-center">Lines</th>
+                      <th className="py-2.5 px-3 text-right">Total Amount</th>
+                      <th className="py-2.5 px-3 text-right text-emerald-800">Posted Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F1F5F9]">
+                    {(financialData?.by_account || []).map((row) => (
+                      <tr key={row.account_code} className="hover:bg-[#F8FAFC]">
+                        <td className="py-2.5 px-3 font-mono font-bold text-[#1E293B]">{row.account_code}</td>
+                        <td className="py-2.5 px-3 text-center tabular-nums">{row.line_count}</td>
+                        <td className="py-2.5 px-3 text-right font-bold tabular-nums">{formatCurrency(row.total_amount, row.currency)}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums text-emerald-700">{formatCurrency(row.posted_amount, row.currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Sub-Tab 4: Visual Breakdown */}
+            {financialTab === "visuals" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs">
+                <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider mb-2">
+                  Top Activities by Financial Spend
+                </h3>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={(financialData?.by_activity || []).slice(0, 8).map((a) => ({
+                        name: a.activity_code,
+                        amount: a.total_amount,
+                      }))}
+                      margin={{ top: 10, right: 10, left: 10, bottom: 20 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                      <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                      <YAxis tick={{ fontSize: 11 }} tickFormatter={(val) => `$${val.toLocaleString()}`} />
+                      <RechartsTooltip formatter={(val: any) => [formatCurrency(Number(val)), "Spend Amount"]} />
+                      <Bar dataKey="amount" fill="#287EAD" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB 2: OUTSTANDING RETIREMENTS AGING (CLIENT SPECIFICATION)
+        ========================================================================= */}
+        {activeMainTab === "retirements" && (
+          <div className="space-y-4">
+            {/* ── Light-Colored Stat Cards for Outstanding Retirements ── */}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-3">
+              {/* Card 1: Total Outstanding */}
+              <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68]">
+                  <span>Outstanding Balance</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD]">
+                    <TrendingUp className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B]">
+                  {formatCurrency(retSummary.total_outstanding_amount)}
+                </div>
+                <div className="mt-0.5 text-[11px] text-[#475569]">
+                  Across {retSummary.total_records} travel forms
+                </div>
+              </div>
+
+              {/* Card 2: Overdue Retirements */}
+              <div className="rounded-xl border border-[#FECDD3] bg-[#FFF1F2] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-rose-800">
+                  <span>Overdue Retirements</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-rose-100 text-rose-700">
+                    <ShieldAlert className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-rose-700">
+                  {retSummary.total_overdue_records}
+                </div>
+                <div className="mt-0.5 text-[11px] font-medium text-rose-600">
+                  {formatCurrency(retSummary.total_overdue_amount)} delinquent
+                </div>
+              </div>
+
+              {/* Card 3: Average Aging */}
+              <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-amber-800">
+                  <span>Avg. Aging (Overdue)</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+                    <Clock className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-amber-800">
+                  {retSummary.average_days_aged} days
+                </div>
+                <div className="mt-0.5 text-[11px] text-amber-700">
+                  Past return grace period
+                </div>
+              </div>
+
+              {/* Card 4: Awaiting Finance Review */}
+              <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-teal-800">
+                  <span>Awaiting Finance</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700">
+                    <ClipboardList className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-teal-800">
+                  {retSummary.total_awaiting_finance}
+                </div>
+                <div className="mt-0.5 text-[11px] text-teal-700">
+                  Expense review in progress
+                </div>
+              </div>
+
+              {/* Card 5: Total Advance Issued */}
+              <div className="rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
+                  <span>Total Advance Issued</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-slate-200 text-slate-700">
+                    <Building2 className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-slate-800">
+                  {formatCurrency(retSummary.total_advance_amount)}
+                </div>
+                <div className="mt-0.5 text-[11px] text-slate-500">
+                  {formatCurrency(retSummary.total_retired_amount)} expensed
+                </div>
+              </div>
+
+              {/* Card 6: Current & Reconciled */}
+              <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs">
+                <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
+                  <span>Current / Not Due</span>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  </span>
+                </div>
+                <div className="mt-2 text-xl font-bold tabular-nums text-emerald-800">
+                  {retSummary.aging_totals["current"]?.count || 0}
+                </div>
+                <div className="mt-0.5 text-[11px] text-emerald-700">
+                  {retSummary.total_reconciled} reconciled
+                </div>
+              </div>
+            </div>
+
+            {/* ── Compact Q&A Assistant Header / Toggle ── */}
+            <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD]/70 p-3 shadow-xs print:hidden">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[#C5E6F5] text-[#287EAD]">
+                    <Sparkles className="h-3.5 w-3.5" />
+                  </span>
+                  <span className="text-xs font-bold text-[#0A4D68]">
+                    Smart Aging Assistant (Q&A)
+                  </span>
+                  {qaAnswer && (
+                    <span className="rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5 text-[10px] font-bold">
+                      Filter Active
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setQaOpen((o) => !o)}
+                  className="flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline cursor-pointer"
+                >
+                  {qaOpen ? "Collapse Q&A" : "Open Q&A Query Box"}
+                  {qaOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                </button>
+              </div>
+
+              {qaOpen && (
+                <div className="mt-3 space-y-2 pt-2 border-t border-[#C5E6F5]/60">
+                  <div className="relative flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={qaQuery}
+                      onChange={(e) => setQaQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") executeQaQuery(qaQuery);
+                      }}
+                      placeholder="Ask any question (e.g., 'Who has retirements overdue > 30 days?', 'Show Travel department', 'Awaiting finance')…"
+                      className="flex-1 rounded-lg border border-[#CBD5E1] bg-white px-3.5 py-1.5 text-xs text-[#1E293B] placeholder-[#94A3B8] shadow-2xs focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => executeQaQuery(qaQuery)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] transition-colors cursor-pointer"
+                    >
+                      <Send className="h-3.5 w-3.5" />
+                      Ask
+                    </button>
+                    {(qaAnswer || qaQuery) && (
+                      <button
+                        type="button"
+                        onClick={clearQa}
+                        className="inline-flex items-center gap-1 rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-1.5 text-xs font-medium text-[#64748B] hover:text-[#1E293B] shadow-2xs cursor-pointer"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                        Clear
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Quick question prompts */}
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <span className="text-[#64748B]">Quick queries:</span>
+                    <button
+                      type="button"
+                      onClick={() => executeQaQuery("Who has retirements overdue by more than 30 days?")}
+                      className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors cursor-pointer"
+                    >
+                      Overdue &gt; 30 Days
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => executeQaQuery("Show outstanding retirements for Travel department")}
+                      className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors cursor-pointer"
+                    >
+                      Travel Department
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => executeQaQuery("Show retirements awaiting finance verification")}
+                      className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors cursor-pointer"
+                    >
+                      Awaiting Finance Review
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => executeQaQuery("Which advances exceed $2,000?")}
+                      className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors cursor-pointer"
+                    >
+                      High Value (&gt; $2,000)
+                    </button>
+                  </div>
+
+                  {/* Answer Box */}
+                  {qaAnswer && (
+                    <div className="mt-2 rounded-lg border border-[#287EAD]/30 bg-white p-3 shadow-xs">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <CheckCircle className="h-4 w-4 text-emerald-600 shrink-0" />
+                            <h4 className="text-xs font-bold text-[#1E293B]">{qaAnswer.headline}</h4>
+                          </div>
+                          <p className="mt-1 text-xs text-[#475569] pl-6 leading-relaxed">
+                            {qaAnswer.detail}
+                          </p>
+                        </div>
+                        <span className="shrink-0 rounded-md bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-1 text-[11px] font-semibold text-[#0A4D68]">
+                          {qaAnswer.matchCount} records
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* ── Retirements Filter Toolbar (CustomListbox Dropdowns) ── */}
@@ -1163,7 +1622,7 @@ export default function RequisitionReportsPage() {
                       setRetPage(1);
                       clearQa();
                     }}
-                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline"
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline cursor-pointer"
                   >
                     <RefreshCw className="h-3 w-3" />
                     Reset
@@ -1172,14 +1631,14 @@ export default function RequisitionReportsPage() {
               </div>
             </div>
 
-            {/* ── Retirements Tabs & Controls ── */}
+            {/* ── Sub-Tabs & View Switcher for Retirements ── */}
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between print:hidden">
               <div className="inline-flex rounded-lg border border-[#E2E8F0] bg-white p-1 shadow-2xs">
                 <button
                   type="button"
                   onClick={() => setRetirementsTab("register")}
                   className={cn(
-                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
                     retirementsTab === "register"
                       ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
                       : "text-[#64748B] hover:text-[#1E293B]",
@@ -1191,7 +1650,7 @@ export default function RequisitionReportsPage() {
                   type="button"
                   onClick={() => setRetirementsTab("by_department")}
                   className={cn(
-                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
                     retirementsTab === "by_department"
                       ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
                       : "text-[#64748B] hover:text-[#1E293B]",
@@ -1203,7 +1662,7 @@ export default function RequisitionReportsPage() {
                   type="button"
                   onClick={() => setRetirementsTab("by_traveller")}
                   className={cn(
-                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
                     retirementsTab === "by_traveller"
                       ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
                       : "text-[#64748B] hover:text-[#1E293B]",
@@ -1215,7 +1674,7 @@ export default function RequisitionReportsPage() {
                   type="button"
                   onClick={() => setRetirementsTab("visuals")}
                   className={cn(
-                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
                     retirementsTab === "visuals"
                       ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
                       : "text-[#64748B] hover:text-[#1E293B]",
@@ -1244,20 +1703,20 @@ export default function RequisitionReportsPage() {
               )}
             </div>
 
-            {/* ── Sub-Tab 1: Aging Register Table ── */}
+            {/* Sub-Tab 1: Aging Register Table */}
             {retirementsTab === "register" && (
               <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="w-full border-collapse text-left text-xs">
                     <thead>
                       <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
-                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("document_reference")}>
+                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("document_reference")}>
                           <div className="flex items-center gap-1">
                             <span>Req Ref</span>
                             <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("traveller_name")}>
+                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("traveller_name")}>
                           <div className="flex items-center gap-1">
                             <span>Traveller</span>
                             <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
@@ -1265,26 +1724,26 @@ export default function RequisitionReportsPage() {
                         </th>
                         <th className="py-2.5 px-3">Department</th>
                         <th className="py-2.5 px-3">Travel Dates</th>
-                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("due_date")}>
+                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("due_date")}>
                           <div className="flex items-center gap-1">
                             <span>Due Date</span>
                             <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("days_overdue")}>
+                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("days_overdue")}>
                           <div className="flex items-center gap-1">
                             <span>Aging Status</span>
                             <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
                           </div>
                         </th>
-                        <th className="py-2.5 px-3 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("advance_amount")}>
+                        <th className="py-2.5 px-3 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("advance_amount")}>
                           <div className="flex items-center justify-end gap-1">
                             <span>Advance</span>
                             <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
                           </div>
                         </th>
                         <th className="py-2.5 px-3 text-right">Retired / Spent</th>
-                        <th className="py-2.5 px-3 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("outstanding_amount")}>
+                        <th className="py-2.5 px-3 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("outstanding_amount")}>
                           <div className="flex items-center justify-end gap-1">
                             <span>Outstanding</span>
                             <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
@@ -1442,7 +1901,7 @@ export default function RequisitionReportsPage() {
               </div>
             )}
 
-            {/* ── Sub-Tab 2: Aged by Department Matrix ── */}
+            {/* Sub-Tab 2: Aged by Department Matrix */}
             {retirementsTab === "by_department" && (
               <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
                 <div className="border-b border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3">
@@ -1516,7 +1975,7 @@ export default function RequisitionReportsPage() {
               </div>
             )}
 
-            {/* ── Sub-Tab 3: Aged by Traveller Matrix ── */}
+            {/* Sub-Tab 3: Aged by Traveller Summary */}
             {retirementsTab === "by_traveller" && (
               <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
                 <div className="border-b border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3">
@@ -1591,7 +2050,7 @@ export default function RequisitionReportsPage() {
               </div>
             )}
 
-            {/* ── Sub-Tab 4: Visual Aging Analytics ── */}
+            {/* Sub-Tab 4: Aging Visual Analytics */}
             {retirementsTab === "visuals" && (
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 {/* Chart 1: Outstanding Balance by Aging Bucket */}
@@ -1650,398 +2109,7 @@ export default function RequisitionReportsPage() {
                 </div>
               </div>
             )}
-          </>
-        ) : (
-          /* ── Financial Lines Mode (Activity Code, Description, Account Code, Amount, Journal #) ── */
-          <>
-            {/* Filter Toolbar for Financial Lines */}
-            <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs print:hidden">
-              <div className="flex flex-wrap items-center gap-3">
-                {/* Search */}
-                <div className="relative flex-1 min-w-[220px]">
-                  <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-[#94A3B8]" />
-                  <input
-                    type="text"
-                    placeholder="Search description, activity code, account code, journal #, req #…"
-                    value={finSearch}
-                    onChange={(e) => {
-                      setFinSearch(e.target.value);
-                      setFinPage(1);
-                    }}
-                    className="w-full rounded-lg border border-[#CBD5E1] bg-white py-1.5 pl-8 pr-7 text-xs text-[#1E293B] placeholder-[#94A3B8] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
-                  />
-                  {finSearch && (
-                    <button
-                      type="button"
-                      onClick={() => setFinSearch("")}
-                      className="absolute right-2 top-2 text-[#94A3B8] hover:text-[#475569]"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  )}
-                </div>
-
-                {/* Account Code (CustomListbox) */}
-                <div className="w-48">
-                  <CustomListbox
-                    value={finAccountCode}
-                    onChange={(v) => {
-                      setFinAccountCode(v);
-                      setFinPage(1);
-                    }}
-                    options={finAccountOptions}
-                    className="text-xs"
-                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
-                  />
-                </div>
-
-                {/* Activity Code (CustomListbox) */}
-                <div className="w-48">
-                  <CustomListbox
-                    value={finActivityCode}
-                    onChange={(v) => {
-                      setFinActivityCode(v);
-                      setFinPage(1);
-                    }}
-                    options={finActivityOptions}
-                    className="text-xs"
-                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
-                  />
-                </div>
-
-                {/* Department (CustomListbox) */}
-                <div className="w-44">
-                  <CustomListbox
-                    value={finDepartment}
-                    onChange={(v) => {
-                      setFinDepartment(v);
-                      setFinPage(1);
-                    }}
-                    options={finDeptOptions}
-                    className="text-xs"
-                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
-                  />
-                </div>
-
-                {/* Status (CustomListbox) */}
-                <div className="w-44">
-                  <CustomListbox
-                    value={finStatus}
-                    onChange={(v) => {
-                      setFinStatus(v);
-                      setFinPage(1);
-                    }}
-                    options={finStatusOptions}
-                    className="text-xs"
-                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
-                  />
-                </div>
-
-                {/* Journal Only Checkbox */}
-                <label className="flex items-center gap-1.5 text-xs text-[#475569] cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={finHasJournal === true}
-                    onChange={(e) => {
-                      setFinHasJournal(e.target.checked ? true : null);
-                      setFinPage(1);
-                    }}
-                    className="rounded border-[#CBD5E1] text-[#287EAD] focus:ring-[#287EAD]"
-                  />
-                  <span>With Journal # only</span>
-                </label>
-
-                {/* Reset Filters */}
-                {(finSearch || finStartDate || finEndDate || finAccountCode || finActivityCode || finDepartment || finStatus || finHasJournal !== null) && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFinSearch("");
-                      setFinStartDate("");
-                      setFinEndDate("");
-                      setFinAccountCode("");
-                      setFinActivityCode("");
-                      setFinDepartment("");
-                      setFinStatus("");
-                      setFinHasJournal(null);
-                      setFinPage(1);
-                    }}
-                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline"
-                  >
-                    <RefreshCw className="h-3 w-3" />
-                    Reset
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Sub-Tabs for Financial Lines */}
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between print:hidden">
-              <div className="inline-flex rounded-lg border border-[#E2E8F0] bg-white p-1 shadow-2xs">
-                <button
-                  type="button"
-                  onClick={() => setFinancialTab("lines")}
-                  className={cn(
-                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
-                    financialTab === "lines"
-                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
-                      : "text-[#64748B] hover:text-[#1E293B]",
-                  )}
-                >
-                  Detailed Lines ({sortedFinancialLines.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFinancialTab("activities")}
-                  className={cn(
-                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
-                    financialTab === "activities"
-                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
-                      : "text-[#64748B] hover:text-[#1E293B]",
-                  )}
-                >
-                  By Activity Code ({(financialData?.by_activity || []).length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFinancialTab("accounts")}
-                  className={cn(
-                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
-                    financialTab === "accounts"
-                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
-                      : "text-[#64748B] hover:text-[#1E293B]",
-                  )}
-                >
-                  By Account Code ({(financialData?.by_account || []).length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFinancialTab("visuals")}
-                  className={cn(
-                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
-                    financialTab === "visuals"
-                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
-                      : "text-[#64748B] hover:text-[#1E293B]",
-                  )}
-                >
-                  Visual Breakdown
-                </button>
-              </div>
-
-              {financialTab === "lines" && (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-[#64748B]">Page size:</span>
-                  <div className="w-36">
-                    <CustomListbox
-                      value={String(finPageSize)}
-                      onChange={(v) => {
-                        setFinPageSize(Number(v));
-                        setFinPage(1);
-                      }}
-                      options={pageSizeOptions}
-                      className="text-xs"
-                      buttonClassName="h-7 border-[#CBD5E1] bg-white text-xs rounded-lg"
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Detailed Financial Lines Table */}
-            {financialTab === "lines" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-left text-xs">
-                    <thead>
-                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
-                        <th className="py-2.5 px-3">Req Ref</th>
-                        <th className="py-2.5 px-3">Date</th>
-                        <th className="py-2.5 px-3">Dept / Requester</th>
-                        <th className="py-2.5 px-3">Activity Code (Dim 10)</th>
-                        <th className="py-2.5 px-3">Description</th>
-                        <th className="py-2.5 px-3">Account Code</th>
-                        <th className="py-2.5 px-3">Cost Centre</th>
-                        <th className="py-2.5 px-3 text-right">Amount</th>
-                        <th className="py-2.5 px-3">Journal #</th>
-                        <th className="py-2.5 px-3">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#F1F5F9]">
-                      {isLoadingFinancial ? (
-                        <tr>
-                          <td colSpan={10} className="py-12 text-center text-xs text-[#64748B]">
-                            <Loader2 className="mx-auto h-6 w-6 animate-spin text-[#287EAD]" />
-                            <p className="mt-2 font-medium">Loading financial lines…</p>
-                          </td>
-                        </tr>
-                      ) : paginatedFinancialLines.length === 0 ? (
-                        <tr>
-                          <td colSpan={10} className="py-12 text-center text-xs text-[#64748B]">
-                            <FileSpreadsheet className="mx-auto h-8 w-8 text-[#9AA5B1] mb-2" />
-                            <p className="text-sm font-semibold text-[#1E293B]">No requisition lines found</p>
-                            <p className="mt-1 text-xs text-[#64748B]">Try clearing your search or filter criteria.</p>
-                          </td>
-                        </tr>
-                      ) : (
-                        paginatedFinancialLines.map((line) => (
-                          <tr key={line.id} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
-                            <td className="py-2.5 px-3 font-semibold text-[#287EAD] whitespace-nowrap">
-                              <Link to={`/forms/${line.document_id}`} className="hover:underline flex items-center gap-1">
-                                {line.document_reference}
-                                <ExternalLink className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                              </Link>
-                            </td>
-                            <td className="py-2.5 px-3 text-[#64748B] whitespace-nowrap">{line.date}</td>
-                            <td className="py-2.5 px-3">
-                              <div className="font-semibold text-[#1E293B]">{line.department || "—"}</div>
-                              <div className="text-[10px] text-[#64748B]">{line.requester}</div>
-                            </td>
-                            <td className="py-2.5 px-3">
-                              <span className="inline-flex items-center rounded bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-0.5 text-[11px] font-mono font-semibold text-[#0A4D68]">
-                                {line.activity_code}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3 max-w-xs truncate" title={line.description}>
-                              {line.description}
-                            </td>
-                            <td className="py-2.5 px-3">
-                              <span className="inline-flex items-center rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono font-semibold text-[#1E293B]">
-                                {line.account_code}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3 font-mono text-slate-600">{line.cost_centre || "—"}</td>
-                            <td className="py-2.5 px-3 text-right font-bold tabular-nums text-[#1E293B]">
-                              {formatCurrency(line.amount, line.currency)}
-                            </td>
-                            <td className="py-2.5 px-3 whitespace-nowrap">
-                              <JournalStatusBadge status={line.journal_status} journalNumber={line.journal_number} />
-                            </td>
-                            <td className="py-2.5 px-3">
-                              <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-[#475569]">
-                                {line.document_status}
-                              </span>
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Pagination */}
-                {totalFinancialPages > 1 && (
-                  <div className="flex items-center justify-between border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2 text-xs text-[#64748B] print:hidden">
-                    <div>
-                      Showing {(finPage - 1) * finPageSize + 1} to{" "}
-                      {Math.min(finPage * finPageSize, sortedFinancialLines.length)} of{" "}
-                      {sortedFinancialLines.length} lines
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => setFinPage((p) => Math.max(1, p - 1))}
-                        disabled={finPage === 1}
-                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
-                      >
-                        <ChevronLeft className="h-4 w-4" />
-                      </button>
-                      <span className="px-2 font-medium text-[#1E293B]">
-                        Page {finPage} of {totalFinancialPages}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setFinPage((p) => Math.min(totalFinancialPages, p + 1))}
-                        disabled={finPage === totalFinancialPages}
-                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
-                      >
-                        <ChevronRight className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Summary by Activity Code */}
-            {financialTab === "activities" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
-                <table className="w-full border-collapse text-left text-xs">
-                  <thead>
-                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
-                      <th className="py-2.5 px-3">Activity Code (Dim 10)</th>
-                      <th className="py-2.5 px-3">Activity Description</th>
-                      <th className="py-2.5 px-3 text-center">Lines</th>
-                      <th className="py-2.5 px-3 text-right">Total Amount</th>
-                      <th className="py-2.5 px-3 text-right text-emerald-800">Posted Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#F1F5F9]">
-                    {(financialData?.by_activity || []).map((row) => (
-                      <tr key={row.activity_code} className="hover:bg-[#F8FAFC]">
-                        <td className="py-2.5 px-3 font-mono font-bold text-[#0A4D68]">{row.activity_code}</td>
-                        <td className="py-2.5 px-3 text-[#1E293B]">{row.activity_description || "—"}</td>
-                        <td className="py-2.5 px-3 text-center tabular-nums">{row.line_count}</td>
-                        <td className="py-2.5 px-3 text-right font-bold tabular-nums">{formatCurrency(row.total_amount, row.currency)}</td>
-                        <td className="py-2.5 px-3 text-right tabular-nums text-emerald-700">{formatCurrency(row.posted_amount, row.currency)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {/* Summary by Account Code */}
-            {financialTab === "accounts" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
-                <table className="w-full border-collapse text-left text-xs">
-                  <thead>
-                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
-                      <th className="py-2.5 px-3">Account Code</th>
-                      <th className="py-2.5 px-3 text-center">Lines</th>
-                      <th className="py-2.5 px-3 text-right">Total Amount</th>
-                      <th className="py-2.5 px-3 text-right text-emerald-800">Posted Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#F1F5F9]">
-                    {(financialData?.by_account || []).map((row) => (
-                      <tr key={row.account_code} className="hover:bg-[#F8FAFC]">
-                        <td className="py-2.5 px-3 font-mono font-bold text-[#1E293B]">{row.account_code}</td>
-                        <td className="py-2.5 px-3 text-center tabular-nums">{row.line_count}</td>
-                        <td className="py-2.5 px-3 text-right font-bold tabular-nums">{formatCurrency(row.total_amount, row.currency)}</td>
-                        <td className="py-2.5 px-3 text-right tabular-nums text-emerald-700">{formatCurrency(row.posted_amount, row.currency)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {/* Visual Breakdown */}
-            {financialTab === "visuals" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs">
-                <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider mb-2">
-                  Top Activities by Financial Spend
-                </h3>
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart
-                      data={(financialData?.by_activity || []).slice(0, 8).map((a) => ({
-                        name: a.activity_code,
-                        amount: a.total_amount,
-                      }))}
-                      margin={{ top: 10, right: 10, left: 10, bottom: 20 }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                      <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                      <YAxis tick={{ fontSize: 11 }} tickFormatter={(val) => `$${val.toLocaleString()}`} />
-                      <RechartsTooltip formatter={(val: any) => [formatCurrency(Number(val)), "Spend Amount"]} />
-                      <Bar dataKey="amount" fill="#287EAD" radius={[4, 4, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-            )}
-          </>
+          </div>
         )}
       </div>
 
@@ -2061,7 +2129,7 @@ export default function RequisitionReportsPage() {
               <button
                 type="button"
                 onClick={() => setScheduleModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600"
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -2079,7 +2147,7 @@ export default function RequisitionReportsPage() {
                       type="button"
                       onClick={() => setScheduleFrequency(freq)}
                       className={cn(
-                        "rounded-lg border px-3 py-2 text-center font-semibold capitalize transition-all",
+                        "rounded-lg border px-3 py-2 text-center font-semibold capitalize transition-all cursor-pointer",
                         scheduleFrequency === freq
                           ? "border-[#287EAD] bg-[#F0F8FD] text-[#0A4D68] shadow-xs"
                           : "border-slate-200 text-slate-600 hover:border-slate-300",
@@ -2138,7 +2206,7 @@ export default function RequisitionReportsPage() {
                 type="button"
                 onClick={handleSendTestSchedule}
                 disabled={scheduleSendingTest}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-2xs hover:bg-[#F8FAFC] disabled:opacity-60"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-2xs hover:bg-[#F8FAFC] disabled:opacity-60 cursor-pointer"
               >
                 {scheduleSendingTest ? (
                   <>
@@ -2157,7 +2225,7 @@ export default function RequisitionReportsPage() {
                 <button
                   type="button"
                   onClick={() => setScheduleModalOpen(false)}
-                  className="rounded-lg px-3 py-1.5 text-xs font-semibold text-[#64748B] hover:text-[#1E293B]"
+                  className="rounded-lg px-3 py-1.5 text-xs font-semibold text-[#64748B] hover:text-[#1E293B] cursor-pointer"
                 >
                   Cancel
                 </button>
@@ -2167,7 +2235,7 @@ export default function RequisitionReportsPage() {
                     setScheduleModalOpen(false);
                     toast.success(`Automated ${scheduleFrequency} report schedule saved successfully.`);
                   }}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-4 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99]"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-4 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] cursor-pointer"
                 >
                   <Check className="h-3.5 w-3.5" />
                   Save Schedule
