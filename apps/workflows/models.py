@@ -158,7 +158,7 @@ class WorkflowStep(models.Model):
     )
     post_imprest_request_after_approval = models.BooleanField(
         default=False,
-        help_text="After this approval in the Request phase, post the Imprest request before continuing.",
+        help_text="After this approval in the Request or procurement phases, post the Imprest request before continuing.",
     )
 
     # ── Approval-step fields ──────────────────────────────────────────────────

@@ -587,6 +587,10 @@ class WorkflowService:
         if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, task_step_order, execution_lane):
             return
 
+        if execution_lane == "main" and step.post_lpo_after_approval and doc is not None:
+            if WorkflowService._start_lpo_posting_gate(instance, step, doc, actor=actor):
+                return
+
         if (
             execution_lane == "main"
             and step.post_imprest_request_after_approval
@@ -596,10 +600,6 @@ class WorkflowService:
             )
         ):
             return
-
-        if execution_lane == "main" and step.post_lpo_after_approval and doc is not None:
-            if WorkflowService._start_lpo_posting_gate(instance, step, doc, actor=actor):
-                return
 
         WorkflowService._advance_step(
             instance,
@@ -2194,7 +2194,13 @@ class WorkflowService:
                 update_fields.append("metadata")
             WorkflowService._save_document(doc, update_fields=update_fields)
 
-            if completion_phase == "request" and outcome == "approved":
+            from apps.documents.builder_workflow import imprest_request_posting_checkpoint_configured
+            has_imprest_posting_checkpoint = imprest_request_posting_checkpoint_configured(doc)
+            if (
+                completion_phase == "request"
+                and outcome == "approved"
+                and not has_imprest_posting_checkpoint
+            ):
                 imprest_posting_gate_started = WorkflowService._start_imprest_request_posting_gate(
                     doc,
                     actor=last_approver_action.actor if last_approver_action else instance.started_by,
@@ -2398,7 +2404,7 @@ class WorkflowService:
 
     @staticmethod
     def _start_imprest_request_step_posting_gate(instance, step, document, *, actor=None) -> bool:
-        """Post at a marked Request approval and pause its chain."""
+        """Post at a marked approval in any procurement phase and pause its chain."""
         try:
             from apps.documents.builder_workflow import (
                 imprest_request_postings_complete,
@@ -2406,13 +2412,14 @@ class WorkflowService:
             )
             if (
                 not is_procurement_document(document)
-                or WorkflowService._document_workflow_phase(document) != "request"
+                or WorkflowService._document_workflow_phase(document)
+                not in {"requisition", "request", "rfq", "lpo"}
             ):
                 return False
             WorkflowService._queue_imprest_request_postings(
                 document,
                 actor=actor,
-                message=f"Queued after {step.name}; later Request approvals are waiting for posting.",
+                message=f"Queued after {step.name}; the next workflow approval is waiting for posting.",
             )
             if imprest_request_postings_complete(document):
                 return False
@@ -2445,7 +2452,7 @@ class WorkflowService:
 
     @staticmethod
     def _resume_imprest_request_workflow_if_ready(document) -> bool:
-        """Resume a marked Request step, or open RFQ/LPO after final posting."""
+        """Resume a marked approval step, or open the next phase after fallback posting."""
         try:
             from apps.documents.builder_workflow import (
                 completed_procurement_stages,
@@ -2454,7 +2461,8 @@ class WorkflowService:
             )
             if (
                 not is_procurement_document(document)
-                or WorkflowService._document_workflow_phase(document) != "request"
+                or WorkflowService._document_workflow_phase(document)
+                not in {"requisition", "request", "rfq", "lpo"}
                 or not imprest_request_postings_complete(document)
             ):
                 return False
@@ -2487,14 +2495,17 @@ class WorkflowService:
                     active_orders, _ = WorkflowService._v2_active_step_orders(locked)
                     if WorkflowService.is_v2_workflow(locked.template) and step.order not in active_orders:
                         logger.error(
-                            "Imprest posting gate step %s is not on the active Request path for document %s",
+                            "Imprest posting gate step %s is not on the active workflow path for document %s",
                             gate_step_id, document.pk,
                         )
                         return False
                     metadata = dict(document.metadata or {})
                     form = dict(metadata.get("form") or {})
                     form.pop("imprest_request_posting_gate_step_id", None)
-                    form["imprest_request_workflow_status"] = "in_progress"
+                    gate_phase = WorkflowService._document_workflow_phase(document)
+                    form["imprest_request_workflow_status"] = (
+                        "in_progress" if gate_phase == "request" else "approved"
+                    )
                     metadata["form"] = form
                     document.metadata = metadata
                     WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])

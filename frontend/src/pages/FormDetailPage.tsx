@@ -169,7 +169,7 @@ function PostingGateHeaderReminder({
       <span className="text-xs font-medium text-red-600">
         {kind === "lpo"
           ? "Later LPO approvals wait until this posting succeeds and the LPO is generated."
-          : "The next Request approver is notified only after this posting succeeds."}
+          : "The workflow advances only after this posting succeeds."}
       </span>
       <button
         type="button"
@@ -542,7 +542,7 @@ export default function FormDetailPage() {
   const dismissImprestPostingGate = useCallback(() => {
     setAwaitingImprestPostSince(0);
     setGateRetrying(false);
-    toast.info("A reminder stays on this form until posting succeeds. The next Request approver is not notified yet.");
+    toast.info("A reminder stays on this form until posting succeeds. The workflow will not advance yet.");
   }, []);
 
   const dismissLpoGenerationGate = useCallback(() => {
@@ -605,20 +605,6 @@ export default function FormDetailPage() {
 
   const [paymentVoucherModalOpen, setPaymentVoucherModalOpen] = useState(false);
   const [imprestPaymentVoucherModalOpen, setImprestPaymentVoucherModalOpen] = useState(false);
-  const [queuedImprestVoucherOpen, setQueuedImprestVoucherOpen] = useState(false);
-  const seenImprestPaymentVoucherId = useRef("");
-  useEffect(() => {
-    if (!imprestPaymentVoucherId || seenImprestPaymentVoucherId.current === imprestPaymentVoucherId) return;
-    seenImprestPaymentVoucherId.current = imprestPaymentVoucherId;
-    if (formData?.imprest_request_posting_required_for_lpo || generatedLpos.length) setQueuedImprestVoucherOpen(true);
-    else setImprestPaymentVoucherModalOpen(true);
-  }, [formData?.imprest_request_posting_required_for_lpo, generatedLpos.length, imprestPaymentVoucherId]);
-  useEffect(() => {
-    if (!queuedImprestVoucherOpen || formData?.imprest_request_posting_required_for_lpo
-      || lpoAutoPresentationPending || (lpoModalOpen && !lpoMinimized) || !imprestPaymentVoucherId) return;
-    setQueuedImprestVoucherOpen(false);
-    setImprestPaymentVoucherModalOpen(true);
-  }, [formData?.imprest_request_posting_required_for_lpo, imprestPaymentVoucherId, lpoAutoPresentationPending, lpoMinimized, lpoModalOpen, queuedImprestVoucherOpen]);
   useEffect(() => {
     if (retirementVoucherPending && !paymentVoucherGateDismissed) setAwaitingPaymentVoucher(true);
     if (paymentVoucherId && (awaitingPaymentVoucher || paymentVoucherGateDismissed)) {
@@ -1971,8 +1957,7 @@ export default function FormDetailPage() {
                   && lpoApprovalSteps.some((step) => step.id === `approver-${activeOrder}`)
                   && !laterLpoStepExists;
                 const isLpoGenerationApprover = Boolean((activeTask?.step as any)?.post_lpo_after_approval);
-                const isImprestPostingApprover = phase === "request"
-                  && Boolean((activeTask?.step as any)?.post_imprest_request_after_approval);
+                const isImprestPostingApprover = Boolean((activeTask?.step as any)?.post_imprest_request_after_approval);
                 const retirementApprovalSteps = (workflowData?.steps ?? []).filter((step) =>
                   step.kind === "task"
                   && /^approver-\d+$/.test(step.id)
@@ -2214,7 +2199,7 @@ export default function FormDetailPage() {
       {awaitingImprestPostSince > 0 && (
         <PostingGateOverlay
           title="Imprest posting in progress"
-          pendingMessage="The next Request approver will be notified after SunSystems confirms the posting."
+          pendingMessage="The workflow will advance after SunSystems confirms the posting."
           failedPostings={failedImprestGatePostings}
           retrying={gateRetrying}
           onRetry={() => void retryGatePostings(failedImprestGatePostings)}

@@ -1028,7 +1028,7 @@ function StepEditPanel({
               </span>
               <span>
                 <span className="block text-xs font-semibold">Post Imprest request after this approval</span>
-                <span className="block text-[11px] mt-1 opacity-80">Use on one Request approval, or select it together with LPO generation to post the DSA and LPO at the same checkpoint.</span>
+                <span className="block text-[11px] mt-1 opacity-80">Use on one approval step in the Request or procurement phases. The workflow waits for the DSA posting to succeed before advancing.</span>
               </span>
             </button>
           )}

@@ -440,7 +440,12 @@ def next_procurement_stage(document: Document) -> str | None:
     if phase == "request":
         try:
             from apps.sunsystems.config import has_imprest_request_lines
-            if has_imprest_request_lines(document) and not imprest_request_postings_complete(document):
+            request_required = has_imprest_request_lines(document)
+            if (
+                request_required
+                and not imprest_request_postings_complete(document)
+                and not imprest_request_posting_checkpoint_configured(document)
+            ):
                 return None
         except Exception:
             return None
@@ -493,6 +498,23 @@ def imprest_request_postings_complete(document: Document) -> bool:
         return False
 
 
+def imprest_request_posting_checkpoint_configured(document: Document) -> bool:
+    """Whether an active workflow template has an explicit Imprest posting step."""
+    if not is_procurement_document(document) or not document.document_type_id:
+        return False
+    try:
+        from apps.workflows.models import WorkflowTemplate
+
+        return WorkflowTemplate.objects.filter(
+            document_type_id=document.document_type_id,
+            target_type="document",
+            is_active=True,
+            steps__post_imprest_request_after_approval=True,
+        ).exists()
+    except Exception:
+        return False
+
+
 def can_start_procurement_workflow_stage(document: Document, stage: str, *, user=None) -> bool:
     """Only allow the initial stage or the next completed procurement stage."""
     normalized = (stage or "").strip().lower()
@@ -536,7 +558,11 @@ def can_start_procurement_workflow_stage(document: Document, stage: str, *, user
         previous = "request" if request_required else "requisition"
         if previous not in completed_procurement_stages(document):
             return False
-        if request_required and not imprest_request_postings_complete(document):
+        if (
+            request_required
+            and not imprest_request_postings_complete(document)
+            and not imprest_request_posting_checkpoint_configured(document)
+        ):
             return False
         if (document.status or "").strip() != DocumentStatus.APPROVED:
             return False
@@ -555,7 +581,11 @@ def can_start_procurement_workflow_stage(document: Document, stage: str, *, user
         except Exception:
             return False
         previous = "request" if request_required else "requisition"
-        if request_required and not imprest_request_postings_complete(document):
+        if (
+            request_required
+            and not imprest_request_postings_complete(document)
+            and not imprest_request_posting_checkpoint_configured(document)
+        ):
             return False
     else:
         previous = PROCUREMENT_WORKFLOW_STAGES[PROCUREMENT_WORKFLOW_STAGES.index(normalized) - 1]
