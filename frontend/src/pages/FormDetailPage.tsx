@@ -285,6 +285,12 @@ export default function FormDetailPage() {
   const [travelPolicyNotice, setTravelPolicyNotice] = useState<string | null>(null);
   const duplicateNoticeDismissedDate = useRef("");
   const duplicateNoticeObservedDate = useRef("");
+  const dismissDuplicateNoticeForFeedback = () => {
+    if (duplicateDateNotice?.travel_date) {
+      duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
+    }
+    setDuplicateDateNotice(null);
+  };
   const [reworkResubmitted, setReworkResubmitted] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const formDirtyRef = useRef(false);
@@ -848,6 +854,7 @@ export default function FormDetailPage() {
         canEditConditionalSections: canEditConditionalSections(),
       }, process);
       if (missing.length || pastDates.length) {
+        dismissDuplicateNoticeForFeedback();
         if (!formEditing) {
           setFormValues({ ...(formData?.values ?? {}) });
           formDirtyRef.current = false;
@@ -911,6 +918,7 @@ export default function FormDetailPage() {
         });
         return;
       }
+      dismissDuplicateNoticeForFeedback();
       const message = extractApiError(err, "Submission failed");
       if (/required fields missing/i.test(message)) {
         const fieldList = message.split(/required fields missing:\s*/i)[1];

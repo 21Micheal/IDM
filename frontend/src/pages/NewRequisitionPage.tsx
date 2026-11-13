@@ -62,6 +62,12 @@ export default function NewRequisitionPage() {
   const [travelPolicyNotice, setTravelPolicyNotice] = useState<string | null>(null);
   const duplicateNoticeDismissedDate = useRef("");
   const duplicateNoticeObservedDate = useRef("");
+  const dismissDuplicateNoticeForFeedback = () => {
+    if (duplicateDateNotice?.travel_date) {
+      duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
+    }
+    setDuplicateDateNotice(null);
+  };
 
   // Refresh the signed-in user's profile before applying current-user formulas.
   // The persisted auth store can predate newly added profile fields, so relying
@@ -361,6 +367,7 @@ export default function NewRequisitionPage() {
         canEditConditionalSections: true,
       }, "draft");
       if (missing.length || pastDates.length) {
+        dismissDuplicateNoticeForFeedback();
         setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
         toast.error(
           `${missing.length + pastDates.length} required field${missing.length + pastDates.length === 1 ? "" : "s"} need${missing.length + pastDates.length === 1 ? "s" : ""} attention.`,
@@ -405,6 +412,7 @@ export default function NewRequisitionPage() {
         });
         return;
       }
+      dismissDuplicateNoticeForFeedback();
       const message = extractApiError(err, "Failed to submit requisition");
       if (/required fields missing/i.test(message)) {
         const fieldList = message.split(/required fields missing:\s*/i)[1];

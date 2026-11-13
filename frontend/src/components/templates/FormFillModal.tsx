@@ -80,6 +80,12 @@ export default function FormFillModal({
   const [travelPolicyNotice, setTravelPolicyNotice] = useState<string | null>(null);
   const duplicateNoticeDismissedDate = useRef("");
   const duplicateNoticeObservedDate = useRef("");
+  const dismissDuplicateNoticeForFeedback = () => {
+    if (duplicateDateNotice?.travel_date) {
+      duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
+    }
+    setDuplicateDateNotice(null);
+  };
   // Required fields flagged by the last "Start workflow" attempt — shown inline
   // (a toast with a long list is unreadable and disappears).
   const [missingFields, setMissingFields] = useState<string[]>([]);
@@ -202,6 +208,7 @@ export default function FormFillModal({
       canEditConditionalSections: true,
     }, "draft");
     if (missing.length || pastDates.length) {
+      dismissDuplicateNoticeForFeedback();
       setMissingFields([...missing, ...pastDates.map((field) => `Past date: ${field}`)]);
       toast.error(
         `${missing.length + pastDates.length} required field${missing.length + pastDates.length === 1 ? "" : "s"} need${missing.length + pastDates.length === 1 ? "s" : ""} attention.`,
@@ -247,6 +254,14 @@ export default function FormFillModal({
           });
           return;
         }
+        const submitMessage = extractApiError(submitErr, "");
+        if (/required fields missing/i.test(submitMessage)) {
+          dismissDuplicateNoticeForFeedback();
+          const fieldList = submitMessage.split(/required fields missing:\s*/i)[1];
+          setMissingFields(fieldList ? fieldList.split(/,\s*/) : [submitMessage]);
+          return;
+        }
+        dismissDuplicateNoticeForFeedback();
         toast.warn(
           "Form saved, but workflow could not be started. Open it from the list to retry.",
         );
@@ -258,9 +273,13 @@ export default function FormFillModal({
       // section), surface its field list in the form as well as in the toast.
       const message = extractApiError(err, "");
       if (/required fields missing/i.test(message)) {
+        dismissDuplicateNoticeForFeedback();
         const fieldList = message.split(/required fields missing:\s*/i)[1];
         setMissingFields(fieldList ? fieldList.split(/,\s*/) : [message]);
-      } else toast.error(message || "Could not save the form before starting its workflow.");
+      } else {
+        dismissDuplicateNoticeForFeedback();
+        toast.error(message || "Could not save the form before starting its workflow.");
+      }
     } finally {
       setSubmitting(false);
     }
