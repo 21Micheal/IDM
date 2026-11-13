@@ -474,3 +474,395 @@ def generate_requisition_report_csv(report_data: Dict[str, Any]) -> str:
 
     return output.getvalue()
 
+
+def build_outstanding_retirements_report(
+    queryset: QuerySet,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Outstanding retirements report aged by traveller and department.
+    Client requirement:
+    - Aging buckets: Current / Not Due, 1-30 days, 31-60 days, 61-90 days, 90+ days.
+    - Groupings by traveller and department with totals.
+    - Status tracking (Overdue, Due, Awaiting Finance, Reconciled, etc.).
+    """
+    from apps.documents.builder_workflow import (
+        travel_retirement_config,
+        travel_retirement_due_date,
+        travel_return_date,
+        retirement_status,
+        is_travel_requisition,
+    )
+    from django.utils import timezone
+
+    today = timezone.localdate()
+    p = params or {}
+
+    # Query params
+    search_q = str(p.get("search") or "").strip().lower()
+    department_q = str(p.get("department") or "").strip()
+    traveller_q = str(p.get("traveller") or "").strip()
+    status_q = str(p.get("status") or "").strip().lower()
+    aging_bucket_q = str(p.get("aging_bucket") or "").strip().lower()
+    start_date_q = str(p.get("start_date") or "").strip()
+    end_date_q = str(p.get("end_date") or "").strip()
+    include_reconciled = str(p.get("include_reconciled") or "false").lower() in ("true", "1", "yes")
+
+    all_retirements: List[Dict[str, Any]] = []
+    available_departments = set()
+    available_travellers = set()
+    available_statuses = set()
+
+    for doc in queryset:
+        if not (is_travel_requisition(doc) or travel_retirement_config(doc)):
+            continue
+
+        metadata = doc.metadata if isinstance(doc.metadata, dict) else {}
+        form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+        values = form.get("values") if isinstance(form.get("values"), dict) else {}
+
+        ret_info = retirement_status(doc) or {}
+        status_kind = ret_info.get("status", "not_started")
+        status_label = ret_info.get("label", "LPO pending")
+        available_statuses.add(status_label)
+
+        ret_date = travel_return_date(doc)
+        due_date = travel_retirement_due_date(doc)
+
+        # Days aged / overdue
+        days_overdue = 0
+        if due_date and today > due_date and status_kind != "reconciled":
+            days_overdue = (today - due_date).days
+
+        # Aging Bucket assignment
+        if status_kind == "reconciled":
+            bucket = "reconciled"
+            bucket_label = "Reconciled"
+        elif days_overdue == 0:
+            bucket = "current"
+            bucket_label = "Current / Not Due"
+        elif days_overdue <= 30:
+            bucket = "1_30"
+            bucket_label = "1 - 30 Days"
+        elif days_overdue <= 60:
+            bucket = "31_60"
+            bucket_label = "31 - 60 Days"
+        elif days_overdue <= 90:
+            bucket = "61_90"
+            bucket_label = "61 - 90 Days"
+        else:
+            bucket = "over_90"
+            bucket_label = "90+ Days"
+
+        # Traveller name
+        traveller_name = _text(
+            values.get("employee_name_q97i")
+            or values.get("applicant_name")
+            or values.get("employee_name")
+        )
+        if not traveller_name and hasattr(doc, "uploaded_by") and doc.uploaded_by:
+            traveller_name = doc.uploaded_by.get_full_name() or doc.uploaded_by.email or "Unknown"
+        if not traveller_name:
+            traveller_name = "Unknown Traveller"
+        available_travellers.add(traveller_name)
+
+        traveller_email = ""
+        if hasattr(doc, "uploaded_by") and doc.uploaded_by:
+            traveller_email = doc.uploaded_by.email or ""
+
+        # Department
+        dept_name = _text(
+            values.get("employee_department_copy")
+            or values.get("employee_department")
+            or values.get("department")
+        )
+        if not dept_name and hasattr(doc, "uploaded_by") and doc.uploaded_by and getattr(doc.uploaded_by, "department", None):
+            dept_name = doc.uploaded_by.department.name or ""
+        if not dept_name:
+            dept_name = "General"
+        available_departments.add(dept_name)
+
+        # Dates
+        departure_date = _text(
+            values.get("activity_start_date_date")
+            or values.get("expected_travel_date_a6r4")
+            or values.get("travel_start_date")
+            or ""
+        )
+        return_date_str = ret_date.strftime("%Y-%m-%d") if ret_date else _text(values.get("activity_end_date_date") or "")
+        due_date_str = due_date.strftime("%Y-%m-%d") if due_date else ""
+
+        # Advance & Variance Amounts
+        advance_amount = _to_float(
+            values.get("total_dsa")
+            or values.get("total_imprest_gross")
+            or values.get("grand_total")
+            or 0.0
+        )
+        variance = ret_info.get("variance") or {}
+        spent_amount = _to_float(variance.get("spent") or 0.0)
+        variance_amount = _to_float(variance.get("amount") or 0.0)
+        variance_scenario = _text(variance.get("scenario") or variance.get("kind") or "")
+
+        if status_kind == "reconciled":
+            outstanding_amount = 0.0
+        else:
+            outstanding_amount = max(0.0, advance_amount - spent_amount) if spent_amount > 0 else advance_amount
+
+        currency = _text(doc.currency or values.get("currency_y0qd") or values.get("currency") or "USD").upper()
+        doc_ref = doc.reference_number or f"REQ-{str(doc.id)[:8]}"
+
+        item = {
+            "id": str(doc.id),
+            "document_reference": doc_ref,
+            "title": doc.title or "Travel Requisition",
+            "document_status": str(doc.status or "draft"),
+            "workflow_phase": str(form.get("workflow_phase") or "requisition"),
+            "created_at": doc.created_at.strftime("%Y-%m-%d") if doc.created_at else "",
+            "traveller_name": traveller_name,
+            "traveller_email": traveller_email,
+            "department": dept_name,
+            "departure_date": departure_date,
+            "return_date": return_date_str,
+            "due_date": due_date_str,
+            "days_overdue": days_overdue,
+            "aging_bucket": bucket,
+            "aging_bucket_label": bucket_label,
+            "advance_amount": round(advance_amount, 2),
+            "retired_amount": round(spent_amount, 2),
+            "outstanding_amount": round(outstanding_amount, 2),
+            "variance_amount": round(variance_amount, 2),
+            "variance_scenario": variance_scenario,
+            "currency": currency,
+            "retirement_status": status_kind,
+            "retirement_status_label": status_label,
+        }
+
+        # Filter: Reconciled exclusion when not requested
+        if not include_reconciled and status_kind == "reconciled" and not aging_bucket_q and not status_q:
+            continue
+
+        # Search filter
+        if search_q:
+            haystack = f"{doc_ref} {doc.title} {traveller_name} {traveller_email} {dept_name} {status_label}".lower()
+            if search_q not in haystack:
+                continue
+
+        # Department filter
+        if department_q and dept_name.lower() != department_q.lower():
+            continue
+
+        # Traveller filter
+        if traveller_q and traveller_name.lower() != traveller_q.lower():
+            continue
+
+        # Status filter
+        if status_q and status_kind.lower() != status_q and status_label.lower() != status_q:
+            continue
+
+        # Aging bucket filter
+        if aging_bucket_q and aging_bucket_q != "all":
+            if bucket != aging_bucket_q:
+                continue
+
+        # Date range filter (against due_date, return_date, or created_at)
+        check_date = due_date_str or return_date_str or item["created_at"]
+        if start_date_q and check_date < start_date_q:
+            continue
+        if end_date_q and check_date > end_date_q:
+            continue
+
+        all_retirements.append(item)
+
+    # Sort: highest days overdue first, then highest outstanding amount
+    all_retirements.sort(
+        key=lambda r: (r["days_overdue"], r["outstanding_amount"], r["created_at"]),
+        reverse=True,
+    )
+
+    # ── Grouping by Department ──────────────────────────────────────────────
+    by_dept_map: Dict[str, Dict[str, Any]] = {}
+    for r in all_retirements:
+        dept = r["department"]
+        if dept not in by_dept_map:
+            by_dept_map[dept] = {
+                "department": dept,
+                "total_records": 0,
+                "total_advance": 0.0,
+                "total_outstanding": 0.0,
+                "total_retired": 0.0,
+                "overdue_count": 0,
+                "overdue_amount": 0.0,
+                "aging_buckets": {
+                    "current": 0.0,
+                    "1_30": 0.0,
+                    "31_60": 0.0,
+                    "61_90": 0.0,
+                    "over_90": 0.0,
+                    "reconciled": 0.0,
+                },
+            }
+        entry = by_dept_map[dept]
+        entry["total_records"] += 1
+        entry["total_advance"] = round(entry["total_advance"] + r["advance_amount"], 2)
+        entry["total_outstanding"] = round(entry["total_outstanding"] + r["outstanding_amount"], 2)
+        entry["total_retired"] = round(entry["total_retired"] + r["retired_amount"], 2)
+        if r["days_overdue"] > 0 and r["retirement_status"] != "reconciled":
+            entry["overdue_count"] += 1
+            entry["overdue_amount"] = round(entry["overdue_amount"] + r["outstanding_amount"], 2)
+        b_key = r["aging_bucket"]
+        if b_key in entry["aging_buckets"]:
+            entry["aging_buckets"][b_key] = round(entry["aging_buckets"][b_key] + r["outstanding_amount"], 2)
+
+    by_department = sorted(
+        by_dept_map.values(),
+        key=lambda d: (d["total_outstanding"], d["overdue_count"], d["total_records"]),
+        reverse=True,
+    )
+
+    # ── Grouping by Traveller ───────────────────────────────────────────────
+    by_traveller_map: Dict[str, Dict[str, Any]] = {}
+    for r in all_retirements:
+        traveller = r["traveller_name"]
+        if traveller not in by_traveller_map:
+            by_traveller_map[traveller] = {
+                "traveller_name": traveller,
+                "traveller_email": r["traveller_email"],
+                "department": r["department"],
+                "total_records": 0,
+                "total_advance": 0.0,
+                "total_outstanding": 0.0,
+                "total_retired": 0.0,
+                "overdue_count": 0,
+                "overdue_amount": 0.0,
+                "aging_buckets": {
+                    "current": 0.0,
+                    "1_30": 0.0,
+                    "31_60": 0.0,
+                    "61_90": 0.0,
+                    "over_90": 0.0,
+                    "reconciled": 0.0,
+                },
+            }
+        entry = by_traveller_map[traveller]
+        entry["total_records"] += 1
+        entry["total_advance"] = round(entry["total_advance"] + r["advance_amount"], 2)
+        entry["total_outstanding"] = round(entry["total_outstanding"] + r["outstanding_amount"], 2)
+        entry["total_retired"] = round(entry["total_retired"] + r["retired_amount"], 2)
+        if r["days_overdue"] > 0 and r["retirement_status"] != "reconciled":
+            entry["overdue_count"] += 1
+            entry["overdue_amount"] = round(entry["overdue_amount"] + r["outstanding_amount"], 2)
+        b_key = r["aging_bucket"]
+        if b_key in entry["aging_buckets"]:
+            entry["aging_buckets"][b_key] = round(entry["aging_buckets"][b_key] + r["outstanding_amount"], 2)
+
+    by_traveller = sorted(
+        by_traveller_map.values(),
+        key=lambda t: (t["total_outstanding"], t["overdue_count"], t["total_records"]),
+        reverse=True,
+    )
+
+    # ── Executive KPI Summary ───────────────────────────────────────────────
+    overdue_items = [r for r in all_retirements if r["days_overdue"] > 0 and r["retirement_status"] != "reconciled"]
+    aging_totals = {
+        "current": {"count": 0, "amount": 0.0},
+        "1_30": {"count": 0, "amount": 0.0},
+        "31_60": {"count": 0, "amount": 0.0},
+        "61_90": {"count": 0, "amount": 0.0},
+        "over_90": {"count": 0, "amount": 0.0},
+        "reconciled": {"count": 0, "amount": 0.0},
+    }
+    for r in all_retirements:
+        b = r["aging_bucket"]
+        if b in aging_totals:
+            aging_totals[b]["count"] += 1
+            aging_totals[b]["amount"] = round(aging_totals[b]["amount"] + r["outstanding_amount"], 2)
+
+    summary = {
+        "total_records": len(all_retirements),
+        "total_advance_amount": round(sum(r["advance_amount"] for r in all_retirements), 2),
+        "total_outstanding_amount": round(sum(r["outstanding_amount"] for r in all_retirements), 2),
+        "total_retired_amount": round(sum(r["retired_amount"] for r in all_retirements), 2),
+        "total_overdue_records": len(overdue_items),
+        "total_overdue_amount": round(sum(r["outstanding_amount"] for r in overdue_items), 2),
+        "total_awaiting_finance": sum(1 for r in all_retirements if r["retirement_status"] == "awaiting_finance"),
+        "total_reconciled": sum(1 for r in all_retirements if r["retirement_status"] == "reconciled"),
+        "average_days_aged": round(sum(r["days_overdue"] for r in overdue_items) / max(1, len(overdue_items)), 1) if overdue_items else 0.0,
+        "aging_totals": aging_totals,
+    }
+
+    filter_options = {
+        "departments": sorted(list(available_departments)),
+        "travellers": sorted(list(available_travellers)),
+        "statuses": sorted(list(available_statuses)),
+        "aging_buckets": [
+            {"key": "all", "label": "All Aging Categories"},
+            {"key": "current", "label": "Current / Not Due"},
+            {"key": "1_30", "label": "1 - 30 Days Overdue"},
+            {"key": "31_60", "label": "31 - 60 Days Overdue"},
+            {"key": "61_90", "label": "61 - 90 Days Overdue"},
+            {"key": "over_90", "label": "90+ Days Overdue"},
+            {"key": "reconciled", "label": "Reconciled"},
+        ],
+    }
+
+    return {
+        "summary": summary,
+        "retirements": all_retirements,
+        "by_department": by_department,
+        "by_traveller": by_traveller,
+        "filter_options": filter_options,
+    }
+
+
+def generate_outstanding_retirements_csv(report_data: Dict[str, Any]) -> str:
+    """
+    Format outstanding retirements aged report into CSV with UTF-8 BOM.
+    """
+    output = io.StringIO()
+    output.write("\ufeff")
+    writer = csv.writer(output)
+
+    # Header Row
+    writer.writerow([
+        "Requisition Ref",
+        "Traveller",
+        "Email",
+        "Department",
+        "Departure Date",
+        "Return Date",
+        "Due Date",
+        "Days Overdue",
+        "Aging Category",
+        "Advance Issued",
+        "Amount Retired",
+        "Outstanding Balance",
+        "Variance Amount",
+        "Currency",
+        "Retirement Status",
+        "Requisition Status",
+    ])
+
+    for row in report_data.get("retirements", []):
+        writer.writerow([
+            row.get("document_reference", ""),
+            row.get("traveller_name", ""),
+            row.get("traveller_email", ""),
+            row.get("department", ""),
+            row.get("departure_date", ""),
+            row.get("return_date", ""),
+            row.get("due_date", ""),
+            row.get("days_overdue", 0),
+            row.get("aging_bucket_label", ""),
+            f"{row.get('advance_amount', 0.0):.2f}",
+            f"{row.get('retired_amount', 0.0):.2f}",
+            f"{row.get('outstanding_amount', 0.0):.2f}",
+            f"{row.get('variance_amount', 0.0):.2f}",
+            row.get("currency", "USD"),
+            row.get("retirement_status_label", ""),
+            row.get("document_status", ""),
+        ])
+
+    return output.getvalue()
+
+

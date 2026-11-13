@@ -4,7 +4,12 @@ import type {
   DocumentEditTokenResponse,
   DocumentPreviewResponse,
 } from "@/types";
-import type { RequisitionReportResponse, RequisitionReportParams } from "@/types/reports";
+import type {
+  RequisitionReportResponse,
+  RequisitionReportParams,
+  RetirementsAgingReportResponse,
+  RetirementsAgingReportParams,
+} from "@/types/reports";
 
 // ── OCR suggestion types (exported for use in components) ─────────────────────
 
@@ -327,6 +332,31 @@ export const documentsAPI = {
       });
     }
     return `/api/v1/documents/requisition-report/?${searchParams.toString()}`;
+  },
+
+  /**
+   * Outstanding retirements aged by traveller and department report.
+   */
+  retirementsAgingReport: (params?: RetirementsAgingReportParams) =>
+    api.get<RetirementsAgingReportResponse>("/documents/retirements-aging-report/", { params }),
+
+  downloadRetirementsAgingReportCsv: (params?: RetirementsAgingReportParams) =>
+    api.get("/documents/retirements-aging-report/", {
+      params: { ...(params || {}), export: "csv" },
+      responseType: "blob",
+    }),
+
+  exportRetirementsAgingReportUrl: (params?: RetirementsAgingReportParams) => {
+    const searchParams = new URLSearchParams();
+    searchParams.set("export", "csv");
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== "") {
+          searchParams.set(k, String(v));
+        }
+      });
+    }
+    return `/api/v1/documents/retirements-aging-report/?${searchParams.toString()}`;
   },
 
   /**

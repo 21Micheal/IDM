@@ -447,11 +447,11 @@ export default function Layout({
   const roleLabel = user?.has_admin_access ? "Administrator" : "Procurement User";
 
   return (
-    <div className="flex h-full w-full max-w-full overflow-hidden bg-[#F4F6F8] font-sans antialiased text-[#1F2933]">
+    <div className="flex h-full w-full max-w-full overflow-hidden bg-[#F4F6F8] font-sans antialiased text-[#1F2933] print:h-auto print:overflow-visible print:bg-white">
       {/* ── Scoped Sidebar ── */}
       <aside
         className={cn(
-          "relative flex flex-col border-r border-[#E4E7EB] bg-[#111927] text-[#9AA5B1] transition-all duration-200 z-30 select-none",
+          "relative flex flex-col border-r border-[#E4E7EB] bg-[#111927] text-[#9AA5B1] transition-all duration-200 z-30 select-none print:hidden",
           collapsed ? "w-16" : "w-64"
         )}
       >
@@ -636,9 +636,9 @@ export default function Layout({
       </aside>
 
       {/* ── Main Work Area ── */}
-      <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex flex-1 flex-col overflow-hidden print:h-auto print:overflow-visible print:block">
         {/* Top Header Bar */}
-        <header className="flex h-12 shrink-0 items-center justify-between border-b border-[#E4E7EB] bg-white px-4 shadow-sm z-20">
+        <header className="flex h-12 shrink-0 items-center justify-between border-b border-[#E4E7EB] bg-white px-4 shadow-sm z-20 print:hidden">
           <div className="flex items-center gap-3">
             <img src={dmsLogo} alt={brandName} className="h-9 w-auto object-contain" />
             <h2 className="text-base font-bold tracking-tight text-[#1F2933]">
@@ -748,7 +748,7 @@ export default function Layout({
         </header>
 
         {/* Content Outlet */}
-        <main className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-[#F4F6F8]">
+        <main className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-[#F4F6F8] print:h-auto print:overflow-visible print:bg-white print:block">
           <Suspense
             fallback={
               <div className="flex h-64 items-center justify-center">

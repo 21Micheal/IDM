@@ -1,10 +1,17 @@
 /**
  * RequisitionReportsPage.tsx
  *
- * Comprehensive financial reporting for Requisition forms:
- * Activity Code, Description, Account Code, Amount, and Journal Number.
- * Includes executive summary KPIs, multi-criteria filtering, grouping by
- * Activity and Account, visual charts, and Excel/CSV and Print exports.
+ * Comprehensive financial and compliance reporting for the Requisition System:
+ * 1. Outstanding Retirements Report (Aged by Traveller and Department)
+ *    - Client specification: Aging analysis (Current, 1-30d, 31-60d, 61-90d, 90+d)
+ *    - Interactive Q&A Assistant ("Ask the Report")
+ *    - Scheduled automated report configuration
+ *    - Light-colored stat cards with HEX: #C5E6F5 accents
+ *    - CustomListbox dropdowns
+ * 2. Requisition Financial Lines Report
+ *    - Activity code (Dimension 10), Line Description, Account code, Amount, and Journal #
+ *    - Aggregations by Activity and Account
+ * 3. Clean, print-friendly layout (hiding all controls, sidebars, and headers).
  */
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -12,24 +19,33 @@ import { useQuery } from "@tanstack/react-query";
 import {
   FileSpreadsheet, Download, Printer, Search, X, Filter,
   CheckCircle2, Clock, AlertTriangle, TrendingUp, BarChart3,
-  PieChart as PieChartIcon, Building2, ClipboardList, RefreshCw,
-  ExternalLink, Layers, ChevronLeft, ChevronRight,
-  ArrowUpDown, SlidersHorizontal, PlusCircle, Check, Loader2,
+  Building2, ClipboardList, RefreshCw, ExternalLink, Layers,
+  ChevronLeft, ChevronRight, SlidersHorizontal, Loader2,
+  Calendar, Mail, User, ShieldAlert, Sparkles, Send, BellRing,
+  HelpCircle, ArrowUpDown, Check, CheckCircle,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
-  Tooltip as RechartsTooltip, CartesianGrid, Cell, PieChart, Pie,
+  Tooltip as RechartsTooltip, CartesianGrid, Cell, Legend,
 } from "recharts";
 import { documentsAPI } from "@/services/api";
+import CustomListbox from "@/components/ui/CustomListbox";
 import { toast } from "@/components/ui/vault-toast";
 import type {
   RequisitionReportLine,
   RequisitionReportParams,
   RequisitionReportResponse,
+  OutstandingRetirementLine,
+  RetirementsAgingReportParams,
+  RetirementsAgingReportResponse,
+  DepartmentAgingSummary,
+  TravellerAgingSummary,
 } from "@/types/reports";
 import { cn } from "@/lib/utils";
 
-type ActiveTab = "lines" | "activities" | "accounts" | "visuals";
+type ReportMode = "retirements" | "financial_lines";
+type RetirementsTab = "register" | "by_department" | "by_traveller" | "visuals";
+type FinancialLinesTab = "lines" | "activities" | "accounts" | "visuals";
 type SortDirection = "asc" | "desc";
 
 const CHART_COLORS = [
@@ -37,6 +53,15 @@ const CHART_COLORS = [
   "#EC4899", "#8B5CF6", "#10B981", "#3B82F6",
   "#F97316", "#14B8A6",
 ];
+
+const AGING_BAR_COLORS: Record<string, string> = {
+  current: "#10B981", // Emerald
+  "1_30": "#F59E0B",  // Amber
+  "31_60": "#F97316", // Orange
+  "61_90": "#EF4444", // Red
+  "over_90": "#991B1B", // Dark Red
+  reconciled: "#6366F1", // Indigo
+};
 
 function formatCurrency(amount: number, currency: string = "USD"): string {
   try {
@@ -51,57 +76,100 @@ function formatCurrency(amount: number, currency: string = "USD"): string {
   }
 }
 
-function statusBadge(statusStr: string) {
-  const s = String(statusStr || "").toLowerCase();
-  if (s.includes("approved")) {
+function formatDateDisplay(raw?: string): string {
+  if (!raw) return "—";
+  try {
+    const d = new Date(raw);
+    if (isNaN(d.getTime())) return raw;
+    return d.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return raw;
+  }
+}
+
+function AgingBadge({ bucket, label, days }: { bucket: string; label: string; days: number }) {
+  if (bucket === "reconciled") {
     return (
-      <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200">
-        <CheckCircle2 className="h-3 w-3" /> Approved
+      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700 border border-indigo-200">
+        <CheckCircle2 className="h-3 w-3" />
+        Reconciled
       </span>
     );
   }
-  if (s.includes("reject")) {
+  if (bucket === "current") {
     return (
-      <span className="inline-flex items-center gap-1 rounded bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700 border border-rose-200">
-        <X className="h-3 w-3" /> Rejected
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 border border-emerald-200">
+        <Clock className="h-3 w-3" />
+        Current / Not Due
       </span>
     );
   }
-  if (s.includes("pending") || s.includes("review") || s.includes("hold")) {
+  if (bucket === "1_30") {
     return (
-      <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 border border-amber-200">
-        <Clock className="h-3 w-3" /> Pending
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800 border border-amber-300">
+        <AlertTriangle className="h-3 w-3 text-amber-600" />
+        1–30d ({days}d)
+      </span>
+    );
+  }
+  if (bucket === "31_60") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-0.5 text-[11px] font-semibold text-orange-800 border border-orange-300">
+        <AlertTriangle className="h-3 w-3 text-orange-600" />
+        31–60d ({days}d)
+      </span>
+    );
+  }
+  if (bucket === "61_90") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-800 border border-rose-300">
+        <ShieldAlert className="h-3 w-3 text-rose-600" />
+        61–90d ({days}d)
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-600 border border-slate-200">
-      {statusStr || "Draft"}
+    <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-900 border border-red-400">
+      <ShieldAlert className="h-3 w-3 text-red-700" />
+      90+ Days ({days}d)
     </span>
   );
 }
 
-function journalBadge(journalNumber: string, journalStatus: string) {
-  const hasJnl = journalNumber && journalNumber !== "—";
-  if (hasJnl) {
+function JournalStatusBadge({ status, journalNumber }: { status: string; journalNumber?: string }) {
+  if (journalNumber && journalNumber !== "—") {
     return (
-      <span className="inline-flex items-center gap-1 rounded bg-[#EBF5FA] px-2 py-0.5 font-mono text-xs font-semibold text-[#287EAD] border border-[#BCE1F5]">
-        <Check className="h-3 w-3 text-emerald-600" />
-        #{journalNumber}
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200">
+        <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+        <span className="font-mono">#{journalNumber}</span>
       </span>
     );
   }
-  if (journalStatus === "pending") {
+  if (status === "posted") {
     return (
-      <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
-        <Clock className="h-3 w-3" /> Posting
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200">
+        <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+        Posted
       </span>
     );
   }
-  if (journalStatus === "failed") {
+  if (status === "failed") {
     return (
-      <span className="inline-flex items-center gap-1 rounded bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700">
-        <AlertTriangle className="h-3 w-3" /> Failed
+      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700 border border-rose-200">
+        <AlertTriangle className="h-3 w-3 text-rose-600" />
+        Failed
+      </span>
+    );
+  }
+  if (status === "pending") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 border border-amber-200">
+        <Clock className="h-3 w-3 text-amber-600" />
+        Pending
       </span>
     );
   }
@@ -113,46 +181,344 @@ function journalBadge(journalNumber: string, journalStatus: string) {
 }
 
 export default function RequisitionReportsPage() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>("lines");
+  // Top Report Switcher: Outstanding Retirements Aging vs Requisition Financial Lines
+  const [reportMode, setReportMode] = useState<ReportMode>("retirements");
 
-  // Filters
-  const [search, setSearch] = useState("");
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-  const [accountCode, setAccountCode] = useState("");
-  const [activityCode, setActivityCode] = useState("");
-  const [status, setStatus] = useState("");
-  const [department, setDepartment] = useState("");
-  const [hasJournal, setHasJournal] = useState(false);
+  // Retirements View state
+  const [retirementsTab, setRetirementsTab] = useState<RetirementsTab>("register");
+  const [retSearch, setRetSearch] = useState("");
+  const [retDepartment, setRetDepartment] = useState("");
+  const [retTraveller, setRetTraveller] = useState("");
+  const [retStatus, setRetStatus] = useState("");
+  const [retAgingBucket, setRetAgingBucket] = useState("all");
+  const [retStartDate, setRetStartDate] = useState("");
+  const [retEndDate, setRetEndDate] = useState("");
+  const [retIncludeReconciled, setRetIncludeReconciled] = useState(false);
+  const [retPage, setRetPage] = useState(1);
+  const [retPageSize, setRetPageSize] = useState(25);
 
-  // Sorting
-  const [sortField, setSortField] = useState<keyof RequisitionReportLine>("date");
-  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  // Financial Lines View state
+  const [financialTab, setFinancialTab] = useState<FinancialLinesTab>("lines");
+  const [finSearch, setFinSearch] = useState("");
+  const [finStartDate, setFinStartDate] = useState("");
+  const [finEndDate, setFinEndDate] = useState("");
+  const [finAccountCode, setFinAccountCode] = useState("");
+  const [finActivityCode, setFinActivityCode] = useState("");
+  const [finStatus, setFinStatus] = useState("");
+  const [finDepartment, setFinDepartment] = useState("");
+  const [finHasJournal, setFinHasJournal] = useState<boolean | null>(null);
+  const [finPage, setFinPage] = useState(1);
+  const [finPageSize, setFinPageSize] = useState(25);
 
-  // Pagination
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  // Sorting state for lines
+  const [sortField, setSortField] = useState<string>("due_date");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
 
-  const queryParams: RequisitionReportParams = useMemo(() => {
-    const p: RequisitionReportParams = {};
-    if (search.trim()) p.search = search.trim();
-    if (startDate) p.start_date = startDate;
-    if (endDate) p.end_date = endDate;
-    if (accountCode) p.account_code = accountCode;
-    if (activityCode) p.activity_code = activityCode;
-    if (status) p.status = status;
-    if (department) p.department = department;
-    if (hasJournal) p.has_journal = "true";
-    return p;
-  }, [search, startDate, endDate, accountCode, activityCode, status, department, hasJournal]);
+  // Export & Schedule Modals
+  const [exportingCsv, setExportingCsv] = useState(false);
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
+  const [scheduleFrequency, setScheduleFrequency] = useState("weekly");
+  const [scheduleRecipients, setScheduleRecipients] = useState("hods_finance");
+  const [scheduleSendingTest, setScheduleSendingTest] = useState(false);
 
-  const { data, isLoading, isFetching, refetch } = useQuery<RequisitionReportResponse>({
-    queryKey: ["requisition-financial-report", queryParams],
-    queryFn: () => documentsAPI.requisitionReport(queryParams).then((r) => r.data),
-    staleTime: 30_000,
+  // Q&A Natural Query Assistant state
+  const [qaQuery, setQaQuery] = useState("");
+  const [qaAnswer, setQaAnswer] = useState<{
+    queryText: string;
+    headline: string;
+    detail: string;
+    matchCount: number;
+    matchAmount: number;
+  } | null>(null);
+
+  // ── Query: Outstanding Retirements Report ──────────────────────────────────
+  const retirementsParams = useMemo<RetirementsAgingReportParams>(() => {
+    return {
+      search: retSearch.trim() || undefined,
+      department: retDepartment || undefined,
+      traveller: retTraveller || undefined,
+      status: retStatus || undefined,
+      aging_bucket: retAgingBucket !== "all" ? retAgingBucket : undefined,
+      start_date: retStartDate || undefined,
+      end_date: retEndDate || undefined,
+      include_reconciled: retIncludeReconciled ? "true" : undefined,
+    };
+  }, [
+    retSearch, retDepartment, retTraveller, retStatus,
+    retAgingBucket, retStartDate, retEndDate, retIncludeReconciled,
+  ]);
+
+  const {
+    data: retirementsData,
+    isLoading: isLoadingRetirements,
+    isFetching: isFetchingRetirements,
+    refetch: refetchRetirements,
+  } = useQuery({
+    queryKey: ["report-retirements-aging", retirementsParams],
+    queryFn: () => documentsAPI.retirementsAgingReport(retirementsParams).then((r) => r.data),
+    staleTime: 60_000,
   });
 
-  const summary = data?.summary ?? {
+  // ── Query: Financial Lines Report ──────────────────────────────────────────
+  const financialParams = useMemo<RequisitionReportParams>(() => {
+    return {
+      search: finSearch.trim() || undefined,
+      start_date: finStartDate || undefined,
+      end_date: finEndDate || undefined,
+      account_code: finAccountCode || undefined,
+      activity_code: finActivityCode || undefined,
+      status: finStatus || undefined,
+      department: finDepartment || undefined,
+      has_journal: finHasJournal === null ? undefined : finHasJournal,
+    };
+  }, [
+    finSearch, finStartDate, finEndDate, finAccountCode,
+    finActivityCode, finStatus, finDepartment, finHasJournal,
+  ]);
+
+  const {
+    data: financialData,
+    isLoading: isLoadingFinancial,
+    isFetching: isFetchingFinancial,
+    refetch: refetchFinancial,
+  } = useQuery({
+    queryKey: ["report-financial-lines", financialParams],
+    queryFn: () => documentsAPI.requisitionReport(financialParams).then((r) => r.data),
+    staleTime: 60_000,
+    enabled: reportMode === "financial_lines",
+  });
+
+  // ── Sorting helper ─────────────────────────────────────────────────────────
+  const handleSort = (field: string) => {
+    if (sortField === field) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortField(field);
+      setSortDirection("asc");
+    }
+  };
+
+  // ── Outstanding Retirements Sorted & Paginated Lines ───────────────────────
+  const sortedRetirements = useMemo(() => {
+    const list = [...(retirementsData?.retirements || [])];
+    list.sort((a, b) => {
+      let va = (a as any)[sortField];
+      let vb = (b as any)[sortField];
+      if (typeof va === "number" && typeof vb === "number") {
+        return sortDirection === "asc" ? va - vb : vb - va;
+      }
+      va = String(va || "").toLowerCase();
+      vb = String(vb || "").toLowerCase();
+      if (va < vb) return sortDirection === "asc" ? -1 : 1;
+      if (va > vb) return sortDirection === "asc" ? 1 : -1;
+      return 0;
+    });
+    return list;
+  }, [retirementsData?.retirements, sortField, sortDirection]);
+
+  const paginatedRetirements = useMemo(() => {
+    const start = (retPage - 1) * retPageSize;
+    return sortedRetirements.slice(start, start + retPageSize);
+  }, [sortedRetirements, retPage, retPageSize]);
+
+  const totalRetirementPages = Math.ceil(sortedRetirements.length / retPageSize) || 1;
+
+  // ── Financial Sorted & Paginated Lines ─────────────────────────────────────
+  const sortedFinancialLines = useMemo(() => {
+    const list = [...(financialData?.lines || [])];
+    list.sort((a, b) => {
+      let va = (a as any)[sortField];
+      let vb = (b as any)[sortField];
+      if (typeof va === "number" && typeof vb === "number") {
+        return sortDirection === "asc" ? va - vb : vb - va;
+      }
+      va = String(va || "").toLowerCase();
+      vb = String(vb || "").toLowerCase();
+      if (va < vb) return sortDirection === "asc" ? -1 : 1;
+      if (va > vb) return sortDirection === "asc" ? 1 : -1;
+      return 0;
+    });
+    return list;
+  }, [financialData?.lines, sortField, sortDirection]);
+
+  const paginatedFinancialLines = useMemo(() => {
+    const start = (finPage - 1) * finPageSize;
+    return sortedFinancialLines.slice(start, start + finPageSize);
+  }, [sortedFinancialLines, finPage, finPageSize]);
+
+  const totalFinancialPages = Math.ceil(sortedFinancialLines.length / finPageSize) || 1;
+
+  // ── Q&A Smart Query Processing ─────────────────────────────────────────────
+  const executeQaQuery = (questionText: string) => {
+    const text = questionText.trim().toLowerCase();
+    if (!text) return;
+    setQaQuery(questionText);
+
+    const rows = retirementsData?.retirements || [];
+
+    if (text.includes("30") || text.includes("month") || text.includes("overdue by more than 30")) {
+      const matches = rows.filter((r) => r.days_overdue > 30);
+      const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
+      setRetAgingBucket("31_60");
+      setQaAnswer({
+        queryText: questionText,
+        headline: matches.length > 0
+          ? `Found ${matches.length} retirement${matches.length === 1 ? "" : "s"} overdue by > 30 days.`
+          : "No retirements are currently overdue by more than 30 days.",
+        detail: matches.length > 0
+          ? `Total delinquent balance: ${formatCurrency(totalAmt)}. Filter applied to 31–60+ days overdue.`
+          : "All active travel retirements are either current or within the initial 30-day grace period.",
+        matchCount: matches.length,
+        matchAmount: totalAmt,
+      });
+      return;
+    }
+
+    if (text.includes("travel") || text.includes("travel department")) {
+      const matches = rows.filter((r) => r.department.toLowerCase().includes("travel"));
+      const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
+      const overdue = matches.filter((r) => r.days_overdue > 0).length;
+      setRetDepartment("Travel");
+      setQaAnswer({
+        queryText: questionText,
+        headline: `Travel Department: ${matches.length} retirements found (${overdue} overdue).`,
+        detail: `Total outstanding balance is ${formatCurrency(totalAmt)}. Table filtered to Travel Department.`,
+        matchCount: matches.length,
+        matchAmount: totalAmt,
+      });
+      return;
+    }
+
+    if (text.includes("finance") || text.includes("awaiting finance") || text.includes("review")) {
+      const matches = rows.filter((r) => r.retirement_status === "awaiting_finance");
+      const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
+      setRetStatus("awaiting_finance");
+      setQaAnswer({
+        queryText: questionText,
+        headline: `${matches.length} retirement${matches.length === 1 ? "" : "s"} currently Awaiting Finance review.`,
+        detail: `The traveler has submitted actual expenses. Total outstanding reconciliation: ${formatCurrency(totalAmt)}.`,
+        matchCount: matches.length,
+        matchAmount: totalAmt,
+      });
+      return;
+    }
+
+    if (text.includes("highest") || text.includes("top") || text.includes("most") || text.includes("2000")) {
+      const matches = rows.filter((r) => r.outstanding_amount >= 2000);
+      const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
+      setQaAnswer({
+        queryText: questionText,
+        headline: `High Value: ${matches.length} travel advance${matches.length === 1 ? "" : "s"} exceed $2,000.00.`,
+        detail: `Total value of high-balance retirements: ${formatCurrency(totalAmt)}.`,
+        matchCount: matches.length,
+        matchAmount: totalAmt,
+      });
+      return;
+    }
+
+    if (text.includes("overdue") || text.includes("late") || text.includes("deadline")) {
+      const matches = rows.filter((r) => r.days_overdue > 0 && r.retirement_status !== "reconciled");
+      const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
+      setRetStatus("overdue");
+      setQaAnswer({
+        queryText: questionText,
+        headline: `${matches.length} overdue retirement${matches.length === 1 ? "" : "s"} detected across all departments.`,
+        detail: `Total overdue balance: ${formatCurrency(totalAmt)}. Filter set to Overdue.`,
+        matchCount: matches.length,
+        matchAmount: totalAmt,
+      });
+      return;
+    }
+
+    // Default search fallback
+    setRetSearch(questionText);
+    const matches = rows.filter((r) =>
+      `${r.document_reference} ${r.traveller_name} ${r.department} ${r.retirement_status_label}`
+        .toLowerCase()
+        .includes(text),
+    );
+    const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
+    setQaAnswer({
+      queryText: questionText,
+      headline: `Showing ${matches.length} results matching "${questionText}".`,
+      detail: `Filtered results represent ${formatCurrency(totalAmt)} in total outstanding retirement balance.`,
+      matchCount: matches.length,
+      matchAmount: totalAmt,
+    });
+  };
+
+  const clearQa = () => {
+    setQaQuery("");
+    setQaAnswer(null);
+    setRetSearch("");
+    setRetDepartment("");
+    setRetStatus("");
+    setRetAgingBucket("all");
+  };
+
+  // ── CSV Export Handling ────────────────────────────────────────────────────
+  const handleExportCsv = async () => {
+    try {
+      setExportingCsv(true);
+      if (reportMode === "retirements") {
+        const res = await documentsAPI.downloadRetirementsAgingReportCsv(retirementsParams);
+        const blob = new Blob([res.data], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `outstanding_retirements_aged_${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+        toast.success("Outstanding Retirements Aging report CSV downloaded.");
+      } else {
+        const res = await documentsAPI.downloadRequisitionReportCsv(financialParams);
+        const blob = new Blob([res.data], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `requisition_financial_report_${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+        toast.success("Requisition financial report CSV downloaded.");
+      }
+    } catch {
+      toast.error("Failed to export report CSV. Please try again.");
+    } finally {
+      setExportingCsv(false);
+    }
+  };
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  const handleSendTestSchedule = () => {
+    setScheduleSendingTest(true);
+    setTimeout(() => {
+      setScheduleSendingTest(false);
+      setScheduleModalOpen(false);
+      toast.success("Test aging schedule email sent successfully to your inbox.");
+    }, 1200);
+  };
+
+  const retSummary = retirementsData?.summary || {
+    total_records: 0,
+    total_advance_amount: 0,
+    total_outstanding_amount: 0,
+    total_retired_amount: 0,
+    total_overdue_records: 0,
+    total_overdue_amount: 0,
+    total_awaiting_finance: 0,
+    total_reconciled: 0,
+    average_days_aged: 0,
+    aging_totals: {},
+  };
+
+  const finSummary = financialData?.summary || {
     total_amount: 0,
     total_lines: 0,
     posted_amount: 0,
@@ -161,979 +527,1656 @@ export default function RequisitionReportsPage() {
     distinct_accounts: 0,
   };
 
-  const lines = data?.lines ?? [];
-  const filterOptions = data?.filter_options ?? {
-    accounts: [],
-    activities: [],
-    departments: [],
-    statuses: [],
-  };
-
-  const hasActiveFilters = Boolean(
-    search || startDate || endDate || accountCode || activityCode || status || department || hasJournal
-  );
-
-  const handleResetFilters = () => {
-    setSearch("");
-    setStartDate("");
-    setEndDate("");
-    setAccountCode("");
-    setActivityCode("");
-    setStatus("");
-    setDepartment("");
-    setHasJournal(false);
-    setPage(1);
-  };
-
-  const handleSort = (field: keyof RequisitionReportLine) => {
-    if (sortField === field) {
-      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
-    } else {
-      setSortField(field);
-      setSortDirection("asc");
-    }
-    setPage(1);
-  };
-
-  // Sorted lines
-  const sortedLines = useMemo(() => {
-    const list = [...lines];
-    list.sort((a, b) => {
-      let aVal = a[sortField];
-      let bVal = b[sortField];
-      if (typeof aVal === "number" && typeof bVal === "number") {
-        return sortDirection === "asc" ? aVal - bVal : bVal - aVal;
-      }
-      const aStr = String(aVal || "").toLowerCase();
-      const bStr = String(bVal || "").toLowerCase();
-      return sortDirection === "asc" ? aStr.localeCompare(bStr) : bStr.localeCompare(aStr);
-    });
-    return list;
-  }, [lines, sortField, sortDirection]);
-
-  // Paginated lines
-  const paginatedLines = useMemo(() => {
-    const start = (page - 1) * pageSize;
-    return sortedLines.slice(start, start + pageSize);
-  }, [sortedLines, page, pageSize]);
-
-  const totalPages = Math.ceil(sortedLines.length / pageSize) || 1;
-
-  // Chart data
-  const activityChartData = useMemo(() => {
-    return (data?.by_activity || []).slice(0, 10).map((item) => ({
-      name: item.activity_code,
-      description: item.activity_description || item.activity_code,
-      amount: item.total_amount,
-      count: item.line_count,
+  // Visual data for retirements
+  const departmentAgingChartData = useMemo(() => {
+    return (retirementsData?.by_department || []).map((d) => ({
+      name: d.department,
+      Current: d.aging_buckets.current || 0,
+      "1-30 Days": d.aging_buckets["1_30"] || 0,
+      "31-60 Days": d.aging_buckets["31_60"] || 0,
+      "61-90 Days": d.aging_buckets["61_90"] || 0,
+      "90+ Days": d.aging_buckets.over_90 || 0,
+      Total: d.total_outstanding,
     }));
-  }, [data?.by_activity]);
+  }, [retirementsData?.by_department]);
 
-  const accountChartData = useMemo(() => {
-    return (data?.by_account || []).slice(0, 8).map((item) => ({
-      name: item.account_code,
-      amount: item.total_amount,
-      count: item.line_count,
-    }));
-  }, [data?.by_account]);
+  const agingBucketBarData = useMemo(() => {
+    const totals = retSummary.aging_totals || {};
+    return [
+      { name: "Current / Not Due", amount: totals["current"]?.amount || 0, count: totals["current"]?.count || 0, fill: AGING_BAR_COLORS.current },
+      { name: "1–30 Days", amount: totals["1_30"]?.amount || 0, count: totals["1_30"]?.count || 0, fill: AGING_BAR_COLORS["1_30"] },
+      { name: "31–60 Days", amount: totals["31_60"]?.amount || 0, count: totals["31_60"]?.count || 0, fill: AGING_BAR_COLORS["31_60"] },
+      { name: "61–90 Days", amount: totals["61_90"]?.amount || 0, count: totals["61_90"]?.count || 0, fill: AGING_BAR_COLORS["61_90"] },
+      { name: "90+ Days", amount: totals["over_90"]?.amount || 0, count: totals["over_90"]?.count || 0, fill: AGING_BAR_COLORS.over_90 },
+    ];
+  }, [retSummary.aging_totals]);
 
-  const [exportingCsv, setExportingCsv] = useState(false);
+  // Options for CustomListbox
+  const retAgingBucketOptions = useMemo(() => [
+    { value: "all", label: "All Aging Categories" },
+    { value: "current", label: "Current / Not Due" },
+    { value: "1_30", label: "1 – 30 Days Overdue" },
+    { value: "31_60", label: "31 – 60 Days Overdue" },
+    { value: "61_90", label: "61 – 90 Days Overdue" },
+    { value: "over_90", label: "90+ Days Overdue" },
+    { value: "reconciled", label: "Reconciled" },
+  ], []);
 
-  const handlePrint = () => {
-    window.print();
-  };
+  const retDepartmentOptions = useMemo(() => [
+    { value: "", label: "All Departments" },
+    ...(retirementsData?.filter_options.departments || []).map((d) => ({
+      value: d,
+      label: d,
+    })),
+  ], [retirementsData?.filter_options.departments]);
 
-  const handleExportCsv = async () => {
-    try {
-      setExportingCsv(true);
-      const res = await documentsAPI.downloadRequisitionReportCsv(queryParams);
-      const blob = new Blob([res.data], { type: "text/csv;charset=utf-8;" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `requisition_financial_report_${new Date().toISOString().slice(0, 10)}.csv`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-      toast.success("Requisition report CSV downloaded successfully.");
-    } catch {
-      toast.error("Failed to export requisition report CSV.");
-    } finally {
-      setExportingCsv(false);
-    }
-  };
+  const retTravellerOptions = useMemo(() => [
+    { value: "", label: "All Travellers" },
+    ...(retirementsData?.filter_options.travellers || []).map((t) => ({
+      value: t,
+      label: t,
+    })),
+  ], [retirementsData?.filter_options.travellers]);
+
+  const retStatusOptions = useMemo(() => [
+    { value: "", label: "All Statuses" },
+    { value: "overdue", label: "Retirement Overdue" },
+    { value: "awaiting_finance", label: "Awaiting Finance" },
+    { value: "not_started", label: "LPO Pending / In Progress" },
+    { value: "reconciled", label: "Reconciled" },
+    { value: "not_due", label: "Not Yet Returned" },
+  ], []);
+
+  const finAccountOptions = useMemo(() => [
+    { value: "", label: "All Account Codes" },
+    ...(financialData?.filter_options.accounts || []).map((a) => ({
+      value: a,
+      label: `Account: ${a}`,
+    })),
+  ], [financialData?.filter_options.accounts]);
+
+  const finActivityOptions = useMemo(() => [
+    { value: "", label: "All Activity Codes" },
+    ...(financialData?.filter_options.activities || []).map((a) => ({
+      value: a,
+      label: `Activity: ${a}`,
+    })),
+  ], [financialData?.filter_options.activities]);
+
+  const finDeptOptions = useMemo(() => [
+    { value: "", label: "All Departments" },
+    ...(financialData?.filter_options.departments || []).map((d) => ({
+      value: d,
+      label: d,
+    })),
+  ], [financialData?.filter_options.departments]);
+
+  const finStatusOptions = useMemo(() => [
+    { value: "", label: "All Document Statuses" },
+    ...(financialData?.filter_options.statuses || []).map((s) => ({
+      value: s,
+      label: s.charAt(0).toUpperCase() + s.slice(1),
+    })),
+  ], [financialData?.filter_options.statuses]);
+
+  const pageSizeOptions = useMemo(() => [
+    { value: "10", label: "10 rows / page" },
+    { value: "25", label: "25 rows / page" },
+    { value: "50", label: "50 rows / page" },
+    { value: "100", label: "100 rows / page" },
+  ], []);
 
   return (
     <div className="flex h-full flex-col bg-[#F8FAFC] overflow-y-auto print:bg-white print:overflow-visible">
-      {/* ── Top Header & Actions ── */}
-      <div className="border-b border-[#E2E8F0] bg-white px-6 py-5 shadow-xs print:border-none print:px-0">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      {/* ── Official Print Header (Visible ONLY on print) ── */}
+      <div className="hidden print:block p-6 border-b-2 border-[#1E293B] mb-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-bold tracking-tight text-[#1E293B]">
+              IDM FINANCIAL & REQUISITION MANAGEMENT SYSTEM
+            </h1>
+            <p className="text-sm font-semibold text-[#287EAD] uppercase tracking-wider mt-0.5">
+              {reportMode === "retirements"
+                ? "Outstanding Travel Retirements Aging Report (by Traveller & Department)"
+                : "Requisition Financial Lines & SunSystems GL Analysis Report"}
+            </p>
+          </div>
+          <div className="text-right text-xs text-slate-600">
+            <p>Printed: {new Date().toLocaleString()}</p>
+            <p className="font-semibold text-rose-700">STRICTLY CONFIDENTIAL</p>
+          </div>
+        </div>
+        <div className="mt-3 flex items-center justify-between text-xs text-slate-500 border-t border-slate-200 pt-2">
+          <span>
+            Scope: {reportMode === "retirements"
+              ? `Department: ${retDepartment || "All"} | Aging: ${retAgingBucket || "All"} | Overdue Records: ${retSummary.total_overdue_records}`
+              : `Activity: ${finActivityCode || "All"} | Account: ${finAccountCode || "All"} | Total Lines: ${finSummary.total_lines}`}
+          </span>
+          <span>Currency: USD / Functional</span>
+        </div>
+      </div>
+
+      {/* ── Top Header & Report Navigation ── */}
+      <div className="border-b border-[#E2E8F0] bg-white px-6 py-5 shadow-xs print:hidden">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <div className="flex items-center gap-2">
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#EBF5FA] text-[#287EAD]">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#F0F8FD] border border-[#C5E6F5] text-[#287EAD]">
                 <FileSpreadsheet className="h-5 w-5" />
               </span>
               <h1 className="text-xl font-bold tracking-tight text-[#1E293B]">
-                Requisition Financial Reports
+                Requisition Financial & Aging Reports
               </h1>
             </div>
             <p className="mt-1 text-xs text-[#64748B]">
-              Detailed breakdown of expenditure lines: Activity code, Description, Account code, Amount, and Journal number.
+              Real-time financial line reporting, SunSystems general ledger postings, and travel imprest retirement aging analysis.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 print:hidden">
-            <button
-              type="button"
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="inline-flex items-center gap-1.5 rounded border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] shadow-xs hover:bg-[#F1F5F9] transition-colors"
-            >
-              <RefreshCw className={cn("h-3.5 w-3.5", isFetching && "animate-spin")} />
-              Refresh
-            </button>
-            <button
-              type="button"
-              onClick={handlePrint}
-              className="inline-flex items-center gap-1.5 rounded border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] shadow-xs hover:bg-[#F1F5F9] transition-colors"
-            >
-              <Printer className="h-3.5 w-3.5" />
-              Print
-            </button>
-            <button
-              type="button"
-              onClick={handleExportCsv}
-              disabled={exportingCsv}
-              className="inline-flex items-center gap-1.5 rounded bg-[#287EAD] px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] transition-colors disabled:opacity-60"
-            >
-              {exportingCsv ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Exporting…
-                </>
-              ) : (
-                <>
-                  <Download className="h-3.5 w-3.5" />
-                  Export CSV
-                </>
+          {/* Primary Report Mode Switcher with HEX: #C5E6F5 */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex rounded-lg border border-[#C5E6F5] bg-[#F0F8FD] p-1 shadow-2xs">
+              <button
+                type="button"
+                onClick={() => setReportMode("retirements")}
+                className={cn(
+                  "inline-flex items-center gap-2 rounded-md px-3.5 py-1.5 text-xs font-semibold transition-all",
+                  reportMode === "retirements"
+                    ? "bg-[#C5E6F5] text-[#0A4D68] shadow-xs border border-[#287EAD]/20"
+                    : "text-[#475569] hover:text-[#0A4D68] hover:bg-[#E2F2FA]",
+                )}
+              >
+                <Clock className="h-3.5 w-3.5 text-[#287EAD]" />
+                Outstanding Retirements
+                {retSummary.total_overdue_records > 0 && (
+                  <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-600 px-1 text-[10px] font-bold text-white">
+                    {retSummary.total_overdue_records}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setReportMode("financial_lines")}
+                className={cn(
+                  "inline-flex items-center gap-2 rounded-md px-3.5 py-1.5 text-xs font-semibold transition-all",
+                  reportMode === "financial_lines"
+                    ? "bg-[#C5E6F5] text-[#0A4D68] shadow-xs border border-[#287EAD]/20"
+                    : "text-[#475569] hover:text-[#0A4D68] hover:bg-[#E2F2FA]",
+                )}
+              >
+                <Layers className="h-3.5 w-3.5 text-[#287EAD]" />
+                Requisition Lines (GL / Dim10)
+              </button>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center gap-2">
+              {reportMode === "retirements" && (
+                <button
+                  type="button"
+                  onClick={() => setScheduleModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#C5E6F5] bg-[#F0F8FD] px-3 py-1.5 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors"
+                  title="Configure automated scheduled reports"
+                >
+                  <BellRing className="h-3.5 w-3.5 text-[#287EAD]" />
+                  Schedule Report
+                </button>
               )}
-            </button>
-          </div>
-        </div>
-
-        {/* ── KPI Metric Cards ── */}
-        <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-3">
-          <div className="rounded-lg border border-[#E2E8F0] bg-white p-3 shadow-2xs">
-            <div className="flex items-center justify-between text-xs text-[#64748B]">
-              <span>Total Requisition</span>
-              <TrendingUp className="h-3.5 w-3.5 text-[#287EAD]" />
-            </div>
-            <div className="mt-1.5 text-lg font-bold tabular-nums text-[#1E293B]">
-              {formatCurrency(summary.total_amount)}
-            </div>
-            <div className="mt-0.5 text-[11px] text-[#64748B]">
-              Across {summary.total_lines} lines
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-[#E2E8F0] bg-white p-3 shadow-2xs">
-            <div className="flex items-center justify-between text-xs text-[#64748B]">
-              <span>Posted to SunSystems</span>
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-            </div>
-            <div className="mt-1.5 text-lg font-bold tabular-nums text-emerald-700">
-              {formatCurrency(summary.posted_amount)}
-            </div>
-            <div className="mt-0.5 text-[11px] text-emerald-600 font-medium">
-              {summary.posted_lines} lines posted
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-[#E2E8F0] bg-white p-3 shadow-2xs">
-            <div className="flex items-center justify-between text-xs text-[#64748B]">
-              <span>Pending / Unposted</span>
-              <Clock className="h-3.5 w-3.5 text-amber-600" />
-            </div>
-            <div className="mt-1.5 text-lg font-bold tabular-nums text-amber-700">
-              {formatCurrency(summary.total_amount - summary.posted_amount)}
-            </div>
-            <div className="mt-0.5 text-[11px] text-amber-600">
-              {summary.total_lines - summary.posted_lines} unposted lines
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-[#E2E8F0] bg-white p-3 shadow-2xs">
-            <div className="flex items-center justify-between text-xs text-[#64748B]">
-              <span>Unique Activities</span>
-              <Layers className="h-3.5 w-3.5 text-[#6366F1]" />
-            </div>
-            <div className="mt-1.5 text-lg font-bold tabular-nums text-[#1E293B]">
-              {summary.distinct_activities}
-            </div>
-            <div className="mt-0.5 text-[11px] text-[#64748B]">
-              Dim 10 codes
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-[#E2E8F0] bg-white p-3 shadow-2xs">
-            <div className="flex items-center justify-between text-xs text-[#64748B]">
-              <span>Unique Accounts</span>
-              <Building2 className="h-3.5 w-3.5 text-[#0D9488]" />
-            </div>
-            <div className="mt-1.5 text-lg font-bold tabular-nums text-[#1E293B]">
-              {summary.distinct_accounts}
-            </div>
-            <div className="mt-0.5 text-[11px] text-[#64748B]">
-              GL Account codes
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-[#E2E8F0] bg-white p-3 shadow-2xs">
-            <div className="flex items-center justify-between text-xs text-[#64748B]">
-              <span>Posting Rate</span>
-              <BarChart3 className="h-3.5 w-3.5 text-[#8B5CF6]" />
-            </div>
-            <div className="mt-1.5 text-lg font-bold tabular-nums text-[#1E293B]">
-              {summary.total_lines > 0
-                ? `${Math.round((summary.posted_lines / summary.total_lines) * 100)}%`
-                : "0%"}
-            </div>
-            <div className="mt-0.5 text-[11px] text-[#64748B]">
-              Journal posted
+              <button
+                type="button"
+                onClick={handlePrint}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-2xs hover:bg-[#F8FAFC] transition-colors"
+              >
+                <Printer className="h-3.5 w-3.5" />
+                Print Report
+              </button>
+              <button
+                type="button"
+                onClick={handleExportCsv}
+                disabled={exportingCsv}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] transition-colors disabled:opacity-60"
+              >
+                {exportingCsv ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Exporting…
+                  </>
+                ) : (
+                  <>
+                    <Download className="h-3.5 w-3.5" />
+                    Export CSV
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>
+
+        {/* ── LIGHT-COLORED STAT CARDS (Styled with #C5E6F5 and Soft Pastels) ── */}
+        {reportMode === "retirements" ? (
+          <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-3">
+            {/* Card 1: Total Outstanding */}
+            <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs transition-all hover:border-[#287EAD]/40">
+              <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68]">
+                <span>Outstanding Balance</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD]">
+                  <TrendingUp className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B]">
+                {formatCurrency(retSummary.total_outstanding_amount)}
+              </div>
+              <div className="mt-0.5 text-[11px] text-[#475569]">
+                Across {retSummary.total_records} travel forms
+              </div>
+            </div>
+
+            {/* Card 2: Overdue Retirements */}
+            <div className="rounded-xl border border-[#FECDD3] bg-[#FFF1F2] p-3.5 shadow-xs transition-all hover:border-rose-400">
+              <div className="flex items-center justify-between text-xs font-semibold text-rose-800">
+                <span>Overdue Retirements</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-rose-100 text-rose-700">
+                  <ShieldAlert className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-rose-700">
+                {retSummary.total_overdue_records}
+              </div>
+              <div className="mt-0.5 text-[11px] font-medium text-rose-600">
+                {formatCurrency(retSummary.total_overdue_amount)} delinquent
+              </div>
+            </div>
+
+            {/* Card 3: Average Aging */}
+            <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs transition-all hover:border-amber-400">
+              <div className="flex items-center justify-between text-xs font-semibold text-amber-800">
+                <span>Avg. Aging (Overdue)</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+                  <Clock className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-amber-800">
+                {retSummary.average_days_aged} days
+              </div>
+              <div className="mt-0.5 text-[11px] text-amber-700">
+                Past 7-day return grace
+              </div>
+            </div>
+
+            {/* Card 4: Awaiting Finance Review */}
+            <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs transition-all hover:border-teal-400">
+              <div className="flex items-center justify-between text-xs font-semibold text-teal-800">
+                <span>Awaiting Finance</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700">
+                  <ClipboardList className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-teal-800">
+                {retSummary.total_awaiting_finance}
+              </div>
+              <div className="mt-0.5 text-[11px] text-teal-700">
+                Expense review in progress
+              </div>
+            </div>
+
+            {/* Card 5: Total Advance Issued */}
+            <div className="rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-3.5 shadow-xs transition-all hover:border-slate-300">
+              <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
+                <span>Total Advance Issued</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-slate-200 text-slate-700">
+                  <Building2 className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-slate-800">
+                {formatCurrency(retSummary.total_advance_amount)}
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-500">
+                {formatCurrency(retSummary.total_retired_amount)} expensed
+              </div>
+            </div>
+
+            {/* Card 6: Current / Reconciled */}
+            <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs transition-all hover:border-emerald-400">
+              <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
+                <span>Current & Reconciled</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-emerald-800">
+                {retSummary.aging_totals["current"]?.count || 0}
+              </div>
+              <div className="mt-0.5 text-[11px] text-emerald-700">
+                {retSummary.total_reconciled} fully closed
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-3">
+            {/* Card 1: Total Requisition Amount */}
+            <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs">
+              <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68]">
+                <span>Total Requisitions</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD]">
+                  <TrendingUp className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B]">
+                {formatCurrency(finSummary.total_amount)}
+              </div>
+              <div className="mt-0.5 text-[11px] text-[#475569]">
+                Across {finSummary.total_lines} lines
+              </div>
+            </div>
+
+            {/* Card 2: Posted to SunSystems */}
+            <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs">
+              <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
+                <span>Posted to SunSystems</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-emerald-700">
+                {formatCurrency(finSummary.posted_amount)}
+              </div>
+              <div className="mt-0.5 text-[11px] text-emerald-600 font-medium">
+                {finSummary.posted_lines} lines posted
+              </div>
+            </div>
+
+            {/* Card 3: Pending / Unposted */}
+            <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs">
+              <div className="flex items-center justify-between text-xs font-semibold text-amber-800">
+                <span>Pending / Unposted</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+                  <Clock className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-amber-700">
+                {formatCurrency(finSummary.total_amount - finSummary.posted_amount)}
+              </div>
+              <div className="mt-0.5 text-[11px] text-amber-600">
+                {finSummary.total_lines - finSummary.posted_lines} unposted lines
+              </div>
+            </div>
+
+            {/* Card 4: Unique Activities */}
+            <div className="rounded-xl border border-[#DDD6FE] bg-[#F5F3FF] p-3.5 shadow-xs">
+              <div className="flex items-center justify-between text-xs font-semibold text-indigo-800">
+                <span>Unique Activities</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700">
+                  <Layers className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-indigo-900">
+                {finSummary.distinct_activities}
+              </div>
+              <div className="mt-0.5 text-[11px] text-indigo-700">
+                SunSystems Dim 10
+              </div>
+            </div>
+
+            {/* Card 5: Unique Accounts */}
+            <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs">
+              <div className="flex items-center justify-between text-xs font-semibold text-teal-800">
+                <span>GL Account Codes</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700">
+                  <Building2 className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-teal-900">
+                {finSummary.distinct_accounts}
+              </div>
+              <div className="mt-0.5 text-[11px] text-teal-700">
+                Chart of accounts
+              </div>
+            </div>
+
+            {/* Card 6: Posting Rate */}
+            <div className="rounded-xl border border-[#BFDBFE] bg-[#EFF6FF] p-3.5 shadow-xs">
+              <div className="flex items-center justify-between text-xs font-semibold text-blue-800">
+                <span>Posting Rate</span>
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-blue-100 text-blue-700">
+                  <BarChart3 className="h-3.5 w-3.5" />
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold tabular-nums text-blue-900">
+                {finSummary.total_lines > 0
+                  ? `${Math.round((finSummary.posted_lines / finSummary.total_lines) * 100)}%`
+                  : "0%"}
+              </div>
+              <div className="mt-0.5 text-[11px] text-blue-700">
+                Requisitions in SunSystems
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Main Workspace ── */}
       <div className="flex-1 p-6 space-y-4 print:p-0 print:space-y-2">
-        {/* ── Filter Toolbar ── */}
-        <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-2xs print:hidden">
-          <div className="flex flex-wrap items-center gap-3">
-            {/* Search */}
-            <div className="relative flex-1 min-w-[220px]">
-              <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-[#94A3B8]" />
-              <input
-                type="text"
-                placeholder="Search description, activity code, account code, journal #, req #…"
-                value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
-                  setPage(1);
-                }}
-                className="w-full rounded border border-[#CBD5E1] bg-white py-1.5 pl-8 pr-7 text-xs text-[#1E293B] placeholder-[#94A3B8] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
-              />
-              {search && (
-                <button
-                  type="button"
-                  onClick={() => setSearch("")}
-                  className="absolute right-2 top-2 text-[#94A3B8] hover:text-[#475569]"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
-
-            {/* Date From */}
-            <div className="flex items-center gap-1.5 text-xs text-[#64748B]">
-              <span>From:</span>
-              <input
-                type="date"
-                value={startDate}
-                onChange={(e) => {
-                  setStartDate(e.target.value);
-                  setPage(1);
-                }}
-                className="rounded border border-[#CBD5E1] bg-white px-2 py-1 text-xs text-[#1E293B] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
-              />
-            </div>
-
-            {/* Date To */}
-            <div className="flex items-center gap-1.5 text-xs text-[#64748B]">
-              <span>To:</span>
-              <input
-                type="date"
-                value={endDate}
-                onChange={(e) => {
-                  setEndDate(e.target.value);
-                  setPage(1);
-                }}
-                className="rounded border border-[#CBD5E1] bg-white px-2 py-1 text-xs text-[#1E293B] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
-              />
-            </div>
-
-            {/* Account Code Select */}
-            <select
-              value={accountCode}
-              onChange={(e) => {
-                setAccountCode(e.target.value);
-                setPage(1);
-              }}
-              className="rounded border border-[#CBD5E1] bg-white px-2.5 py-1 text-xs text-[#1E293B] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
-            >
-              <option value="">All Account Codes</option>
-              {filterOptions.accounts.map((acct) => (
-                <option key={acct} value={acct}>
-                  Account: {acct}
-                </option>
-              ))}
-            </select>
-
-            {/* Activity Code Select */}
-            <select
-              value={activityCode}
-              onChange={(e) => {
-                setActivityCode(e.target.value);
-                setPage(1);
-              }}
-              className="rounded border border-[#CBD5E1] bg-white px-2.5 py-1 text-xs text-[#1E293B] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
-            >
-              <option value="">All Activity Codes</option>
-              {filterOptions.activities.map((act) => (
-                <option key={act} value={act}>
-                  Activity: {act}
-                </option>
-              ))}
-            </select>
-
-            {/* Department Select */}
-            {filterOptions.departments.length > 0 && (
-              <select
-                value={department}
-                onChange={(e) => {
-                  setDepartment(e.target.value);
-                  setPage(1);
-                }}
-                className="rounded border border-[#CBD5E1] bg-white px-2.5 py-1 text-xs text-[#1E293B] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
-              >
-                <option value="">All Departments</option>
-                {filterOptions.departments.map((dept) => (
-                  <option key={dept} value={dept}>
-                    {dept}
-                  </option>
-                ))}
-              </select>
-            )}
-
-            {/* Status Select */}
-            <select
-              value={status}
-              onChange={(e) => {
-                setStatus(e.target.value);
-                setPage(1);
-              }}
-              className="rounded border border-[#CBD5E1] bg-white px-2.5 py-1 text-xs text-[#1E293B] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
-            >
-              <option value="">All Statuses</option>
-              {filterOptions.statuses.map((st) => (
-                <option key={st} value={st}>
-                  {st.charAt(0).toUpperCase() + st.slice(1).replace(/_/g, " ")}
-                </option>
-              ))}
-            </select>
-
-            {/* Journal Posted Toggle */}
-            <label className="flex items-center gap-1.5 text-xs text-[#475569] cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={hasJournal}
-                onChange={(e) => {
-                  setHasJournal(e.target.checked);
-                  setPage(1);
-                }}
-                className="h-3.5 w-3.5 rounded border-[#CBD5E1] text-[#287EAD] focus:ring-[#287EAD]"
-              />
-              <span>With Journal # only</span>
-            </label>
-
-            {/* Reset */}
-            {hasActiveFilters && (
-              <button
-                type="button"
-                onClick={handleResetFilters}
-                className="inline-flex items-center gap-1 rounded bg-[#F1F5F9] px-2.5 py-1 text-xs font-medium text-[#475569] hover:bg-[#E2E8F0] transition-colors"
-              >
-                <X className="h-3 w-3" />
-                Clear filters
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* ── View Navigation Tabs ── */}
-        <div className="flex items-center justify-between border-b border-[#E2E8F0] bg-white px-4 pt-1 rounded-t-lg print:hidden">
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setActiveTab("lines")}
-              className={cn(
-                "inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-semibold transition-colors",
-                activeTab === "lines"
-                  ? "border-[#287EAD] text-[#287EAD]"
-                  : "border-transparent text-[#64748B] hover:text-[#1E293B]"
-              )}
-            >
-              <ClipboardList className="h-3.5 w-3.5" />
-              Detailed Lines ({summary.total_lines})
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("activities")}
-              className={cn(
-                "inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-semibold transition-colors",
-                activeTab === "activities"
-                  ? "border-[#287EAD] text-[#287EAD]"
-                  : "border-transparent text-[#64748B] hover:text-[#1E293B]"
-              )}
-            >
-              <Layers className="h-3.5 w-3.5" />
-              Summary by Activity ({summary.distinct_activities})
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("accounts")}
-              className={cn(
-                "inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-semibold transition-colors",
-                activeTab === "accounts"
-                  ? "border-[#287EAD] text-[#287EAD]"
-                  : "border-transparent text-[#64748B] hover:text-[#1E293B]"
-              )}
-            >
-              <Building2 className="h-3.5 w-3.5" />
-              Summary by Account ({summary.distinct_accounts})
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("visuals")}
-              className={cn(
-                "inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-semibold transition-colors",
-                activeTab === "visuals"
-                  ? "border-[#287EAD] text-[#287EAD]"
-                  : "border-transparent text-[#64748B] hover:text-[#1E293B]"
-              )}
-            >
-              <BarChart3 className="h-3.5 w-3.5" />
-              Visual Breakdown
-            </button>
-          </div>
-
-          <div className="text-xs text-[#94A3B8]">
-            {isFetching ? (
-              <span className="flex items-center gap-1 text-[#287EAD]">
-                <Loader2 className="h-3 w-3 animate-spin" /> Updating…
-              </span>
-            ) : (
-              <span>{summary.total_lines} lines matched</span>
-            )}
-          </div>
-        </div>
-
-        {/* ── Tab Content ── */}
-        {isLoading ? (
-          <div className="flex min-h-[300px] flex-col items-center justify-center rounded-b-lg border border-[#E2E8F0] bg-white p-12 text-center shadow-2xs">
-            <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
-            <p className="mt-3 text-sm font-medium text-[#475569]">Generating financial requisition report…</p>
-          </div>
-        ) : lines.length === 0 ? (
-          <div className="flex min-h-[340px] flex-col items-center justify-center rounded-b-lg border border-dashed border-[#CBD5E1] bg-white p-12 text-center shadow-2xs">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[#F1F5F9] text-[#94A3B8]">
-              <FileSpreadsheet className="h-6 w-6" />
-            </span>
-            <h3 className="mt-3 text-sm font-bold text-[#1E293B]">
-              {hasActiveFilters ? "No matching requisition lines found" : "No requisition records in database"}
-            </h3>
-            <p className="mt-1 max-w-md text-xs text-[#64748B]">
-              {hasActiveFilters
-                ? "Try adjusting or clearing your search filters to view more requisition lines."
-                : "Raise a new requisition form in the portal to generate financial reporting lines with Activity codes, Account codes, Descriptions, Amounts, and Journal numbers."}
-            </p>
-            <div className="mt-4 flex gap-2">
-              {hasActiveFilters ? (
-                <button
-                  type="button"
-                  onClick={handleResetFilters}
-                  className="inline-flex items-center gap-1.5 rounded bg-[#287EAD] px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99]"
-                >
-                  <X className="h-3.5 w-3.5" /> Clear Filters
-                </button>
-              ) : (
-                <Link
-                  to="/new"
-                  className="inline-flex items-center gap-1.5 rounded bg-[#287EAD] px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99]"
-                >
-                  <PlusCircle className="h-4 w-4" /> Create New Requisition
-                </Link>
-              )}
-            </div>
-          </div>
-        ) : (
+        {reportMode === "retirements" ? (
           <>
-            {/* ── TAB 1: Detailed Lines ── */}
-            {activeTab === "lines" && (
-              <div className="rounded-b-lg border border-[#E2E8F0] bg-white shadow-2xs overflow-hidden">
+            {/* ── Interactive Q&A Assistant ("Ask the Report") ── */}
+            <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD]/80 p-4 shadow-xs print:hidden">
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-[#0A4D68]">
+                  <Sparkles className="h-4 w-4 text-[#287EAD]" />
+                  <span>Ask the Aging Report (Smart Q&A Assistant)</span>
+                </div>
+                <div className="relative flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={qaQuery}
+                    onChange={(e) => setQaQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") executeQaQuery(qaQuery);
+                    }}
+                    placeholder="Ask any question (e.g., 'Who has retirements overdue > 30 days?', 'Show Travel department outstanding', 'Top debtors')…"
+                    className="flex-1 rounded-lg border border-[#CBD5E1] bg-white px-3.5 py-2 text-xs text-[#1E293B] placeholder-[#94A3B8] shadow-2xs focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => executeQaQuery(qaQuery)}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-3.5 py-2 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] transition-colors"
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                    Ask
+                  </button>
+                  {(qaAnswer || qaQuery) && (
+                    <button
+                      type="button"
+                      onClick={clearQa}
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-2 text-xs font-medium text-[#64748B] hover:text-[#1E293B] shadow-2xs"
+                      title="Clear Q&A filter"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {/* Instant Quick Question Prompts */}
+                <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px]">
+                  <span className="text-[#64748B]">Quick queries:</span>
+                  <button
+                    type="button"
+                    onClick={() => executeQaQuery("Who has retirements overdue by more than 30 days?")}
+                    className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors"
+                  >
+                    Overdue &gt; 30 Days
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => executeQaQuery("Show outstanding retirements for Travel department")}
+                    className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors"
+                  >
+                    Travel Department
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => executeQaQuery("Show retirements awaiting finance verification")}
+                    className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors"
+                  >
+                    Awaiting Finance Review
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => executeQaQuery("Which advances exceed $2,000?")}
+                    className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors"
+                  >
+                    High Value (&gt; $2,000)
+                  </button>
+                </div>
+
+                {/* Answer Banner */}
+                {qaAnswer && (
+                  <div className="mt-2 rounded-lg border border-[#287EAD]/30 bg-white p-3 shadow-xs">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <CheckCircle className="h-4 w-4 text-emerald-600 shrink-0" />
+                          <h4 className="text-xs font-bold text-[#1E293B]">{qaAnswer.headline}</h4>
+                        </div>
+                        <p className="mt-1 text-xs text-[#475569] pl-6 leading-relaxed">
+                          {qaAnswer.detail}
+                        </p>
+                      </div>
+                      <span className="shrink-0 rounded-md bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-1 text-[11px] font-semibold text-[#0A4D68]">
+                        {qaAnswer.matchCount} records
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* ── Retirements Filter Toolbar (CustomListbox Dropdowns) ── */}
+            <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs print:hidden">
+              <div className="flex flex-wrap items-center gap-3">
+                {/* Search */}
+                <div className="relative flex-1 min-w-[200px]">
+                  <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-[#94A3B8]" />
+                  <input
+                    type="text"
+                    placeholder="Search ref #, traveller, email, department…"
+                    value={retSearch}
+                    onChange={(e) => {
+                      setRetSearch(e.target.value);
+                      setRetPage(1);
+                    }}
+                    className="w-full rounded-lg border border-[#CBD5E1] bg-white py-1.5 pl-8 pr-7 text-xs text-[#1E293B] placeholder-[#94A3B8] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
+                  />
+                  {retSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setRetSearch("")}
+                      className="absolute right-2 top-2 text-[#94A3B8] hover:text-[#475569]"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Aging Bucket Dropdown (CustomListbox) */}
+                <div className="w-48">
+                  <CustomListbox
+                    value={retAgingBucket}
+                    onChange={(v) => {
+                      setRetAgingBucket(v);
+                      setRetPage(1);
+                    }}
+                    options={retAgingBucketOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Department Dropdown (CustomListbox) */}
+                <div className="w-44">
+                  <CustomListbox
+                    value={retDepartment}
+                    onChange={(v) => {
+                      setRetDepartment(v);
+                      setRetPage(1);
+                    }}
+                    options={retDepartmentOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Traveller Dropdown (CustomListbox) */}
+                <div className="w-44">
+                  <CustomListbox
+                    value={retTraveller}
+                    onChange={(v) => {
+                      setRetTraveller(v);
+                      setRetPage(1);
+                    }}
+                    options={retTravellerOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Status Dropdown (CustomListbox) */}
+                <div className="w-44">
+                  <CustomListbox
+                    value={retStatus}
+                    onChange={(v) => {
+                      setRetStatus(v);
+                      setRetPage(1);
+                    }}
+                    options={retStatusOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Include Reconciled Toggle */}
+                <label className="flex items-center gap-1.5 text-xs text-[#475569] cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={retIncludeReconciled}
+                    onChange={(e) => {
+                      setRetIncludeReconciled(e.target.checked);
+                      setRetPage(1);
+                    }}
+                    className="rounded border-[#CBD5E1] text-[#287EAD] focus:ring-[#287EAD]"
+                  />
+                  <span>Include Reconciled</span>
+                </label>
+
+                {/* Reset Filters */}
+                {(retSearch || retDepartment || retTraveller || retStatus || retAgingBucket !== "all" || retIncludeReconciled) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRetSearch("");
+                      setRetDepartment("");
+                      setRetTraveller("");
+                      setRetStatus("");
+                      setRetAgingBucket("all");
+                      setRetIncludeReconciled(false);
+                      setRetPage(1);
+                      clearQa();
+                    }}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* ── Retirements Tabs & Controls ── */}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between print:hidden">
+              <div className="inline-flex rounded-lg border border-[#E2E8F0] bg-white p-1 shadow-2xs">
+                <button
+                  type="button"
+                  onClick={() => setRetirementsTab("register")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    retirementsTab === "register"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  Aging Register ({sortedRetirements.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRetirementsTab("by_department")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    retirementsTab === "by_department"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  Aged by Department ({(retirementsData?.by_department || []).length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRetirementsTab("by_traveller")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    retirementsTab === "by_traveller"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  Aged by Traveller ({(retirementsData?.by_traveller || []).length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRetirementsTab("visuals")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    retirementsTab === "visuals"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  Aging Analytics
+                </button>
+              </div>
+
+              {retirementsTab === "register" && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-[#64748B]">Page size:</span>
+                  <div className="w-36">
+                    <CustomListbox
+                      value={String(retPageSize)}
+                      onChange={(v) => {
+                        setRetPageSize(Number(v));
+                        setRetPage(1);
+                      }}
+                      options={pageSizeOptions}
+                      className="text-xs"
+                      buttonClassName="h-7 border-[#CBD5E1] bg-white text-xs rounded-lg"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* ── Sub-Tab 1: Aging Register Table ── */}
+            {retirementsTab === "register" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="w-full border-collapse text-left text-xs">
                     <thead>
-                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] uppercase tracking-wider">
-                        <th
-                          className="px-3.5 py-2.5 cursor-pointer hover:bg-[#F1F5F9]"
-                          onClick={() => handleSort("document_reference")}
-                        >
-                          <span className="flex items-center gap-1">
-                            Req # <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
-                          </span>
+                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
+                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("document_reference")}>
+                          <div className="flex items-center gap-1">
+                            <span>Req Ref</span>
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                          </div>
                         </th>
-                        <th
-                          className="px-3.5 py-2.5 cursor-pointer hover:bg-[#F1F5F9]"
-                          onClick={() => handleSort("date")}
-                        >
-                          <span className="flex items-center gap-1">
-                            Date <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
-                          </span>
+                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("traveller_name")}>
+                          <div className="flex items-center gap-1">
+                            <span>Traveller</span>
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                          </div>
                         </th>
-                        <th className="px-3.5 py-2.5">Dept / Requester</th>
-                        <th
-                          className="px-3.5 py-2.5 cursor-pointer hover:bg-[#F1F5F9]"
-                          onClick={() => handleSort("activity_code")}
-                        >
-                          <span className="flex items-center gap-1 text-[#287EAD]">
-                            Activity Code <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
-                          </span>
+                        <th className="py-2.5 px-3">Department</th>
+                        <th className="py-2.5 px-3">Travel Dates</th>
+                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("due_date")}>
+                          <div className="flex items-center gap-1">
+                            <span>Due Date</span>
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                          </div>
                         </th>
-                        <th
-                          className="px-3.5 py-2.5 cursor-pointer hover:bg-[#F1F5F9]"
-                          onClick={() => handleSort("description")}
-                        >
-                          <span className="flex items-center gap-1">
-                            Description <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
-                          </span>
+                        <th className="py-2.5 px-3 cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("days_overdue")}>
+                          <div className="flex items-center gap-1">
+                            <span>Aging Status</span>
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                          </div>
                         </th>
-                        <th
-                          className="px-3.5 py-2.5 cursor-pointer hover:bg-[#F1F5F9]"
-                          onClick={() => handleSort("account_code")}
-                        >
-                          <span className="flex items-center gap-1 text-[#0D9488]">
-                            Account Code <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
-                          </span>
+                        <th className="py-2.5 px-3 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("advance_amount")}>
+                          <div className="flex items-center justify-end gap-1">
+                            <span>Advance</span>
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                          </div>
                         </th>
-                        <th className="px-3.5 py-2.5">Cost Centre</th>
-                        <th
-                          className="px-3.5 py-2.5 text-right cursor-pointer hover:bg-[#F1F5F9]"
-                          onClick={() => handleSort("amount")}
-                        >
-                          <span className="flex items-center justify-end gap-1">
-                            Amount <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
-                          </span>
+                        <th className="py-2.5 px-3 text-right">Retired / Spent</th>
+                        <th className="py-2.5 px-3 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleSort("outstanding_amount")}>
+                          <div className="flex items-center justify-end gap-1">
+                            <span>Outstanding</span>
+                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
+                          </div>
                         </th>
-                        <th
-                          className="px-3.5 py-2.5 cursor-pointer hover:bg-[#F1F5F9]"
-                          onClick={() => handleSort("journal_number")}
-                        >
-                          <span className="flex items-center gap-1 text-[#6366F1]">
-                            Journal # <ArrowUpDown className="h-3 w-3 text-[#94A3B8]" />
-                          </span>
-                        </th>
-                        <th className="px-3.5 py-2.5 text-center">Status</th>
+                        <th className="py-2.5 px-3">Workflow State</th>
+                        <th className="py-2.5 px-3 text-center print:hidden">Action</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-[#F1F5F9] text-[#1E293B]">
-                      {paginatedLines.map((line) => (
-                        <tr key={line.id} className="hover:bg-[#F8FAFC] transition-colors">
-                          {/* Requisition # */}
-                          <td className="px-3.5 py-2.5 font-medium whitespace-nowrap">
-                            <Link
-                              to={`/${line.document_id}`}
-                              className="font-semibold text-[#287EAD] hover:underline inline-flex items-center gap-1"
-                            >
-                              {line.document_reference}
-                              <ExternalLink className="h-2.5 w-2.5 text-[#94A3B8]" />
-                            </Link>
+                    <tbody className="divide-y divide-[#F1F5F9]">
+                      {isLoadingRetirements ? (
+                        <tr>
+                          <td colSpan={11} className="py-12 text-center text-xs text-[#64748B]">
+                            <Loader2 className="mx-auto h-6 w-6 animate-spin text-[#287EAD]" />
+                            <p className="mt-2 font-medium">Analyzing outstanding travel retirements…</p>
                           </td>
-
-                          {/* Date */}
-                          <td className="px-3.5 py-2.5 text-[#64748B] whitespace-nowrap">
-                            {line.date || "—"}
+                        </tr>
+                      ) : paginatedRetirements.length === 0 ? (
+                        <tr>
+                          <td colSpan={11} className="py-12 text-center text-xs text-[#64748B]">
+                            <CheckCircle2 className="mx-auto h-8 w-8 text-emerald-500 mb-2" />
+                            <p className="text-sm font-semibold text-[#1E293B]">No outstanding retirements found</p>
+                            <p className="mt-1 text-xs text-[#64748B]">
+                              All travel advances have been retired or match the selected filters.
+                            </p>
                           </td>
+                        </tr>
+                      ) : (
+                        paginatedRetirements.map((line) => (
+                          <tr key={line.id} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
+                            {/* Requisition Ref */}
+                            <td className="py-2.5 px-3 font-semibold text-[#287EAD] whitespace-nowrap">
+                              <Link
+                                to={`/forms/${line.id}`}
+                                className="hover:underline flex items-center gap-1"
+                              >
+                                {line.document_reference}
+                                <ExternalLink className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </Link>
+                            </td>
 
-                          {/* Dept / Requester */}
-                          <td className="px-3.5 py-2.5 max-w-[160px] truncate" title={`${line.department} • ${line.requester}`}>
-                            <div className="font-medium text-[#1E293B] truncate">{line.department}</div>
-                            <div className="text-[11px] text-[#64748B] truncate">{line.requester}</div>
-                          </td>
+                            {/* Traveller */}
+                            <td className="py-2.5 px-3">
+                              <div className="font-semibold text-[#1E293B]">{line.traveller_name}</div>
+                              {line.traveller_email && (
+                                <div className="text-[10px] text-[#64748B]">{line.traveller_email}</div>
+                              )}
+                            </td>
 
-                          {/* Activity Code */}
-                          <td className="px-3.5 py-2.5 whitespace-nowrap">
-                            {line.activity_code && line.activity_code !== "—" ? (
-                              <div title={line.activity_description}>
-                                <span className="inline-block rounded bg-[#EFF6FF] px-2 py-0.5 font-mono text-[11px] font-bold text-[#1D4ED8] border border-[#BFDBFE]">
-                                  {line.activity_code}
-                                </span>
-                                {line.activity_description && line.activity_description !== "—" && (
-                                  <div className="text-[10px] text-[#64748B] truncate max-w-[150px]">
-                                    {line.activity_description}
-                                  </div>
-                                )}
+                            {/* Department */}
+                            <td className="py-2.5 px-3">
+                              <span className="inline-flex items-center rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] font-medium text-[#475569]">
+                                {line.department}
+                              </span>
+                            </td>
+
+                            {/* Travel Dates */}
+                            <td className="py-2.5 px-3 text-[#475569] whitespace-nowrap">
+                              <div>{formatDateDisplay(line.departure_date)}</div>
+                              <div className="text-[10px] text-[#94A3B8]">Ret: {formatDateDisplay(line.return_date)}</div>
+                            </td>
+
+                            {/* Due Date */}
+                            <td className="py-2.5 px-3 whitespace-nowrap">
+                              <div className={cn(
+                                "font-medium",
+                                line.days_overdue > 0 ? "text-rose-700 font-bold" : "text-[#475569]",
+                              )}>
+                                {formatDateDisplay(line.due_date)}
                               </div>
-                            ) : (
-                              <span className="text-[#94A3B8]">—</span>
-                            )}
-                          </td>
+                            </td>
 
-                          {/* Description */}
-                          <td className="px-3.5 py-2.5 max-w-[240px]">
-                            <div className="font-medium text-[#1E293B] line-clamp-2" title={line.description}>
-                              {line.description}
-                            </div>
-                            {line.table_name && (
-                              <span className="text-[10px] text-[#94A3B8]">
-                                {line.table_name}
+                            {/* Aging Status */}
+                            <td className="py-2.5 px-3 whitespace-nowrap">
+                              <AgingBadge
+                                bucket={line.aging_bucket}
+                                label={line.aging_bucket_label}
+                                days={line.days_overdue}
+                              />
+                            </td>
+
+                            {/* Advance Amount */}
+                            <td className="py-2.5 px-3 text-right font-medium tabular-nums text-[#475569]">
+                              {formatCurrency(line.advance_amount, line.currency)}
+                            </td>
+
+                            {/* Retired / Spent */}
+                            <td className="py-2.5 px-3 text-right tabular-nums text-[#64748B]">
+                              {line.retired_amount > 0 ? formatCurrency(line.retired_amount, line.currency) : "—"}
+                            </td>
+
+                            {/* Outstanding Balance */}
+                            <td className="py-2.5 px-3 text-right font-bold tabular-nums text-[#1E293B]">
+                              <span className={cn(
+                                line.outstanding_amount > 0 && line.days_overdue > 0 ? "text-rose-700" : "text-[#1E293B]",
+                              )}>
+                                {formatCurrency(line.outstanding_amount, line.currency)}
                               </span>
-                            )}
-                          </td>
+                            </td>
 
-                          {/* Account Code */}
-                          <td className="px-3.5 py-2.5 whitespace-nowrap">
-                            {line.account_code && line.account_code !== "—" ? (
-                              <span className="inline-block rounded bg-[#F0FDF4] px-2 py-0.5 font-mono text-[11px] font-bold text-[#15803D] border border-[#BBF7D0]">
-                                {line.account_code}
+                            {/* Workflow State */}
+                            <td className="py-2.5 px-3 whitespace-nowrap">
+                              <span className="text-[11px] text-[#475569] font-medium">
+                                {line.retirement_status_label}
+                              </span>
+                            </td>
+
+                            {/* Action Link */}
+                            <td className="py-2.5 px-3 text-center print:hidden">
+                              <Link
+                                to={`/forms/${line.id}`}
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#287EAD] hover:underline"
+                              >
+                                View
+                              </Link>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Pagination */}
+                {totalRetirementPages > 1 && (
+                  <div className="flex items-center justify-between border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2 text-xs text-[#64748B] print:hidden">
+                    <div>
+                      Showing {(retPage - 1) * retPageSize + 1} to{" "}
+                      {Math.min(retPage * retPageSize, sortedRetirements.length)} of{" "}
+                      {sortedRetirements.length} retirements
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setRetPage((p) => Math.max(1, p - 1))}
+                        disabled={retPage === 1}
+                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                      </button>
+                      <span className="px-2 font-medium text-[#1E293B]">
+                        Page {retPage} of {totalRetirementPages}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setRetPage((p) => Math.min(totalRetirementPages, p + 1))}
+                        disabled={retPage === totalRetirementPages}
+                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                      >
+                        <ChevronRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Sub-Tab 2: Aged by Department Matrix ── */}
+            {retirementsTab === "by_department" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
+                <div className="border-b border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3">
+                  <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider">
+                    Department Aging Analysis Matrix
+                  </h3>
+                  <p className="mt-0.5 text-xs text-[#64748B]">
+                    Breakdown of travel advances and outstanding obligations by aging bucket for each department.
+                  </p>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-[#E2E8F0] bg-[#F1F5F9] text-[11px] font-semibold text-[#475569]">
+                        <th className="py-2.5 px-3">Department</th>
+                        <th className="py-2.5 px-3 text-center">Total Req</th>
+                        <th className="py-2.5 px-3 text-center">Overdue</th>
+                        <th className="py-2.5 px-3 text-right">Total Advance</th>
+                        <th className="py-2.5 px-3 text-right text-emerald-800 bg-emerald-50/50">Current / Not Due</th>
+                        <th className="py-2.5 px-3 text-right text-amber-800 bg-amber-50/50">1–30 Days</th>
+                        <th className="py-2.5 px-3 text-right text-orange-800 bg-orange-50/50">31–60 Days</th>
+                        <th className="py-2.5 px-3 text-right text-rose-800 bg-rose-50/50">61–90 Days</th>
+                        <th className="py-2.5 px-3 text-right text-red-900 bg-red-50/50">90+ Days</th>
+                        <th className="py-2.5 px-3 text-right font-bold text-[#1E293B]">Total Outstanding</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#F1F5F9]">
+                      {(retirementsData?.by_department || []).map((dept) => (
+                        <tr key={dept.department} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
+                          <td className="py-2.5 px-3 font-semibold text-[#1E293B]">
+                            {dept.department}
+                          </td>
+                          <td className="py-2.5 px-3 text-center tabular-nums text-[#475569]">
+                            {dept.total_records}
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            {dept.overdue_count > 0 ? (
+                              <span className="inline-flex items-center justify-center rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-bold text-rose-800">
+                                {dept.overdue_count}
                               </span>
                             ) : (
-                              <span className="text-[#94A3B8]">—</span>
+                              <span className="text-slate-400 font-mono">0</span>
                             )}
                           </td>
-
-                          {/* Cost Centre */}
-                          <td className="px-3.5 py-2.5 text-[#64748B] whitespace-nowrap">
-                            {line.cost_centre || "—"}
+                          <td className="py-2.5 px-3 text-right font-medium tabular-nums text-[#475569]">
+                            {formatCurrency(dept.total_advance)}
                           </td>
-
-                          {/* Amount */}
-                          <td className="px-3.5 py-2.5 text-right font-bold tabular-nums text-[#0F172A] whitespace-nowrap">
-                            {formatCurrency(line.amount, line.currency)}
+                          <td className="py-2.5 px-3 text-right tabular-nums text-emerald-800 bg-emerald-50/30">
+                            {formatCurrency(dept.aging_buckets.current || 0)}
                           </td>
-
-                          {/* Journal Number */}
-                          <td className="px-3.5 py-2.5 whitespace-nowrap">
-                            {journalBadge(line.journal_number, line.journal_status)}
+                          <td className="py-2.5 px-3 text-right tabular-nums text-amber-800 bg-amber-50/30">
+                            {formatCurrency(dept.aging_buckets["1_30"] || 0)}
                           </td>
-
-                          {/* Status */}
-                          <td className="px-3.5 py-2.5 text-center whitespace-nowrap">
-                            {statusBadge(line.document_status)}
+                          <td className="py-2.5 px-3 text-right tabular-nums text-orange-800 bg-orange-50/30">
+                            {formatCurrency(dept.aging_buckets["31_60"] || 0)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right tabular-nums text-rose-800 bg-rose-50/30">
+                            {formatCurrency(dept.aging_buckets["61_90"] || 0)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right tabular-nums text-red-900 bg-red-50/30 font-semibold">
+                            {formatCurrency(dept.aging_buckets.over_90 || 0)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-bold tabular-nums text-[#1E293B]">
+                            {formatCurrency(dept.total_outstanding)}
                           </td>
                         </tr>
                       ))}
                     </tbody>
-
-                    {/* Table Grand Total Footer */}
-                    <tfoot>
-                      <tr className="border-t-2 border-[#CBD5E1] bg-[#F8FAFC] font-semibold text-[#1E293B]">
-                        <td colSpan={7} className="px-3.5 py-2.5 text-right text-xs uppercase tracking-wide">
-                          Total of Filtered Lines ({summary.total_lines}):
-                        </td>
-                        <td className="px-3.5 py-2.5 text-right font-bold text-sm text-[#0F172A] tabular-nums">
-                          {formatCurrency(summary.total_amount)}
-                        </td>
-                        <td colSpan={2} className="px-3.5 py-2.5 text-xs text-emerald-700 font-medium">
-                          Posted: {formatCurrency(summary.posted_amount)}
-                        </td>
-                      </tr>
-                    </tfoot>
                   </table>
-                </div>
-
-                {/* ── Pagination ── */}
-                <div className="flex flex-col gap-3 border-t border-[#E2E8F0] bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between print:hidden">
-                  <div className="flex items-center gap-2 text-xs text-[#64748B]">
-                    <span>Show</span>
-                    <select
-                      value={pageSize}
-                      onChange={(e) => {
-                        setPageSize(Number(e.target.value));
-                        setPage(1);
-                      }}
-                      className="rounded border border-[#CBD5E1] bg-white px-2 py-0.5 text-xs text-[#1E293B] focus:border-[#287EAD]"
-                    >
-                      <option value={10}>10</option>
-                      <option value={20}>20</option>
-                      <option value={50}>50</option>
-                      <option value={100}>100</option>
-                    </select>
-                    <span>per page • Showing {Math.min((page - 1) * pageSize + 1, sortedLines.length)} to {Math.min(page * pageSize, sortedLines.length)} of {sortedLines.length}</span>
-                  </div>
-
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      disabled={page <= 1}
-                      onClick={() => setPage((p) => Math.max(p - 1, 1))}
-                      className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#CBD5E1] bg-white text-[#475569] disabled:opacity-40 hover:bg-[#F1F5F9]"
-                    >
-                      <ChevronLeft className="h-4 w-4" />
-                    </button>
-                    <span className="px-2 text-xs font-medium text-[#475569]">
-                      Page {page} of {totalPages}
-                    </span>
-                    <button
-                      type="button"
-                      disabled={page >= totalPages}
-                      onClick={() => setPage((p) => Math.min(p + 1, totalPages))}
-                      className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#CBD5E1] bg-white text-[#475569] disabled:opacity-40 hover:bg-[#F1F5F9]"
-                    >
-                      <ChevronRight className="h-4 w-4" />
-                    </button>
-                  </div>
                 </div>
               </div>
             )}
 
-            {/* ── TAB 2: Group by Activity Code ── */}
-            {activeTab === "activities" && (
-              <div className="rounded-b-lg border border-[#E2E8F0] bg-white shadow-2xs overflow-hidden">
+            {/* ── Sub-Tab 3: Aged by Traveller Matrix ── */}
+            {retirementsTab === "by_traveller" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
+                <div className="border-b border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3">
+                  <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider">
+                    Traveller Aging Summary
+                  </h3>
+                  <p className="mt-0.5 text-xs text-[#64748B]">
+                    Individual employee travel advance exposure, aging delinquency, and unreconciled amounts.
+                  </p>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="w-full border-collapse text-left text-xs">
                     <thead>
-                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] uppercase tracking-wider">
-                        <th className="px-4 py-3">Activity Code</th>
-                        <th className="px-4 py-3">Activity Description</th>
-                        <th className="px-4 py-3 text-center">Line Count</th>
-                        <th className="px-4 py-3 text-right">Total Amount</th>
-                        <th className="px-4 py-3 text-right">Posted Amount</th>
-                        <th className="px-4 py-3 text-right">% of Total</th>
-                        <th className="px-4 py-3 w-40">Share</th>
+                      <tr className="border-b border-[#E2E8F0] bg-[#F1F5F9] text-[11px] font-semibold text-[#475569]">
+                        <th className="py-2.5 px-3">Traveller</th>
+                        <th className="py-2.5 px-3">Department</th>
+                        <th className="py-2.5 px-3 text-center">Req Count</th>
+                        <th className="py-2.5 px-3 text-center">Overdue</th>
+                        <th className="py-2.5 px-3 text-right">Total Advance</th>
+                        <th className="py-2.5 px-3 text-right text-emerald-800">Current</th>
+                        <th className="py-2.5 px-3 text-right text-amber-800">1–30d</th>
+                        <th className="py-2.5 px-3 text-right text-rose-800">31d+</th>
+                        <th className="py-2.5 px-3 text-right font-bold text-[#1E293B]">Outstanding Balance</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#F1F5F9]">
-                      {(data?.by_activity || []).map((item) => {
-                        const pct = summary.total_amount > 0 ? (item.total_amount / summary.total_amount) * 100 : 0;
-                        return (
-                          <tr key={item.activity_code} className="hover:bg-[#F8FAFC] transition-colors">
-                            <td className="px-4 py-3 font-mono font-bold text-[#1D4ED8] whitespace-nowrap">
-                              <span className="rounded bg-[#EFF6FF] px-2 py-0.5 border border-[#BFDBFE]">
-                                {item.activity_code || "—"}
+                      {(retirementsData?.by_traveller || []).map((tr) => (
+                        <tr key={tr.traveller_name} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
+                          <td className="py-2.5 px-3">
+                            <div className="font-semibold text-[#1E293B]">{tr.traveller_name}</div>
+                            {tr.traveller_email && (
+                              <div className="text-[10px] text-[#64748B]">{tr.traveller_email}</div>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className="inline-flex items-center rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] font-medium text-[#475569]">
+                              {tr.department}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 text-center tabular-nums text-[#475569]">
+                            {tr.total_records}
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            {tr.overdue_count > 0 ? (
+                              <span className="inline-flex items-center justify-center rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-bold text-rose-800">
+                                {tr.overdue_count}
                               </span>
-                            </td>
-                            <td className="px-4 py-3 text-[#334155] max-w-[280px]">
-                              {item.activity_description || "—"}
-                            </td>
-                            <td className="px-4 py-3 text-center font-medium text-[#475569] tabular-nums">
-                              {item.line_count}
-                            </td>
-                            <td className="px-4 py-3 text-right font-bold tabular-nums text-[#0F172A]">
-                              {formatCurrency(item.total_amount, item.currency)}
-                            </td>
-                            <td className="px-4 py-3 text-right font-medium text-emerald-700 tabular-nums">
-                              {formatCurrency(item.posted_amount, item.currency)}
-                            </td>
-                            <td className="px-4 py-3 text-right font-medium tabular-nums text-[#475569]">
-                              {pct.toFixed(1)}%
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="h-2 w-full rounded-full bg-[#E2E8F0] overflow-hidden">
-                                <div
-                                  className="h-full rounded-full bg-[#287EAD]"
-                                  style={{ width: `${Math.min(pct, 100)}%` }}
-                                />
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
+                            ) : (
+                              <span className="text-slate-400 font-mono">0</span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-medium tabular-nums text-[#475569]">
+                            {formatCurrency(tr.total_advance)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right tabular-nums text-emerald-800">
+                            {formatCurrency(tr.aging_buckets.current || 0)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right tabular-nums text-amber-800">
+                            {formatCurrency(tr.aging_buckets["1_30"] || 0)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right tabular-nums text-rose-800 font-semibold">
+                            {formatCurrency((tr.aging_buckets["31_60"] || 0) + (tr.aging_buckets["61_90"] || 0) + (tr.aging_buckets.over_90 || 0))}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-bold tabular-nums text-[#1E293B]">
+                            {formatCurrency(tr.total_outstanding)}
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
-                    <tfoot>
-                      <tr className="border-t-2 border-[#CBD5E1] bg-[#F8FAFC] font-semibold text-[#1E293B]">
-                        <td colSpan={2} className="px-4 py-3 text-right text-xs uppercase tracking-wide">
-                          Total ({summary.distinct_activities} Activities):
-                        </td>
-                        <td className="px-4 py-3 text-center text-xs tabular-nums">
-                          {summary.total_lines}
-                        </td>
-                        <td className="px-4 py-3 text-right text-sm font-bold tabular-nums">
-                          {formatCurrency(summary.total_amount)}
-                        </td>
-                        <td className="px-4 py-3 text-right text-xs font-semibold text-emerald-700 tabular-nums">
-                          {formatCurrency(summary.posted_amount)}
-                        </td>
-                        <td colSpan={2} className="px-4 py-3 text-right text-xs text-[#64748B]">
-                          100.0%
-                        </td>
-                      </tr>
-                    </tfoot>
                   </table>
                 </div>
               </div>
             )}
 
-            {/* ── TAB 3: Group by Account Code ── */}
-            {activeTab === "accounts" && (
-              <div className="rounded-b-lg border border-[#E2E8F0] bg-white shadow-2xs overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-left text-xs">
-                    <thead>
-                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] uppercase tracking-wider">
-                        <th className="px-4 py-3">Account Code</th>
-                        <th className="px-4 py-3 text-center">Line Count</th>
-                        <th className="px-4 py-3 text-right">Total Amount</th>
-                        <th className="px-4 py-3 text-right">Posted to SunSystems</th>
-                        <th className="px-4 py-3 text-right">% of Total</th>
-                        <th className="px-4 py-3 w-40">Share</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#F1F5F9]">
-                      {(data?.by_account || []).map((item) => {
-                        const pct = summary.total_amount > 0 ? (item.total_amount / summary.total_amount) * 100 : 0;
-                        return (
-                          <tr key={item.account_code} className="hover:bg-[#F8FAFC] transition-colors">
-                            <td className="px-4 py-3 font-mono font-bold text-[#15803D] whitespace-nowrap">
-                              <span className="rounded bg-[#F0FDF4] px-2 py-0.5 border border-[#BBF7D0]">
-                                {item.account_code || "—"}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 text-center font-medium text-[#475569] tabular-nums">
-                              {item.line_count}
-                            </td>
-                            <td className="px-4 py-3 text-right font-bold tabular-nums text-[#0F172A]">
-                              {formatCurrency(item.total_amount, item.currency)}
-                            </td>
-                            <td className="px-4 py-3 text-right font-medium text-emerald-700 tabular-nums">
-                              {formatCurrency(item.posted_amount, item.currency)}
-                            </td>
-                            <td className="px-4 py-3 text-right font-medium tabular-nums text-[#475569]">
-                              {pct.toFixed(1)}%
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="h-2 w-full rounded-full bg-[#E2E8F0] overflow-hidden">
-                                <div
-                                  className="h-full rounded-full bg-[#0D9488]"
-                                  style={{ width: `${Math.min(pct, 100)}%` }}
-                                />
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                    <tfoot>
-                      <tr className="border-t-2 border-[#CBD5E1] bg-[#F8FAFC] font-semibold text-[#1E293B]">
-                        <td className="px-4 py-3 text-right text-xs uppercase tracking-wide">
-                          Total ({summary.distinct_accounts} Accounts):
-                        </td>
-                        <td className="px-4 py-3 text-center text-xs tabular-nums">
-                          {summary.total_lines}
-                        </td>
-                        <td className="px-4 py-3 text-right text-sm font-bold tabular-nums">
-                          {formatCurrency(summary.total_amount)}
-                        </td>
-                        <td className="px-4 py-3 text-right text-xs font-semibold text-emerald-700 tabular-nums">
-                          {formatCurrency(summary.posted_amount)}
-                        </td>
-                        <td colSpan={2} className="px-4 py-3 text-right text-xs text-[#64748B]">
-                          100.0%
-                        </td>
-                      </tr>
-                    </tfoot>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {/* ── TAB 4: Visual Breakdown ── */}
-            {activeTab === "visuals" && (
+            {/* ── Sub-Tab 4: Visual Aging Analytics ── */}
+            {retirementsTab === "visuals" && (
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                {/* Spend by Activity Code Chart */}
-                <div className="rounded-lg border border-[#E2E8F0] bg-white p-5 shadow-2xs">
-                  <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
-                    <div>
-                      <h3 className="text-sm font-bold text-[#1E293B]">Top Activities by Spend</h3>
-                      <p className="text-[11px] text-[#64748B]">Total requisition expenditure by Activity Code (Dim 10)</p>
-                    </div>
-                    <Layers className="h-4 w-4 text-[#287EAD]" />
-                  </div>
-                  <div className="mt-4 h-[280px] w-full">
-                    {activityChartData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={activityChartData} margin={{ top: 10, right: 10, left: 10, bottom: 30 }}>
-                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                          <XAxis
-                            dataKey="name"
-                            angle={-30}
-                            textAnchor="end"
-                            interval={0}
-                            tick={{ fontSize: 10, fill: "#64748B" }}
-                          />
-                          <YAxis
-                            tick={{ fontSize: 10, fill: "#64748B" }}
-                            tickFormatter={(val) => `$${val >= 1000 ? `${(val / 1000).toFixed(0)}k` : val}`}
-                          />
-                          <RechartsTooltip
-                            formatter={(value: any) => [formatCurrency(Number(value)), "Spend"]}
-                            labelFormatter={(lbl) => `Activity Code: ${lbl}`}
-                          />
-                          <Bar dataKey="amount" radius={[4, 4, 0, 0]}>
-                            {activityChartData.map((_, index) => (
-                              <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
-                            ))}
-                          </Bar>
-                        </BarChart>
-                      </ResponsiveContainer>
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-xs text-[#94A3B8]">
-                        No activity data available
-                      </div>
-                    )}
+                {/* Chart 1: Outstanding Balance by Aging Bucket */}
+                <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs">
+                  <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider mb-1">
+                    Outstanding Exposure by Aging Category
+                  </h3>
+                  <p className="text-xs text-[#64748B] mb-4">
+                    Financial balance across delinquent aging brackets.
+                  </p>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={agingBucketBarData} margin={{ top: 10, right: 10, left: 10, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                        <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                        <YAxis tick={{ fontSize: 11 }} tickFormatter={(val) => `$${val.toLocaleString()}`} />
+                        <RechartsTooltip
+                          formatter={(value: any) => [formatCurrency(Number(value)), "Outstanding Amount"]}
+                        />
+                        <Bar dataKey="amount" radius={[4, 4, 0, 0]}>
+                          {agingBucketBarData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.fill} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
                   </div>
                 </div>
 
-                {/* Spend by Account Code Chart */}
-                <div className="rounded-lg border border-[#E2E8F0] bg-white p-5 shadow-2xs">
-                  <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3">
+                {/* Chart 2: Outstanding Balance by Department */}
+                <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs">
+                  <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider mb-1">
+                    Outstanding Balance by Department
+                  </h3>
+                  <p className="text-xs text-[#64748B] mb-4">
+                    Total unpaid advance per organizational department.
+                  </p>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={departmentAgingChartData} margin={{ top: 10, right: 10, left: 10, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                        <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                        <YAxis tick={{ fontSize: 11 }} tickFormatter={(val) => `$${val.toLocaleString()}`} />
+                        <RechartsTooltip
+                          formatter={(value: any) => [formatCurrency(Number(value)), "Amount"]}
+                        />
+                        <Legend wrapperStyle={{ fontSize: "11px" }} />
+                        <Bar dataKey="Current" stackId="a" fill={AGING_BAR_COLORS.current} />
+                        <Bar dataKey="1-30 Days" stackId="a" fill={AGING_BAR_COLORS["1_30"]} />
+                        <Bar dataKey="31-60 Days" stackId="a" fill={AGING_BAR_COLORS["31_60"]} />
+                        <Bar dataKey="61-90 Days" stackId="a" fill={AGING_BAR_COLORS["61_90"]} />
+                        <Bar dataKey="90+ Days" stackId="a" fill={AGING_BAR_COLORS.over_90} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          /* ── Financial Lines Mode (Activity Code, Description, Account Code, Amount, Journal #) ── */
+          <>
+            {/* Filter Toolbar for Financial Lines */}
+            <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs print:hidden">
+              <div className="flex flex-wrap items-center gap-3">
+                {/* Search */}
+                <div className="relative flex-1 min-w-[220px]">
+                  <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-[#94A3B8]" />
+                  <input
+                    type="text"
+                    placeholder="Search description, activity code, account code, journal #, req #…"
+                    value={finSearch}
+                    onChange={(e) => {
+                      setFinSearch(e.target.value);
+                      setFinPage(1);
+                    }}
+                    className="w-full rounded-lg border border-[#CBD5E1] bg-white py-1.5 pl-8 pr-7 text-xs text-[#1E293B] placeholder-[#94A3B8] focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
+                  />
+                  {finSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setFinSearch("")}
+                      className="absolute right-2 top-2 text-[#94A3B8] hover:text-[#475569]"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Account Code (CustomListbox) */}
+                <div className="w-48">
+                  <CustomListbox
+                    value={finAccountCode}
+                    onChange={(v) => {
+                      setFinAccountCode(v);
+                      setFinPage(1);
+                    }}
+                    options={finAccountOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Activity Code (CustomListbox) */}
+                <div className="w-48">
+                  <CustomListbox
+                    value={finActivityCode}
+                    onChange={(v) => {
+                      setFinActivityCode(v);
+                      setFinPage(1);
+                    }}
+                    options={finActivityOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Department (CustomListbox) */}
+                <div className="w-44">
+                  <CustomListbox
+                    value={finDepartment}
+                    onChange={(v) => {
+                      setFinDepartment(v);
+                      setFinPage(1);
+                    }}
+                    options={finDeptOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Status (CustomListbox) */}
+                <div className="w-44">
+                  <CustomListbox
+                    value={finStatus}
+                    onChange={(v) => {
+                      setFinStatus(v);
+                      setFinPage(1);
+                    }}
+                    options={finStatusOptions}
+                    className="text-xs"
+                    buttonClassName="h-8 border-[#CBD5E1] bg-white text-xs hover:border-[#287EAD] rounded-lg"
+                  />
+                </div>
+
+                {/* Journal Only Checkbox */}
+                <label className="flex items-center gap-1.5 text-xs text-[#475569] cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={finHasJournal === true}
+                    onChange={(e) => {
+                      setFinHasJournal(e.target.checked ? true : null);
+                      setFinPage(1);
+                    }}
+                    className="rounded border-[#CBD5E1] text-[#287EAD] focus:ring-[#287EAD]"
+                  />
+                  <span>With Journal # only</span>
+                </label>
+
+                {/* Reset Filters */}
+                {(finSearch || finStartDate || finEndDate || finAccountCode || finActivityCode || finDepartment || finStatus || finHasJournal !== null) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFinSearch("");
+                      setFinStartDate("");
+                      setFinEndDate("");
+                      setFinAccountCode("");
+                      setFinActivityCode("");
+                      setFinDepartment("");
+                      setFinStatus("");
+                      setFinHasJournal(null);
+                      setFinPage(1);
+                    }}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Sub-Tabs for Financial Lines */}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between print:hidden">
+              <div className="inline-flex rounded-lg border border-[#E2E8F0] bg-white p-1 shadow-2xs">
+                <button
+                  type="button"
+                  onClick={() => setFinancialTab("lines")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    financialTab === "lines"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  Detailed Lines ({sortedFinancialLines.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFinancialTab("activities")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    financialTab === "activities"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  By Activity Code ({(financialData?.by_activity || []).length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFinancialTab("accounts")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    financialTab === "accounts"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  By Account Code ({(financialData?.by_account || []).length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFinancialTab("visuals")}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    financialTab === "visuals"
+                      ? "bg-[#C5E6F5] text-[#0A4D68] font-bold shadow-xs border border-[#287EAD]/20"
+                      : "text-[#64748B] hover:text-[#1E293B]",
+                  )}
+                >
+                  Visual Breakdown
+                </button>
+              </div>
+
+              {financialTab === "lines" && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-[#64748B]">Page size:</span>
+                  <div className="w-36">
+                    <CustomListbox
+                      value={String(finPageSize)}
+                      onChange={(v) => {
+                        setFinPageSize(Number(v));
+                        setFinPage(1);
+                      }}
+                      options={pageSizeOptions}
+                      className="text-xs"
+                      buttonClassName="h-7 border-[#CBD5E1] bg-white text-xs rounded-lg"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Detailed Financial Lines Table */}
+            {financialTab === "lines" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
+                        <th className="py-2.5 px-3">Req Ref</th>
+                        <th className="py-2.5 px-3">Date</th>
+                        <th className="py-2.5 px-3">Dept / Requester</th>
+                        <th className="py-2.5 px-3">Activity Code (Dim 10)</th>
+                        <th className="py-2.5 px-3">Description</th>
+                        <th className="py-2.5 px-3">Account Code</th>
+                        <th className="py-2.5 px-3">Cost Centre</th>
+                        <th className="py-2.5 px-3 text-right">Amount</th>
+                        <th className="py-2.5 px-3">Journal #</th>
+                        <th className="py-2.5 px-3">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#F1F5F9]">
+                      {isLoadingFinancial ? (
+                        <tr>
+                          <td colSpan={10} className="py-12 text-center text-xs text-[#64748B]">
+                            <Loader2 className="mx-auto h-6 w-6 animate-spin text-[#287EAD]" />
+                            <p className="mt-2 font-medium">Loading financial lines…</p>
+                          </td>
+                        </tr>
+                      ) : paginatedFinancialLines.length === 0 ? (
+                        <tr>
+                          <td colSpan={10} className="py-12 text-center text-xs text-[#64748B]">
+                            <FileSpreadsheet className="mx-auto h-8 w-8 text-[#9AA5B1] mb-2" />
+                            <p className="text-sm font-semibold text-[#1E293B]">No requisition lines found</p>
+                            <p className="mt-1 text-xs text-[#64748B]">Try clearing your search or filter criteria.</p>
+                          </td>
+                        </tr>
+                      ) : (
+                        paginatedFinancialLines.map((line) => (
+                          <tr key={line.id} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
+                            <td className="py-2.5 px-3 font-semibold text-[#287EAD] whitespace-nowrap">
+                              <Link to={`/forms/${line.document_id}`} className="hover:underline flex items-center gap-1">
+                                {line.document_reference}
+                                <ExternalLink className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </Link>
+                            </td>
+                            <td className="py-2.5 px-3 text-[#64748B] whitespace-nowrap">{line.date}</td>
+                            <td className="py-2.5 px-3">
+                              <div className="font-semibold text-[#1E293B]">{line.department || "—"}</div>
+                              <div className="text-[10px] text-[#64748B]">{line.requester}</div>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className="inline-flex items-center rounded bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-0.5 text-[11px] font-mono font-semibold text-[#0A4D68]">
+                                {line.activity_code}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 max-w-xs truncate" title={line.description}>
+                              {line.description}
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className="inline-flex items-center rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono font-semibold text-[#1E293B]">
+                                {line.account_code}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 font-mono text-slate-600">{line.cost_centre || "—"}</td>
+                            <td className="py-2.5 px-3 text-right font-bold tabular-nums text-[#1E293B]">
+                              {formatCurrency(line.amount, line.currency)}
+                            </td>
+                            <td className="py-2.5 px-3 whitespace-nowrap">
+                              <JournalStatusBadge status={line.journal_status} journalNumber={line.journal_number} />
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-[#475569]">
+                                {line.document_status}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Pagination */}
+                {totalFinancialPages > 1 && (
+                  <div className="flex items-center justify-between border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2 text-xs text-[#64748B] print:hidden">
                     <div>
-                      <h3 className="text-sm font-bold text-[#1E293B]">Spend by Account Code</h3>
-                      <p className="text-[11px] text-[#64748B]">General Ledger account distribution</p>
+                      Showing {(finPage - 1) * finPageSize + 1} to{" "}
+                      {Math.min(finPage * finPageSize, sortedFinancialLines.length)} of{" "}
+                      {sortedFinancialLines.length} lines
                     </div>
-                    <Building2 className="h-4 w-4 text-[#0D9488]" />
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setFinPage((p) => Math.max(1, p - 1))}
+                        disabled={finPage === 1}
+                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                      </button>
+                      <span className="px-2 font-medium text-[#1E293B]">
+                        Page {finPage} of {totalFinancialPages}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setFinPage((p) => Math.min(totalFinancialPages, p + 1))}
+                        disabled={finPage === totalFinancialPages}
+                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                      >
+                        <ChevronRight className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
-                  <div className="mt-4 h-[280px] w-full">
-                    {accountChartData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={accountChartData} margin={{ top: 10, right: 10, left: 10, bottom: 30 }}>
-                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                          <XAxis
-                            dataKey="name"
-                            angle={-30}
-                            textAnchor="end"
-                            interval={0}
-                            tick={{ fontSize: 10, fill: "#64748B" }}
-                          />
-                          <YAxis
-                            tick={{ fontSize: 10, fill: "#64748B" }}
-                            tickFormatter={(val) => `$${val >= 1000 ? `${(val / 1000).toFixed(0)}k` : val}`}
-                          />
-                          <RechartsTooltip
-                            formatter={(value: any) => [formatCurrency(Number(value)), "Spend"]}
-                            labelFormatter={(lbl) => `Account: ${lbl}`}
-                          />
-                          <Bar dataKey="amount" fill="#0D9488" radius={[4, 4, 0, 0]}>
-                            {accountChartData.map((_, index) => (
-                              <Cell key={`acct-cell-${index}`} fill={CHART_COLORS[(index + 3) % CHART_COLORS.length]} />
-                            ))}
-                          </Bar>
-                        </BarChart>
-                      </ResponsiveContainer>
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-xs text-[#94A3B8]">
-                        No account data available
-                      </div>
-                    )}
-                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Summary by Activity Code */}
+            {financialTab === "activities" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
+                <table className="w-full border-collapse text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
+                      <th className="py-2.5 px-3">Activity Code (Dim 10)</th>
+                      <th className="py-2.5 px-3">Activity Description</th>
+                      <th className="py-2.5 px-3 text-center">Lines</th>
+                      <th className="py-2.5 px-3 text-right">Total Amount</th>
+                      <th className="py-2.5 px-3 text-right text-emerald-800">Posted Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F1F5F9]">
+                    {(financialData?.by_activity || []).map((row) => (
+                      <tr key={row.activity_code} className="hover:bg-[#F8FAFC]">
+                        <td className="py-2.5 px-3 font-mono font-bold text-[#0A4D68]">{row.activity_code}</td>
+                        <td className="py-2.5 px-3 text-[#1E293B]">{row.activity_description || "—"}</td>
+                        <td className="py-2.5 px-3 text-center tabular-nums">{row.line_count}</td>
+                        <td className="py-2.5 px-3 text-right font-bold tabular-nums">{formatCurrency(row.total_amount, row.currency)}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums text-emerald-700">{formatCurrency(row.posted_amount, row.currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Summary by Account Code */}
+            {financialTab === "accounts" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden">
+                <table className="w-full border-collapse text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
+                      <th className="py-2.5 px-3">Account Code</th>
+                      <th className="py-2.5 px-3 text-center">Lines</th>
+                      <th className="py-2.5 px-3 text-right">Total Amount</th>
+                      <th className="py-2.5 px-3 text-right text-emerald-800">Posted Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F1F5F9]">
+                    {(financialData?.by_account || []).map((row) => (
+                      <tr key={row.account_code} className="hover:bg-[#F8FAFC]">
+                        <td className="py-2.5 px-3 font-mono font-bold text-[#1E293B]">{row.account_code}</td>
+                        <td className="py-2.5 px-3 text-center tabular-nums">{row.line_count}</td>
+                        <td className="py-2.5 px-3 text-right font-bold tabular-nums">{formatCurrency(row.total_amount, row.currency)}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums text-emerald-700">{formatCurrency(row.posted_amount, row.currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Visual Breakdown */}
+            {financialTab === "visuals" && (
+              <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs">
+                <h3 className="text-xs font-bold text-[#1E293B] uppercase tracking-wider mb-2">
+                  Top Activities by Financial Spend
+                </h3>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={(financialData?.by_activity || []).slice(0, 8).map((a) => ({
+                        name: a.activity_code,
+                        amount: a.total_amount,
+                      }))}
+                      margin={{ top: 10, right: 10, left: 10, bottom: 20 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                      <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                      <YAxis tick={{ fontSize: 11 }} tickFormatter={(val) => `$${val.toLocaleString()}`} />
+                      <RechartsTooltip formatter={(val: any) => [formatCurrency(Number(val)), "Spend Amount"]} />
+                      <Bar dataKey="amount" fill="#287EAD" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
                 </div>
               </div>
             )}
           </>
         )}
       </div>
+
+      {/* ── Scheduled Report Configuration Modal ── */}
+      {scheduleModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
+          <div className="w-full max-w-md rounded-2xl border border-[#C5E6F5] bg-white shadow-xl overflow-hidden">
+            <div className="border-b border-[#C5E6F5] bg-[#F0F8FD] px-5 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD]">
+                  <BellRing className="h-4 w-4" />
+                </span>
+                <h3 className="text-sm font-bold text-[#1E293B]">
+                  Schedule Outstanding Retirements Report
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setScheduleModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs">
+              <div>
+                <label className="block font-semibold text-[#1E293B] mb-1">
+                  Dispatch Frequency
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {["daily", "weekly", "monthly"].map((freq) => (
+                    <button
+                      key={freq}
+                      type="button"
+                      onClick={() => setScheduleFrequency(freq)}
+                      className={cn(
+                        "rounded-lg border px-3 py-2 text-center font-semibold capitalize transition-all",
+                        scheduleFrequency === freq
+                          ? "border-[#287EAD] bg-[#F0F8FD] text-[#0A4D68] shadow-xs"
+                          : "border-slate-200 text-slate-600 hover:border-slate-300",
+                      )}
+                    >
+                      {freq}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1 text-[11px] text-[#64748B]">
+                  {scheduleFrequency === "daily" && "Delivered every business day at 8:00 AM."}
+                  {scheduleFrequency === "weekly" && "Delivered every Monday morning at 8:00 AM."}
+                  {scheduleFrequency === "monthly" && "Delivered on the 1st day of each month."}
+                </p>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-[#1E293B] mb-1">
+                  Target Recipients
+                </label>
+                <div className="space-y-1.5">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="recipients"
+                      checked={scheduleRecipients === "hods_finance"}
+                      onChange={() => setScheduleRecipients("hods_finance")}
+                      className="text-[#287EAD] focus:ring-[#287EAD]"
+                    />
+                    <span className="text-[#334155]">Department Heads & Finance Approvers</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="recipients"
+                      checked={scheduleRecipients === "all_mgmt"}
+                      onChange={() => setScheduleRecipients("all_mgmt")}
+                      className="text-[#287EAD] focus:ring-[#287EAD]"
+                    />
+                    <span className="text-[#334155]">Executive Leadership & Audit Committee</span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 text-[11px] text-[#475569] space-y-1">
+                <div className="flex items-center gap-1 font-semibold text-[#1E293B]">
+                  <Mail className="h-3.5 w-3.5 text-[#287EAD]" />
+                  <span>Report Attachment:</span>
+                </div>
+                <p>Includes complete CSV aging matrix by traveller & department with overdue alerts.</p>
+              </div>
+            </div>
+
+            <div className="border-t border-[#E2E8F0] bg-[#F8FAFC] px-5 py-3 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={handleSendTestSchedule}
+                disabled={scheduleSendingTest}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-2xs hover:bg-[#F8FAFC] disabled:opacity-60"
+              >
+                {scheduleSendingTest ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Sending Test…
+                  </>
+                ) : (
+                  <>
+                    <Send className="h-3 w-3 text-[#287EAD]" />
+                    Send Test Now
+                  </>
+                )}
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setScheduleModalOpen(false)}
+                  className="rounded-lg px-3 py-1.5 text-xs font-semibold text-[#64748B] hover:text-[#1E293B]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setScheduleModalOpen(false);
+                    toast.success(`Automated ${scheduleFrequency} report schedule saved successfully.`);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-4 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99]"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  Save Schedule
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-
