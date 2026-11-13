@@ -285,6 +285,7 @@ export default function FormDetailPage() {
   const [travelPolicyNotice, setTravelPolicyNotice] = useState<string | null>(null);
   const duplicateNoticeDismissedDate = useRef("");
   const duplicateNoticeObservedDate = useRef("");
+  const retirementFormRef = useRef<HTMLDivElement>(null);
   const dismissDuplicateNoticeForFeedback = () => {
     if (duplicateDateNotice?.travel_date) {
       duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
@@ -991,6 +992,19 @@ export default function FormDetailPage() {
     onError: () => toast.error("Could not delete this draft."),
   });
 
+  const retirementSubmissionAvailable = Boolean(
+    doc?.can_submit_retirement
+    && doc?.metadata?.form?.travel_retirement?.enabled
+    && formData?.sections,
+  );
+  useEffect(() => {
+    if (!retirementSubmissionAvailable) return;
+    const frame = window.requestAnimationFrame(() => {
+      retirementFormRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [doc?.id, retirementSubmissionAvailable]);
+
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center bg-white">
@@ -1664,7 +1678,7 @@ export default function FormDetailPage() {
                   businessUnit={String((doc.metadata?.sunsystems as Record<string, any> | undefined)?.ui?.businessUnit ?? "")}
                 />
               </div>
-              <div className="form-renderer bg-white px-4 py-3 sm:px-5 sm:py-4">
+              <div ref={retirementFormRef} className="form-renderer bg-white px-4 py-3 sm:px-5 sm:py-4">
                 <TemplateForm
                   sections={formData.sections ?? []}
                   values={formEditing ? formValues : (formData.values ?? {})}
@@ -1771,7 +1785,7 @@ export default function FormDetailPage() {
             />
           )}
 
-          {(isWorkflowActiveOrCompleted(step) || sunSystemsPostingEnabled) && (
+          {!showRetirementSubmit && (isWorkflowActiveOrCompleted(step) || sunSystemsPostingEnabled) && (
             <div className={cn("grid gap-3", isWorkflowActiveOrCompleted(step) && sunSystemsPostingEnabled ? "lg:grid-cols-2" : "")}>
               {isWorkflowActiveOrCompleted(step) && (
                 <ApprovalStagesTable
