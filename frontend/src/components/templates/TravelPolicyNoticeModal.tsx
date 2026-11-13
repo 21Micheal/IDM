@@ -3,9 +3,11 @@ import { Info } from "lucide-react";
 type Props = {
   message: string;
   onDismiss: () => void;
+  onRaiseAnyway: () => void;
+  submitting?: boolean;
 };
 
-export default function TravelPolicyNoticeModal({ message, onDismiss }: Props) {
+export default function TravelPolicyNoticeModal({ message, onDismiss, onRaiseAnyway, submitting = false }: Props) {
   return (
     <div className="fixed inset-0 z-[310] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
       <div
@@ -23,13 +25,22 @@ export default function TravelPolicyNoticeModal({ message, onDismiss }: Props) {
             <p className="mt-1.5 text-xs leading-relaxed text-[#5E6870]">{message}</p>
           </div>
         </div>
-        <div className="flex justify-end border-t border-[#E2E6E9] bg-[#F7F8F9] px-6 py-4">
+        <div className="flex justify-end gap-2 border-t border-[#E2E6E9] bg-[#F7F8F9] px-6 py-4">
           <button
             type="button"
             onClick={onDismiss}
-            className="bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#1E6F99]"
+            disabled={submitting}
+            className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#5E6870] transition-colors hover:bg-[#EEF1F3] disabled:opacity-60"
           >
             Dismiss
+          </button>
+          <button
+            type="button"
+            onClick={onRaiseAnyway}
+            disabled={submitting}
+            className="bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#1E6F99]"
+          >
+            {submitting ? "Submitting…" : "Raise anyway"}
           </button>
         </div>
       </div>

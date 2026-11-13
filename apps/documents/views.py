@@ -1172,38 +1172,34 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # another phase of an existing requisition.
         form = ((doc.metadata or {}).get("form") or {})
         current_phase = str(form.get("workflow_phase") or "requisition").strip().lower()
-        booked_early_matches = []
+        booked_early_reference = None
         if (
             str(form.get("workflow_type") or "").strip().lower() == "requisition"
-            and current_phase == "requisition"
+            and current_phase != "retirement"
             and requested_stage in ("", "requisition")
         ):
             from apps.documents.requisition_duplicates import find_existing_travel_date_duplicates
 
             duplicate_matches = find_existing_travel_date_duplicates(doc)
             if duplicate_matches:
-                allow_duplicate_date = request.data.get("allow_duplicate_travel_date") is True
-                if allow_duplicate_date and doc.uploaded_by_id == request.user.id:
-                    booked_early_matches = duplicate_matches
-                else:
-                    details = ", ".join(match["reference_number"] for match in duplicate_matches[:3])
-                    extra = f" Other matches: {len(duplicate_matches) - 3}." if len(duplicate_matches) > 3 else ""
-                    return Response(
-                        {
-                            "detail": (
-                                "This requisition was not submitted because you already have a "
-                                f"requisition starting on {duplicate_matches[0]['date']} ({details}).{extra} "
-                                "Choose a different travel start date before submitting."
-                            ),
-                            "code": "duplicate_requisition_travel_date",
-                            "travel_date": duplicate_matches[0]["date"],
-                            "matches": duplicate_matches,
-                        },
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                details = ", ".join(match["reference_number"] for match in duplicate_matches[:3])
+                extra = f" Other matches: {len(duplicate_matches) - 3}." if len(duplicate_matches) > 3 else ""
+                return Response(
+                    {
+                        "detail": (
+                            "This requisition was not submitted because you already have a "
+                            f"requisition starting on {duplicate_matches[0]['date']} ({details}).{extra} "
+                            "Choose a different travel start date before submitting."
+                        ),
+                        "code": "duplicate_requisition_travel_date",
+                        "travel_date": duplicate_matches[0]["date"],
+                        "matches": duplicate_matches,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         def record_booked_early_override():
-            if not booked_early_matches:
+            if not booked_early_reference:
                 return
             # WorkflowService.start may update the form metadata. Reload first
             # so recording this marker does not overwrite its phase/status data.
@@ -1211,8 +1207,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             metadata = dict(doc.metadata or {})
             form_metadata = dict(metadata.get("form") or {})
             form_metadata["booked_early"] = {
-                "travel_date": booked_early_matches[0]["date"],
-                "matches": booked_early_matches,
+                "reason": "unreconciled_retirement",
+                "blocking_reference": booked_early_reference,
                 "raised_at": timezone.now().isoformat(),
                 "raised_by_id": str(request.user.id),
             }
@@ -1229,14 +1225,21 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 request.user, exclude_document_id=doc.id,
             )
             if overdue:
-                return Response(
-                    {
-                        "detail": f"Reconciliation for requisition {overdue.reference_number} is still outstanding. Reconcile that requisition before raising another one.",
-                        "code": "overdue_retirement_policy",
-                        "blocking_reference": overdue.reference_number,
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
+                allow_unreconciled_retirement = (
+                    request.data.get("allow_unreconciled_retirement") is True
+                    and doc.uploaded_by_id == request.user.id
                 )
+                if allow_unreconciled_retirement:
+                    booked_early_reference = overdue.reference_number
+                else:
+                    return Response(
+                        {
+                            "detail": f"Reconciliation for requisition {overdue.reference_number} is still outstanding. Reconcile that requisition before raising another one.",
+                            "code": "overdue_retirement_policy",
+                            "blocking_reference": overdue.reference_number,
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
         if requested_stage == "retirement":
             if not can_submit_retirement_workflow(doc, user=request.user):
@@ -1284,7 +1287,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
 
         can_submit_retirement = can_submit_retirement_workflow(doc, user=request.user)
-        can_submit_request = can_submit_request_workflow(doc, user=request.user)
+        can_submit_request = can_submit_request_workflow(
+            doc,
+            user=request.user,
+            allow_unreconciled_retirement=bool(booked_early_reference),
+        )
 
         # Rejection is terminal — it ends the workflow. Draft/returned documents
         # start (or resume) the request phase; fully-approved builder forms in

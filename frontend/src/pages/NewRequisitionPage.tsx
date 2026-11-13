@@ -340,7 +340,7 @@ export default function NewRequisitionPage() {
 
   // Submit mutation
   const submitMutation = useMutation<any, Error, boolean | void>({
-    mutationFn: async (allowDuplicateTravelDate = false) => {
+    mutationFn: async (allowUnreconciledRetirement = false) => {
       if (!selectedTemplateId) throw new Error("No template selected");
       // New requisitions are still in the draft process step — using "submit"
       // here skipped any column/field with draft-only editableWhen rules, so
@@ -368,9 +368,10 @@ export default function NewRequisitionPage() {
         throw new Error("FORM_REQUIRED_FIELDS");
       }
       setMissingFields([]);
-      if (duplicateTravelDate && !allowDuplicateTravelDate) {
+      if (duplicateTravelDate) {
         const duplicateResponse = await documentsAPI.checkRequisitionDuplicateForTemplate(selectedTemplateId, formValues);
         if (duplicateResponse.data.exists) {
+          setTravelPolicyNotice(null);
           setDuplicateDateNotice(duplicateResponse.data);
           throw new Error("DUPLICATE_REQUISITION_TRAVEL_DATE");
         }
@@ -378,7 +379,7 @@ export default function NewRequisitionPage() {
       const docId = await autosave.finalizeNow();
       if (docId) return documentsAPI.submit(docId, {
         workflow_stage: "requisition",
-        ...(allowDuplicateTravelDate ? { allow_duplicate_travel_date: true } : {}),
+        ...(allowUnreconciledRetirement ? { allow_unreconciled_retirement: true } : {}),
       });
       throw new Error("Failed to initialize requisition document");
     },
@@ -397,6 +398,7 @@ export default function NewRequisitionPage() {
         return;
       }
       if (err?.response?.data?.code === "duplicate_requisition_travel_date") {
+        setTravelPolicyNotice(null);
         setDuplicateDateNotice({
           travel_date: String(err.response.data.travel_date || duplicateTravelDate || ""),
           matches: Array.isArray(err.response.data.matches) ? err.response.data.matches : [],
@@ -688,7 +690,7 @@ export default function NewRequisitionPage() {
                   You already have a requisition starting on <strong className="font-semibold text-slate-800">{duplicateDateNotice.travel_date}</strong>
                   {duplicateDateNotice.matches.length > 0 && <> ({duplicateDateNotice.matches.map((match) => match.reference_number).filter(Boolean).join(", ") || "another requisition"})</>}.
                 </p>
-                <p className="mt-2 text-sm leading-relaxed text-slate-600">Please check the date before continuing. Requisitions for different dates can still be submitted as usual.</p>
+                <p className="mt-2 text-sm leading-relaxed text-slate-600">Choose a different travel start date before submitting this requisition.</p>
               </div>
             </div>
             <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-6 py-4">
@@ -696,16 +698,18 @@ export default function NewRequisitionPage() {
                 duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
                 setDuplicateDateNotice(null);
               }} className="border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100">Dismiss</button>
-              <button type="button" onClick={() => submitMutation.mutate(true)} disabled={submitMutation.isPending} className="bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99] disabled:opacity-60">
-                {submitMutation.isPending ? "Submitting…" : "Raise anyway"}
-              </button>
             </div>
           </div>
         </div>
       )}
 
       {travelPolicyNotice && (
-        <TravelPolicyNoticeModal message={travelPolicyNotice} onDismiss={() => setTravelPolicyNotice(null)} />
+        <TravelPolicyNoticeModal
+          message={travelPolicyNotice}
+          onDismiss={() => setTravelPolicyNotice(null)}
+          onRaiseAnyway={() => { setTravelPolicyNotice(null); submitMutation.mutate(true); }}
+          submitting={submitMutation.isPending}
+        />
       )}
 
       {/* ── Signature Placement Modal ── */}

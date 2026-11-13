@@ -180,7 +180,7 @@ export default function FormFillModal({
   // Validates required fields, creates the document, then immediately submits
   // it for approval. If submit fails the form lands in draft — the user can
   // retry from the forms list.
-  const handleStartWorkflow = async (allowDuplicateTravelDate = false) => {
+  const handleStartWorkflow = async (allowUnreconciledRetirement = false) => {
     if (!title.trim()) {
       toast.error("Please enter a form title.");
       return;
@@ -212,9 +212,10 @@ export default function FormFillModal({
 
     setSubmitting(true);
     try {
-      if (duplicateTravelDate && !allowDuplicateTravelDate) {
+      if (duplicateTravelDate) {
         const duplicateResponse = await documentsAPI.checkRequisitionDuplicateForTemplate(template.id, duplicateValues);
         if (duplicateResponse.data.exists) {
+          setTravelPolicyNotice(null);
           setDuplicateDateNotice(duplicateResponse.data);
           return;
         }
@@ -222,7 +223,7 @@ export default function FormFillModal({
       const docId = await autosave.finalizeNow();
       if (!docId) throw new Error("Could not save the form before starting its workflow.");
       try {
-        await documentsAPI.submit(docId, allowDuplicateTravelDate ? { allow_duplicate_travel_date: true } : undefined);
+        await documentsAPI.submit(docId, allowUnreconciledRetirement ? { allow_unreconciled_retirement: true } : undefined);
         queryClient.invalidateQueries({ queryKey: ["forms"] });
         queryClient.invalidateQueries({ queryKey: ["documents"] });
         toast.success("Workflow started — form submitted for approval.");
@@ -239,6 +240,7 @@ export default function FormFillModal({
           return;
         }
         if (responseData?.code === "duplicate_requisition_travel_date") {
+          setTravelPolicyNotice(null);
           setDuplicateDateNotice({
             travel_date: String(responseData.travel_date || duplicateTravelDate || ""),
             matches: Array.isArray(responseData.matches) ? responseData.matches : [],
@@ -425,7 +427,7 @@ export default function FormFillModal({
                   You already have a requisition starting on <strong className="font-semibold text-slate-800">{duplicateDateNotice.travel_date}</strong>
                   {duplicateDateNotice.matches.length > 0 && <> ({duplicateDateNotice.matches.map((match) => match.reference_number).filter(Boolean).join(", ") || "another requisition"})</>}.
                 </p>
-                <p className="mt-2 text-sm leading-relaxed text-slate-600">Please check the date before continuing. Requisitions for different dates can still be submitted as usual.</p>
+                <p className="mt-2 text-sm leading-relaxed text-slate-600">Choose a different travel start date before submitting this requisition.</p>
               </div>
             </div>
             <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-6 py-4">
@@ -433,15 +435,17 @@ export default function FormFillModal({
                 duplicateNoticeDismissedDate.current = duplicateDateNotice.travel_date;
                 setDuplicateDateNotice(null);
               }} className="border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100">Dismiss</button>
-              <button type="button" onClick={() => void handleStartWorkflow(true)} disabled={submitting} className="bg-[#287EAD] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1E6F99] disabled:opacity-60">
-                {submitting ? "Submitting…" : "Raise anyway"}
-              </button>
             </div>
           </div>
         </div>
       )}
       {travelPolicyNotice && (
-        <TravelPolicyNoticeModal message={travelPolicyNotice} onDismiss={() => setTravelPolicyNotice(null)} />
+        <TravelPolicyNoticeModal
+          message={travelPolicyNotice}
+          onDismiss={() => setTravelPolicyNotice(null)}
+          onRaiseAnyway={() => { setTravelPolicyNotice(null); void handleStartWorkflow(true); }}
+          submitting={submitting}
+        />
       )}
     </div>
   );

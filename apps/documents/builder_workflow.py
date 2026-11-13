@@ -841,7 +841,12 @@ def can_submit_retirement_workflow(document: Document, *, user=None) -> bool:
     return True
 
 
-def can_submit_request_workflow(document: Document, *, user=None) -> bool:
+def can_submit_request_workflow(
+    document: Document,
+    *,
+    user=None,
+    allow_unreconciled_retirement: bool = False,
+) -> bool:
     """Whether the initial (request) approval cycle can be started or resumed."""
     status = (document.status or "").strip()
     if status not in (
@@ -866,6 +871,7 @@ def can_submit_request_workflow(document: Document, *, user=None) -> bool:
         # reconciliation can actually be completed.
         if (
             user is not None
+            and not allow_unreconciled_retirement
             and phase != "retirement"
             and is_travel_requisition(document)
         ):
