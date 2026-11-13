@@ -1147,7 +1147,30 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             sections_override=template.sections,
             start_date_field=template.travel_start_date_field,
         )
-        matches = find_existing_travel_date_duplicates_for_owner(request.user.id, travel_date)
+        # New requisitions autosave to a draft while the user is filling them.
+        # Exclude only that user's draft for this same template, otherwise its
+        # own selected date is reported back as a duplicate of itself.
+        exclude_document_id = None
+        candidate_id = request.data.get("document_id")
+        if candidate_id:
+            candidate = Document.objects.filter(
+                pk=candidate_id,
+                uploaded_by=request.user,
+                status="draft",
+                deleted_at__isnull=True,
+            ).only("id", "metadata").first()
+            candidate_form = ((candidate.metadata or {}).get("form") or {}) if candidate else {}
+            if (
+                candidate
+                and str(candidate_form.get("workflow_type") or "").strip().lower() == "requisition"
+                and str(candidate_form.get("template_id") or "") == str(template.id)
+            ):
+                exclude_document_id = candidate.id
+        matches = find_existing_travel_date_duplicates_for_owner(
+            request.user.id,
+            travel_date,
+            exclude_document_id=exclude_document_id,
+        )
         return Response({"exists": bool(matches), "travel_date": travel_date, "matches": matches})
 
     @action(detail=True, methods=["post"])

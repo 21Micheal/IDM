@@ -455,12 +455,16 @@ export const documentsAPI = {
       travel_date: string;
       matches: Array<{ reference_number: string; date: string }>;
     }>(`/documents/${id}/check_requisition_duplicate/`, { values }),
-  checkRequisitionDuplicateForTemplate: (templateId: string, values: Record<string, unknown>) =>
+  checkRequisitionDuplicateForTemplate: (templateId: string, values: Record<string, unknown>, documentId?: string) =>
     api.post<{
       exists: boolean;
       travel_date: string;
       matches: Array<{ reference_number: string; date: string }>;
-    }>("/documents/check_requisition_duplicate/", { template_id: templateId, values }),
+    }>("/documents/check_requisition_duplicate/", {
+      template_id: templateId,
+      values,
+      ...(documentId ? { document_id: documentId } : {}),
+    }),
 
   rfq: (id: string) => api.get(`/documents/${id}/rfq/`),
   sendRfq: (id: string) => api.post(`/documents/${id}/rfq/`),

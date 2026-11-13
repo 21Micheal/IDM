@@ -122,31 +122,6 @@ export default function NewRequisitionPage() {
   const duplicateTravelDate = selectedTemplate
     ? requisitionStartDate(selectedTemplate.sections ?? [], formValues, selectedTemplate.travel_start_date_field)
     : "";
-  const { data: duplicateCheck } = useQuery({
-    queryKey: ["requisition-travel-date-duplicate", selectedTemplateId, duplicateTravelDate],
-    queryFn: () => documentsAPI.checkRequisitionDuplicateForTemplate(selectedTemplateId!, formValues).then((response) => response.data),
-    enabled: Boolean(
-      selectedTemplateId
-      && duplicateTravelDate
-      && String(selectedTemplate?.workflow_type || "requisition").toLowerCase() === "requisition"
-    ),
-    staleTime: 0,
-  });
-
-  useEffect(() => {
-    if (duplicateNoticeObservedDate.current !== duplicateTravelDate) {
-      duplicateNoticeObservedDate.current = duplicateTravelDate;
-      duplicateNoticeDismissedDate.current = "";
-    }
-    if (
-      duplicateCheck?.exists
-      && duplicateCheck.travel_date
-      && duplicateNoticeDismissedDate.current !== duplicateCheck.travel_date
-    ) {
-      setDuplicateDateNotice(duplicateCheck);
-    }
-  }, [duplicateTravelDate, duplicateCheck]);
-
   const autosave = useFormDraftAutosave({
     enabled: Boolean(selectedTemplateId && selectedTemplate),
     dirty: formDirty,
@@ -165,6 +140,37 @@ export default function NewRequisitionPage() {
       void qc.invalidateQueries({ queryKey: ["requisitions"] });
     },
   });
+
+  const { data: duplicateCheck } = useQuery({
+    queryKey: ["requisition-travel-date-duplicate", selectedTemplateId, autosave.documentId, duplicateTravelDate],
+    queryFn: () => documentsAPI.checkRequisitionDuplicateForTemplate(
+      selectedTemplateId!,
+      formValues,
+      autosave.documentId ?? undefined,
+    ).then((response) => response.data),
+    enabled: Boolean(
+      selectedTemplateId
+      && duplicateTravelDate
+      && String(selectedTemplate?.workflow_type || "requisition").toLowerCase() === "requisition"
+    ),
+    staleTime: 0,
+  });
+
+  useEffect(() => {
+    if (duplicateNoticeObservedDate.current !== duplicateTravelDate) {
+      duplicateNoticeObservedDate.current = duplicateTravelDate;
+      duplicateNoticeDismissedDate.current = "";
+      setDuplicateDateNotice(null);
+    }
+    const currentDateCheck = duplicateCheck?.travel_date === duplicateTravelDate ? duplicateCheck : null;
+    if (
+      currentDateCheck?.exists
+      && currentDateCheck.travel_date
+      && duplicateNoticeDismissedDate.current !== currentDateCheck.travel_date
+    ) {
+      setDuplicateDateNotice(currentDateCheck);
+    }
+  }, [duplicateTravelDate, duplicateCheck]);
 
   // Auto-select first requisition template if not set
   useEffect(() => {
@@ -376,7 +382,11 @@ export default function NewRequisitionPage() {
       }
       setMissingFields([]);
       if (duplicateTravelDate) {
-        const duplicateResponse = await documentsAPI.checkRequisitionDuplicateForTemplate(selectedTemplateId, formValues);
+        const duplicateResponse = await documentsAPI.checkRequisitionDuplicateForTemplate(
+          selectedTemplateId,
+          formValues,
+          autosave.documentId ?? undefined,
+        );
         if (duplicateResponse.data.exists) {
           setTravelPolicyNotice(null);
           setDuplicateDateNotice(duplicateResponse.data);
@@ -687,7 +697,7 @@ export default function NewRequisitionPage() {
         </div>
       )}
 
-      {duplicateDateNotice && (
+      {duplicateDateNotice?.travel_date === duplicateTravelDate && duplicateTravelDate && (
         <div className="fixed inset-0 z-[300] flex items-center justify-center bg-slate-950/45 px-4 py-6" role="presentation">
           <div role="alertdialog" aria-modal="true" aria-labelledby="duplicate-travel-date-title" className="w-full max-w-md overflow-hidden border border-amber-200 bg-white shadow-2xl">
             <div className="flex items-start gap-4 px-6 pt-6 pb-5">

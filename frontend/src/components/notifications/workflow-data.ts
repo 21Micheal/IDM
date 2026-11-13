@@ -222,6 +222,7 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
   steps: WorkflowStep[];
   currentStep: number;
   isActive: boolean;
+  phase?: WorkflowPhase | string | null;
   documentTitle?: string;
   submittedBy?: string;
   submittedDate?: string;
@@ -238,9 +239,9 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
     instances.find((row) => row.status === "in_progress") ??
     instances[0];
 
-  // Prefer the document phase, which is the current sequential procurement
-  // stage, and use the instance only while the document metadata catches up.
-  const effectivePhase = workflowPhase ?? (instance?.phase as WorkflowPhase | undefined) ?? null;
+  // The workflow instance is loaded separately from the document detail and
+  // can reflect a phase transition before a cached document query does.
+  const effectivePhase = (instance?.phase as WorkflowPhase | undefined) ?? workflowPhase ?? null;
 
   const template = instance?.template
     ? await workflowAPI
@@ -309,6 +310,7 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: Workf
 
   return {
     steps,
+    phase: effectivePhase,
     currentStep: (() => {
       const activeMain = steps.findIndex((step) => step.executionLane !== "imprest_request" && (step.status === "in-progress" || step.status === "on-hold"));
       return activeMain >= 0 ? activeMain : steps.findIndex((step) => step.status === "in-progress" || step.status === "on-hold");

@@ -143,8 +143,12 @@ export default function FormFillModal({
     ? requisitionStartDate(template.sections ?? [], duplicateValues, template.travel_start_date_field)
     : "";
   const { data: duplicateCheck } = useQuery({
-    queryKey: ["requisition-template-travel-date-duplicate", template.id, duplicateTravelDate],
-    queryFn: () => documentsAPI.checkRequisitionDuplicateForTemplate(template.id, duplicateValues).then((response) => response.data),
+    queryKey: ["requisition-template-travel-date-duplicate", template.id, autosave.documentId, duplicateTravelDate],
+    queryFn: () => documentsAPI.checkRequisitionDuplicateForTemplate(
+      template.id,
+      duplicateValues,
+      autosave.documentId ?? undefined,
+    ).then((response) => response.data),
     enabled: Boolean(duplicateTravelDate && String(template.workflow_type || "").toLowerCase() === "requisition"),
     staleTime: 0,
   });
@@ -153,13 +157,15 @@ export default function FormFillModal({
     if (duplicateNoticeObservedDate.current !== duplicateTravelDate) {
       duplicateNoticeObservedDate.current = duplicateTravelDate;
       duplicateNoticeDismissedDate.current = "";
+      setDuplicateDateNotice(null);
     }
+    const currentDateCheck = duplicateCheck?.travel_date === duplicateTravelDate ? duplicateCheck : null;
     if (
-      duplicateCheck?.exists
-      && duplicateCheck.travel_date
-      && duplicateNoticeDismissedDate.current !== duplicateCheck.travel_date
+      currentDateCheck?.exists
+      && currentDateCheck.travel_date
+      && duplicateNoticeDismissedDate.current !== currentDateCheck.travel_date
     ) {
-      setDuplicateDateNotice(duplicateCheck);
+      setDuplicateDateNotice(currentDateCheck);
     }
   }, [duplicateTravelDate, duplicateCheck]);
 
@@ -220,7 +226,11 @@ export default function FormFillModal({
     setSubmitting(true);
     try {
       if (duplicateTravelDate) {
-        const duplicateResponse = await documentsAPI.checkRequisitionDuplicateForTemplate(template.id, duplicateValues);
+        const duplicateResponse = await documentsAPI.checkRequisitionDuplicateForTemplate(
+          template.id,
+          duplicateValues,
+          autosave.documentId ?? undefined,
+        );
         if (duplicateResponse.data.exists) {
           setTravelPolicyNotice(null);
           setDuplicateDateNotice(duplicateResponse.data);
@@ -435,7 +445,7 @@ export default function FormFillModal({
         </div>
       </div>
 
-      {duplicateDateNotice && (
+      {duplicateDateNotice?.travel_date === duplicateTravelDate && duplicateTravelDate && (
         <div className="fixed inset-0 z-[300] flex items-center justify-center bg-slate-950/45 px-4 py-6" role="presentation">
           <div role="alertdialog" aria-modal="true" aria-labelledby="duplicate-travel-date-title" className="w-full max-w-md overflow-hidden border border-amber-200 bg-white shadow-2xl">
             <div className="flex items-start gap-4 px-6 pt-6 pb-5">

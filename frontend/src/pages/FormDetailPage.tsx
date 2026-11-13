@@ -396,15 +396,17 @@ export default function FormDetailPage() {
     if (duplicateNoticeObservedDate.current !== duplicateTravelDate) {
       duplicateNoticeObservedDate.current = duplicateTravelDate;
       duplicateNoticeDismissedDate.current = "";
+      setDuplicateDateNotice(null);
     }
+    const currentDateCheck = duplicateCheck?.travel_date === duplicateTravelDate ? duplicateCheck : null;
     if (
       formEditing
       && String(doc?.status || "").toLowerCase() === "draft"
-      && duplicateCheck?.exists
-      && duplicateCheck.travel_date
-      && duplicateNoticeDismissedDate.current !== duplicateCheck.travel_date
+      && currentDateCheck?.exists
+      && currentDateCheck.travel_date
+      && duplicateNoticeDismissedDate.current !== currentDateCheck.travel_date
     ) {
-      setDuplicateDateNotice(duplicateCheck);
+      setDuplicateDateNotice(currentDateCheck);
     }
   }, [formEditing, doc?.status, duplicateTravelDate, duplicateCheck]);
 
@@ -781,7 +783,7 @@ export default function FormDetailPage() {
   }, [doc, activeTask, formEditing, formData?.values, user?.has_admin_access]);
 
   const { data: workflowData, isLoading: workflowDataLoading } = useQuery({
-    queryKey: ["form-workflow", id, formData?.lpo_generation_ready ? "lpo-ready" : "standard"],
+    queryKey: ["form-workflow", id, formData?.lpo_generation_ready ? "lpo-ready" : "standard", workflowPhase],
     queryFn: () => loadWorkflowData(id!, doc?.builder_workflow_phase),
     // Keep the query enabled during the completion overlay so its one-shot
     // invalidation can refresh the approval table underneath the overlay.
@@ -1789,7 +1791,7 @@ export default function FormDetailPage() {
                 <ApprovalStagesTable
                   steps={workflowData?.steps ?? []}
                   isLoading={workflowDataLoading}
-                  phase={doc.builder_workflow_phase}
+                  phase={workflowData?.phase ?? doc.builder_workflow_phase}
                   retirementAwaitingSubmission={retirementAwaitingSubmission}
                   lpoAwaitingSubmission={Boolean(formData?.lpo_generation_ready)}
                 />
@@ -2238,7 +2240,7 @@ export default function FormDetailPage() {
         </div>
       )}
 
-      {duplicateDateNotice && (
+      {duplicateDateNotice?.travel_date === duplicateTravelDate && duplicateTravelDate && (
         <div className="fixed inset-0 z-[300] flex items-center justify-center bg-slate-950/45 px-4 py-6" onMouseDown={(event) => {
           if (event.target === event.currentTarget) return;
         }}>
