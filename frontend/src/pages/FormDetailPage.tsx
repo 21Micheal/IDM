@@ -783,7 +783,9 @@ export default function FormDetailPage() {
   const { data: workflowData, isLoading: workflowDataLoading } = useQuery({
     queryKey: ["form-workflow", id, formData?.lpo_generation_ready ? "lpo-ready" : "standard"],
     queryFn: () => loadWorkflowData(id!, doc?.builder_workflow_phase),
-    enabled: !!id && !!doc && !workflowActionCompleted,
+    // Keep the query enabled during the completion overlay so its one-shot
+    // invalidation can refresh the approval table underneath the overlay.
+    enabled: !!id && !!doc,
     ...QUERY_SHORT_STALE,
     refetchInterval: (query) => {
       if (workflowActionCompleted) return false;
@@ -1935,6 +1937,12 @@ export default function FormDetailPage() {
               variant="bar"
               onBeforeApprove={savePendingFormEditsBeforeApproval}
               onCompleted={(action) => {
+                // Refresh behind the completion overlay. The query remains
+                // enabled but stops polling while that overlay is displayed.
+                void qc.invalidateQueries({
+                  queryKey: ["form-workflow", id],
+                  refetchType: "active",
+                });
                 // Only a successful approval can trigger a configured posting
                 // checkpoint. Reject/return/hold must never show a posting
                 // spinner for this step while the completion overlay opens.
