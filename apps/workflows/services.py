@@ -330,6 +330,17 @@ class WorkflowService:
             if isinstance(form_values, dict):
                 for field_id, value in form_values.items():
                     context[field_id] = value
+                    if isinstance(value, list):
+                        # Extract table column values from rows
+                        for row in value:
+                            if isinstance(row, dict):
+                                for col_key, cell_val in row.items():
+                                    if cell_val not in (None, ""):
+                                        dotted_key = f"{field_id}.{col_key}"
+                                        if dotted_key not in context:
+                                            context[dotted_key] = cell_val
+                                        if col_key not in context:
+                                            context[col_key] = cell_val
         
         elif payment_run:
             # Payment run fields

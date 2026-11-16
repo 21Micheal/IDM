@@ -22,6 +22,7 @@
  * the same algorithms should be ported to the backend engine
  * (evaluate / compile / validate).
  */
+import { evaluateCalcExpression } from "./calculations";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Fields (what conditions can look at)
@@ -82,7 +83,8 @@ export type Operator =
   | "is_empty" | "is_not_empty"
   | "is_true" | "is_false"
   | "before" | "after" | "within_last_days"
-  | "contains_any" | "contains_all";
+  | "contains_any" | "contains_all"
+  | "formula";
 
 export const OPERATOR_META: Record<Operator, { label: string; arity: 0 | 1 | 2 | "list" }> = {
   eq: { label: "is", arity: 1 },
@@ -107,12 +109,13 @@ export const OPERATOR_META: Record<Operator, { label: string; arity: 0 | 1 | 2 |
   within_last_days: { label: "is within the last (days)", arity: 1 },
   contains_any: { label: "includes any of", arity: "list" },
   contains_all: { label: "includes all of", arity: "list" },
+  formula: { label: "matches formula", arity: 1 },
 };
 
 export const OPERATORS_BY_TYPE: Record<FieldType, Operator[]> = {
-  number:      ["eq", "neq", "gt", "gte", "lt", "lte", "between", "is_empty", "is_not_empty"],
-  money:       ["eq", "neq", "gt", "gte", "lt", "lte", "between", "is_empty", "is_not_empty"],
-  text:        ["eq", "neq", "contains", "not_contains", "starts_with", "ends_with", "in", "not_in", "is_empty", "is_not_empty"],
+  number:      ["eq", "neq", "gt", "gte", "lt", "lte", "between", "is_empty", "is_not_empty", "formula"],
+  money:       ["eq", "neq", "gt", "gte", "lt", "lte", "between", "is_empty", "is_not_empty", "formula"],
+  text:        ["eq", "neq", "contains", "not_contains", "starts_with", "ends_with", "in", "not_in", "is_empty", "is_not_empty", "formula"],
   select:      ["eq", "neq", "in", "not_in", "is_empty", "is_not_empty"],
   multiselect: ["contains_any", "contains_all", "is_empty", "is_not_empty"],
   boolean:     ["is_true", "is_false"],
@@ -134,6 +137,8 @@ export interface ConditionRule {
   currency?: string;
   /** Compare against another field instead of a literal. */
   value_ref?: string;
+  /** Custom calculation / formula expression (e.g. actual_cost_of_ticket > estimated_ticket_cost) */
+  formula?: string;
 }
 
 export interface ConditionGroup {
@@ -403,12 +408,31 @@ export const makeEnv = (values: Record<string, unknown>, extra: Partial<EvalEnv>
   ({ values, vars: {}, warnings: [], ...extra });
 
 function getValue(env: EvalEnv, id: string): unknown {
+  if (!id) return undefined;
   if (id.startsWith("var.")) return env.vars[id.slice(4)];
   if (id in env.values) return env.values[id];
-  if (id.includes(".")) { // nested objects: { uploader: { department: "X" } }
+  if (id.includes(".")) { // nested objects: { uploader: { department: "X" } } or table rows: { travel_itenerary_vtqc: [{ actual_cost_of_ticket: "1500" }] }
+    const parts = id.split(".");
     let cur: any = env.values;
-    for (const part of id.split(".")) { if (cur == null) return undefined; cur = cur[part]; }
-    return cur;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (cur == null) return undefined;
+      if (Array.isArray(cur)) {
+        const remaining = parts.slice(i).join(".");
+        const row = cur.find((r: any) => r && typeof r === "object" && (r[remaining] !== undefined || r[part] !== undefined));
+        if (!row) return undefined;
+        return row[remaining] !== undefined ? row[remaining] : row[part];
+      }
+      cur = cur[part];
+    }
+    if (cur !== undefined) return cur;
+  }
+  // If bare id not directly found in values, search any table array of row objects
+  for (const v of Object.values(env.values)) {
+    if (Array.isArray(v)) {
+      const row = v.find((r: any) => r && typeof r === "object" && r[id] !== undefined && r[id] !== "");
+      if (row) return row[id];
+    }
   }
   return undefined;
 }
@@ -454,6 +478,20 @@ const asList = (v: unknown): string[] =>
 const TRUE_WHEN_EMPTY = new Set<Operator>(["neq", "not_in", "not_contains", "is_false"]);
 
 export function evalRule(rule: ConditionRule, fields: Map<string, WorkflowField>, env: EvalEnv): boolean {
+  if (rule.op === "formula" || rule.formula) {
+    const expr = String(rule.formula || rule.value || "").trim();
+    if (!expr) return false;
+    try {
+      const res = evaluateCalcExpression(expr, env.values as Record<string, any>);
+      if (typeof res === "boolean") return res;
+      if (typeof res === "number") return res !== 0;
+      if (typeof res === "string") return !["0", "", "false"].includes(res.toLowerCase());
+      return Boolean(res);
+    } catch {
+      return false;
+    }
+  }
+
   if (!rule.field_id || !rule.op) { env.warnings.push("Incomplete condition ignored."); return false; }
   const field = fields.get(rule.field_id);
   const raw = getValue(env, rule.field_id);
@@ -468,40 +506,41 @@ export function evalRule(rule: ConditionRule, fields: Map<string, WorkflowField>
   const refVal = rule.value_ref ? getValue(env, rule.value_ref) : undefined;
   const lit = rule.value_ref ? refVal : rule.value;
 
-  switch (type) {
-    case "number":
-    case "money": {
-      const L0 = toNumber(raw);
-      if (L0 === null) return false;
-      const leftCur = isMoney(raw) ? raw.currency : undefined;
-      // Normalise both sides into the literal's currency (or the left currency for field refs).
-      let cmpCur = rule.currency || leftCur;
-      let L: number | null = L0;
-      if (type === "money" && !rule.value_ref && rule.currency && leftCur) L = convert(env, L0, leftCur, rule.currency);
-      const rightNum = (v: unknown): number | null => {
-        const n = toNumber(v);
-        if (n === null) return null;
-        if (rule.value_ref && isMoney(v) && leftCur) return convert(env, n, v.currency, leftCur);
-        return n;
-      };
-      if (rule.value_ref) cmpCur = leftCur;
-      void cmpCur;
-      if (L === null) return false;
-      const R = rightNum(lit);
-      switch (rule.op) {
-        case "between": {
-          const R2 = toNumber(rule.value2);
-          return R !== null && R2 !== null && L >= Math.min(R, R2) - 1e-9 && L <= Math.max(R, R2) + 1e-9;
-        }
-        case "eq":  return R !== null && Math.abs(L - R) < 1e-9;
-        case "neq": return R === null || Math.abs(L - R) >= 1e-9;
-        case "gt":  return R !== null && L > R;
-        case "gte": return R !== null && L >= R - 1e-9;
-        case "lt":  return R !== null && L < R;
-        case "lte": return R !== null && L <= R + 1e-9;
-        default: return false;
+  const isNumericOp = ["gt", "gte", "lt", "lte", "between"].includes(rule.op);
+  if (type === "number" || type === "money" || (isNumericOp && toNumber(raw) !== null)) {
+    const L0 = toNumber(raw);
+    if (L0 === null) return false;
+    const leftCur = isMoney(raw) ? raw.currency : undefined;
+    // Normalise both sides into the literal's currency (or the left currency for field refs).
+    let cmpCur = rule.currency || leftCur;
+    let L: number | null = L0;
+    if (type === "money" && !rule.value_ref && rule.currency && leftCur) L = convert(env, L0, leftCur, rule.currency);
+    const rightNum = (v: unknown): number | null => {
+      const n = toNumber(v);
+      if (n === null) return null;
+      if (rule.value_ref && isMoney(v) && leftCur) return convert(env, n, v.currency, leftCur);
+      return n;
+    };
+    if (rule.value_ref) cmpCur = leftCur;
+    void cmpCur;
+    if (L === null) return false;
+    const R = rightNum(lit);
+    switch (rule.op) {
+      case "between": {
+        const R2 = toNumber(rule.value2);
+        return R !== null && R2 !== null && L >= Math.min(R, R2) - 1e-9 && L <= Math.max(R, R2) + 1e-9;
       }
+      case "eq":  return R !== null && Math.abs(L - R) < 1e-9;
+      case "neq": return R === null || Math.abs(L - R) >= 1e-9;
+      case "gt":  return R !== null && L > R;
+      case "gte": return R !== null && L >= R - 1e-9;
+      case "lt":  return R !== null && L < R;
+      case "lte": return R !== null && L <= R + 1e-9;
+      default: break;
     }
+  }
+
+  switch (type) {
     case "boolean": {
       const b = raw === true || lc(raw) === "true" || lc(raw) === "yes" || raw === 1;
       if (rule.op === "is_true") return b;
@@ -563,6 +602,9 @@ export function evalGroup(g: ConditionGroup, fields: Map<string, WorkflowField>,
 const fmtNum = (n: unknown) => { const x = toNumber(n); return x === null ? String(n ?? "…") : x.toLocaleString("en-US", { maximumFractionDigits: 2 }); };
 
 export function describeRule(r: ConditionRule, fields: Map<string, WorkflowField>): string {
+  if (r.op === "formula" || r.formula) {
+    return `Formula: ${r.formula || r.value || "…"}`;
+  }
   const f = fields.get(r.field_id);
   const name = f?.label ?? (r.field_id || "…");
   const meta = OPERATOR_META[r.op];
@@ -895,6 +937,7 @@ export function isCovered(list: Interval[], t: Interval): boolean {
 }
 
 const needsValue = (r: ConditionRule) => {
+  if (r.op === "formula" || r.formula) return isEmptyValue(r.formula || r.value);
   const a = OPERATOR_META[r.op]?.arity;
   if (a === 0) return false;
   if (r.value_ref) return false;
@@ -922,6 +965,10 @@ export function validateDefinition(
     if (g.children.length === 0) { err(`${where}: condition is empty.`, blockId); return; }
     for (const c of g.children) {
       if (c.kind === "group") { checkGroup(c, blockId, where); continue; }
+      if (c.op === "formula" || c.formula) {
+        if (isEmptyValue(c.formula || c.value)) err(`${where}: formula condition needs an expression.`, blockId);
+        continue;
+      }
       if (!c.field_id) { err(`${where}: pick a field for every condition.`, blockId); continue; }
       const f = fields.get(c.field_id);
       if (!f && !declared.has(c.field_id)) { err(`${where}: field "${c.field_id}" no longer exists on this form.`, blockId); continue; }

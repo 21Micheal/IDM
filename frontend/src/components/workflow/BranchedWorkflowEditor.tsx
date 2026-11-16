@@ -133,10 +133,12 @@ function RuleRow({ rule, fields, currencies, onChange, onRemove }: {
 }) {
   const field = fields.find((f) => f.id === rule.field_id);
   const type: FieldType = field?.type ?? "text";
-  const ops = OPERATORS_BY_TYPE[type];
+  const ops = OPERATORS_BY_TYPE[type] || ["eq", "neq", "gt", "lt", "gte", "lte", "formula"];
   const meta = OPERATOR_META[rule.op];
-  const canRef = ["number", "money", "text", "date"].includes(type) && meta?.arity !== 0 && meta?.arity !== "list";
+  const canRef = ["number", "money", "text", "date"].includes(type) && meta?.arity !== 0 && meta?.arity !== "list" && rule.op !== "formula";
   const set = (patch: Partial<ConditionRule>) => onChange({ ...rule, ...patch });
+  const isNumeric = ["number", "money"].includes(type);
+  const compatibleTypes: FieldType[] = isNumeric ? ["number", "money"] : [type];
 
   const scalar = (v: unknown, onV: (x: string | number) => void, ph = "") => {
     if (type === "number" || type === "money") {
@@ -161,28 +163,40 @@ function RuleRow({ rule, fields, currencies, onChange, onRemove }: {
 
   return (
     <div className="flex flex-wrap items-start gap-2 p-2 rounded-lg bg-muted/40 border border-border/60">
-      <div className="w-44 min-w-[9rem]">
+      <div className="w-52 min-w-[10rem]">
         <FieldSelect value={rule.field_id} fields={fields}
           onChange={(id) => {
             const nf = fields.find((f) => f.id === id);
             const nOps = OPERATORS_BY_TYPE[nf?.type ?? "text"];
             onChange({ ...rule, field_id: id, op: nOps.includes(rule.op) ? rule.op : nOps[0],
-              value: undefined, value2: undefined, value_ref: undefined,
+              value: undefined, value2: undefined, value_ref: undefined, formula: undefined,
               currency: nf?.type === "money" ? (rule.currency || currencies[0]) : undefined });
           }} />
       </div>
       <div className="w-40 min-w-[8rem]">
         <select className={inp} value={rule.op} disabled={!rule.field_id}
-          onChange={(e) => set({ op: e.target.value as Operator, value: undefined, value2: undefined })}>
+          onChange={(e) => set({ op: e.target.value as Operator, value: undefined, value2: undefined, formula: undefined })}>
           {ops.map((o) => <option key={o} value={o}>{OPERATOR_META[o].label}</option>)}
         </select>
       </div>
 
-      {meta && meta.arity !== 0 && (
+      {rule.op === "formula" ? (
+        <div className="flex-1 min-w-[12rem] flex flex-col gap-1">
+          <input
+            className={inp}
+            placeholder="e.g. actual_cost_of_ticket > estimated_ticket_cost"
+            value={rule.formula ?? String(rule.value ?? "")}
+            onChange={(e) => set({ formula: e.target.value, value: e.target.value })}
+          />
+          <span className="text-[10px] text-muted-foreground">
+            Formula referencing form fields or table columns (e.g. <code>actual_cost_of_ticket &gt; estimated_ticket_cost</code>)
+          </span>
+        </div>
+      ) : meta && meta.arity !== 0 && (
         <div className="flex-1 min-w-[10rem] flex flex-wrap items-center gap-2">
           {rule.value_ref !== undefined ? (
             <div className="flex-1 min-w-[9rem]">
-              <FieldSelect value={rule.value_ref} fields={fields.filter((f) => f.id !== rule.field_id)} types={[type]}
+              <FieldSelect value={rule.value_ref} fields={fields.filter((f) => f.id !== rule.field_id)} types={compatibleTypes}
                 placeholder="Compare to field…" onChange={(id) => set({ value_ref: id })} />
             </div>
           ) : meta.arity === "list" ? (
@@ -203,9 +217,9 @@ function RuleRow({ rule, fields, currencies, onChange, onRemove }: {
           {canRef && (
             <button type="button" title={rule.value_ref !== undefined ? "Use a fixed value" : "Compare with another field"}
               onClick={() => rule.value_ref !== undefined ? set({ value_ref: undefined }) : set({ value_ref: "", value: undefined, value2: undefined })}
-              className={clsx("px-2 py-1.5 rounded-md border text-[11px]",
-                rule.value_ref !== undefined ? "border-accent text-accent bg-accent/10" : "border-border text-muted-foreground hover:text-foreground")}>
-              ⇄ field
+              className={clsx("px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition-colors flex items-center gap-1",
+                rule.value_ref !== undefined ? "border-accent text-accent bg-accent/10" : "border-border text-muted-foreground hover:text-foreground hover:bg-muted/50")}>
+              ⇄ {rule.value_ref !== undefined ? "Field" : "Compare field"}
             </button>
           )}
         </div>

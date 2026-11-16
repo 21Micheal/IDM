@@ -361,3 +361,134 @@ class ProcurementAutoAdvanceTests(V2ActivationTests):
         with self.captureOnCommitCallbacks(execute=False) as callbacks:
             WorkflowService._activate_v2_step(instance)
         self.assertTrue(callbacks)
+
+
+class FormFieldAmountComparisonTests(TestCase):
+    def test_field_to_field_amount_comparison(self):
+        from apps.workflows.engine import eval_rule, EvalContext
+
+        ctx = EvalContext(values={
+            "estimated_ticket_cost": 1200.0,
+            "actual_cost_of_ticket": "1500",
+            "travel_itenerary_vtqc": [
+                {"actual_cost_of_ticket": "1500", "airline": "CASSOA"}
+            ],
+        })
+        field_map = {
+            "estimated_ticket_cost": {"id": "estimated_ticket_cost", "type": "money"},
+            "actual_cost_of_ticket": {"id": "actual_cost_of_ticket", "type": "money"},
+            "travel_itenerary_vtqc.actual_cost_of_ticket": {"id": "travel_itenerary_vtqc.actual_cost_of_ticket", "type": "money"},
+        }
+
+        # Rule comparing dotted table column > top-level field
+        rule_gt = {
+            "kind": "rule",
+            "field_id": "travel_itenerary_vtqc.actual_cost_of_ticket",
+            "op": "gt",
+            "value_ref": "estimated_ticket_cost",
+        }
+        self.assertTrue(eval_rule(rule_gt, field_map, ctx))
+
+        rule_lt = {
+            "kind": "rule",
+            "field_id": "travel_itenerary_vtqc.actual_cost_of_ticket",
+            "op": "lt",
+            "value_ref": "estimated_ticket_cost",
+        }
+        self.assertFalse(eval_rule(rule_lt, field_map, ctx))
+
+    def test_formula_condition_evaluation(self):
+        from apps.workflows.engine import eval_rule, EvalContext
+
+        ctx = EvalContext(values={
+            "estimated_ticket_cost": 1200.0,
+            "actual_cost_of_ticket": 1500.0,
+        })
+        rule_formula = {
+            "kind": "rule",
+            "op": "formula",
+            "value": "actual_cost_of_ticket > estimated_ticket_cost",
+        }
+        self.assertTrue(eval_rule(rule_formula, {}, ctx))
+
+        rule_formula_false = {
+            "kind": "rule",
+            "op": "formula",
+            "value": "actual_cost_of_ticket < estimated_ticket_cost",
+        }
+        self.assertFalse(eval_rule(rule_formula_false, {}, ctx))
+
+    def test_nested_if_amount_comparison_branching(self):
+        defn = {
+            "version": 2,
+            "blocks": [
+                {
+                    "id": "switch_phase",
+                    "kind": "switch",
+                    "field_id": "context.phase",
+                    "cases": [
+                        {
+                            "id": "case_req",
+                            "label": "requisition",
+                            "values": ["requisition"],
+                            "blocks": [
+                                {"id": "b_step1", "kind": "approval", "step": _step("Line Manager Approval")},
+                                {"id": "b_step2", "kind": "approval", "step": _step("Booking Officer")},
+                                {
+                                    "id": "b_if",
+                                    "kind": "if_else",
+                                    "label": "Ticket Overrun Check",
+                                    "branches": [
+                                        {
+                                            "id": "br_overrun",
+                                            "label": "Overrun",
+                                            "when": {
+                                                "id": "g1",
+                                                "kind": "group",
+                                                "combinator": "and",
+                                                "children": [
+                                                    {
+                                                        "id": "r1",
+                                                        "kind": "rule",
+                                                        "field_id": "actual_cost_of_ticket",
+                                                        "op": "gt",
+                                                        "value_ref": "estimated_ticket_cost",
+                                                    }
+                                                ]
+                                            },
+                                            "blocks": [
+                                                {"id": "b_step3", "kind": "approval", "step": _step("Overrun Approver")}
+                                            ]
+                                        }
+                                    ],
+                                    "else_blocks": []
+                                }
+                            ]
+                        }
+                    ],
+                    "default_blocks": []
+                }
+            ]
+        }
+        field_map = {
+            "context.phase": {"id": "context.phase", "type": "select"},
+            "actual_cost_of_ticket": {"id": "actual_cost_of_ticket", "type": "money"},
+            "estimated_ticket_cost": {"id": "estimated_ticket_cost", "type": "money"},
+        }
+
+        # Case 1: Overrun (1500 > 1200) -> 3 steps
+        orders_overrun, _ = resolve_active_path(defn, field_map, {
+            "context.phase": "requisition",
+            "actual_cost_of_ticket": 1500,
+            "estimated_ticket_cost": 1200,
+        })
+        self.assertEqual(orders_overrun, [1, 2, 3])
+
+        # Case 2: Normal (1000 <= 1200) -> 2 steps
+        orders_normal, _ = resolve_active_path(defn, field_map, {
+            "context.phase": "requisition",
+            "actual_cost_of_ticket": 1000,
+            "estimated_ticket_cost": 1200,
+        })
+        self.assertEqual(orders_normal, [1, 2])
+

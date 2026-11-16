@@ -606,20 +606,79 @@ function extractFormFields(
     ?? m.sections?.flatMap((section: any) => section?.fields ?? [])
     ?? m.fields
     ?? [];
-  const templateFields = templates.flatMap((template) =>
-    (Array.isArray(template?.sections) ? template.sections : [])
-      .flatMap((section: any) => Array.isArray(section?.fields) ? section.fields : [])
-  );
-  const allFields = [...(Array.isArray(raw) ? raw : []), ...templateFields];
-  const toType = (t: string, source?: string): WorkflowField["type"] => {
+
+  const metaFields: any[] = (docType as any)?.metadata_fields ?? [];
+  const metaAdapted = metaFields.map((mf: any) => ({
+    id: mf.key,
+    key: mf.key,
+    label: mf.label,
+    type: mf.field_type,
+    options: mf.select_options,
+  }));
+
+  const templateFields: any[] = [];
+  for (const template of templates) {
+    const sections = Array.isArray(template?.sections) ? template.sections : [];
+    for (const section of sections) {
+      for (const field of Array.isArray(section?.fields) ? section.fields : []) {
+        templateFields.push(field);
+        if (String(field?.type || "").toLowerCase() === "table") {
+          const cols = Array.isArray(field?.columns)
+            ? field.columns
+            : Array.isArray(field?.tableColumns)
+            ? field.tableColumns
+            : [];
+          const tableKey = String(field?.key || field?.id || "");
+          const tableLabel = String(field?.label || field?.title || tableKey);
+          for (const col of cols) {
+            const colKey = String(col?.key || col?.id || "");
+            const colLabel = String(col?.label || col?.title || colKey);
+            if (!colKey) continue;
+            templateFields.push({
+              id: `${tableKey}.${colKey}`,
+              key: `${tableKey}.${colKey}`,
+              label: `${tableLabel}: ${colLabel}`,
+              type: col?.type,
+              options: col?.options,
+            });
+            templateFields.push({
+              id: colKey,
+              key: colKey,
+              label: `${colLabel} (${tableLabel})`,
+              type: col?.type,
+              options: col?.options,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  const allFields = [...(Array.isArray(raw) ? raw : []), ...metaAdapted, ...templateFields];
+  const toType = (t: string, source?: string, keyLabel?: string): WorkflowField["type"] => {
     const x = (t || "").toLowerCase();
+    const kl = (keyLabel || "").toLowerCase();
     if (x === "user" || (x === "reference" && ["users", "user"].includes(String(source ?? "").toLowerCase()))) return "user";
-    if (["currency", "money", "amount"].includes(x)) return "money";
-    if (["number", "integer", "decimal", "float"].includes(x)) return "number";
+    if (["currency", "money", "amount", "calc_money", "calc_currency"].includes(x)) return "money";
+    if (["number", "integer", "decimal", "float", "calc_number"].includes(x)) return "number";
     if (["select", "dropdown", "radio", "choice"].includes(x)) return "select";
     if (["multiselect", "multi_select", "checkbox_group", "tags"].includes(x)) return "multiselect";
     if (["checkbox", "boolean", "switch", "toggle"].includes(x)) return "boolean";
     if (["date", "datetime"].includes(x)) return "date";
+    if (
+      kl.includes("cost") ||
+      kl.includes("amount") ||
+      kl.includes("total") ||
+      kl.includes("gross") ||
+      kl.includes("price") ||
+      kl.includes("vat") ||
+      kl.includes("dsa") ||
+      kl.includes("spend") ||
+      kl.includes("rate") ||
+      kl.includes("fare")
+    ) {
+      return "money";
+    }
     return "text";
   };
   const out: WorkflowField[] = [];
@@ -627,21 +686,33 @@ function extractFormFields(
   for (const f of allFields) {
     const key = String(f?.key ?? f?.name ?? f?.id ?? "");
     const id = String(f?.id ?? key);
-    if (!id || seen.has(key || id)) continue;
-    seen.add(key || id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
     const referenceSource = f?.referenceSource ?? f?.reference_source ?? (String(f?.type).toLowerCase() === "user" ? "users" : undefined);
     const opts = Array.isArray(f?.options)
       ? f.options.map((o: any) => (typeof o === "string" ? { value: o, label: o } : { value: String(o.value ?? o.id ?? o.label), label: String(o.label ?? o.value) }))
       : undefined;
-    out.push({ id, key, label: String(f?.label ?? f?.title ?? id), type: toType(String(f?.type ?? ""), referenceSource), options: opts, source: "form" });
+    const label = String(f?.label ?? f?.title ?? id);
+    out.push({
+      id,
+      key,
+      label,
+      type: toType(String(f?.type ?? ""), referenceSource, `${id} ${label} ${key}`),
+      options: opts,
+      source: "form",
+    });
   }
   return out;
 }
 
-function buildFieldCatalog(docType: Partial<DocumentType> | null | undefined, target: WorkflowTargetType): WorkflowField[] {
+function buildFieldCatalog(
+  docType: Partial<DocumentType> | null | undefined,
+  target: WorkflowTargetType,
+  templates: Array<Record<string, any>> = [],
+): WorkflowField[] {
   const system = SYSTEM_FIELDS.filter((f) => (target === "payment_run" ? true : !f.id.startsWith("payment_run.")))
     .filter((f) => (target === "payment_run" ? f.id !== "amount" : true));
-  return [...extractFormFields(docType), ...system];
+  return [...extractFormFields(docType, templates), ...system];
 }
 
 /** Same rules the old save loop enforced, expressed per step so validateDefinition can reuse them. */
@@ -2416,9 +2487,21 @@ function TemplateEditor({
     },
   });
 
+  const { data: formTemplates = [] } = useQuery<Array<Record<string, any>>>({
+    queryKey: ["workflow-form-templates", selectedDocumentTypeId],
+    queryFn: async () => {
+      if (!selectedDocumentTypeId) return [];
+      const res = await templatesAPI.list({ document_type: selectedDocumentTypeId, type: "built" });
+      const raw = res.data?.results ?? res.data ?? [];
+      return Array.isArray(raw) ? raw.filter((t: any) => !t?.kind || t.kind === "form") : [];
+    },
+    enabled: Boolean(selectedDocumentTypeId),
+    staleTime: 5 * 60_000,
+  });
+
   const fieldCatalog = useMemo(
-    () => buildFieldCatalog(selectedDocumentType, targetType),
-    [selectedDocumentType, targetType],
+    () => buildFieldCatalog(selectedDocumentType, targetType, formTemplates),
+    [selectedDocumentType, targetType, formTemplates],
   );
 
   const handleBlocksChange = useCallback((next: Block[]) => {

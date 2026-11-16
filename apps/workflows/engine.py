@@ -60,6 +60,7 @@ class Operator:
     WITHIN_LAST_DAYS = "within_last_days"
     CONTAINS_ANY = "contains_any"
     CONTAINS_ALL = "contains_all"
+    FORMULA = "formula"
 
 
 # Operators that are true when the field is empty (besides is_empty)
@@ -69,16 +70,16 @@ TRUE_WHEN_EMPTY = {Operator.NEQ, Operator.NOT_IN, Operator.NOT_CONTAINS, Operato
 OPERATORS_BY_TYPE = {
     FieldType.NUMBER: [
         Operator.EQ, Operator.NEQ, Operator.GT, Operator.GTE, Operator.LT, Operator.LTE,
-        Operator.BETWEEN, Operator.IS_EMPTY, Operator.IS_NOT_EMPTY,
+        Operator.BETWEEN, Operator.IS_EMPTY, Operator.IS_NOT_EMPTY, Operator.FORMULA,
     ],
     FieldType.MONEY: [
         Operator.EQ, Operator.NEQ, Operator.GT, Operator.GTE, Operator.LT, Operator.LTE,
-        Operator.BETWEEN, Operator.IS_EMPTY, Operator.IS_NOT_EMPTY,
+        Operator.BETWEEN, Operator.IS_EMPTY, Operator.IS_NOT_EMPTY, Operator.FORMULA,
     ],
     FieldType.TEXT: [
         Operator.EQ, Operator.NEQ, Operator.CONTAINS, Operator.NOT_CONTAINS,
         Operator.STARTS_WITH, Operator.ENDS_WITH, Operator.IN, Operator.NOT_IN,
-        Operator.IS_EMPTY, Operator.IS_NOT_EMPTY,
+        Operator.IS_EMPTY, Operator.IS_NOT_EMPTY, Operator.FORMULA,
     ],
     FieldType.SELECT: [
         Operator.EQ, Operator.NEQ, Operator.IN, Operator.NOT_IN,
@@ -182,6 +183,9 @@ def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any
         "currency": FieldType.MONEY,
         "money": FieldType.MONEY,
         "amount": FieldType.MONEY,
+        "calc_number": FieldType.NUMBER,
+        "calc_money": FieldType.MONEY,
+        "calc_currency": FieldType.MONEY,
         "number": FieldType.NUMBER,
         "integer": FieldType.NUMBER,
         "decimal": FieldType.NUMBER,
@@ -203,6 +207,15 @@ def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any
         "user": FieldType.USER,
     }
 
+    def _infer_type(raw_type_str: str, key_label_str: str) -> str:
+        t = (raw_type_str or "").lower()
+        if t in type_mapping:
+            return type_mapping[t]
+        kl = key_label_str.lower()
+        if any(w in kl for w in ("cost", "amount", "price", "total", "rate", "fee", "gross", "vat", "dsa", "spend", "balance", "fare")):
+            return FieldType.MONEY
+        return FieldType.TEXT
+
     def add_field(field: Dict[str, Any], source: str = "form") -> None:
         if not isinstance(field, dict):
             return
@@ -210,7 +223,8 @@ def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any
         if not field_id:
             return
         field_id = str(field_id)
-        field_type = type_mapping.get(str(field.get("type", "")).lower(), FieldType.TEXT)
+        label_str = str(field.get("label") or field.get("title") or field_id)
+        field_type = _infer_type(str(field.get("type", "")), f"{field_id} {label_str}")
 
         options = []
         raw_opts = field.get("options") or field.get("select_options") or []
@@ -226,7 +240,7 @@ def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any
 
         field_map[field_id] = {
             "id": field_id,
-            "label": str(field.get("label") or field.get("title") or field_id),
+            "label": label_str,
             "type": field_type,
             "options": options if options else None,
             "source": source,
@@ -268,6 +282,36 @@ def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any
                     continue
                 for field in section.get("fields") or []:
                     add_field(field, source="form")
+                    # If field is a table, extract all its columns so workflows can branch on table values
+                    if str(field.get("type", "")).lower() == "table":
+                        cols = field.get("columns") or field.get("tableColumns") or []
+                        table_key = str(field.get("key") or field.get("id") or "")
+                        table_label = str(field.get("label") or field.get("title") or table_key)
+                        for col in cols:
+                            if not isinstance(col, dict):
+                                continue
+                            col_key = str(col.get("key") or col.get("id") or "")
+                            if not col_key:
+                                continue
+                            col_label = str(col.get("label") or col.get("title") or col_key)
+                            col_type = _infer_type(str(col.get("type", "")), f"{col_key} {col_label}")
+
+                            dotted_id = f"{table_key}.{col_key}"
+                            field_map[dotted_id] = {
+                                "id": dotted_id,
+                                "label": f"{table_label}: {col_label}",
+                                "type": col_type,
+                                "options": None,
+                                "source": "form",
+                            }
+                            if col_key not in field_map:
+                                field_map[col_key] = {
+                                    "id": col_key,
+                                    "label": f"{col_label} ({table_label})",
+                                    "type": col_type,
+                                    "options": None,
+                                    "source": "form",
+                                }
     except Exception:
         logger.debug("Could not load form templates for document type %s", getattr(document_type, "pk", None), exc_info=True)
 
@@ -300,22 +344,50 @@ class EvalContext:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_value(ctx: EvalContext, field_id: str) -> Any:
-    """Get a value from the context, handling nested keys and variables."""
+    """Get a value from the context, handling nested keys, table columns, and variables."""
+    if not field_id:
+        return None
+
     if field_id.startswith("var."):
         return ctx.vars.get(field_id[4:])
     
     if field_id in ctx.values:
         return ctx.values[field_id]
     
-    # Handle nested keys (e.g., "uploader.department")
+    # Handle dotted keys (e.g. "uploader.department", "travel_itenerary_vtqc.actual_cost_of_ticket")
     if "." in field_id:
         parts = field_id.split(".")
         current = ctx.values
-        for part in parts:
+        for idx, part in enumerate(parts):
             if current is None:
-                return None
-            current = current.get(part) if isinstance(current, dict) else None
-        return current
+                break
+            if isinstance(current, dict):
+                current = current.get(part)
+            elif isinstance(current, list):
+                # Search list of row dicts for the remaining path
+                remaining = ".".join(parts[idx:])
+                found = None
+                for row in current:
+                    if isinstance(row, dict):
+                        if remaining in row and row[remaining] not in (None, ""):
+                            found = row[remaining]
+                            break
+                        if part in row and row[part] not in (None, ""):
+                            found = row[part]
+                            break
+                current = found
+                break
+            else:
+                current = None
+        if current is not None:
+            return current
+
+    # If bare key not found at root, search through any table list of dicts in context values
+    for val in ctx.values.values():
+        if isinstance(val, list):
+            for row in val:
+                if isinstance(row, dict) and field_id in row and row[field_id] not in (None, ""):
+                    return row[field_id]
     
     return None
 
@@ -433,7 +505,28 @@ def eval_rule(
     """
     field_id = rule.get("field_id")
     op = rule.get("op")
-    
+    formula = rule.get("formula")
+
+    # Formula condition: evaluated directly against context values
+    if op == Operator.FORMULA or formula:
+        expr = formula or rule.get("value")
+        if not expr:
+            ctx.warnings.append("Empty formula condition ignored.")
+            return False
+        try:
+            from apps.templates_engine.conditions import evaluate_calc_expression
+            res = evaluate_calc_expression(str(expr), ctx.values)
+            if isinstance(res, bool):
+                return res
+            if isinstance(res, (int, float)):
+                return res != 0
+            if isinstance(res, str):
+                return res.strip().lower() in ("true", "1", "yes")
+            return bool(res)
+        except Exception as e:
+            ctx.warnings.append(f"Formula evaluation error: {e}")
+            return False
+
     if not field_id or not op:
         ctx.warnings.append("Incomplete condition ignored.")
         return False
@@ -478,6 +571,9 @@ def eval_rule(
     elif field_type == FieldType.DATE:
         return _eval_date_rule(raw, rhs, op, rule, ctx)
     elif field_type in (FieldType.TEXT, FieldType.SELECT, FieldType.USER, FieldType.GROUP):
+        # If numeric comparison operator and both sides convert to numbers, compare numerically
+        if op in (Operator.GT, Operator.GTE, Operator.LT, Operator.LTE, Operator.BETWEEN) and to_number(raw) is not None:
+            return _eval_numeric_rule(raw, rhs, op, rule, field_type, ctx)
         return _eval_text_rule(raw, rhs, op, field_type)
     elif field_type == FieldType.MULTISELECT:
         return _eval_multiselect_rule(raw, rhs, op)
@@ -880,8 +976,14 @@ def _validate_condition(
             errors.extend(_validate_condition(child, field_map, block_id))
     
     else:  # rule
-        field_id = condition.get("field_id")
         op = condition.get("op")
+        formula = condition.get("formula")
+        if op == Operator.FORMULA or formula:
+            if not formula and not condition.get("value"):
+                errors.append(ValidationError("error", "Formula condition requires an expression.", block_id))
+            return errors
+
+        field_id = condition.get("field_id")
         
         if not field_id:
             errors.append(ValidationError("error", "Rule missing field_id.", block_id))
