@@ -37,6 +37,7 @@ interface WorkflowStep {
   status_label: string;
   step_type: StepType;
   post_lpo_after_approval?: boolean;
+  prepare_lpo_after_approval?: boolean;
   post_imprest_request_after_approval?: boolean;
   parallel_lane?: "imprest_request" | null;
   // Approval-step fields
@@ -360,6 +361,7 @@ function normalizeStep(step: WorkflowStep): WorkflowStep {
     ...step,
     step_type: normalizeStepType((step as any).step_type),
     post_lpo_after_approval: Boolean((step as any).post_lpo_after_approval),
+    prepare_lpo_after_approval: Boolean((step as any).prepare_lpo_after_approval),
     post_imprest_request_after_approval: Boolean((step as any).post_imprest_request_after_approval),
     parallel_lane: (step as any).parallel_lane === "imprest_request" ? "imprest_request" : null,
     assignee_type: normalizeAssigneeType(step.assignee_type),
@@ -490,6 +492,7 @@ function blankStep(): WorkflowStep {
     order: 0, name: "", status_label: "Pending Approval",
     step_type: "approval",
     post_lpo_after_approval: false,
+    prepare_lpo_after_approval: false,
     post_imprest_request_after_approval: false,
     parallel_lane: null,
     assignee_type: "group_any", assignee_group: null, assignee_user: null, assignee_user_field: "",
@@ -506,6 +509,7 @@ function blankNotificationStep(): WorkflowStep {
     order: 0, name: "Send Notification", status_label: "Notification Sent",
     step_type: "notification",
     post_lpo_after_approval: false,
+    prepare_lpo_after_approval: false,
     post_imprest_request_after_approval: false,
     assignee_type: "group_any", assignee_group: null, assignee_user: null,
     allow_assignee_selection: false,
@@ -1071,6 +1075,22 @@ function StepEditPanel({
           )}
           <button
             type="button"
+            onClick={() => onChange({ prepare_lpo_after_approval: !step.prepare_lpo_after_approval })}
+            className={clsx(
+              "w-full flex items-start gap-3 p-4 rounded-xl border text-left transition-colors",
+              step.prepare_lpo_after_approval ? "border-violet-400/50 bg-violet-50 text-violet-900" : "border-border bg-muted/30 text-foreground hover:bg-muted/60"
+            )}
+          >
+            <span className={clsx("mt-0.5 w-4 h-4 rounded border flex items-center justify-center", step.prepare_lpo_after_approval ? "bg-violet-600 border-violet-600 text-white" : "border-muted-foreground/50")}>
+              {step.prepare_lpo_after_approval ? <Check className="w-3 h-3" /> : null}
+            </span>
+            <span>
+              <span className="block text-xs font-semibold">Prepare LPOs after this approval</span>
+              <span className="block text-[11px] mt-1 opacity-80">Generate the LPO documents for review without a SunSystems PO number. Configure a later step to post them.</span>
+            </span>
+          </button>
+          <button
+            type="button"
             onClick={() => onChange({ post_lpo_after_approval: !step.post_lpo_after_approval })}
             className={clsx(
               "w-full flex items-start gap-3 p-4 rounded-xl border text-left transition-colors",
@@ -1081,8 +1101,8 @@ function StepEditPanel({
               {step.post_lpo_after_approval ? <Check className="w-3 h-3" /> : null}
             </span>
             <span>
-              <span className="block text-xs font-semibold">Generate LPOs after this approval</span>
-              <span className="block text-[11px] mt-1 opacity-80">Post the purchase orders and generate their LPO documents. If Imprest posting is also selected, both posting sets run together before the LPO can be submitted.</span>
+              <span className="block text-xs font-semibold">Post LPOs after this approval</span>
+              <span className="block text-[11px] mt-1 opacity-80">Post the prepared purchase orders to SunSystems, add the returned PO number to each LPO, then complete the workflow.</span>
             </span>
           </button>
           {isRequisitionWorkflow && (

@@ -124,6 +124,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                     assignee_user_field=step.assignee_user_field,
                     allow_assignee_selection=step.allow_assignee_selection,
                     post_lpo_after_approval=step.post_lpo_after_approval,
+                    prepare_lpo_after_approval=step.prepare_lpo_after_approval,
                     post_imprest_request_after_approval=step.post_imprest_request_after_approval,
                     sla_hours=step.sla_hours, allow_resubmit=step.allow_resubmit,
                     allow_approve=step.allow_approve, allow_reject=step.allow_reject,

@@ -60,6 +60,7 @@ def generate_lpo_for_document(
     table_key=None,
     table_label=None,
     values_override=None,
+    prepared=False,
 ):
     """Generate an LPO document, using the SSC reference when supplied.
 
@@ -72,47 +73,61 @@ def generate_lpo_for_document(
     meta = dict(getattr(document, "metadata", None) or {})
     form = dict(meta.get("form") or {})
     records = [item for item in (form.get("lpo_documents") or []) if isinstance(item, dict)]
+    refresh_target = None
     if purchase_order_reference:
         match = next((item for item in records if (
-            (posting_stage is not None and str(item.get("posting_stage")) == str(posting_stage))
-            or str(item.get("reference") or "") == str(purchase_order_reference)
+            str(item.get("posting_stage")) == str(posting_stage)
+            if posting_stage is not None
+            else str(item.get("reference") or "") == str(purchase_order_reference)
         )), None)
         if match:
             existing = Document.objects.filter(pk=match.get("id")).first()
             if existing:
-                return existing
+                if prepared and match.get("prepared"):
+                    return existing
+                if not prepared and match.get("prepared"):
+                    refresh_target = existing
+                else:
+                    return existing
 
         # A prior concurrent posting result may have overwritten the source
         # requisition's metadata after this LPO was generated. Recover the
         # already-created child by its SunSystems reference and relationship,
         # then restore its pointer instead of generating a duplicate PDF.
-        linked_lpos = Document.objects.filter(
-            incoming_relationships__source_document=document,
-            incoming_relationships__relation_type=DocumentRelationship.RelationType.REFERENCES,
-            document_type__code=LPO_DOC_TYPE_CODE,
-        ).distinct().order_by("created_at")
-        for existing in linked_lpos:
-            existing_meta = existing.metadata if isinstance(existing.metadata, dict) else {}
-            if str(existing_meta.get("lpo.number") or "") != str(purchase_order_reference):
-                continue
-            recovered = {
-                "id": str(existing.id),
-                "reference": str(purchase_order_reference),
-                "document_reference": existing.reference_number,
-                "table_key": table_key or "",
-                "table_label": table_label or "Requisition",
-            }
-            if posting_stage is not None:
-                recovered["posting_stage"] = int(posting_stage)
-            records = [item for item in records if str(item.get("id")) != str(existing.id)]
-            records.append(recovered)
-            form["lpo_documents"] = records
-            form["lpo_document_id"] = records[0].get("id")
-            form["lpo_reference"] = records[0].get("reference")
-            meta["form"] = form
-            document.metadata = meta
-            document.save(update_fields=["metadata", "updated_at"])
-            return existing
+        if not prepared:
+            linked_lpos = Document.objects.filter(
+                incoming_relationships__source_document=document,
+                incoming_relationships__relation_type=DocumentRelationship.RelationType.REFERENCES,
+                document_type__code=LPO_DOC_TYPE_CODE,
+            ).distinct().order_by("created_at")
+            for existing in linked_lpos:
+                existing_meta = existing.metadata if isinstance(existing.metadata, dict) else {}
+                if str(existing_meta.get("lpo.number") or "") != str(purchase_order_reference):
+                    continue
+                recovered = {
+                    "id": str(existing.id),
+                    "reference": str(purchase_order_reference),
+                    "document_reference": existing.reference_number,
+                    "table_key": table_key or "",
+                    "table_label": table_label or "Requisition",
+                }
+                if posting_stage is not None:
+                    recovered["posting_stage"] = int(posting_stage)
+                records = [item for item in records if str(item.get("id")) != str(existing.id)]
+                records.append(recovered)
+                form["lpo_documents"] = records
+                form["lpo_document_id"] = records[0].get("id")
+                form["lpo_reference"] = records[0].get("reference")
+                meta["form"] = form
+                document.metadata = meta
+                document.save(update_fields=["metadata", "updated_at"])
+                return existing
+    elif prepared:
+        match = next((item for item in records if posting_stage is not None and str(item.get("posting_stage")) == str(posting_stage)), None)
+        if match:
+            refresh_target = Document.objects.filter(pk=match.get("id")).first()
+            if refresh_target and match.get("prepared"):
+                return refresh_target
     else:
         existing_id = form.get("lpo_document_id")
         if existing_id:
@@ -146,7 +161,7 @@ def generate_lpo_for_document(
         tables = [{"key": table_key, "label": table_label or "Requisition", "columns": []}]
 
     table = tables[0]
-    lpo_reference = str(purchase_order_reference or _generate_unique_reference(doc_type)).strip()
+    lpo_reference = str(purchase_order_reference or ("Pending SunSystems number" if prepared else _generate_unique_reference(doc_type))).strip()
     # Keep the repository's globally-unique document identifier separate from
     # the SunSystems PO reference shown in the PDF. The finance system owns the
     # latter, and its numbering may overlap the local document-type sequence.
@@ -156,7 +171,7 @@ def generate_lpo_for_document(
         table_key=table.get("key"), values_override=render_values,
     )
     title = f"Purchase Order {lpo_reference}"
-    lpo_doc = generate_document_from_template_sync(
+    rendered_doc = generate_document_from_template_sync(
         template,
         merge_values,
         fmt="pdf",
@@ -167,6 +182,34 @@ def generate_lpo_for_document(
     )
     # Keep the resolved supplier contact on the generated order so later
     # delivery does not have to query SunSystems a second time.
+    lpo_doc = rendered_doc
+    if refresh_target:
+        # The prepared file already has a stable document URL. Replace its
+        # contents in place so approvers' existing LPO links now show the
+        # authoritative SunSystems number without creating a second LPO.
+        from django.core.files.base import ContentFile
+        rendered_doc.file.open("rb")
+        rendered_bytes = rendered_doc.file.read()
+        rendered_doc.file.close()
+        refresh_target.file.delete(save=False)
+        refresh_target.file.save(rendered_doc.file_name, ContentFile(rendered_bytes), save=False)
+        refresh_target.title = rendered_doc.title
+        refresh_target.file_name = rendered_doc.file_name
+        refresh_target.file_size = rendered_doc.file_size
+        refresh_target.file_mime_type = rendered_doc.file_mime_type
+        refresh_target.checksum = rendered_doc.checksum
+        refresh_target.metadata = rendered_doc.metadata
+        refresh_target.amount = rendered_doc.amount
+        refresh_target.currency = rendered_doc.currency
+        refresh_target.document_date = rendered_doc.document_date
+        refresh_target.due_date = rendered_doc.due_date
+        refresh_target.save(update_fields=[
+            "file", "title", "file_name", "file_size", "file_mime_type", "checksum",
+            "metadata", "amount", "currency", "document_date", "due_date", "updated_at",
+        ])
+        rendered_doc.file.delete(save=False)
+        rendered_doc.delete()
+        lpo_doc = refresh_target
     lpo_metadata = dict(lpo_doc.metadata or {})
     lpo_metadata["lpo_supplier"] = {
         "code": _as_text(merge_values.get("supplier.code")),
@@ -186,22 +229,24 @@ def generate_lpo_for_document(
         logger.exception("Could not link LPO %s to requisition %s", lpo_doc.pk, document.pk)
 
     now = _today_str()
-    if not values.get("__lpo_number"):
+    if not prepared:
         values["__lpo_number"] = lpo_reference
-    values["__lpo_date"] = now
+        values["__lpo_date"] = now
     values["__requisition_number"] = document.reference_number or values.get("__requisition_number", "")
     form["values"] = values
     lpo_record = {
         "id": str(lpo_doc.id),
-        "reference": lpo_reference,
+        "reference": "" if prepared else lpo_reference,
         "document_reference": lpo_doc.reference_number,
         "table_key": table.get("key") or "",
         "table_label": table_label or table.get("label") or "Requisition",
     }
     if posting_stage is not None:
         lpo_record["posting_stage"] = int(posting_stage)
-    if not any(item.get("id") == lpo_record["id"] for item in records):
-        records.append(lpo_record)
+    if prepared:
+        lpo_record["prepared"] = True
+    records = [item for item in records if str(item.get("posting_stage")) != str(posting_stage)] if posting_stage is not None else records
+    records.append(lpo_record)
     form["lpo_documents"] = records
     if records:
         form["lpo_document_id"] = records[0].get("id")

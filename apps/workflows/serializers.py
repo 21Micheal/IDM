@@ -93,6 +93,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             "id", "template", "order", "node_id", "name", "status_label",
             "step_type",
             "post_lpo_after_approval",
+            "prepare_lpo_after_approval",
             "post_imprest_request_after_approval",
             # approval-step fields
             "assignee_type", "assignee_group", "assignee_group_name",
@@ -173,6 +174,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "id", "node_id", "name", "status_label",
             "step_type",
             "post_lpo_after_approval",
+            "prepare_lpo_after_approval",
             "post_imprest_request_after_approval",
             # approval-step
             "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto", "assignee_user_field",
@@ -192,6 +194,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "instructions":            {"required": False, "allow_blank": True},
             "step_type":               {"required": False},
             "post_lpo_after_approval": {"required": False},
+            "prepare_lpo_after_approval": {"required": False},
             "post_imprest_request_after_approval": {"required": False},
             "assignee_user_field":    {"required": False, "allow_blank": True},
             "approver_email_subject":  {"required": False, "allow_blank": True},
@@ -945,7 +948,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
             and getattr(obj.step, "post_lpo_after_approval", False)
             and form.get("lpo_generation_ready")
         ):
-            return "Awaiting LPO submission"
+            return "Awaiting LPO posting"
         return obj.get_status_display()
 
     def get_document_ref(self, obj):

@@ -154,7 +154,11 @@ class WorkflowStep(models.Model):
     )
     post_lpo_after_approval = models.BooleanField(
         default=False,
-        help_text="After this approval, post configured purchase orders and generate their LPO documents before continuing.",
+        help_text="After this approval, post configured purchase orders; successful posting completes the LPO workflow.",
+    )
+    prepare_lpo_after_approval = models.BooleanField(
+        default=False,
+        help_text="Generate draft LPO documents after this approval, before their Purchase Orders are posted to SunSystems.",
     )
     post_imprest_request_after_approval = models.BooleanField(
         default=False,

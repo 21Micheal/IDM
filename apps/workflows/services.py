@@ -598,6 +598,9 @@ class WorkflowService:
         if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, task_step_order, execution_lane):
             return
 
+        if execution_lane == "main" and step.prepare_lpo_after_approval and doc is not None:
+            WorkflowService._prepare_lpo_documents(instance, step, doc, actor=actor)
+
         if execution_lane == "main" and step.post_lpo_after_approval and doc is not None:
             if WorkflowService._start_lpo_posting_gate(instance, step, doc, actor=actor):
                 return
@@ -1848,7 +1851,7 @@ class WorkflowService:
                 # generated document entirely. Raising rolls back the approval
                 # action, leaving this checkpoint task available for correction.
                 raise WorkflowError(
-                    "This step is configured to generate LPOs, but the form has no usable Purchase Order line mapping. "
+                    "This step is configured to post LPOs, but the form has no usable Purchase Order line mapping. "
                     "Configure a Travel line amount and its PO fields, then approve this step again."
                 )
             from apps.sunsystems.models import JournalPosting, JournalPostingStatus
@@ -1857,6 +1860,7 @@ class WorkflowService:
             metadata = document.metadata if isinstance(document.metadata, dict) else {}
             form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
             form["lpo_generation_ready"] = False
+            form["lpo_posting_complete"] = False
             joint_imprest_posting = bool(getattr(step, "post_imprest_request_after_approval", False))
             if joint_imprest_posting:
                 from apps.sunsystems.config import get_imprest_request_postings
@@ -1876,9 +1880,8 @@ class WorkflowService:
             document.metadata = metadata
             WorkflowService._save_document(document, update_fields=["metadata"])
 
-            # Keep the approving task in the actor's queue while the PO is
-            # posted and generated. It becomes the explicit Submit LPO action
-            # once every configured purchase order and PDF is ready.
+            # Keep the approving task in the actor's queue until the PO posts
+            # and the returned number is written into its prepared LPO.
             gate_task = instance.tasks.filter(
                 step=step,
                 execution_lane="main",
@@ -1926,8 +1929,43 @@ class WorkflowService:
             return True
 
     @staticmethod
+    def _prepare_lpo_documents(instance: WorkflowInstance, step: WorkflowStep, document, actor=None) -> None:
+        """Render table-scoped LPOs at the configured preparation approval."""
+        try:
+            from apps.documents.builder_workflow import is_procurement_document
+            from apps.sunsystems.config import get_journal_mapping, get_purchase_order_postings
+            if not is_procurement_document(document) or WorkflowService._document_workflow_phase(document) != "lpo":
+                return
+            requested = get_purchase_order_postings(document)
+            if not requested:
+                raise WorkflowError("This step is configured to prepare LPOs, but no Purchase Order lines are mapped.")
+            from apps.documents.lpo import generate_lpo_for_document
+            for item in requested:
+                stage = int(item["stage"])
+                mapping = get_journal_mapping(document, stage=stage) or {}
+                po = mapping.get("purchase_order") or {}
+                lines = po.get("lines") or []
+                line_spec = lines[0] if lines and isinstance(lines[0], dict) else {}
+                table_key = str(line_spec.get("repeat_over") or "") or None
+                generate_lpo_for_document(
+                    document,
+                    actor=actor or instance.started_by,
+                    purchase_order_reference="Pending SunSystems number",
+                    posting_stage=stage,
+                    table_key=table_key,
+                    table_label=line_spec.get("table_label") or mapping.get("_posting_label") or item.get("label"),
+                    values_override=mapping.get("_posting_values") if isinstance(mapping.get("_posting_values"), dict) else None,
+                    prepared=True,
+                )
+        except WorkflowError:
+            raise
+        except Exception as exc:
+            logger.exception("Could not prepare LPO documents for %s", document.pk)
+            raise WorkflowError("The LPO documents could not be prepared. This approval was not advanced.") from exc
+
+    @staticmethod
     def _resume_lpo_workflow_if_ready(document) -> bool:
-        """Mark a configured LPO approval ready for its actor to submit."""
+        """Complete the configured final LPO approval after posting is ready."""
         try:
             from apps.documents.builder_workflow import is_procurement_document
             from apps.sunsystems.config import get_purchase_order_postings
@@ -1951,7 +1989,10 @@ class WorkflowService:
             generated = {
                 int(row.get("posting_stage"))
                 for row in (form.get("lpo_documents") or [])
-                if isinstance(row, dict) and str(row.get("posting_stage", "")).isdigit()
+                if isinstance(row, dict)
+                and str(row.get("posting_stage", "")).isdigit()
+                and row.get("reference")
+                and not row.get("prepared")
             }
             if not set(stages).issubset(generated):
                 return False
@@ -1990,21 +2031,20 @@ class WorkflowService:
                     latest_document = type(document).objects.select_for_update().get(pk=document.pk)
                     metadata = latest_document.metadata if isinstance(latest_document.metadata, dict) else {}
                     form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
-                    if form.get("lpo_generation_ready"):
-                        if form.get("imprest_request_posting_required_for_lpo"):
-                            form["imprest_request_posting_required_for_lpo"] = False
-                            form["imprest_request_workflow_status"] = "in_progress"
-                            metadata["form"] = form
-                            latest_document.metadata = metadata
-                            WorkflowService._save_document(latest_document, update_fields=["metadata"])
-                        return False
-                    form["lpo_generation_ready"] = True
+                    form["lpo_generation_ready"] = False
+                    form["lpo_posting_complete"] = True
                     if form.get("imprest_request_posting_required_for_lpo"):
                         form["imprest_request_posting_required_for_lpo"] = False
                         form["imprest_request_workflow_status"] = "in_progress"
                     metadata["form"] = form
                     latest_document.metadata = metadata
                     WorkflowService._save_document(latest_document, update_fields=["metadata"])
+                    gate_task.status = "approved"
+                    gate_task.save(update_fields=["status", "updated_at"])
+                    # The configured posting checkpoint is the final LPO
+                    # approval. Successful posting releases it and finishes
+                    # the workflow; no extra submit action is required.
+                    WorkflowService._complete(locked, "approved")
                 return True
         except Exception:
             logger.exception("Could not resume LPO workflow after generation for %s", document.pk)
@@ -2746,7 +2786,11 @@ class WorkflowService:
             # skip the posting after the final approver approves.
             lpo_stage_completed = "lpo" in completed_procurement_stages(document)
             if is_procurement_document(document) and outcome == "approved" and phase == "lpo" and lpo_stage_completed:
-                if has_po_mapping:
+                configured_post_gate = WorkflowInstance.objects.filter(
+                    document=document,
+                    template__steps__post_lpo_after_approval=True,
+                ).exists()
+                if has_po_mapping and not configured_post_gate:
                     for item in get_purchase_order_postings(document):
                         stage = int(item["stage"])
                         posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)

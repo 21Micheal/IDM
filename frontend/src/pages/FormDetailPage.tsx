@@ -309,8 +309,6 @@ export default function FormDetailPage() {
   const [awaitingLpo, setAwaitingLpo] = useState(
     Boolean(navigationState?.awaitLpo),
   );
-  const [awaitingLpoReady, setAwaitingLpoReady] = useState(false);
-  const [lpoGateTaskId, setLpoGateTaskId] = useState<string | null>(null);
   const [awaitingImprestPostSince, setAwaitingImprestPostSince] = useState(0);
   const [awaitingPaymentVoucher, setAwaitingPaymentVoucher] = useState(false);
   const [paymentVoucherGateDismissed, setPaymentVoucherGateDismissed] = useState(false);
@@ -323,7 +321,7 @@ export default function FormDetailPage() {
   // (not just a toast) so a long list stays on screen while it's being fixed.
   const [missingFields, setMissingFields] = useState<string[]>([]);
 
-  const awaitingPostingGate = awaitingLpo || awaitingLpoReady || awaitingImprestPostSince > 0 || awaitingPaymentVoucher;
+  const awaitingPostingGate = awaitingLpo || awaitingImprestPostSince > 0 || awaitingPaymentVoucher;
 
   const { data: doc, isLoading, dataUpdatedAt: formDataUpdatedAt } = useQuery<any>({
     queryKey: ["form", id],
@@ -357,13 +355,14 @@ export default function FormDetailPage() {
       values?: Record<string, unknown>;
       travel_retirement?: { enabled?: boolean };
       lpo_generation_ready?: boolean;
+      lpo_posting_complete?: boolean;
       imprest_request_workflow_status?: string;
       retirement_workflow_status?: string;
       retirement_variance?: RetirementVariance;
       print_config?: Record<string, any>;
       lpo_document_id?: string;
       lpo_reference?: string;
-      lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string }>;
+      lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string; prepared?: boolean }>;
       payment_voucher_document_id?: string;
       payment_voucher_reference?: string;
       imprest_payment_voucher_document_id?: string;
@@ -447,8 +446,6 @@ export default function FormDetailPage() {
     && !paymentVoucherId;
   const showPaymentVoucherGate = awaitingPaymentVoucher && !paymentVoucherId;
   // PO rows without a generated LPO mean the LPO generation gate is still open.
-  const generatedLpoCount = (formData?.lpo_documents?.length || 0)
-    || (formData?.lpo_document_id ? 1 : 0);
   // Watch Request/LPO gates after dismiss/reopen so a failed post still surfaces.
   const watchPostingGate = awaitingPostingGate
     || imprestPostingGateActive
@@ -488,9 +485,9 @@ export default function FormDetailPage() {
     [gatePostings],
   );
   const lpoPostingGateActive = useMemo(() => {
-    if (generatedLpoCount > 0 || workflowPhase !== "lpo") return false;
+    if (formData?.lpo_posting_complete || workflowPhase !== "lpo") return false;
     return gatePostings.some((p) => isLpoPurchaseOrderStage(p.stage));
-  }, [gatePostings, generatedLpoCount, workflowPhase]);
+  }, [gatePostings, formData?.lpo_posting_complete, workflowPhase]);
   // Hide the page banner while the modal overlay is already covering the same
   // failure — otherwise show it whenever the gate is still blocked.
   const showImprestGateBanner = imprestPostingGateActive && failedImprestGatePostings.length > 0
@@ -575,17 +572,10 @@ export default function FormDetailPage() {
   const lpoSetKey = generatedLpos.map((lpo) => lpo.id).join(",");
   const [lpoModalOpen, setLpoModalOpen] = useState(false);
   const [lpoMinimized, setLpoMinimized] = useState(false);
-  const [lpoAutoPresentationPending, setLpoAutoPresentationPending] = useState(false);
 
   useEffect(() => {
     if (!generatedLpos.length) return;
-    setAwaitingLpo(false);
-    setGateRetrying(false);
     if (!generatedLpos.some((lpo) => lpo.id === selectedLpoId)) setSelectedLpoId(generatedLpos[0].id);
-    setLpoModalOpen(true);
-    setLpoMinimized(false);
-    setLpoAutoPresentationPending(true);
-    setWorkflowActionCompleted(false);
   }, [lpoSetKey]);
 
   const lpoPdfQuery = useQuery({
@@ -715,33 +705,16 @@ export default function FormDetailPage() {
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
   useEffect(() => {
-    if ((activeTask?.step as any)?.post_lpo_after_approval && activeTask?.id) {
-      setLpoGateTaskId(activeTask.id);
-    }
-    if (
-      activeTask?.status === "awaiting_posting"
-      && Boolean((activeTask.step as any)?.post_lpo_after_approval)
-      && !formData?.lpo_generation_ready
-    ) {
-      setAwaitingLpoReady(true);
-    }
-  }, [activeTask, formData?.lpo_generation_ready]);
-  useEffect(() => {
-    if (!formData?.lpo_generation_ready) return;
-    setAwaitingLpoReady(false);
-    // The task query may have fetched just before the posting transaction
-    // changed it from approved to awaiting_posting. Refresh it alongside the
-    // readiness update so the submit action appears without waiting for the
-    // shared task-list polling interval.
-    void qc.refetchQueries({ queryKey: ["workflow", "my-tasks"], type: "active" });
-  }, [formData?.lpo_generation_ready, qc]);
-  const lpoSubmitTaskId = lpoGateTaskId
-    || ((activeTask?.step as any)?.post_lpo_after_approval ? activeTask?.id : null);
-  const canSubmitLpo = Boolean(
-    lpoSubmitTaskId
-    && formData?.lpo_generation_ready
-    && generatedLpos.length,
-  );
+    if (!formData?.lpo_posting_complete) return;
+    setAwaitingLpo(false);
+    setGateRetrying(false);
+    setWorkflowActionCompleted(true);
+    void Promise.all([
+      qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] }),
+      qc.invalidateQueries({ queryKey: ["form-workflow", id] }),
+      qc.invalidateQueries({ queryKey: ["requisitions"] }),
+    ]);
+  }, [formData?.lpo_posting_complete, id, qc]);
 
   // When the page is opened via an email notification link (?task=<id>),
   // scroll the action panel into view once the approver's task has loaded.
@@ -778,7 +751,7 @@ export default function FormDetailPage() {
     ...QUERY_SHORT_STALE,
     refetchInterval: (query) => {
       if (workflowActionCompleted) return false;
-      if (awaitingLpoReady) return 1_000;
+      if (awaitingLpo) return 1_000;
       return query.state.data?.isActive ? 15_000 : false;
     },
   });
@@ -925,22 +898,6 @@ export default function FormDetailPage() {
     mutationFn: (content: string) => documentsAPI.addComment(id!, content),
     onSuccess: () => { setComment(""); qc.invalidateQueries({ queryKey: ["form", id] }); },
     onError: (err) => toast.error(extractApiError(err, "Failed to add comment")),
-  });
-
-  const submitLpoMutation = useMutation({
-    mutationFn: (taskId: string) => workflowAPI.submitLpo(taskId),
-    onSuccess: async () => {
-      toast.success("LPO submitted to the next approval step.");
-      setAwaitingLpoReady(false);
-      setLpoModalOpen(false);
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] }),
-        qc.invalidateQueries({ queryKey: ["form", id] }),
-        qc.invalidateQueries({ queryKey: ["form-workflow", id] }),
-        qc.invalidateQueries({ queryKey: ["requisitions"] }),
-      ]);
-    },
-    onError: (err) => toast.error(extractApiError(err, "Could not submit the generated LPO.")),
   });
 
   const updateFormMutation = useMutation({
@@ -1536,7 +1493,7 @@ export default function FormDetailPage() {
                   />
                 ) : (
                   <span className="text-xs text-[#5E6870]">
-                    {formEditing ? (formAutosave.status === "saving" || formAutosave.status === "unsaved" ? "Saving changes…" : formAutosave.status === "error" ? "Autosave failed" : formAutosave.status === "saved" ? "Changes saved" : "Editing") : canSubmitLpo ? "LPO generated — submit to continue" : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm && isOwnerOrSubmitter ? "Click Edit form to modify" : canEdit && !isOwnerOrSubmitter ? "Your permitted changes save automatically" : "Filled in-app"}
+                    {formEditing ? (formAutosave.status === "saving" || formAutosave.status === "unsaved" ? "Saving changes…" : formAutosave.status === "error" ? "Autosave failed" : formAutosave.status === "saved" ? "Changes saved" : "Editing") : formData?.lpo_posting_complete ? "LPO posted to SunSystems" : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm && isOwnerOrSubmitter ? "Click Edit form to modify" : canEdit && !isOwnerOrSubmitter ? "Your permitted changes save automatically" : "Filled in-app"}
                   </span>
                 )}
               </div>
@@ -1573,7 +1530,7 @@ export default function FormDetailPage() {
                     onChange={(val) => setSelectedLpoId(val)}
                     options={generatedLpos.map((lpo, index) => ({
                       value: lpo.id,
-                      label: `${lpo.table_label || `LPO ${index + 1}`} · ${lpo.reference || index + 1}`,
+                      label: `${lpo.table_label || `LPO ${index + 1}`} · ${lpo.reference || "Pending SunSystems number"}`,
                     }))}
                     buttonClassName="max-w-44 border border-[#C8CDD1] bg-white px-2 py-1.5 text-xs text-[#1F2933] text-left hover:border-[#287EAD] transition-colors"
                     ariaLabel="Select LPO"
@@ -1930,7 +1887,7 @@ export default function FormDetailPage() {
         )}
       </div>
 
-        {activeTask && !isReturnedReworkEditor && !canSubmitLpo && (
+        {activeTask && activeTask.status !== "awaiting_posting" && !isReturnedReworkEditor && (
         <div ref={taskPanelRef} className="z-10 shrink-0 border-t border-[#C8CDD2] bg-white">
           <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
             <WorkflowActionPanel
@@ -2004,15 +1961,8 @@ export default function FormDetailPage() {
                   setWorkflowActionCompleted(true);
                   return;
                 }
-                if (activeTask?.id) setLpoGateTaskId(activeTask.id);
-                setAwaitingLpoReady(true);
-                if (generatedLpos.length) {
-                  setSelectedLpoId(generatedLpos[0].id);
-                  setLpoModalOpen(true);
-                  setLpoMinimized(false);
-                  return;
-                }
                 setAwaitingLpo(true);
+                setGateRetrying(false);
                 void qc.invalidateQueries({ queryKey: ["form", id] });
               }}
             />
@@ -2020,7 +1970,7 @@ export default function FormDetailPage() {
         </div>
       )}
 
-      {(canResubmitAtBottom || canSubmitLpo || showRetirementSubmit) && (
+      {(canResubmitAtBottom || showRetirementSubmit) && (
         <div className="fixed bottom-6 right-6 z-[120] flex items-center gap-2">
           {canResubmitAtBottom && (
             <button
@@ -2031,17 +1981,6 @@ export default function FormDetailPage() {
             >
               {submitMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
               Resubmit
-            </button>
-          )}
-          {canSubmitLpo && (
-            <button
-              type="button"
-              onClick={() => lpoSubmitTaskId && submitLpoMutation.mutate(lpoSubmitTaskId)}
-              disabled={submitLpoMutation.isPending}
-              className="inline-flex items-center gap-2 rounded-full bg-[#287EAD] px-5 py-3 text-sm font-semibold text-white shadow-lg ring-1 ring-white/80 hover:bg-[#1E6F99] disabled:cursor-wait disabled:opacity-60"
-            >
-              {submitLpoMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              Submit for Approval
             </button>
           )}
           {showRetirementSubmit && (
@@ -2064,28 +2003,17 @@ export default function FormDetailPage() {
           <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden border border-[#AEB5BB] bg-white shadow-2xl">
             <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
               <div className="min-w-0">
-                <h2 className="truncate text-sm font-bold text-[#1F2933]">Purchase Order {generatedLpoReference || ""}</h2>
+                <h2 className="truncate text-sm font-bold text-[#1F2933]">Purchase Order {generatedLpoReference || "(pending SunSystems number)"}</h2>
                 <p className="text-xs text-[#5E6870]">Generated LPO document</p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {canSubmitLpo && (
-                  <button
-                    type="button"
-                    onClick={() => lpoSubmitTaskId && submitLpoMutation.mutate(lpoSubmitTaskId)}
-                    disabled={submitLpoMutation.isPending}
-                    className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
-                  >
-                    {submitLpoMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                    <Send className="h-3.5 w-3.5" /> Submit for Approval
-                  </button>
-                )}
                 {canDownloadLpo && (
                   <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99]">
                     <Download className="h-3.5 w-3.5" /> Download PDF
                   </button>
                 )}
-                <button type="button" aria-label="Minimize LPO" onClick={() => { setLpoMinimized(true); setLpoAutoPresentationPending(false); }} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><PanelRightClose className="h-4 w-4" /></button>
-                <button type="button" aria-label="Close LPO" onClick={() => { setLpoModalOpen(false); setLpoAutoPresentationPending(false); }} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><X className="h-4 w-4" /></button>
+                <button type="button" aria-label="Minimize LPO" onClick={() => setLpoMinimized(true)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><PanelRightClose className="h-4 w-4" /></button>
+                <button type="button" aria-label="Close LPO" onClick={() => setLpoModalOpen(false)} className="border border-[#C8CDD2] bg-white p-2 text-[#35434D] hover:bg-[#E9EEF1]"><X className="h-4 w-4" /></button>
               </div>
             </div>
             <div className="min-h-[50vh] flex-1 bg-[#E9EEF1]">
@@ -2194,12 +2122,12 @@ export default function FormDetailPage() {
         </div>
       )}
 
-      {awaitingLpo && !generatedLpos.length && (
+      {awaitingLpo && !formData?.lpo_posting_complete && (
         <PostingGateOverlay
-          title={formData?.imprest_request_posting_required_for_lpo ? "LPO and Imprest posting in progress" : "Approval complete"}
+          title={formData?.imprest_request_posting_required_for_lpo ? "LPO and Imprest posting in progress" : "LPO posting in progress"}
           pendingMessage={formData?.imprest_request_posting_required_for_lpo
             ? "Preparing the LPO and DSA Payment Voucher after both SunSystems postings complete…"
-            : "Preparing the generated LPO after SunSystems returns the purchase order number…"}
+            : "Posting the prepared LPO to SunSystems and recording its purchase order number…"}
           failedPostings={failedCombinedLpoGatePostings}
           generationError={formData?.imprest_payment_voucher_status === "failed"
             ? `The DSA Payment Voucher could not be generated after several attempts. ${formData.imprest_payment_voucher_error || "The Imprest journal remains posted; request administrator review to retry voucher generation."}`
@@ -2290,7 +2218,7 @@ export default function FormDetailPage() {
         />
       )}
 
-      {(reworkResubmitted || (workflowActionCompleted && !awaitingLpo && !showPaymentVoucherGate && !paymentVoucherId && !activeTask && !generatedLpos.length)) && (
+      {(reworkResubmitted || (workflowActionCompleted && !awaitingLpo && !showPaymentVoucherGate && !paymentVoucherId && !activeTask && (!generatedLpos.length || formData?.lpo_posting_complete))) && (
         <div className="fixed inset-0 z-[200] flex items-start justify-center bg-black/40 px-4 pt-[10vh]">
           <div
             role="alertdialog"
