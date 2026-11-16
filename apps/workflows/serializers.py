@@ -945,10 +945,17 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
         form = ((getattr(document, "metadata", None) or {}).get("form") or {}) if document else {}
         if (
             obj.status == "awaiting_posting"
-            and getattr(obj.step, "post_lpo_after_approval", False)
+            and (
+                getattr(obj.step, "post_lpo_after_approval", False)
+                or getattr(obj.step, "prepare_lpo_after_approval", False)
+            )
             and form.get("lpo_generation_ready")
         ):
-            return "Awaiting LPO posting"
+            return (
+                "Awaiting LPO submission"
+                if getattr(obj.step, "prepare_lpo_after_approval", False)
+                else "Awaiting LPO posting"
+            )
         return obj.get_status_display()
 
     def get_document_ref(self, obj):

@@ -253,6 +253,8 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase, retirementAw
                 && step.phase === "retirement"
                 && step.status === "pending"
                 ? "Awaiting retirement submission"
+                : lpoAwaitingSubmission && step.prepareLpoAfterApproval && step.status === "completed"
+                  ? "Awaiting LPO submission"
                 : lpoAwaitingSubmission && step.postLpoAfterApproval && step.status === "in-progress"
                   ? "Awaiting LPO submission"
                 : step.statusDisplay || step.status;

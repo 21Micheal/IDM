@@ -81,6 +81,7 @@ type WorkflowTemplateStepRecord = {
   notify_email?: string;
   instructions?: string;
   post_lpo_after_approval?: boolean;
+  prepare_lpo_after_approval?: boolean;
 };
 
 type WorkflowTemplateRecord = {
@@ -481,6 +482,7 @@ function buildApproverWorkflow(
         ? "Automated notification step"
         : (templateStep.instructions || `${ordinal(index + 1)} approval step`),
       postLpoAfterApproval: Boolean(templateStep.post_lpo_after_approval),
+      prepareLpoAfterApproval: Boolean(templateStep.prepare_lpo_after_approval),
     };
   });
 

@@ -578,6 +578,14 @@ export default function FormDetailPage() {
     if (!generatedLpos.some((lpo) => lpo.id === selectedLpoId)) setSelectedLpoId(generatedLpos[0].id);
   }, [lpoSetKey]);
 
+  const preparedLpo = generatedLpos.find((lpo) => lpo.prepared);
+  useEffect(() => {
+    if (!preparedLpo || formData?.lpo_posting_complete || workflowPhase !== "lpo") return;
+    setSelectedLpoId(preparedLpo.id);
+    setLpoModalOpen(true);
+    setLpoMinimized(false);
+  }, [preparedLpo?.id, formData?.lpo_posting_complete, workflowPhase]);
+
   const lpoPdfQuery = useQuery({
     queryKey: ["lpo-pdf", generatedLpoId],
     queryFn: async () => {
@@ -704,11 +712,20 @@ export default function FormDetailPage() {
     ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
+  const canSubmitPreparedLpo = Boolean(
+    formData?.lpo_generation_ready
+    && preparedLpo
+    && activeTask?.status === "awaiting_posting"
+    && (activeTask?.step as any)?.prepare_lpo_after_approval
+    && !isUnassignedHandoffViewer
+    && !isReturnedReworkEditor,
+  );
   useEffect(() => {
     if (!formData?.lpo_posting_complete) return;
     setAwaitingLpo(false);
     setGateRetrying(false);
     setWorkflowActionCompleted(true);
+    setLpoModalOpen(false);
     void Promise.all([
       qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] }),
       qc.invalidateQueries({ queryKey: ["form-workflow", id] }),
@@ -892,6 +909,20 @@ export default function FormDetailPage() {
       }
       toast.error(message);
     },
+  });
+
+  const submitPreparedLpoMutation = useMutation({
+    mutationFn: () => workflowAPI.submitLpo(activeTask!.id),
+    onSuccess: async () => {
+      toast.success("LPO submitted for approvals");
+      setWorkflowActionCompleted(false);
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["form", id] }),
+        qc.invalidateQueries({ queryKey: ["form-workflow", id] }),
+        qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] }),
+      ]);
+    },
+    onError: (err) => toast.error(extractApiError(err, "Could not submit the prepared LPO for approvals.")),
   });
 
   const commentMutation = useMutation({
@@ -1928,6 +1959,7 @@ export default function FormDetailPage() {
                   && lpoApprovalSteps.some((step) => step.id === `approver-${activeOrder}`)
                   && !laterLpoStepExists;
                 const isLpoGenerationApprover = Boolean((activeTask?.step as any)?.post_lpo_after_approval);
+                const isLpoPreparationApprover = Boolean((activeTask?.step as any)?.prepare_lpo_after_approval);
                 const isImprestPostingApprover = Boolean((activeTask?.step as any)?.post_imprest_request_after_approval);
                 const retirementApprovalSteps = (workflowData?.steps ?? []).filter((step) =>
                   step.kind === "task"
@@ -1947,6 +1979,17 @@ export default function FormDetailPage() {
                   setPaymentVoucherGateDismissed(false);
                   setWorkflowActionCompleted(false);
                   void qc.invalidateQueries({ queryKey: ["form", id] });
+                  return;
+                }
+
+                if (isLpoPreparationApprover) {
+                  setAwaitingLpo(false);
+                  setWorkflowActionCompleted(false);
+                  void Promise.all([
+                    qc.invalidateQueries({ queryKey: ["form", id] }),
+                    qc.invalidateQueries({ queryKey: ["form-workflow", id] }),
+                    qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] }),
+                  ]);
                   return;
                 }
 
@@ -1970,8 +2013,19 @@ export default function FormDetailPage() {
         </div>
       )}
 
-      {(canResubmitAtBottom || showRetirementSubmit) && (
+      {(canResubmitAtBottom || showRetirementSubmit || canSubmitPreparedLpo) && (
         <div className="fixed bottom-6 right-6 z-[120] flex items-center gap-2">
+          {canSubmitPreparedLpo && (
+            <button
+              type="button"
+              onClick={() => submitPreparedLpoMutation.mutate()}
+              disabled={submitPreparedLpoMutation.isPending}
+              className="inline-flex items-center gap-2 rounded-full bg-[#287EAD] px-5 py-3 text-sm font-semibold text-white shadow-lg ring-1 ring-white/80 hover:bg-[#1E6F99] disabled:cursor-wait disabled:opacity-60"
+            >
+              {submitPreparedLpoMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              Submit for Approvals
+            </button>
+          )}
           {canResubmitAtBottom && (
             <button
               type="button"
@@ -2007,6 +2061,17 @@ export default function FormDetailPage() {
                 <p className="text-xs text-[#5E6870]">Generated LPO document</p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                {canSubmitPreparedLpo && (
+                  <button
+                    type="button"
+                    onClick={() => submitPreparedLpoMutation.mutate()}
+                    disabled={submitPreparedLpoMutation.isPending}
+                    className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:cursor-wait disabled:opacity-60"
+                  >
+                    {submitPreparedLpoMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    Submit for Approvals
+                  </button>
+                )}
                 {canDownloadLpo && (
                   <button type="button" onClick={() => void handleDownloadLpo()} className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99]">
                     <Download className="h-3.5 w-3.5" /> Download PDF

@@ -1086,7 +1086,7 @@ function StepEditPanel({
             </span>
             <span>
               <span className="block text-xs font-semibold">Prepare LPOs after this approval</span>
-              <span className="block text-[11px] mt-1 opacity-80">Generate the LPO documents for review without a SunSystems PO number. Configure a later step to post them.</span>
+              <span className="block text-[11px] mt-1 opacity-80">Generate the LPO documents for review without a SunSystems PO number. After approval, this task waits for you to click “Submit for Approvals.” Configure a later step to post them.</span>
             </span>
           </button>
           <button

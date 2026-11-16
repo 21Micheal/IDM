@@ -599,7 +599,14 @@ class WorkflowService:
             return
 
         if execution_lane == "main" and step.prepare_lpo_after_approval and doc is not None:
-            WorkflowService._prepare_lpo_documents(instance, step, doc, actor=actor)
+            if WorkflowService._prepare_lpo_documents(instance, step, doc, actor=actor):
+                # Keep this approved step with its approver until they have
+                # reviewed the prepared LPO and explicitly released the next
+                # approval step.
+                task.status = "awaiting_posting"
+                task.save(update_fields=["status", "updated_at"])
+                WorkflowService._skip_active_tasks(instance, step_order=task.step.order)
+                return
 
         if execution_lane == "main" and step.post_lpo_after_approval and doc is not None:
             if WorkflowService._start_lpo_posting_gate(instance, step, doc, actor=actor):
@@ -1929,13 +1936,13 @@ class WorkflowService:
             return True
 
     @staticmethod
-    def _prepare_lpo_documents(instance: WorkflowInstance, step: WorkflowStep, document, actor=None) -> None:
+    def _prepare_lpo_documents(instance: WorkflowInstance, step: WorkflowStep, document, actor=None) -> bool:
         """Render table-scoped LPOs at the configured preparation approval."""
         try:
             from apps.documents.builder_workflow import is_procurement_document
             from apps.sunsystems.config import get_journal_mapping, get_purchase_order_postings
             if not is_procurement_document(document) or WorkflowService._document_workflow_phase(document) != "lpo":
-                return
+                raise WorkflowError("LPO preparation is only available during the procurement LPO phase.")
             requested = get_purchase_order_postings(document)
             if not requested:
                 raise WorkflowError("This step is configured to prepare LPOs, but no Purchase Order lines are mapped.")
@@ -1957,6 +1964,15 @@ class WorkflowService:
                     values_override=mapping.get("_posting_values") if isinstance(mapping.get("_posting_values"), dict) else None,
                     prepared=True,
                 )
+            latest = type(document).objects.get(pk=document.pk)
+            metadata = latest.metadata if isinstance(latest.metadata, dict) else {}
+            form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+            form["lpo_generation_ready"] = True
+            form["lpo_posting_complete"] = False
+            metadata["form"] = form
+            latest.metadata = metadata
+            WorkflowService._save_document(latest, update_fields=["metadata"])
+            return True
         except WorkflowError:
             raise
         except Exception as exc:
@@ -2053,16 +2069,14 @@ class WorkflowService:
     @staticmethod
     @transaction.atomic
     def submit_generated_lpo(task: WorkflowTask, actor) -> None:
-        """Advance from the configured LPO generation step after an explicit submit."""
+        """Release a prepared LPO for approvals or finish a legacy posting gate."""
         task, instance = WorkflowService._lock_action_task(task)
         if task.status != "awaiting_posting":
             raise WorkflowError("This LPO is not waiting for submission.")
-        if not task.step.post_lpo_after_approval:
-            raise WorkflowError("This step is not configured to generate an LPO.")
         if instance.status != "in_progress" or instance.current_step_order != task.step.order:
             raise WorkflowError("The workflow has moved on from this LPO approval step.")
         if not task.actions.filter(action="approved").exists():
-            raise WorkflowError("Approve this step before submitting its generated LPO.")
+            raise WorkflowError("Approve this step before submitting the generated LPO.")
 
         document = instance.document
         if not document:
@@ -2077,6 +2091,42 @@ class WorkflowService:
         stages = [int(item["stage"]) for item in requested]
         if not stages:
             raise WorkflowError("No LPO purchase order postings are configured.")
+
+        # Preparation checkpoints pause after rendering. Releasing this gate
+        # advances to subsequent approvals; SunSystems posting remains at its
+        # independently configured checkpoint.
+        if task.step.prepare_lpo_after_approval:
+            metadata = document.metadata if isinstance(document.metadata, dict) else {}
+            form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
+            prepared = {
+                int(row.get("posting_stage"))
+                for row in (form.get("lpo_documents") or [])
+                if isinstance(row, dict)
+                and str(row.get("posting_stage", "")).isdigit()
+                and row.get("prepared")
+            }
+            if not form.get("lpo_generation_ready") or not set(stages).issubset(prepared):
+                raise WorkflowError("Wait until every prepared LPO is ready before submitting for approvals.")
+            form["lpo_generation_ready"] = False
+            metadata["form"] = form
+            document.metadata = metadata
+            WorkflowService._save_document(document, update_fields=["metadata"])
+            task.status = "approved"
+            task.save(update_fields=["status", "updated_at"])
+            WorkflowTaskAction.objects.create(
+                task=task,
+                actor=actor,
+                action="submitted_lpo",
+                comment="Submitted the prepared LPO for approvals.",
+            )
+            WorkflowService._advance_step(
+                instance, task.step.order, task_step_order=task.step.order,
+                source_task_id=task.id,
+            )
+            return
+
+        if not task.step.post_lpo_after_approval:
+            raise WorkflowError("This step is not configured to prepare or post an LPO.")
         posted = dict(
             JournalPosting.objects.filter(document=document, stage__in=stages)
             .values_list("stage", "status")

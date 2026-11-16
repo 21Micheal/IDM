@@ -222,10 +222,9 @@ def generate_payment_voucher_for_retirement(document, posting, actor=None):
     existing = Document.objects.filter(
         incoming_relationships__source_document=locked,
         incoming_relationships__relation_type=DocumentRelationship.RelationType.REFERENCES,
-        document_type__code=PAYMENT_VOUCHER_DOC_TYPE_CODE,
         metadata__payment_voucher__source_document_id=str(locked.pk),
         metadata__payment_voucher__kind="retirement",
-    ).first()
+    ).order_by("created_at").first()
     if existing:
         form_meta["payment_voucher_document_id"] = str(existing.pk)
         form_meta["payment_voucher_reference"] = existing.reference_number
@@ -317,10 +316,9 @@ def generate_payment_voucher_for_imprest(document, posting, actor=None):
     existing = Document.objects.filter(
         incoming_relationships__source_document=locked,
         incoming_relationships__relation_type=DocumentRelationship.RelationType.REFERENCES,
-        document_type__code=PAYMENT_VOUCHER_DOC_TYPE_CODE,
         metadata__payment_voucher__source_document_id=str(locked.pk),
         metadata__payment_voucher__kind="imprest",
-    ).first()
+    ).order_by("created_at").first()
     if existing:
         form_meta["imprest_payment_voucher_document_id"] = str(existing.pk)
         form_meta["imprest_payment_voucher_reference"] = existing.reference_number

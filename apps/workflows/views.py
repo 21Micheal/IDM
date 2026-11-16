@@ -570,7 +570,12 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             WorkflowService.submit_generated_lpo(task, request.user)
         except WorkflowError as exc:
             return Response({"detail": str(exc)}, status=400)
-        return Response({"status": "submitted", "detail": "Generated LPO submitted to the next workflow step."})
+        detail = (
+            "Prepared LPO submitted for approvals."
+            if task.step.prepare_lpo_after_approval
+            else "Generated LPO submitted to the next workflow step."
+        )
+        return Response({"status": "submitted", "detail": detail})
 
     # ── Reject ─────────────────────────────────────────────────────────────
 

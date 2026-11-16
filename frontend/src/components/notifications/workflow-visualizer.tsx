@@ -63,6 +63,8 @@ export interface WorkflowStep {
   executionLane?: "imprest_request";
   /** This approval is the configured LPO generation checkpoint. */
   postLpoAfterApproval?: boolean;
+  /** This approval prepares LPO documents and waits for explicit submission. */
+  prepareLpoAfterApproval?: boolean;
   branchLabel?: string;
   next?: string[];
   description?: string;

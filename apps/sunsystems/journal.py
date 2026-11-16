@@ -228,7 +228,12 @@ def _maybe_generate_payment_voucher_after_posting(document, posting, actor=None)
     form_meta = (((document.metadata or {}).get("form") or {}) if isinstance(document.metadata, dict) else {})
     voucher_id_key = "imprest_payment_voucher_document_id" if kind == "imprest" else "payment_voucher_document_id"
     voucher_status = form_meta.get(f"{kind}_payment_voucher_status")
-    if form_meta.get(voucher_id_key) or voucher_status in {"pending", "generated", "failed"}:
+    # A status alone is not proof that the voucher can be opened. Older runs
+    # may have persisted "generated" (or "failed") without saving its id;
+    # invoke the idempotent generator in that case so it can recover an
+    # already-linked voucher or retry generation. A queued retry stays in
+    # control while pending.
+    if form_meta.get(voucher_id_key) or voucher_status == "pending":
         return
     try:
         from apps.documents.payment_voucher import (
