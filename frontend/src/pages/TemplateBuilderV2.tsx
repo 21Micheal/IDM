@@ -1682,7 +1682,11 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       const descCol = cols.find((c) => c.sunsystems?.role === "description");
       const analysis: Record<string, unknown> = {};
       if (budgetLineCol) {
-        for (const dimension of budgetLineCol.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS) {
+        // The configured dimensions control which selectors appear in the
+        // Budget Line modal. Selecting Activity can also populate paired,
+        // hidden dimensions, so compile all slots and let blank values fall
+        // back to '#'.
+        for (const dimension of ANALYSIS_PANEL_SLOTS) {
           const slot = ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1;
           if (slot > 0) analysis[String(slot)] = { row_field: budgetLineCol.key, key: dimension };
         }
@@ -1890,7 +1894,11 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     const lineAnalysis: Record<string, unknown> = {};
     const poLineAnalysis: Record<string, unknown> = {};
     if (budgetLineCol) {
-      for (const dimension of budgetLineCol.budgetLine?.dimensions ?? ANALYSIS_PANEL_SLOTS) {
+      // The configured dimensions control which selectors appear in the
+      // Budget Line modal. Selecting Activity can also populate paired,
+      // hidden dimensions, so compile all slots and let blank values fall
+      // back to '#'.
+      for (const dimension of ANALYSIS_PANEL_SLOTS) {
         const slot = ANALYSIS_PANEL_SLOTS.indexOf(dimension) + 1;
         if (slot > 0) {
           lineAnalysis[String(slot)] = { row_field: budgetLineCol.key, key: dimension };
@@ -1909,10 +1917,14 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     const lineSpec: Record<string, unknown> = {
       repeat_over: f.key,
       table_label: f.label || f.key,
-      account_code: budgetLineCol
-        ? { row_field: budgetLineCol.key, key: "account_code" }
-        : acctCol
-          ? { row_field: acctCol.key }
+      // A dedicated Ticket Account Code column is authoritative when present;
+      // Budget Line remains the fallback for older tables that store the
+      // ticket account and analysis together. This lets calculated account
+      // columns (for example, travel-scope-based account selection) reach PO.
+      account_code: acctCol
+        ? { row_field: acctCol.key }
+        : budgetLineCol
+          ? { row_field: budgetLineCol.key, key: "account_code" }
           : (f.sunsystems?.account ? { const: f.sunsystems.account } : undefined),
       // Separate legacy DSA tables must not also create a Travel PO line.
       // In the merged Ticket/DSA table, however, the same row can carry both

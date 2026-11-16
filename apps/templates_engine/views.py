@@ -327,7 +327,23 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 and _eval_visible(f, generation_values, viewer=viewer)
                 and is_editable(f, generation_values, viewer=viewer)
             ]
-            missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]
+            def _required_field_missing(field):
+                key = str(field.get("key") or "")
+                if field.get("type") == "multi_file":
+                    return not any(
+                        candidate.startswith(f"{key}~")
+                        and (
+                            (isinstance(value, dict) and bool(value.get("storage_path")))
+                            or (
+                                bool(str(value or "").strip())
+                                and f"attachment_{candidate}" in request.FILES
+                            )
+                        )
+                        for candidate, value in generation_values.items()
+                    )
+                return not generation_values.get(key)
+
+            missing = [f["label"] for f in all_fields if _required_field_missing(f)]
 
             # Table COLUMNS carry their own independent `required` flag (the
             # table field itself is rarely marked required — its columns are).
