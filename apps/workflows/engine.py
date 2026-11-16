@@ -392,6 +392,32 @@ def get_value(ctx: EvalContext, field_id: str) -> Any:
     return None
 
 
+def _table_column_values(ctx: EvalContext, field_id: str):
+    """Return ``(table_key, values)`` for a table-column reference.
+
+    Conditions that compare two table columns must compare cells from the same
+    row. ``get_value`` intentionally returns a scalar for legacy callers, so
+    expose the row values separately for field-to-field numeric conditions.
+    """
+    if not field_id:
+        return None
+    if "." in field_id:
+        table_key, column_key = field_id.split(".", 1)
+        rows = ctx.values.get(table_key)
+        if isinstance(rows, dict):
+            rows = [rows]
+        if isinstance(rows, list) and any(isinstance(row, dict) and column_key in row for row in rows):
+            return table_key, [row.get(column_key) if isinstance(row, dict) else None for row in rows]
+        return None
+
+    # Bare column IDs remain supported for older workflow definitions. Use
+    # the first table containing that column, matching get_value's precedence.
+    for table_key, rows in ctx.values.items():
+        if isinstance(rows, list) and any(isinstance(row, dict) and field_id in row for row in rows):
+            return table_key, [row.get(field_id) if isinstance(row, dict) else None for row in rows]
+    return None
+
+
 def is_money(value: Any) -> bool:
     """Check if a value is a money object (has amount and optional currency)."""
     return (
@@ -491,6 +517,7 @@ def eval_rule(
     rule: Dict[str, Any],
     field_map: Dict[str, Dict[str, Any]],
     ctx: EvalContext,
+    _row_pair: Optional[Tuple[Any, Any]] = None,
 ) -> bool:
     """
     Evaluate a single condition rule.
@@ -527,12 +554,40 @@ def eval_rule(
             ctx.warnings.append(f"Formula evaluation error: {e}")
             return False
 
+    # A table-column field reference represents one value per row. Compare
+    # paired cells row-by-row (or each table value against a scalar field),
+    # rather than comparing the first non-empty value from each column. This
+    # is especially important for amount comparisons used by nested IF paths.
+    if _row_pair is None and rule.get("value_ref") and op in (
+        Operator.EQ, Operator.NEQ, Operator.GT, Operator.GTE,
+        Operator.LT, Operator.LTE,
+    ):
+        left_rows = _table_column_values(ctx, str(field_id or ""))
+        right_rows = _table_column_values(ctx, str(rule.get("value_ref") or ""))
+        if left_rows or right_rows:
+            if left_rows and right_rows and left_rows[0] == right_rows[0]:
+                pairs = list(zip(left_rows[1], right_rows[1]))
+            elif left_rows and right_rows:
+                pairs = [(left, right) for left in left_rows[1] for right in right_rows[1]]
+            elif left_rows:
+                right_value = get_value(ctx, str(rule.get("value_ref")))
+                pairs = [(left, right_value) for left in left_rows[1]]
+            else:
+                left_value = get_value(ctx, str(field_id or ""))
+                pairs = [(left_value, right) for right in right_rows[1]]
+            for left_value, right_value in pairs:
+                if is_empty_value(left_value) or is_empty_value(right_value):
+                    continue
+                if eval_rule(rule, field_map, ctx, _row_pair=(left_value, right_value)):
+                    return True
+            return False
+
     if not field_id or not op:
         ctx.warnings.append("Incomplete condition ignored.")
         return False
     
     field = field_map.get(field_id, {})
-    raw = get_value(ctx, field_id)
+    raw = _row_pair[0] if _row_pair is not None else get_value(ctx, field_id)
     
     # Infer type from field metadata or raw value
     field_type = field.get("type")
@@ -559,7 +614,7 @@ def eval_rule(
     # Get right-hand operand (literal or field reference)
     value_ref = rule.get("value_ref")
     if value_ref:
-        rhs = get_value(ctx, value_ref)
+        rhs = _row_pair[1] if _row_pair is not None else get_value(ctx, value_ref)
     else:
         rhs = rule.get("value")
     

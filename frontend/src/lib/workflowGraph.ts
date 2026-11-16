@@ -437,6 +437,29 @@ function getValue(env: EvalEnv, id: string): unknown {
   return undefined;
 }
 
+function getTableColumnValues(env: EvalEnv, id: string): { table: string; values: unknown[] } | undefined {
+  if (!id) return undefined;
+  if (id.includes(".")) {
+    const [table, ...columnParts] = id.split(".");
+    const column = columnParts.join(".");
+    const rows = env.values[table];
+    if (Array.isArray(rows) && rows.some((row: any) => row && typeof row === "object" && column in row)) {
+      return { table, values: rows.map((row: any) => row && typeof row === "object" ? row[column] : undefined) };
+    }
+    if (rows && typeof rows === "object" && column in (rows as any)) {
+      return { table, values: [(rows as any)[column]] };
+    }
+    return undefined;
+  }
+
+  for (const [table, rows] of Object.entries(env.values)) {
+    if (Array.isArray(rows) && rows.some((row: any) => row && typeof row === "object" && id in row)) {
+      return { table, values: rows.map((row: any) => row && typeof row === "object" ? row[id] : undefined) };
+    }
+  }
+  return undefined;
+}
+
 const isMoney = (v: unknown): v is { amount: unknown; currency?: string } =>
   !!v && typeof v === "object" && !Array.isArray(v) && "amount" in (v as any);
 
@@ -477,7 +500,12 @@ const asList = (v: unknown): string[] =>
 /** When the field is empty, only these operators are satisfied (besides is_empty). */
 const TRUE_WHEN_EMPTY = new Set<Operator>(["neq", "not_in", "not_contains", "is_false"]);
 
-export function evalRule(rule: ConditionRule, fields: Map<string, WorkflowField>, env: EvalEnv): boolean {
+export function evalRule(
+  rule: ConditionRule,
+  fields: Map<string, WorkflowField>,
+  env: EvalEnv,
+  rowPair?: { left: unknown; right: unknown },
+): boolean {
   if (rule.op === "formula" || rule.formula) {
     const expr = String(rule.formula || rule.value || "").trim();
     if (!expr) return false;
@@ -493,8 +521,29 @@ export function evalRule(rule: ConditionRule, fields: Map<string, WorkflowField>
   }
 
   if (!rule.field_id || !rule.op) { env.warnings.push("Incomplete condition ignored."); return false; }
+  if (!rowPair && rule.value_ref && ["eq", "neq", "gt", "gte", "lt", "lte"].includes(rule.op)) {
+    const leftRows = getTableColumnValues(env, rule.field_id);
+    const rightRows = getTableColumnValues(env, rule.value_ref);
+    if (leftRows || rightRows) {
+      let pairs: Array<[unknown, unknown]>;
+      if (leftRows && rightRows && leftRows.table === rightRows.table) {
+        pairs = leftRows.values.map((left, index) => [left, rightRows.values[index]]);
+      } else if (leftRows && rightRows) {
+        pairs = leftRows.values.flatMap((left) => rightRows.values.map((right) => [left, right] as [unknown, unknown]));
+      } else if (leftRows) {
+        const right = getValue(env, rule.value_ref);
+        pairs = leftRows.values.map((left) => [left, right]);
+      } else {
+        const left = getValue(env, rule.field_id);
+        pairs = rightRows!.values.map((right) => [left, right]);
+      }
+      return pairs.some(([left, right]) => !isEmptyValue(left) && !isEmptyValue(right)
+        && evalRule(rule, fields, env, { left, right }));
+    }
+  }
+
   const field = fields.get(rule.field_id);
-  const raw = getValue(env, rule.field_id);
+  const raw = rowPair ? rowPair.left : getValue(env, rule.field_id);
   const type: FieldType = field?.type ?? (isMoney(raw) ? "money" : typeof raw === "number" ? "number"
     : typeof raw === "boolean" ? "boolean" : Array.isArray(raw) ? "multiselect" : "text");
 
@@ -503,7 +552,7 @@ export function evalRule(rule: ConditionRule, fields: Map<string, WorkflowField>
   if (isEmptyValue(raw)) return TRUE_WHEN_EMPTY.has(rule.op);
 
   // Right-hand operand: literal or another field.
-  const refVal = rule.value_ref ? getValue(env, rule.value_ref) : undefined;
+  const refVal = rule.value_ref ? (rowPair ? rowPair.right : getValue(env, rule.value_ref)) : undefined;
   const lit = rule.value_ref ? refVal : rule.value;
 
   const isNumericOp = ["gt", "gte", "lt", "lte", "between"].includes(rule.op);
