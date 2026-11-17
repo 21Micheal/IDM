@@ -26,6 +26,13 @@ from rest_framework.views import APIView
 
 logger = logging.getLogger(__name__)
 
+# AnalysisDimensionId -> AnalysisCode slot in the ledger used by the
+# requisition Budget Line. Keep in sync with frontend/src/lib/analysisDimensions.ts.
+LEDGER_ANALYSIS_SLOTS = {
+    "04": 1, "05": 2, "06": 3, "03": 4, "08": 5,
+    "09": 6, "10": 7, "11": 8, "07": 9, "12": 10,
+}
+
 
 class IsAdminAccess(permissions.BasePermission):
     """Allow only users with administrative access (mirrors RequireAdmin)."""
@@ -1233,13 +1240,15 @@ class ProductGroupsQueryView(APIView):
 
 
 class AnalysisCodesQueryView(APIView):
-    """Return analysis codes for ONE SunSystems dimension (AnalysisCodes/Query).
+    """Return analysis codes present in Book B for ONE dimension.
 
     GET /api/v1/sunsystems/analysis-codes/?dimension=04&business_unit=PK1
 
-    ``dimension`` is the AnalysisDimensionId the codes belong to (e.g. "04"
-    Project, "05" Cost Centre). The SunSystems query requires it as a filter,
-    so it is mandatory here.
+    For the requisition's ten configured dimensions, the selectable codes are
+    read from actual ledger lines in Book B, using the same date/account scope
+    as the paired-analysis lookup. The AnalysisCodes master query is used only
+    to attach names to those Book B codes; it is not trusted as the source of
+    the selectable set because it can include codes absent from that book.
 
     Response:
         { analysis_codes: [{ analysis_code, analysis_dimension_id, name }] }
@@ -1270,7 +1279,7 @@ class AnalysisCodesQueryView(APIView):
             .replace('"', "&quot;")
         )
 
-        ssc_payload = (
+        master_payload = (
             "<SSC>\n"
             "  <ErrorContext/>\n"
             "  <User/>\n"
@@ -1295,8 +1304,69 @@ class AnalysisCodesQueryView(APIView):
 
         try:
             client = SunSystemsClient(config)
-            response_xml = client.execute("AnalysisCodes", "Query", ssc_payload)
+            slot = LEDGER_ANALYSIS_SLOTS.get(dimension)
+            if slot is None:
+                # Other SunSystems dimensions are not part of the configured
+                # ten-slot requisition ledger. Preserve the generic lookup for
+                # those external fields; its context is still Book B.
+                response_xml = client.execute("AnalysisCodes", "Query", master_payload)
+                book_codes = None
+            else:
+                from django.utils import timezone
+                import xml.etree.ElementTree as ET
+
+                start_period = f"001{timezone.localdate().year}"
+                root = ET.Element("SSC")
+                ET.SubElement(root, "ErrorContext")
+                ET.SubElement(root, "User")
+                context = ET.SubElement(root, "SunSystemsContext")
+                ET.SubElement(context, "BusinessUnit").text = business_unit
+                ET.SubElement(context, "BudgetCode").text = "B"
+                payload = ET.SubElement(root, "Payload")
+                filter_node = ET.SubElement(payload, "Filter")
+                expr = ET.SubElement(filter_node, "Expr", {"operator": "AND"})
+                ET.SubElement(expr, "Item", {
+                    "name": "/Ledger/Line/AccountingPeriod",
+                    "operator": "GTE",
+                    "value": start_period,
+                })
+                ET.SubElement(expr, "Item", {
+                    "name": "/Ledger/Line/Accounts/AccountType",
+                    "operator": "EQU",
+                    "value": "3",
+                })
+                select = ET.SubElement(payload, "Select")
+                ledger = ET.SubElement(select, "Ledger")
+                line = ET.SubElement(ledger, "Line")
+                ET.SubElement(line, f"AnalysisCode{slot}").text = "."
+                ledger_xml = client.execute("Journal", "Query", ET.tostring(root, encoding="unicode"))
+                try:
+                    ledger_root = ET.fromstring(ledger_xml or "<SSC/>")
+                except ET.ParseError as exc:
+                    return Response(
+                        {"ok": False, "error": f"Could not parse SunSystems ledger response: {exc}"},
+                        status=status.HTTP_502_BAD_GATEWAY,
+                    )
+                book_codes = {
+                    (node.findtext(f"AnalysisCode{slot}") or "").strip()
+                    for node in ledger_root.findall(".//Ledger/Line")
+                    if (node.findtext(f"AnalysisCode{slot}") or "").strip()
+                }
+                if not book_codes:
+                    return Response({
+                        "ok": True,
+                        "analysis_codes": [],
+                        "count": 0,
+                        "budget_code": "B",
+                        "start_period": start_period,
+                    })
+                response_xml = client.execute("AnalysisCodes", "Query", master_payload)
         except SunSystemsError as exc:
+            logger.warning(
+                "SunSystems analysis-code lookup failed for dimension %s in Book B: %s",
+                dimension,
+                exc,
+            )
             return Response(
                 {"ok": False, "error": str(exc)},
                 status=status.HTTP_502_BAD_GATEWAY,
@@ -1307,7 +1377,7 @@ class AnalysisCodesQueryView(APIView):
             root = ET.fromstring(response_xml or "<SSC/>")
             for node in root.findall(".//AnalysisCodes"):
                 code = (node.findtext("AnalysisCode") or "").strip()
-                if not code:
+                if not code or (book_codes is not None and code not in book_codes):
                     continue
                 analysis_codes.append({
                     "analysis_code": code,
