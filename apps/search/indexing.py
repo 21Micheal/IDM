@@ -25,7 +25,17 @@ def document_queryset_for_index():
 
 def _delay_after_commit(task, *args, **kwargs) -> None:
     """Queue Celery work after the surrounding transaction commits."""
-    transaction.on_commit(lambda: task.delay(*args, **kwargs))
+
+    def enqueue() -> None:
+        try:
+            task.delay(*args, **kwargs)
+        except Exception:
+            # The document transaction is already committed here. A broker
+            # outage must not turn a successful form save into an HTTP 500.
+            # Keep the failure visible so operators can repair/reindex later.
+            logger.exception("Could not queue post-commit task %s", getattr(task, "name", repr(task)))
+
+    transaction.on_commit(enqueue)
 
 
 def queue_index_document(document_id: str) -> None:
