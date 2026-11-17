@@ -289,6 +289,10 @@ export interface RetirementConfig {
   /** Use either a numeric form field or the total from configured DSA amount rows. */
   issuedAmountMode?: "field" | "imprest_request_total";
   issuedAmountField?: string; // top-level field KEY holding the issued amount
+  /** Early-return retirement amounts are supplied by top-level calculated fields. */
+  underSpendConditionField?: string;
+  underSpentAmountField?: string;
+  underVarianceAmountField?: string;
   exact: RetirementScenario;
   under: RetirementScenario;
   over: RetirementScenario;
@@ -1566,6 +1570,10 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   }
 
   const byRole = (role: string) => fields.find((f) => f.sunsystems?.role === role);
+  const retirementFieldByLabel = (...needles: string[]) => fields.find((field) => {
+    const label = String(field.label || "").trim().toLowerCase();
+    return needles.some((needle) => label === needle.toLowerCase());
+  })?.key;
   const accountSpec = (source: AccountCodeSource | undefined, manual: string | undefined, columns?: TableColumn[]) => {
     if (source === "account_code" || source === "supplier_code") {
       const column = columns?.find((candidate) => candidate.sunsystems?.role === source);
@@ -1658,6 +1666,12 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           retirement: {
             issued_amount: issuedAmountSpec,
             spent_amount: { table: f.key, column: amountCol.key },
+            ...((retirement.underSpendConditionField || retirementFieldByLabel("Early Return?", "Early Return"))
+              ? { under_spend_condition: { field: retirement.underSpendConditionField || retirementFieldByLabel("Early Return?", "Early Return") } } : {}),
+            ...((retirement.underSpentAmountField || retirementFieldByLabel("Total Amount Spent"))
+              ? { under_spent_amount: { field: retirement.underSpentAmountField || retirementFieldByLabel("Total Amount Spent") } } : {}),
+            ...((retirement.underVarianceAmountField || retirementFieldByLabel("Total Amount To Return", "Total Amount To Return Copy"))
+              ? { under_variance_amount: { field: retirement.underVarianceAmountField || retirementFieldByLabel("Total Amount To Return", "Total Amount To Return Copy") } } : {}),
             scenarios: {
               exact: toScenario(retirement.exact),
               under: toScenario(retirement.under),
@@ -3190,6 +3204,11 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
 }) {
   const retirement = column.sunsystems?.retirement;
   const amountFieldOptions = formFields.filter((f) => f.key && (f.type === "number" || f.type === "currency" || CALCULATED_TYPES.has(f.type)));
+  const conditionFieldOptions = formFields.filter((f) => f.key && (f.type === "boolean" || f.type === "checkbox" || f.type === "yes_no"));
+  const fieldByLabel = (labels: string[]) => formFields.find((field) => labels.includes(String(field.label || "").trim().toLowerCase()))?.key ?? "";
+  const earlyReturnField = retirement?.underSpendConditionField || fieldByLabel(["early return?", "early return"]);
+  const underSpentField = retirement?.underSpentAmountField || fieldByLabel(["total amount spent"]);
+  const underVarianceField = retirement?.underVarianceAmountField || fieldByLabel(["total amount to return", "total amount to return copy"]);
   const imprestTable = formFields.find((f) => f.type === "table"
     && (f.workflowRole === "rfq_required_lines" || Boolean(dsaAccountValueSpec(f)))
     && Boolean(f.sunsystems?.imprestRequest?.enabled || f.columns?.some((column) => column.sunsystems?.imprestRequest?.enabled)));
@@ -3208,7 +3227,7 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
   };
 
   return (
-    <Row label="Retirement / Reconciliation" hint="For imprest-style tables: compare this column's total against an issued amount and post different journal lines depending on whether the user under- or over-spent.">
+    <Row label="Retirement / Reconciliation" hint="Exact spend reuses the issued amount. Over-spend adds the extra expense rows. Early-return under-spend uses the configured calculated fields.">
       <div className="space-y-3 border border-[#C8CDD2] bg-white p-2.5">
         <ToggleYesNo
           value={!!retirement?.enabled}
@@ -3246,6 +3265,42 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
                   Without this, issued is treated as 0 and every submission posts as a full overspend.
                 </p>
               )}
+            </div>
+            <div className="space-y-2 border-t border-dashed border-[#C8CDD2] pt-2">
+              <p className="text-xs text-[#5E6870]">Early return uses the form’s calculated spend and return amounts. Over-spend adds the extra expense rows to the issued amount.</p>
+              <label className="block">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Early return condition</span>
+                <CustomListbox
+                  value={earlyReturnField}
+                  onChange={(val) => onChange({ ...retirement, underSpendConditionField: val || undefined })}
+                  options={[{ value: "", label: "— choose a yes/no field —" }, ...conditionFieldOptions.map((f) => ({ value: f.key, label: `${f.label} (${f.key})` }))]}
+                  className={cn(iCls, "mt-1")}
+                  buttonClassName="w-full"
+                  ariaLabel="Early return condition field"
+                />
+              </label>
+              <label className="block">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Early return spent amount</span>
+                <CustomListbox
+                  value={underSpentField}
+                  onChange={(val) => onChange({ ...retirement, underSpentAmountField: val || undefined })}
+                  options={[{ value: "", label: "— choose a calculated amount field —" }, ...amountFieldOptions.map((f) => ({ value: f.key, label: `${f.label} (${f.key})` }))]}
+                  className={cn(iCls, "mt-1")}
+                  buttonClassName="w-full"
+                  ariaLabel="Early return spent amount field"
+                />
+              </label>
+              <label className="block">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Early return variance amount</span>
+                <CustomListbox
+                  value={underVarianceField}
+                  onChange={(val) => onChange({ ...retirement, underVarianceAmountField: val || undefined })}
+                  options={[{ value: "", label: "— choose the return amount field —" }, ...amountFieldOptions.map((f) => ({ value: f.key, label: `${f.label} (${f.key})` }))]}
+                  className={cn(iCls, "mt-1")}
+                  buttonClassName="w-full"
+                  ariaLabel="Early return variance amount field"
+                />
+              </label>
             </div>
             {RETIREMENT_SCENARIOS.map((s) => (
               <RetirementScenarioEditor
@@ -8661,8 +8716,19 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
         accountField: renameReference(c.sunsystems.accountField),
         budgetAmountField: renameReference(c.sunsystems.budgetAmountField),
         monitoredAmountField: renameReference(c.sunsystems.monitoredAmountField),
-        ...(c.sunsystems.retirement?.issuedAmountField === oldKey
-          ? { retirement: { ...c.sunsystems.retirement, issuedAmountField: newKey } }
+        ...(c.sunsystems.retirement && [
+          c.sunsystems.retirement.issuedAmountField,
+          c.sunsystems.retirement.underSpendConditionField,
+          c.sunsystems.retirement.underSpentAmountField,
+          c.sunsystems.retirement.underVarianceAmountField,
+        ].includes(oldKey)
+          ? { retirement: {
+            ...c.sunsystems.retirement,
+            ...(c.sunsystems.retirement.issuedAmountField === oldKey ? { issuedAmountField: newKey } : {}),
+            ...(c.sunsystems.retirement.underSpendConditionField === oldKey ? { underSpendConditionField: newKey } : {}),
+            ...(c.sunsystems.retirement.underSpentAmountField === oldKey ? { underSpentAmountField: newKey } : {}),
+            ...(c.sunsystems.retirement.underVarianceAmountField === oldKey ? { underVarianceAmountField: newKey } : {}),
+          } }
           : {}),
       }
       : c.sunsystems,

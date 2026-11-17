@@ -803,6 +803,19 @@ def get_imprest_retirement_postings(document) -> list[dict]:
     meta = getattr(document, "metadata", None) or {}
     form = meta.get("form") if isinstance(meta.get("form"), dict) else {}
     sections = form.get("sections") if isinstance(form.get("sections"), list) else []
+    form_fields = [
+        field for section in sections if isinstance(section, dict)
+        for field in section.get("fields", []) if isinstance(field, dict)
+    ]
+
+    def retirement_field_key(config_key: str, *labels: str) -> str | None:
+        configured = str(retirement.get(config_key) or "").strip()
+        if configured:
+            return configured
+        wanted = {label.strip().casefold() for label in labels}
+        return next((str(field.get("key")) for field in form_fields
+                     if str(field.get("label") or "").strip().casefold() in wanted and field.get("key")), None)
+
     values = get_form_values(document)
     po_postings = get_imprest_request_postings(document)
     sunsystems = get_sunsystems_config(document)
@@ -835,8 +848,15 @@ def get_imprest_retirement_postings(document) -> list[dict]:
             amount_column = next((c for c in columns if (c.get("sunsystems") or {}).get("role") == "line_amount"), None)
             retirement = (amount_column or {}).get("sunsystems", {}).get("retirement")
             rows = values.get(table.get("key"))
-            if not isinstance(retirement, dict) or not retirement.get("enabled") or not isinstance(rows, list) or not rows:
+            if not isinstance(retirement, dict) or not retirement.get("enabled"):
                 continue
+            condition_key = retirement_field_key("underSpendConditionField", "Early Return?", "Early Return")
+            if not isinstance(rows, list):
+                # Exact-spend submissions may contain no retirement table
+                # value at all. Keep legacy mappings table-dependent.
+                if not condition_key:
+                    continue
+                rows = []
 
             supplier_column = next((c for c in columns if (c.get("sunsystems") or {}).get("role") == "supplier_code"), None)
             first_row = next((row for row in rows if isinstance(row, dict) and any(v not in (None, "", [], {}) for v in row.values())), {})
@@ -905,6 +925,11 @@ def get_imprest_retirement_postings(document) -> list[dict]:
                 "retirement": {
                     "issued_amount": issued_amount,
                     "spent_amount": {"table": table.get("key"), "column": amount_column.get("key")},
+                    **({"under_spend_condition": {"field": condition_key}} if condition_key else {}),
+                    **({"under_spent_amount": {"field": spent_key}}
+                       if (spent_key := retirement_field_key("underSpentAmountField", "Total Amount Spent")) else {}),
+                    **({"under_variance_amount": {"field": variance_key}}
+                       if (variance_key := retirement_field_key("underVarianceAmountField", "Total Amount To Return", "Total Amount To Return Copy")) else {}),
                     "scenarios": scenarios,
                 }
             }

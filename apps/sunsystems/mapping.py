@@ -690,8 +690,11 @@ def build_purchase_order_ssc(
 
 
 def classify_retirement(retirement: dict, values: dict, warnings: list[str] | None = None) -> dict:
-    """Classify an imprest/retirement table against its issued/requested
-    amount. Pure classification — no line expansion, no XML — so it can be
+    """Classify an imprest retirement against its issued/requested amount.
+    New mappings use an early-return condition plus top-level calculated
+    spend/return fields for underspend, while the expense table contains only
+    extra over-spend. Older mappings retain their table-total comparison.
+    Pure classification — no line expansion, no XML — so it can be
     called anywhere the issued/spent/scenario numbers are needed (line
     expansion below, and the retirement-variance persisted for display on
     the Forms report / detail page).
@@ -788,22 +791,62 @@ def classify_retirement(retirement: dict, values: dict, warnings: list[str] | No
                 text = row.get(description_column_key)
                 if isinstance(text, str) and text.strip():
                     row_descriptions.append(text.strip())
-    else:
+    elif not isinstance(retirement.get("under_spend_condition"), dict):
         _warnings.append(f"Retirement table '{table_key}' has no rows; spent amount treated as 0.")
 
-    diff = spent - issued
-    if abs(diff) <= _RETIREMENT_EPSILON:
-        scenario_name = "exact"
-    elif diff < 0:
-        scenario_name = "under"
+    under_condition = retirement.get("under_spend_condition")
+    if isinstance(under_condition, dict):
+        condition_key = under_condition.get("field")
+        if condition_key and condition_key not in (values or {}):
+            _warnings.append(
+                f"Retirement's early-return condition field '{condition_key}' was not found; "
+                "the retirement was classified from its extra expense rows."
+            )
+        is_early_return = resolve_value(under_condition, values).strip().casefold() in {"true", "1", "yes", "y", "on"}
+        if is_early_return:
+            under_spent_spec = retirement.get("under_spent_amount") or {}
+            under_variance_spec = retirement.get("under_variance_amount") or {}
+            spent_key = under_spent_spec.get("field") if isinstance(under_spent_spec, dict) else None
+            variance_key = under_variance_spec.get("field") if isinstance(under_variance_spec, dict) else None
+            if spent_key:
+                spent = resolve_amount(under_spent_spec, values)
+                row_descriptions = []
+            if variance_key:
+                variance = abs(resolve_amount(under_variance_spec, values))
+            else:
+                variance = abs(issued - spent)
+                _warnings.append("Early-return variance amount is not configured; it was calculated from issued minus spent.")
+            scenario_name = "under"
+        elif spent > _RETIREMENT_EPSILON:
+            # The retirement table contains only the additional expenses.
+            # The journal's spent amount is therefore issued + those rows.
+            variance = spent
+            spent = issued + variance
+            scenario_name = "over"
+        else:
+            # Exact-spend retirement has no expense rows to enter. Its issued
+            # amount is the actual spend and produces a zero variance.
+            spent = issued
+            variance = Decimal("0")
+            row_descriptions = []
+            scenario_name = "exact"
     else:
-        scenario_name = "over"
+        # Compatibility for saved templates that still use the original
+        # retirement-table-total convention.
+        diff = spent - issued
+        if abs(diff) <= _RETIREMENT_EPSILON:
+            scenario_name = "exact"
+        elif diff < 0:
+            scenario_name = "under"
+        else:
+            scenario_name = "over"
+        variance = abs(diff)
 
     return {
         "scenario": scenario_name,
         "issued": issued,
         "spent": spent,
-        "variance": abs(diff),
+        "variance": variance,
         # De-duplicated, in encounter order — one line per distinct expense
         # narrative rather than repeating "Fuel; Fuel; Fuel" for three fuel
         # rows. Empty string when the table has no rows, no configured
