@@ -1365,7 +1365,11 @@ function BudgetLineInput({ value, onChange, disabled, dimensions, accountCodes, 
   );
 }
 
-function hasFieldValue(value: unknown, type?: string): boolean {
+function hasFieldValue(
+  value: unknown,
+  type?: string,
+  budgetLine?: { dimensions?: string[] },
+): boolean {
   if (value === undefined || value === null || value === "") return false;
   if (typeof value === "string") return Boolean(value.trim());
   // Table boolean cells store "true"/"false" strings; treat unchecked as empty
@@ -1375,7 +1379,21 @@ function hasFieldValue(value: unknown, type?: string): boolean {
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === "object") {
     const record = value as Record<string, unknown>;
-    if (type === "budget_line") return Boolean(String(record.account_code || record.dsa_account_code || "").trim());
+    if (type === "budget_line") {
+      const accountSelected = Boolean(String(record.account_code || record.dsa_account_code || "").trim());
+      const dimensions = Array.isArray(budgetLine?.dimensions) && budgetLine.dimensions.length
+        ? budgetLine.dimensions
+        : ANALYSIS_PANEL_SLOTS;
+      const analysisSelected = dimensions.some((dimension) =>
+        record[dimension] !== undefined
+        && record[dimension] !== null
+        && String(record[dimension]).trim() !== "",
+      );
+      // Selecting Activity can populate the other analysis values automatically.
+      // That is a valid Budget Line even if an account code is not part of this
+      // field's configuration or is supplied separately in another field.
+      return accountSelected || analysisSelected;
+    }
     // External / analysis-panel style objects are empty until at least one slot is set.
     return Object.values(record).some((entry) => entry !== undefined && entry !== null && String(entry).trim() !== "");
   }
@@ -1383,8 +1401,12 @@ function hasFieldValue(value: unknown, type?: string): boolean {
 }
 
 /** True when a required scalar or table-cell value is missing. */
-function isMissingRequiredValue(value: unknown, type?: string): boolean {
-  return !hasFieldValue(value, type);
+function isMissingRequiredValue(
+  value: unknown,
+  type?: string,
+  budgetLine?: { dimensions?: string[] },
+): boolean {
+  return !hasFieldValue(value, type, budgetLine);
 }
 
 function validationMessageFor(issues: string[], label: string, value?: unknown, type?: string): string | undefined {
@@ -3368,7 +3390,7 @@ export function requiredFieldLabels(
             rows.forEach((row, rowIndex) => {
               if (!evalVisible(col, values, allFields, processStep, row, viewer)) return;
               if (!evalEditable(col, values, allFields, processStep, row, viewer)) return;
-              if (isMissingRequiredValue(row?.[colKey], col.type)) {
+              if (isMissingRequiredValue(row?.[colKey], col.type, col.budgetLine)) {
                 missing.push(`${tableColumnLabel} (row ${rowIndex + 1})`);
               }
             });
@@ -3389,7 +3411,7 @@ export function requiredFieldLabels(
             ),
           );
           if (!hasAttachment) { missing.push(f.label ?? key); continue; }
-        } else if (isMissingRequiredValue(v, type)) {
+        } else if (isMissingRequiredValue(v, type, f.budgetLine)) {
           missing.push(f.label ?? key);
           continue;
         }
