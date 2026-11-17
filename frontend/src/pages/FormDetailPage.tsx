@@ -712,14 +712,6 @@ export default function FormDetailPage() {
     ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
-  const canSubmitPreparedLpo = Boolean(
-    formData?.lpo_generation_ready
-    && preparedLpo
-    && activeTask?.status === "awaiting_posting"
-    && (activeTask?.step as any)?.prepare_lpo_after_approval
-    && !isUnassignedHandoffViewer
-    && !isReturnedReworkEditor,
-  );
   useEffect(() => {
     if (!formData?.lpo_posting_complete) return;
     setAwaitingLpo(false);
@@ -1049,6 +1041,14 @@ export default function FormDetailPage() {
   const isReturnedReworkEditor = hasPreviousApproverHandoff
     && String(handoffEditorId ?? "") === String(user?.id ?? "");
   const isUnassignedHandoffViewer = hasPreviousApproverHandoff && !isReturnedReworkEditor;
+  const canSubmitPreparedLpo = Boolean(
+    formData?.lpo_generation_ready
+    && preparedLpo
+    && activeTask?.status === "awaiting_posting"
+    && (activeTask?.step as any)?.prepare_lpo_after_approval
+    && !isUnassignedHandoffViewer
+    && !isReturnedReworkEditor,
+  );
   const canEdit = !isUnassignedHandoffViewer
     && (hasAdminAccess || (doc.permissions ?? []).includes("edit"));
   const canDownload = hasAdminAccess || (doc.permissions ?? []).includes("download");
