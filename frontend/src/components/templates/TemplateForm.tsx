@@ -115,6 +115,7 @@ type Field = {
   required?: boolean; colSpan?: number; width?: number;
   workflowRole?: string;
   options?: string[]; columns?: Column[]; minRows?: number; totalLabel?: string;
+  budgetLine?: { dimensions?: string[]; accountCodes?: string[]; dsaAccountCodes?: string[]; taxRateColumn?: string };
   currencySymbol?: string; currencyFromField?: string; referenceSource?: string; referenceGroupId?: string; tooltip?: string; regex?: string;
   min?: string | number; max?: string | number; minLength?: number; maxLength?: number;
   /* Number/currency display config — a "number" field with `currency` type (or
