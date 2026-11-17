@@ -220,7 +220,7 @@ def _maybe_generate_lpo_after_posting(document, posting, actor=None) -> None:
 
 
 def _maybe_generate_payment_voucher_after_posting(document, posting, actor=None) -> None:
-    """Generate the appropriate PV once, after its source posting set completes."""
+    """Queue the appropriate PV once its source posting set completes."""
     stage = int(getattr(posting, "stage", 0) or 0)
     kind = "imprest" if 20000 <= stage < 30000 else "retirement" if stage >= 30000 else None
     if not kind:
@@ -233,13 +233,10 @@ def _maybe_generate_payment_voucher_after_posting(document, posting, actor=None)
     # invoke the idempotent generator in that case so it can recover an
     # already-linked voucher or retry generation. A queued retry stays in
     # control while pending.
-    if form_meta.get(voucher_id_key) or voucher_status == "pending":
+    if form_meta.get(voucher_id_key) or (voucher_status == "pending" and kind != "imprest"):
         return
     try:
-        from apps.documents.payment_voucher import (
-            _retirement_stages, generate_payment_voucher_for_imprest,
-            generate_payment_voucher_for_retirement,
-        )
+        from apps.documents.payment_voucher import _retirement_stages, generate_payment_voucher_for_retirement
         if kind == "imprest":
             from apps.sunsystems.config import get_imprest_request_postings
             from apps.sunsystems.models import JournalPostingStatus
@@ -249,7 +246,8 @@ def _maybe_generate_payment_voucher_after_posting(document, posting, actor=None)
             ).values_list("stage", flat=True))
             if not stages or not stages.issubset(posted):
                 return
-            voucher = generate_payment_voucher_for_imprest(document, posting, actor=actor or posting.posted_by)
+            _queue_imprest_payment_voucher_generation(document, posting, actor=actor or posting.posted_by)
+            return
         else:
             stages = _retirement_stages(document)
             if not stages or stage not in stages:
@@ -288,6 +286,47 @@ def _maybe_generate_payment_voucher_after_posting(document, posting, actor=None)
                 document.save(update_fields=["metadata", "updated_at"])
             except Exception:
                 logger.exception("Could not record failed %s voucher queue state for %s", kind, document.pk)
+
+
+def _queue_imprest_payment_voucher_generation(document, posting, actor=None) -> None:
+    """Queue PV rendering without delaying LPO workflow completion."""
+    from django.db import transaction
+    from apps.documents.models import Document
+    from apps.sunsystems.tasks import retry_payment_voucher_generation
+
+    with transaction.atomic():
+        latest = Document.objects.select_for_update().get(pk=document.pk)
+        metadata = dict(latest.metadata or {})
+        form = dict(metadata.get("form") or {})
+        if form.get("imprest_payment_voucher_document_id"):
+            return
+        # Re-queue a pending or stale "generated" status when the document id
+        # is missing. The generator locks the source form and recovers linked
+        # vouchers, so concurrent retries remain idempotent.
+        form["imprest_payment_voucher_status"] = "pending"
+        form.pop("imprest_payment_voucher_error", None)
+        metadata["form"] = form
+        latest.metadata = metadata
+        latest.save(update_fields=["metadata", "updated_at"])
+
+    try:
+        retry_payment_voucher_generation.delay(
+            str(document.pk),
+            "imprest",
+            str(posting.pk),
+            str(getattr(actor or posting.posted_by, "pk", "") or ""),
+        )
+    except Exception as exc:
+        logger.exception("Could not queue Imprest Payment Voucher generation for %s", document.pk)
+        with transaction.atomic():
+            latest = Document.objects.select_for_update().get(pk=document.pk)
+            metadata = dict(latest.metadata or {})
+            form = dict(metadata.get("form") or {})
+            form["imprest_payment_voucher_status"] = "failed"
+            form["imprest_payment_voucher_error"] = f"Could not queue voucher generation: {exc}"[:500]
+            metadata["form"] = form
+            latest.metadata = metadata
+            latest.save(update_fields=["metadata", "updated_at"])
 
 
 def _mark(posting: JournalPosting, status: str, **fields) -> None:

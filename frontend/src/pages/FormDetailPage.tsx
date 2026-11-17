@@ -343,8 +343,9 @@ export default function FormDetailPage() {
       // another member. The completion overlay is terminal on this page, so
       // stop polling the detail record while it is shown.
       if (workflowActionCompleted) return false;
-      const form = (query.state.data as { metadata?: { form?: { imprest_request_workflow_status?: string; payment_voucher_document_id?: string; retirement_workflow_status?: string; retirement_variance?: { scenario?: string; kind?: string } } } } | undefined)
+      const form = (query.state.data as { metadata?: { form?: { imprest_request_workflow_status?: string; payment_voucher_document_id?: string; imprest_payment_voucher_document_id?: string; imprest_payment_voucher_status?: string; retirement_workflow_status?: string; retirement_variance?: { scenario?: string; kind?: string } } } } | undefined)
         ?.metadata?.form;
+      if (form?.imprest_payment_voucher_status === "pending" && !form.imprest_payment_voucher_document_id) return 1_500;
       if (String(form?.retirement_workflow_status || "").toLowerCase() === "approved"
         && (form?.retirement_variance?.scenario === "over" || form?.retirement_variance?.kind === "over")
         && !form?.payment_voucher_document_id) return 1_500;
@@ -369,7 +370,7 @@ export default function FormDetailPage() {
       print_config?: Record<string, any>;
       lpo_document_id?: string;
       lpo_reference?: string;
-      lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string; prepared?: boolean }>;
+      lpo_documents?: Array<{ id: string; reference?: string; table_key?: string; table_label?: string; posting_stage?: number; prepared?: boolean }>;
       payment_voucher_document_id?: string;
       payment_voucher_reference?: string;
       imprest_payment_voucher_document_id?: string;
@@ -570,6 +571,21 @@ export default function FormDetailPage() {
     : formData?.lpo_document_id
       ? [{ id: formData.lpo_document_id, reference: formData.lpo_reference }]
       : [];
+  const lpoPostingStages = gatePostings.filter((posting) => isLpoPurchaseOrderStage(posting.stage));
+  const imprestRequestPostingStages = gatePostings.filter((posting) => isImprestRequestPostingStage(posting.stage));
+  const allLpoFilesReady = lpoPostingStages.length > 0 && lpoPostingStages.every((posting) =>
+    posting.status === "posted"
+    && generatedLpos.some((lpo) =>
+      !lpo.prepared
+      && Number(lpo.posting_stage) === Number(posting.stage)
+      && Boolean(lpo.reference),
+    ),
+  );
+  const requiredImprestPostingsReady = !formData?.imprest_request_posting_required_for_lpo
+    || (imprestRequestPostingStages.length > 0 && imprestRequestPostingStages.every((posting) => posting.status === "posted"));
+  // The durable workflow flag is authoritative, with file/posting evidence as
+  // a fallback if its metadata refresh lags behind generated LPO documents.
+  const lpoGateReady = Boolean(formData?.lpo_posting_complete || (allLpoFilesReady && requiredImprestPostingsReady));
   const [selectedLpoId, setSelectedLpoId] = useState<string | null>(
     (location.state as { selectedLpoId?: string } | null)?.selectedLpoId ?? null,
   );
@@ -720,7 +736,7 @@ export default function FormDetailPage() {
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
   useEffect(() => {
-    if (!formData?.lpo_posting_complete) return;
+    if (!lpoGateReady) return;
     setAwaitingLpo(false);
     setGateRetrying(false);
     // The last LPO approver must stay on the form to open the generated LPO
@@ -733,7 +749,7 @@ export default function FormDetailPage() {
       qc.invalidateQueries({ queryKey: ["form-workflow", id] }),
       qc.invalidateQueries({ queryKey: ["requisitions"] }),
     ]);
-  }, [formData?.lpo_posting_complete, id, qc]);
+  }, [lpoGateReady, id, qc]);
 
   // When the page is opened via an email notification link (?task=<id>),
   // scroll the action panel into view once the approver's task has loaded.
@@ -1537,6 +1553,11 @@ export default function FormDetailPage() {
                     {formEditing ? (formAutosave.status === "saving" || formAutosave.status === "unsaved" ? "Saving changes…" : formAutosave.status === "error" ? "Autosave failed" : formAutosave.status === "saved" ? "Changes saved" : "Editing") : formData?.lpo_posting_complete ? "LPO posted to SunSystems" : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm && isOwnerOrSubmitter ? "Click Edit form to modify" : canEdit && !isOwnerOrSubmitter ? "Your permitted changes save automatically" : "Filled in-app"}
                   </span>
                 )}
+                {formData?.imprest_payment_voucher_status === "pending" && !imprestPaymentVoucherId && (
+                  <span role="status" className="inline-flex items-center gap-1.5 text-xs font-medium text-[#287EAD]">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating DSA Payment Voucher…
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-2 flex-wrap justify-end">
                 {canSubmit && !canResubmitAtBottom && (
@@ -2197,7 +2218,7 @@ export default function FormDetailPage() {
         </div>
       )}
 
-      {awaitingLpo && !formData?.lpo_posting_complete && (
+      {awaitingLpo && !lpoGateReady && (
         <PostingGateOverlay
           title={formData?.imprest_request_posting_required_for_lpo ? "LPO and Imprest posting in progress" : "LPO posting in progress"}
           pendingMessage={formData?.imprest_request_posting_required_for_lpo
