@@ -309,6 +309,13 @@ export default function FormDetailPage() {
   const [awaitingLpo, setAwaitingLpo] = useState(
     Boolean(navigationState?.awaitLpo),
   );
+  // Completion/gate flags are only for this navigation. React Router stores
+  // location state in browser history, so clear it after initializing local
+  // state or a refresh/reopen in this browser can replay a stale overlay.
+  useEffect(() => {
+    if (!navigationState?.workflowActionCompleted && !navigationState?.awaitLpo) return;
+    navigate(`${location.pathname}${location.search}${location.hash}`, { replace: true, state: null });
+  }, [location.hash, location.pathname, location.search, navigate, navigationState?.awaitLpo, navigationState?.workflowActionCompleted]);
   const [awaitingImprestPostSince, setAwaitingImprestPostSince] = useState(0);
   const [awaitingPaymentVoucher, setAwaitingPaymentVoucher] = useState(false);
   const [paymentVoucherGateDismissed, setPaymentVoucherGateDismissed] = useState(false);
@@ -716,7 +723,10 @@ export default function FormDetailPage() {
     if (!formData?.lpo_posting_complete) return;
     setAwaitingLpo(false);
     setGateRetrying(false);
-    setWorkflowActionCompleted(true);
+    // The last LPO approver must stay on the form to open the generated LPO
+    // and payment voucher. This is a successful posting milestone, not a
+    // reason to cover the documents with the terminal workflow overlay.
+    setWorkflowActionCompleted(false);
     setLpoModalOpen(false);
     void Promise.all([
       qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] }),
