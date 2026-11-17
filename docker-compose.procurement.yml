@@ -52,6 +52,9 @@ services:
       context: .
       dockerfile: Dockerfile
       network: host
+      args:
+        INSTALL_PADDLE_OCR: "0"
+        PRELOAD_OCR_MODELS: "0"
     restart: unless-stopped
     command: sh -c "python manage.py migrate --noinput && daphne IDM.asgi:application -b 0.0.0.0 -p 8000"
     environment:
@@ -106,6 +109,9 @@ services:
   celery_worker:
     build:
       context: .
+      args:
+        INSTALL_PADDLE_OCR: "0"
+        PRELOAD_OCR_MODELS: "0"
       network: host
     restart: unless-stopped
     command: celery -A IDM worker -l info -Q default,indexing,notifications
@@ -145,6 +151,9 @@ services:
   celery_beat:
     build:
       context: .
+      args:
+        INSTALL_PADDLE_OCR: "0"
+        PRELOAD_OCR_MODELS: "0"
       network: host
     restart: unless-stopped
     command: celery -A IDM beat -l info

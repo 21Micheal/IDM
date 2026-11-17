@@ -240,6 +240,10 @@ def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any
 
         field_map[field_id] = {
             "id": field_id,
+            # Form values are persisted under schema ``key``. Some older
+            # templates have a distinct display/id value, which is what the
+            # workflow picker serializes as field_id.
+            "value_key": str(field.get("key") or field.get("name") or field_id),
             "label": label_str,
             "type": field_type,
             "options": options if options else None,
@@ -299,6 +303,7 @@ def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any
                             dotted_id = f"{table_key}.{col_key}"
                             field_map[dotted_id] = {
                                 "id": dotted_id,
+                                "value_key": dotted_id,
                                 "label": f"{table_label}: {col_label}",
                                 "type": col_type,
                                 "options": None,
@@ -307,6 +312,7 @@ def build_field_map_from_document_type(document_type) -> Dict[str, Dict[str, Any
                             if col_key not in field_map:
                                 field_map[col_key] = {
                                     "id": col_key,
+                                    "value_key": col_key,
                                     "label": f"{col_label} ({table_label})",
                                     "type": col_type,
                                     "options": None,
@@ -416,6 +422,20 @@ def _table_column_values(ctx: EvalContext, field_id: str):
         if isinstance(rows, list) and any(isinstance(row, dict) and field_id in row for row in rows):
             return table_key, [row.get(field_id) if isinstance(row, dict) else None for row in rows]
     return None
+
+
+def _get_field_value(ctx: EvalContext, field_id: str, field_map: Dict[str, Dict[str, Any]]) -> Any:
+    """Resolve a workflow field ID and fall back to its persisted form key."""
+    value = get_value(ctx, field_id)
+    if not is_empty_value(value):
+        return value
+    field = field_map.get(field_id) or {}
+    value_key = field.get("value_key")
+    if value_key and str(value_key) != field_id:
+        keyed_value = get_value(ctx, str(value_key))
+        if not is_empty_value(keyed_value):
+            return keyed_value
+    return value
 
 
 def is_money(value: Any) -> bool:
@@ -562,18 +582,22 @@ def eval_rule(
         Operator.EQ, Operator.NEQ, Operator.GT, Operator.GTE,
         Operator.LT, Operator.LTE,
     ):
-        left_rows = _table_column_values(ctx, str(field_id or ""))
-        right_rows = _table_column_values(ctx, str(rule.get("value_ref") or ""))
+        left_id = str(field_id or "")
+        right_id = str(rule.get("value_ref") or "")
+        left_value_key = str((field_map.get(left_id) or {}).get("value_key") or left_id)
+        right_value_key = str((field_map.get(right_id) or {}).get("value_key") or right_id)
+        left_rows = _table_column_values(ctx, left_value_key)
+        right_rows = _table_column_values(ctx, right_value_key)
         if left_rows or right_rows:
             if left_rows and right_rows and left_rows[0] == right_rows[0]:
                 pairs = list(zip(left_rows[1], right_rows[1]))
             elif left_rows and right_rows:
                 pairs = [(left, right) for left in left_rows[1] for right in right_rows[1]]
             elif left_rows:
-                right_value = get_value(ctx, str(rule.get("value_ref")))
+                right_value = _get_field_value(ctx, right_id, field_map)
                 pairs = [(left, right_value) for left in left_rows[1]]
             else:
-                left_value = get_value(ctx, str(field_id or ""))
+                left_value = _get_field_value(ctx, left_id, field_map)
                 pairs = [(left_value, right) for right in right_rows[1]]
             for left_value, right_value in pairs:
                 if is_empty_value(left_value) or is_empty_value(right_value):
@@ -587,7 +611,7 @@ def eval_rule(
         return False
     
     field = field_map.get(field_id, {})
-    raw = _row_pair[0] if _row_pair is not None else get_value(ctx, field_id)
+    raw = _row_pair[0] if _row_pair is not None else _get_field_value(ctx, field_id, field_map)
     
     # Infer type from field metadata or raw value
     field_type = field.get("type")
@@ -614,7 +638,7 @@ def eval_rule(
     # Get right-hand operand (literal or field reference)
     value_ref = rule.get("value_ref")
     if value_ref:
-        rhs = _row_pair[1] if _row_pair is not None else get_value(ctx, value_ref)
+        rhs = _row_pair[1] if _row_pair is not None else _get_field_value(ctx, value_ref, field_map)
     else:
         rhs = rule.get("value")
     

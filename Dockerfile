@@ -41,8 +41,14 @@ RUN python -m venv "$VIRTUAL_ENV"
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 COPY requirements.txt .
+ARG INSTALL_PADDLE_OCR=1
 RUN python -m pip install --upgrade pip setuptools wheel \
-    && python -m pip install -r requirements.txt
+    && if [ "$INSTALL_PADDLE_OCR" = "1" ]; then \
+         python -m pip install -r requirements.txt; \
+       else \
+         sed '/^[[:space:]]*paddlepaddle==/d; /^[[:space:]]*paddleocr==/d' requirements.txt > /tmp/requirements-no-paddle.txt \
+         && python -m pip install -r /tmp/requirements-no-paddle.txt; \
+       fi
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM python:3.10-slim-bookworm

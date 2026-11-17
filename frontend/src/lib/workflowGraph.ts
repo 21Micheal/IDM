@@ -472,6 +472,17 @@ function isEmptyValue(v: unknown): boolean {
   return false;
 }
 
+function getFieldValue(env: EvalEnv, id: string, fields: Map<string, WorkflowField>): unknown {
+  const value = getValue(env, id);
+  if (!isEmptyValue(value)) return value;
+  const schemaKey = fields.get(id)?.key;
+  if (schemaKey && schemaKey !== id) {
+    const keyedValue = getValue(env, schemaKey);
+    if (!isEmptyValue(keyedValue)) return keyedValue;
+  }
+  return value;
+}
+
 function toNumber(v: unknown): number | null {
   if (isMoney(v)) return toNumber(v.amount);
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
@@ -522,8 +533,10 @@ export function evalRule(
 
   if (!rule.field_id || !rule.op) { env.warnings.push("Incomplete condition ignored."); return false; }
   if (!rowPair && rule.value_ref && ["eq", "neq", "gt", "gte", "lt", "lte"].includes(rule.op)) {
-    const leftRows = getTableColumnValues(env, rule.field_id);
-    const rightRows = getTableColumnValues(env, rule.value_ref);
+    const leftKey = fields.get(rule.field_id)?.key ?? rule.field_id;
+    const rightKey = fields.get(rule.value_ref)?.key ?? rule.value_ref;
+    const leftRows = getTableColumnValues(env, leftKey);
+    const rightRows = getTableColumnValues(env, rightKey);
     if (leftRows || rightRows) {
       let pairs: Array<[unknown, unknown]>;
       if (leftRows && rightRows && leftRows.table === rightRows.table) {
@@ -531,10 +544,10 @@ export function evalRule(
       } else if (leftRows && rightRows) {
         pairs = leftRows.values.flatMap((left) => rightRows.values.map((right) => [left, right] as [unknown, unknown]));
       } else if (leftRows) {
-        const right = getValue(env, rule.value_ref);
+        const right = getFieldValue(env, rule.value_ref, fields);
         pairs = leftRows.values.map((left) => [left, right]);
       } else {
-        const left = getValue(env, rule.field_id);
+        const left = getFieldValue(env, rule.field_id, fields);
         pairs = rightRows!.values.map((right) => [left, right]);
       }
       return pairs.some(([left, right]) => !isEmptyValue(left) && !isEmptyValue(right)
@@ -543,7 +556,7 @@ export function evalRule(
   }
 
   const field = fields.get(rule.field_id);
-  const raw = rowPair ? rowPair.left : getValue(env, rule.field_id);
+  const raw = rowPair ? rowPair.left : getFieldValue(env, rule.field_id, fields);
   const type: FieldType = field?.type ?? (isMoney(raw) ? "money" : typeof raw === "number" ? "number"
     : typeof raw === "boolean" ? "boolean" : Array.isArray(raw) ? "multiselect" : "text");
 
@@ -552,7 +565,7 @@ export function evalRule(
   if (isEmptyValue(raw)) return TRUE_WHEN_EMPTY.has(rule.op);
 
   // Right-hand operand: literal or another field.
-  const refVal = rule.value_ref ? (rowPair ? rowPair.right : getValue(env, rule.value_ref)) : undefined;
+  const refVal = rule.value_ref ? (rowPair ? rowPair.right : getFieldValue(env, rule.value_ref, fields)) : undefined;
   const lit = rule.value_ref ? refVal : rule.value;
 
   const isNumericOp = ["gt", "gte", "lt", "lte", "between"].includes(rule.op);

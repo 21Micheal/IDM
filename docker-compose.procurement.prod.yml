@@ -9,6 +9,7 @@ x-procurement-app: &procurement-app
     context: .
     dockerfile: Dockerfile
     args:
+      INSTALL_PADDLE_OCR: "0"
       PRELOAD_OCR_MODELS: "0"
   image: requisition-procurement:prod
   restart: unless-stopped
