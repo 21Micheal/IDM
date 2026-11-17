@@ -22,8 +22,8 @@
   "theme": {
     "fontFamily": "Arial, Helvetica, sans-serif",
     "headingFamily": "Arial, Helvetica, sans-serif",
-    "baseFontSize": 10,
-    "lineHeight": 1.18,
+    "baseFontSize": 12,
+    "lineHeight": 1.25,
     "textColor": "#111111",
     "headingColor": "#061A64",
     "accentColor": "#061A64"
@@ -128,7 +128,7 @@
                   "type": "text",
                   "text": "PAYMENT VOUCHER",
                   "style": {
-                    "fontSize": 19,
+                    "fontSize": 22,
                     "bold": true,
                     "textAlign": "center",
                     "color": "#061A64",
@@ -155,7 +155,7 @@
                   "type": "text",
                   "text": "Payment To",
                   "style": {
-                    "fontSize": 12,
+                    "fontSize": 14,
                     "bold": true,
                     "textAlign": "left",
                     "color": "#061A64",
@@ -167,7 +167,7 @@
                   "type": "text",
                   "text": "{{voucher_payment_to}}",
                   "style": {
-                    "fontSize": 12,
+                    "fontSize": 14,
                     "bold": false,
                     "textAlign": "left",
                     "color": "#061A64",
@@ -194,7 +194,7 @@
                   "type": "text",
                   "text": "Account Code:",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "bold": true,
                     "textAlign": "left",
                     "color": "#061A64",
@@ -206,7 +206,7 @@
                   "type": "text",
                   "text": "{{voucher_account_code}}",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "bold": false,
                     "textAlign": "left",
                     "color": "#061A64",
@@ -226,7 +226,7 @@
                   "type": "text",
                   "text": "Name:",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "bold": true,
                     "textAlign": "left",
                     "color": "#061A64",
@@ -238,7 +238,7 @@
                   "type": "text",
                   "text": "{{voucher_name}}",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "bold": false,
                     "textAlign": "left",
                     "color": "#061A64",
@@ -258,7 +258,7 @@
                   "type": "text",
                   "text": "Date",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "bold": true,
                     "textAlign": "left",
                     "color": "#061A64",
@@ -270,7 +270,7 @@
                   "type": "text",
                   "text": "{{voucher_date}}",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "bold": false,
                     "textAlign": "left",
                     "color": "#061A64",
@@ -368,7 +368,7 @@
                   "type": "text",
                   "text": "Total Amount",
                   "style": {
-                    "fontSize": 11,
+                    "fontSize": 13,
                     "bold": true,
                     "textAlign": "right",
                     "color": "#061A64",
@@ -380,7 +380,7 @@
                   "type": "text",
                   "text": "{{voucher_total}}",
                   "style": {
-                    "fontSize": 11,
+                    "fontSize": 13,
                     "bold": true,
                     "textAlign": "right",
                     "color": "#061A64",
@@ -407,7 +407,7 @@
                   "type": "text",
                   "text": "Cheque No.  ........................................................",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "bold": true,
                     "textAlign": "left",
                     "color": "#061A64",
@@ -437,34 +437,36 @@
                       "id": "pv-prepared",
                       "role": "Prepared By",
                       "name": "{{prepared_by}}",
-                      "date": ".................................",
+                      "date": "",
                       "signature": "........................................"
                     },
                     {
                       "id": "pv-checked",
                       "role": "Checked By",
-                      "name": "........................................",
-                      "date": ".................................",
+                      "name": "",
+                      "date": "",
                       "signature": "........................................"
                     },
                     {
                       "id": "pv-approved",
                       "role": "Approved By",
-                      "name": "........................................",
-                      "date": ".................................",
+                      "name": "",
+                      "date": "",
                       "signature": "........................................"
                     },
                     {
                       "id": "pv-received",
                       "role": "Received/Dispatched by",
-                      "name": "......................................................",
+                      "name": "",
                       "date": "",
                       "signature": ""
                     }
                   ],
                   "style": {
-                    "fontSize": 10,
-                    "color": "#061A64"
+                    "fontSize": 12,
+                    "color": "#061A64",
+                    "signatureSpace": 52,
+                    "columnsPerRow": 2
                   }
                 }
               ]

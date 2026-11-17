@@ -1171,7 +1171,7 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
     text_color = colors.HexColor(str(theme.get("textColor", "#1F2933")))
     heading_color = colors.HexColor(str(theme.get("headingColor", "#0F2A3A")))
     accent = colors.HexColor(str(theme.get("accentColor", "#287EAD")))
-    base_size = max(8, round(float(theme.get("baseFontSize", 13)) * .75))
+    base_size = max(9, round(float(theme.get("baseFontSize", 13)) * .75))
     align_map = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
 
     def as_color(value, fallback):
@@ -1186,7 +1186,7 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
     def para(raw, *, style=None, element=None):
         element = element or {}
         estyle = element.get("style") or {}
-        size = max(7, round(float(estyle.get("fontSize", base_size / .75)) * .75))
+        size = max(9, round(float(estyle.get("fontSize", base_size / .75)) * .75))
         bold, italic = bool(estyle.get("bold")), bool(estyle.get("italic"))
         font = "Helvetica-BoldOblique" if bold and italic else "Helvetica-Bold" if bold else "Helvetica-Oblique" if italic else "Helvetica"
         if style is None:
@@ -1241,7 +1241,7 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             widths = [available_width * max(1, float(column.get("width") or 1)) / sum(max(1, float(c.get("width") or 1)) for c in columns) for column in columns]
             header_bg = as_color(element.get("headerBackground"), accent)
             header_color = as_color(element.get("headerColor"), "#FFFFFF")
-            header_style = ParagraphStyle("DesignerV2TableHeader", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=max(7, base_size - 1), leading=base_size, textColor=header_color)
+            header_style = ParagraphStyle("DesignerV2TableHeader", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=max(8, base_size - 1), leading=base_size, textColor=header_color)
             data = [[para(column.get("label", ""), style=header_style) for column in columns]]
             data.extend([[para(row[i] if i < len(row) else "") for i in range(len(columns))] for row in rows])
             summaries = element.get("summaries") or []
@@ -1282,15 +1282,53 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             return [para(element.get("alt") or "")]
         if kind == "signature_group":
             signatures = element.get("signatories") or []
-            rows = []
-            for signature in signatures:
-                role = f"{signature.get('step')}. " if signature.get("step") else ""
-                rows.append([para(role + str(signature.get("role") or ""), element={"style": {"bold": True}}), para(""), para("")])
-                rows.append([para(_subst_tokens(str(signature.get("name") or ""), values)), para(""), para("Date: " + _subst_tokens(str(signature.get("date") or ""), values))])
-            if not rows:
+            if not signatures:
                 return []
-            table = Table(rows, colWidths=[available_width * .42, available_width * .12, available_width * .46])
-            table.setStyle(TableStyle([("SPAN", (0, i), (2, i)) for i in range(0, len(rows), 2)] + [("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2)]))
+            signature_style = element.get("style") or {}
+            columns_per_row = max(1, min(4, int(signature_style.get("columnsPerRow", 2))))
+            signature_space = max(18, float(signature_style.get("signatureSpace", 42)) * .75)
+            block_width = available_width / columns_per_row
+            signature_font = max(8, round(float(signature_style.get("fontSize", 12)) * .75))
+            signature_color_value = signature_style.get("color") or theme.get("textColor", "#1F2933")
+            signature_color = as_color(signature_color_value, text_color)
+
+            def signer_block(signature):
+                role = f"{signature.get('step')}. " if signature.get("step") else ""
+                role += str(signature.get("role") or "")
+                raw_name = _subst_tokens(str(signature.get("name") or ""), values).strip()
+                raw_date = _subst_tokens(str(signature.get("date") or ""), values).strip()
+                is_line = lambda value: bool(value) and all(char in ". _-" for char in value)
+                name_text = "Name: __________________________" if is_line(raw_name) or not raw_name else f"Name: {raw_name}"
+                date_text = "Date: __________________" if is_line(raw_date) or not raw_date else f"Date: {raw_date}"
+                block = [
+                    para(role, element={"style": {"bold": True, "fontSize": signature_font / .75, "color": signature_color_value}}),
+                    Spacer(1, signature_space),
+                    HRFlowable(width="100%", thickness=0.65, color=as_color(signature_style.get("lineColor"), "#334155"), spaceBefore=0, spaceAfter=3),
+                ]
+                detail_style = ParagraphStyle(
+                    "SignerDetail", parent=styles["Normal"], fontName="Helvetica",
+                    fontSize=max(8, signature_font - 1), leading=max(10, signature_font + 2),
+                    textColor=signature_color,
+                )
+                detail = Table([[para(name_text, style=detail_style), para(date_text, style=detail_style)]], colWidths=[block_width * .62, block_width * .38])
+                detail.setStyle(TableStyle([
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ]))
+                block.append(detail)
+                return block
+
+            signer_blocks = [signer_block(signature) for signature in signatures]
+            rows = [signer_blocks[i:i + columns_per_row] for i in range(0, len(signer_blocks), columns_per_row)]
+            for row in rows:
+                row.extend([""] * (columns_per_row - len(row)))
+            table = Table(rows, colWidths=[block_width] * columns_per_row, hAlign="LEFT")
+            table.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7), ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+            ]))
             return [table]
         if kind == "divider":
             return [HRFlowable(width="100%", thickness=float(style.get("borderWidth", 1)), color=as_color(style.get("borderColor"), "#94A3B8"))]

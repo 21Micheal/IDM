@@ -22,8 +22,8 @@
   "theme": {
     "fontFamily": "Arial, Helvetica, sans-serif",
     "headingFamily": "Arial, Helvetica, sans-serif",
-    "baseFontSize": 10,
-    "lineHeight": 1.18,
+    "baseFontSize": 12,
+    "lineHeight": 1.25,
     "textColor": "#111111",
     "headingColor": "#111111",
     "accentColor": "#061A64"
@@ -150,7 +150,7 @@
                   "type": "text",
                   "text": "This form must be used for all credit purchases.\nThe LPO automatically expires after 60 days if not utilized.",
                   "style": {
-                    "fontSize": 9,
+                    "fontSize": 10,
                     "color": "#172554",
                     "align": "right",
                     "textAlign": "right",
@@ -224,7 +224,7 @@
                   "type": "text",
                   "text": "{{supplier.name}}",
                   "style": {
-                    "fontSize": 12,
+                    "fontSize": 14,
                     "bold": true,
                     "marginBottom": 2
                   }
@@ -234,7 +234,7 @@
                   "type": "text",
                   "text": "{{supplier.address}}",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "lineHeight": 1.2
                   }
                 }
@@ -253,7 +253,7 @@
                   "type": "text",
                   "text": "DELIVER TO",
                   "style": {
-                    "fontSize": 11,
+                    "fontSize": 13,
                     "bold": true,
                     "color": "#061A64",
                     "marginBottom": 1
@@ -264,7 +264,7 @@
                   "type": "text",
                   "text": "Civil Aviation Safety & Security Oversight Agency",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "color": "#061A64",
                     "bold": true,
                     "marginBottom": 1
@@ -275,7 +275,7 @@
                   "type": "text",
                   "text": "Plot 41/43 Circular Road\nPO BOX 873 Entebbe\n+256 312 266930",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "color": "#061A64",
                     "lineHeight": 1.2
                   }
@@ -437,7 +437,7 @@
                 {
                   "id": "cassoa-bottom-spacer",
                   "type": "spacer",
-                  "height": 76
+                  "height": 12
                 }
               ]
             }
@@ -457,7 +457,7 @@
                   "type": "text",
                   "text": "{{lpo.purpose}}",
                   "style": {
-                    "fontSize": 10,
+                    "fontSize": 12,
                     "color": "#061A64",
                     "bold": true,
                     "marginBottom": 4
@@ -468,7 +468,7 @@
                   "type": "text",
                   "text": "The above LPO number MUST be quoted on the invoice and any other correspondence.",
                   "style": {
-                    "fontSize": 9,
+                    "fontSize": 10,
                     "lineHeight": 1.15
                   }
                 }
@@ -547,10 +547,23 @@
                 {
                   "id": "cassoa-checked-label",
                   "type": "text",
-                  "text": "Checked By........................................",
+                  "text": "Checked By",
                   "style": {
-                    "fontSize": 9,
+                    "fontSize": 13,
                     "bold": true
+                  }
+                },
+                {
+                  "id": "cassoa-checked-label-signing-space",
+                  "type": "spacer",
+                  "height": 38
+                },
+                {
+                  "id": "cassoa-checked-label-signature-line",
+                  "type": "divider",
+                  "style": {
+                    "borderWidth": 0.8,
+                    "borderColor": "#334155"
                   }
                 }
               ]
@@ -563,10 +576,23 @@
                 {
                   "id": "cassoa-checked-date-label",
                   "type": "text",
-                  "text": "Date...................................",
+                  "text": "Date",
                   "style": {
-                    "fontSize": 9,
+                    "fontSize": 13,
                     "bold": true
+                  }
+                },
+                {
+                  "id": "cassoa-checked-date-label-signing-space",
+                  "type": "spacer",
+                  "height": 38
+                },
+                {
+                  "id": "cassoa-checked-date-label-signature-line",
+                  "type": "divider",
+                  "style": {
+                    "borderWidth": 0.8,
+                    "borderColor": "#334155"
                   }
                 }
               ]
@@ -579,18 +605,31 @@
                 {
                   "id": "cassoa-checked-designation-label",
                   "type": "text",
-                  "text": "Designation....................................",
+                  "text": "Designation",
                   "style": {
-                    "fontSize": 9,
+                    "fontSize": 13,
                     "bold": true
+                  }
+                },
+                {
+                  "id": "cassoa-checked-designation-label-signing-space",
+                  "type": "spacer",
+                  "height": 38
+                },
+                {
+                  "id": "cassoa-checked-designation-label-signature-line",
+                  "type": "divider",
+                  "style": {
+                    "borderWidth": 0.8,
+                    "borderColor": "#334155"
                   }
                 }
               ]
             }
           ],
-          "gap": 8,
-          "marginBottom": 8,
-          "minHeight": 8,
+          "gap": 12,
+          "marginBottom": 16,
+          "minHeight": 0,
           "keepTogether": true
         },
         {
@@ -604,10 +643,23 @@
                 {
                   "id": "cassoa-approved-label",
                   "type": "text",
-                  "text": "Approved By......................................",
+                  "text": "Approved By",
                   "style": {
-                    "fontSize": 9,
+                    "fontSize": 13,
                     "bold": true
+                  }
+                },
+                {
+                  "id": "cassoa-approved-label-signing-space",
+                  "type": "spacer",
+                  "height": 38
+                },
+                {
+                  "id": "cassoa-approved-label-signature-line",
+                  "type": "divider",
+                  "style": {
+                    "borderWidth": 0.8,
+                    "borderColor": "#334155"
                   }
                 }
               ]
@@ -620,10 +672,23 @@
                 {
                   "id": "cassoa-approved-date-label",
                   "type": "text",
-                  "text": "Date...................................",
+                  "text": "Date",
                   "style": {
-                    "fontSize": 9,
+                    "fontSize": 13,
                     "bold": true
+                  }
+                },
+                {
+                  "id": "cassoa-approved-date-label-signing-space",
+                  "type": "spacer",
+                  "height": 38
+                },
+                {
+                  "id": "cassoa-approved-date-label-signature-line",
+                  "type": "divider",
+                  "style": {
+                    "borderWidth": 0.8,
+                    "borderColor": "#334155"
                   }
                 }
               ]
@@ -636,18 +701,31 @@
                 {
                   "id": "cassoa-approved-designation-label",
                   "type": "text",
-                  "text": "Designation....................................",
+                  "text": "Designation",
                   "style": {
-                    "fontSize": 9,
+                    "fontSize": 13,
                     "bold": true
+                  }
+                },
+                {
+                  "id": "cassoa-approved-designation-label-signing-space",
+                  "type": "spacer",
+                  "height": 38
+                },
+                {
+                  "id": "cassoa-approved-designation-label-signature-line",
+                  "type": "divider",
+                  "style": {
+                    "borderWidth": 0.8,
+                    "borderColor": "#334155"
                   }
                 }
               ]
             }
           ],
-          "gap": 8,
+          "gap": 12,
           "marginBottom": 0,
-          "minHeight": 8,
+          "minHeight": 0,
           "keepTogether": true
         }
       ],
