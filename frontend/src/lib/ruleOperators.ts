@@ -52,8 +52,8 @@ export function matchOperator(operator: string | undefined, sv: string, expected
   const nonblank = sv.trim() !== "";
   const booleanAlias = (value: string): string | null => {
     const normalized = value.trim().toLowerCase();
-    if (normalized === "true" || normalized === "yes") return "yes";
-    if (normalized === "false" || normalized === "no") return "no";
+    if (["true", "yes", "1", "on", "checked"].includes(normalized)) return "yes";
+    if (["false", "no", "0", "off", "unchecked"].includes(normalized)) return "no";
     return null;
   };
   const actualBool = booleanAlias(sv), expectedBool = booleanAlias(exp);

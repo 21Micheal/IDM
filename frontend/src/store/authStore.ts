@@ -39,6 +39,7 @@ export interface AuthUser {
   has_admin_access?: boolean;
   can_view_system_audit?: boolean;
   group_names?: string[];
+  group_ids?: string[];
   mfa_enabled: boolean;
   must_change_password: boolean;          // ← new field
   department_name?: string | null;

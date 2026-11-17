@@ -690,9 +690,16 @@ function conditionSourceValues(
     const rows = Array.isArray(values[tableKey]) ? (values[tableKey] as Record<string, unknown>[]) : [];
     return rows.map((r) => str(r?.[colKey]));
   }
-  const sib = allFields.find((f) => f.key === fieldKey);
+  const sib = allFields.find((f) => f.key === fieldKey || f.id === fieldKey);
   if (!sib) return null;
-  return [str(values[sib.key ?? ""])];
+  const stableKey = sib.key ?? "";
+  const internalId = sib.id ?? "";
+  const raw = stableKey && Object.prototype.hasOwnProperty.call(values, stableKey)
+    ? values[stableKey]
+    : internalId && Object.prototype.hasOwnProperty.call(values, internalId)
+      ? values[internalId]
+      : values[fieldKey];
+  return [str(raw)];
 }
 
 /* Section ordering / on-demand + linked-table helpers live in
@@ -2506,7 +2513,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       <div className="form-renderer-checkbox flex min-h-[62px] min-w-0 flex-col justify-end" style={style}>
         <Controller control={control} name={key} render={({ field: f }) => (
           <label className={`flex h-10 w-full cursor-pointer items-center gap-2.5 text-sm ${validationMessage ? "text-red-700" : "text-foreground"}`}>
-            <input type="checkbox" checked={Boolean(f.value)} disabled={dis}
+            <input type="checkbox" checked={f.value === true || ["true", "yes", "1", "on", "checked"].includes(String(f.value ?? "").trim().toLowerCase())} disabled={dis}
               className={`h-4 w-4 rounded accent-primary ${validationMessage ? "outline outline-1 outline-red-500" : "border-border"}`}
               onChange={(e) => { f.onChange(e.target.checked); onChangeCb(key, e.target.checked); }} />
             {label}
@@ -3155,11 +3162,15 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   const ordered = active;
 
   // Keep a live snapshot of form values for conditional visibility
-  const liveValues: TemplateFormValues = { ...(watch() as TemplateFormValues), ...values, __document_id: documentId };
+  // RHF is the immediate source while a person is interacting. Props are
+  // mirrored into RHF above for external updates; keeping props last here can
+  // briefly overwrite a freshly toggled checkbox with its previous value.
+  const liveValues: TemplateFormValues = { ...values, ...(watch() as TemplateFormValues), __document_id: documentId };
 
   // Viewer context for role-restricted sections.
   const viewer: FormViewer = {
     groupNames: currentUser?.group_names ?? [],
+    groupIds: currentUser?.group_ids ?? [],
     isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
     canEditConditionalSections,
   };

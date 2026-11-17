@@ -6151,16 +6151,20 @@ function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, 
     if (c.operator === "equals") return stepMatches;
     if (c.operator === "not_equals") return !stepMatches;
   } else {
-    const sib = allFields.find((f) => f.key === c.fieldKey);
+    const sib = allFields.find((f) => f.key === c.fieldKey || f.id === c.fieldKey);
     if (!sib) return true;
-    const v = values[sib.id];
+    // The interactive builder preview stores values by internal id, while
+    // its sample preview and the live form use the stable form key.
+    const id = sib.id ?? "";
+    const valueKey = id && Object.prototype.hasOwnProperty.call(values, id) ? id : sib.key;
+    const v = values[valueKey];
     sv = v == null ? "" : String(v);
   }
   const lower = sv.trim().toLowerCase();
   const booleanAlias = (value: string): string | null => {
     const normalized = value.trim().toLowerCase();
-    if (normalized === "true" || normalized === "yes") return "yes";
-    if (normalized === "false" || normalized === "no") return "no";
+    if (["true", "yes", "1", "on", "checked"].includes(normalized)) return "yes";
+    if (["false", "no", "0", "off", "unchecked"].includes(normalized)) return "no";
     return null;
   };
   const actualBool = booleanAlias(sv), expectedBool = booleanAlias(c.value ?? "");

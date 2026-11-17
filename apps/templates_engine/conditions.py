@@ -168,9 +168,9 @@ def match_operator(operator, sv: str, expected: str) -> bool:
     nonblank = sv.strip() != ""
     def boolean_alias(value):
         normalized = (value or "").strip().lower()
-        if normalized in ("true", "yes"):
+        if normalized in ("true", "yes", "1", "on", "checked"):
             return "yes"
-        if normalized in ("false", "no"):
+        if normalized in ("false", "no", "0", "off", "unchecked"):
             return "no"
         return None
     actual_bool, expected_bool = boolean_alias(sv), boolean_alias(expected)
