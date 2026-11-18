@@ -647,37 +647,47 @@ def sync_retirement_variance(document: Document) -> dict | None:
     if not is_built_form_document(document):
         return None
 
+    from django.db import transaction
     from apps.sunsystems.variance import compute_retirement_variance, get_requested_amount
 
-    try:
-        requested_amount = get_requested_amount(document)
-    except Exception:
-        requested_amount = None
-
-    form_meta = (document.metadata or {}).get("form") or {}
-    phase = (form_meta.get("workflow_phase") or infer_builder_workflow_phase(document) or "request").strip().lower()
-
-    variance = None
-    if phase == "retirement":
+    # Posting callbacks for the LPO and Imprest journal can finish nearly at
+    # the same time. A stale Document instance here used to write its entire
+    # metadata JSON after the workflow had advanced, reverting
+    # completed_workflow_stages, lpo_posting_complete, and workflow_phase.
+    # Lock and merge into the latest row so this display-only sync cannot undo
+    # a workflow transition or another posting callback's voucher links.
+    with transaction.atomic():
+        current = Document.objects.select_for_update().get(pk=document.pk)
         try:
-            variance = compute_retirement_variance(document)
+            requested_amount = get_requested_amount(current)
         except Exception:
-            variance = None
+            requested_amount = None
 
-    meta = dict(document.metadata or {})
-    form = dict(meta.get("form") or {})
-    changed = False
-    if form.get("requested_amount") != requested_amount:
-        form["requested_amount"] = requested_amount
-        changed = True
-    if form.get("retirement_variance") != variance:
-        form["retirement_variance"] = variance
-        changed = True
-    if changed:
-        meta["form"] = form
-        document.metadata = meta
-        document.save(update_fields=["metadata", "updated_at"])
-    return variance
+        form_meta = (current.metadata or {}).get("form") or {}
+        phase = (form_meta.get("workflow_phase") or infer_builder_workflow_phase(current) or "request").strip().lower()
+
+        variance = None
+        if phase == "retirement":
+            try:
+                variance = compute_retirement_variance(current)
+            except Exception:
+                variance = None
+
+        meta = dict(current.metadata or {})
+        form = dict(meta.get("form") or {})
+        changed = False
+        if form.get("requested_amount") != requested_amount:
+            form["requested_amount"] = requested_amount
+            changed = True
+        if form.get("retirement_variance") != variance:
+            form["retirement_variance"] = variance
+            changed = True
+        if changed:
+            meta["form"] = form
+            current.metadata = meta
+            current.save(update_fields=["metadata", "updated_at"])
+        document.metadata = current.metadata
+        return variance
 
 
 def retirement_journal_posted(document: Document) -> bool:

@@ -592,7 +592,9 @@ export default function FormDetailPage() {
   const selectedLpo = generatedLpos.find((lpo) => lpo.id === selectedLpoId) || generatedLpos[0];
   const generatedLpoId = selectedLpo?.id;
   const generatedLpoReference = selectedLpo?.reference || formData?.lpo_reference;
-  const lpoSetKey = generatedLpos.map((lpo) => lpo.id).join(",");
+  const lpoSetKey = generatedLpos
+    .map((lpo) => `${lpo.id}:${lpo.prepared ? "prepared" : "posted"}:${lpo.reference || ""}`)
+    .join(",");
   const [lpoModalOpen, setLpoModalOpen] = useState(false);
   const [lpoMinimized, setLpoMinimized] = useState(false);
 
@@ -735,21 +737,26 @@ export default function FormDetailPage() {
     ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
+  const postedLpo = generatedLpos.find((lpo) => !lpo.prepared);
   useEffect(() => {
-    if (!lpoGateReady) return;
+    // Keep the posting-stage reminder active until the posted LPO itself is
+    // available, even if the workflow's completion flag arrived first.
+    if (!awaitingLpo || !lpoGateReady || !postedLpo) return;
+    setSelectedLpoId(postedLpo.id);
+    setLpoModalOpen(true);
+    setLpoMinimized(false);
     setAwaitingLpo(false);
     setGateRetrying(false);
     // The last LPO approver must stay on the form to open the generated LPO
     // and payment voucher. This is a successful posting milestone, not a
     // reason to cover the documents with the terminal workflow overlay.
     setWorkflowActionCompleted(false);
-    setLpoModalOpen(false);
     void Promise.all([
       qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] }),
       qc.invalidateQueries({ queryKey: ["form-workflow", id] }),
       qc.invalidateQueries({ queryKey: ["requisitions"] }),
     ]);
-  }, [lpoGateReady, id, qc]);
+  }, [lpoGateReady, awaitingLpo, postedLpo?.id, lpoSetKey, id, qc]);
 
   // When the page is opened via an email notification link (?task=<id>),
   // scroll the action panel into view once the approver's task has loaded.

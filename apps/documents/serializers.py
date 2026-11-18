@@ -983,6 +983,25 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
                 form["lpo_document_ids"] = [item["id"] for item in lpo_records]
                 form["lpo_document_id"] = lpo_records[0].get("id")
                 form["lpo_reference"] = lpo_records[0].get("reference")
+
+            # Concurrent LPO and Imprest posting callbacks can both update the
+            # source form's JSON metadata. If one update overwrites the other's
+            # voucher pointer, the linked PV remains valid, so recover it from
+            # the durable document relationship for this response.
+            if not form.get("imprest_payment_voucher_document_id"):
+                imprest_voucher_link = instance.outgoing_relationships.filter(
+                    relation_type=DocumentRelationship.RelationType.REFERENCES,
+                    target_document__metadata__payment_voucher__source_document_id=str(instance.pk),
+                    target_document__metadata__payment_voucher__kind="imprest",
+                ).select_related("target_document").order_by("created_at").first()
+                if imprest_voucher_link:
+                    voucher = imprest_voucher_link.target_document
+                    form["imprest_payment_voucher_document_id"] = str(voucher.pk)
+                    form["imprest_payment_voucher_reference"] = voucher.reference_number
+                    form["imprest_payment_voucher_status"] = "generated"
+                    form.pop("imprest_payment_voucher_error", None)
+
+            if lpo_records or form.get("imprest_payment_voucher_document_id"):
                 metadata["form"] = form
                 data["metadata"] = metadata
         suggestions = metadata.get("relationship_suggestions") if isinstance(metadata, dict) else None
