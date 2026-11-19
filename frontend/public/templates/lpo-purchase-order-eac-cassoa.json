@@ -547,7 +547,7 @@
                 {
                   "id": "cassoa-checked-label",
                   "type": "text",
-                  "text": "Checked By",
+                  "text": "Checked By: {{checked_by.name}}",
                   "style": {
                     "fontSize": 13,
                     "bold": true
@@ -576,7 +576,7 @@
                 {
                   "id": "cassoa-checked-date-label",
                   "type": "text",
-                  "text": "Date",
+                  "text": "Date: {{checked_by.date}}",
                   "style": {
                     "fontSize": 13,
                     "bold": true
@@ -605,7 +605,7 @@
                 {
                   "id": "cassoa-checked-designation-label",
                   "type": "text",
-                  "text": "Designation",
+                  "text": "Designation: {{checked_by.role}}",
                   "style": {
                     "fontSize": 13,
                     "bold": true
@@ -643,7 +643,7 @@
                 {
                   "id": "cassoa-approved-label",
                   "type": "text",
-                  "text": "Approved By",
+                  "text": "Approved By: {{approved_by.name}}",
                   "style": {
                     "fontSize": 13,
                     "bold": true
@@ -672,7 +672,7 @@
                 {
                   "id": "cassoa-approved-date-label",
                   "type": "text",
-                  "text": "Date",
+                  "text": "Date: {{approved_by.date}}",
                   "style": {
                     "fontSize": 13,
                     "bold": true
@@ -701,7 +701,7 @@
                 {
                   "id": "cassoa-approved-designation-label",
                   "type": "text",
-                  "text": "Designation",
+                  "text": "Designation: {{approved_by.role}}",
                   "style": {
                     "fontSize": 13,
                     "bold": true

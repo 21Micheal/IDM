@@ -60,6 +60,7 @@ def generate_lpo_for_document(
     table_key=None,
     table_label=None,
     values_override=None,
+    signatories_override=None,
     prepared=False,
     force_refresh=False,
 ):
@@ -172,10 +173,12 @@ def generate_lpo_for_document(
     merge_values = build_lpo_merge_values(
         document, lpo_reference, doc_type=doc_type, actor=user,
         table_key=table.get("key"), values_override=render_values,
+        signatories_override=signatories_override,
     )
     title = f"Purchase Order {lpo_reference}"
+    render_template = _template_with_lpo_signatory_tokens(template)
     rendered_doc = generate_document_from_template_sync(
-        template,
+        render_template,
         merge_values,
         fmt="pdf",
         title=title,
@@ -260,6 +263,46 @@ def generate_lpo_for_document(
     return lpo_doc
 
 
+def _template_with_lpo_signatory_tokens(template):
+    """Ensure older saved CASSOA LPO designs expose the signatory merge fields.
+
+    Built templates are stored in the database, so editing the import JSON alone
+    does not update existing deployments. Patch a copy of the saved design at
+    render time when it contains the known CASSOA signatory element IDs.
+    """
+    import copy
+
+    design = getattr(template, "design", None)
+    if not isinstance(design, dict):
+        return template
+    design = copy.deepcopy(design)
+    labels = {
+        "cassoa-checked-label": ("Checked By", "checked_by.name"),
+        "cassoa-checked-date-label": ("Date", "checked_by.date"),
+        "cassoa-checked-designation-label": ("Designation", "checked_by.role"),
+        "cassoa-approved-label": ("Approved By", "approved_by.name"),
+        "cassoa-approved-date-label": ("Date", "approved_by.date"),
+        "cassoa-approved-designation-label": ("Designation", "approved_by.role"),
+    }
+
+    def walk(value):
+        if isinstance(value, dict):
+            item_id = str(value.get("id") or "")
+            if item_id in labels and value.get("type") == "text":
+                label, token = labels[item_id]
+                value["text"] = f"{label}: {{{{{token}}}}}"
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(design)
+    rendered_template = copy.copy(template)
+    rendered_template.design = design
+    return rendered_template
+
+
 def generate_lpo_for_posting(document, posting, actor=None):
     """Render the PO posting's PDF using the reference returned by SunSystems."""
     reference = str(getattr(posting, "journal_number", "") or "").strip()
@@ -330,9 +373,46 @@ def generate_lpo_for_posting(document, posting, actor=None):
     return lpo
 
 
-def refresh_lpo_documents_for_approval(document):
-    """Refresh generated LPO PDFs so newly approved profile signatures appear."""
+def refresh_lpo_documents_for_approval(document, *, actor=None, step=None):
+    """Refresh generated LPO PDFs as procurement approvals add signatures."""
     from apps.sunsystems.config import get_journal_mapping
+
+    signatories_override = {}
+    step_name = str(getattr(step, "name", "") or "").strip()
+    if actor is not None and step is not None and not getattr(step, "prepare_lpo_after_approval", False):
+        folded_step = step_name.casefold()
+        slot = "checked_by" if "check" in folded_step else None
+        if slot is None:
+            try:
+                from apps.workflows.models import WorkflowTaskAction
+                prep_action = WorkflowTaskAction.objects.filter(
+                    task__workflow_instance__document=document,
+                    task__execution_lane="main",
+                    action="approved",
+                    task__step__prepare_lpo_after_approval=True,
+                ).select_related("task__step").order_by("-created_at").first()
+                if prep_action:
+                    first_after_prep = WorkflowTaskAction.objects.filter(
+                        task__workflow_instance=prep_action.task.workflow_instance,
+                        task__execution_lane="main",
+                        action="approved",
+                        actor__isnull=False,
+                        created_at__gt=prep_action.created_at,
+                    ).select_related("task__step").order_by("created_at").first()
+                    if first_after_prep and first_after_prep.task.step_id == step.pk:
+                        slot = "checked_by"
+                    else:
+                        slot = "approved_by"
+            except Exception:
+                logger.exception("Could not resolve LPO signatory slot for step %s", step_name)
+        if slot:
+            from django.utils import timezone
+            signatories_override[slot] = {
+                "name": _user_name(actor),
+                "role": str(getattr(actor, "job_description", "") or step_name).strip(),
+                "date": timezone.localdate().strftime("%d/%m/%Y"),
+                "signature": _approval_signature_data(actor),
+            }
 
     form = ((getattr(document, "metadata", None) or {}).get("form") or {})
     for record in form.get("lpo_documents") or []:
@@ -345,8 +425,8 @@ def refresh_lpo_documents_for_approval(document):
             continue
         mapping = get_journal_mapping(document, stage=stage) or {}
         po = mapping.get("purchase_order") or {}
-        lines = po.get("lines") or []
-        line_spec = lines[0] if lines and isinstance(lines[0], dict) else {}
+        specs = po.get("lines") or []
+        line_spec = specs[0] if specs and isinstance(specs[0], dict) else {}
         reference = str(record.get("reference") or "Pending SunSystems number")
         generate_lpo_for_document(
             document,
@@ -356,6 +436,7 @@ def refresh_lpo_documents_for_approval(document):
             table_key=record.get("table_key") or str(line_spec.get("repeat_over") or "") or None,
             table_label=record.get("table_label") or line_spec.get("table_label") or mapping.get("_posting_label"),
             values_override=mapping.get("_posting_values") if isinstance(mapping.get("_posting_values"), dict) else None,
+            signatories_override=signatories_override,
             prepared=bool(record.get("prepared")),
             force_refresh=True,
         )
@@ -409,7 +490,7 @@ def queue_pending_lpo_supplier_emails(document) -> None:
         )
 
 
-def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None, table_key=None, values_override=None) -> dict:
+def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None, table_key=None, values_override=None, signatories_override=None) -> dict:
     """Build the flat designer merge-field values for the LPO document.
 
     Keys are dotted exactly as the designer emits them (``lpo.number``,
@@ -447,9 +528,14 @@ def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None
     currency = _first_currency(values, lines) or "KES"
 
     signatories = _lpo_workflow_signatories(document)
+    if isinstance(signatories_override, dict):
+        for slot in ("checked_by", "approved_by"):
+            details = signatories_override.get(slot)
+            if isinstance(details, dict):
+                signatories[slot] = {**signatories[slot], **details}
     prepared_by = signatories["prepared_by"]
     prepared_by["name"] = prepared_by["name"] or _requestor_name(values, sections) or _user_name(getattr(document, "uploaded_by", None))
-    prepared_by["role"] = prepared_by["role"] or "Procurement Approval"
+    prepared_by["role"] = prepared_by["role"] or str(getattr(getattr(document, "uploaded_by", None), "job_description", "") or "").strip()
     line_descriptions = list(dict.fromkeys(
         _as_text(line.get("description") or line.get("item")) for line in lines
         if _as_text(line.get("description") or line.get("item"))
@@ -481,14 +567,17 @@ def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None
         "company.phone": "",
         "prepared_by.name": prepared_by["name"],
         "prepared_by.role": prepared_by["role"],
+        "prepared_by.designation": prepared_by["role"],
         "prepared_by.date": prepared_by["date"] or today,
         "prepared_by.signature": prepared_by["signature"],
         "checked_by.name": signatories["checked_by"]["name"],
-        "checked_by.role": signatories["checked_by"]["role"] or "LPO Check",
+        "checked_by.role": signatories["checked_by"]["role"],
+        "checked_by.designation": signatories["checked_by"]["role"],
         "checked_by.date": signatories["checked_by"]["date"],
         "checked_by.signature": signatories["checked_by"]["signature"],
         "approved_by.name": signatories["approved_by"]["name"],
-        "approved_by.role": signatories["approved_by"]["role"] or "LPO Approval",
+        "approved_by.role": signatories["approved_by"]["role"],
+        "approved_by.designation": signatories["approved_by"]["role"],
         "approved_by.date": signatories["approved_by"]["date"],
         "approved_by.signature": signatories["approved_by"]["signature"],
     }
@@ -963,28 +1052,46 @@ def _approval_signature_data(user):
 
 
 def _lpo_workflow_signatories(document):
-    """Resolve the three LPO signatories from approved LPO workflow actions."""
+    """Resolve Prepared By, LPO Check, and final approver from LPO workflow actions."""
     from apps.workflows.models import WorkflowTaskAction
 
     actions = list(WorkflowTaskAction.objects.filter(
         task__workflow_instance__document=document,
-        task__workflow_instance__template__phase="lpo",
+        task__execution_lane="main",
         action="approved",
         actor__isnull=False,
-    ).select_related("actor", "task__step").order_by("created_at"))
-    prepared = checked = None
-    approval_actions = []
+    ).select_related("actor", "task__step", "task__workflow_instance__template").order_by("created_at"))
+
+    prepared_actions = []
     for action in actions:
         step = action.task.step
-        name = str(step.name or "").strip()
-        folded = name.casefold()
+        folded = str(step.name or "").strip().casefold()
         if getattr(step, "prepare_lpo_after_approval", False) or ("procurement" in folded and "approval" in folded):
-            prepared = action
-        elif "check" in folded:
-            checked = action
-        elif "approval" in folded:
-            approval_actions.append(action)
-    approved = approval_actions[-1] if approval_actions else None
+            prepared_actions.append(action)
+
+    prepared = prepared_actions[-1] if prepared_actions else None
+    procurement_actions = [
+        action for action in actions
+        if prepared is not None
+        and action.task.workflow_instance_id == prepared.task.workflow_instance_id
+        and action.created_at > prepared.created_at
+    ]
+    checked_candidates = [
+        action for action in procurement_actions
+        if "check" in str(action.task.step.name or "").casefold()
+    ]
+    # Some configured workflows call this stage "LPO Approval". The first
+    # approval after the preparation checkpoint is the designated LPO Check
+    # slot when no explicit "check" label is present.
+    checked = (checked_candidates[0] if checked_candidates else
+               (procurement_actions[0] if procurement_actions else None))
+    final_candidates = [
+        action for action in procurement_actions
+        if checked is not None
+        and action.task.pk != checked.task.pk
+        and action.task.step.order > checked.task.step.order
+    ]
+    approved = final_candidates[-1] if final_candidates else None
 
     def details(action, fallback_name="", fallback_role=""):
         if action is None:
@@ -993,7 +1100,7 @@ def _lpo_workflow_signatories(document):
         from django.utils import timezone
         return {
             "name": _user_name(actor),
-            "role": str(action.task.step.name or fallback_role).strip(),
+            "role": str(getattr(actor, "job_description", "") or action.task.step.name or fallback_role).strip(),
             "date": timezone.localtime(action.created_at).strftime("%d/%m/%Y") if action.created_at else "",
             "signature": _approval_signature_data(actor),
         }

@@ -1203,11 +1203,70 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             rendered = f"<u>{rendered}</u>"
         return Paragraph(rendered or "&#160;", style)
 
+    def value_flowable(raw, available_width, *, style=None, element=None):
+        """Render a merge value as an image when it is an image data URL.
+
+        Profile signatures are passed to the designer as data URLs. Treating
+        one as paragraph text can create a multi-page-tall ReportLab table
+        cell, so image-valued tokens must be decoded before building tables.
+        """
+        resolved = _subst_tokens(str(raw or ""), values).strip()
+        image_raw = _decode_data_url_image(resolved)
+        if image_raw:
+            image = RLImage(BytesIO(image_raw))
+            max_width = min(max(1, available_width), 72 * mm)
+            max_height = 18 * mm
+            ratio = min(
+                max_width / max(image.imageWidth, 1),
+                max_height / max(image.imageHeight, 1),
+            )
+            image.drawWidth = image.imageWidth * ratio
+            image.drawHeight = image.imageHeight * ratio
+            return image
+        # If a malformed image token somehow reaches the renderer, don't print
+        # its base64 payload into the PDF.
+        if resolved.casefold().startswith("data:image/"):
+            return para("", style=style, element=element)
+        return para(raw, style=style, element=element)
+
     def render_element(element, available_width):
         kind = element.get("type")
         style = element.get("style") or {}
         if kind in ("text", "note", "heading"):
-            text = element.get("text", "")
+            text = str(element.get("text", "") or "")
+            element_id = str(element.get("id") or "").casefold()
+            lpo_slot = next((slot for slot in ("checked_by", "approved_by")
+                             if element_id.startswith(f"cassoa-{slot.removesuffix('_by').replace('_', '-')}-")), None)
+            if kind == "text" and lpo_slot:
+                prefix = "checked" if lpo_slot == "checked_by" else "approved"
+                if element_id == f"cassoa-{prefix}-label":
+                    name = str(values.get(f"{lpo_slot}.name") or "").strip()
+                    label = "Checked By" if prefix == "checked" else "Approved By"
+                    text = f"{label}: {name}" if name else label
+                    return [para(text, element=element)]
+                if element_id == f"cassoa-{prefix}-date-label":
+                    date = str(values.get(f"{lpo_slot}.date") or "").strip()
+                    return [para(f"Date: {date}" if date else "Date", element=element)]
+                if element_id == f"cassoa-{prefix}-designation-label":
+                    designation = str(values.get(f"{lpo_slot}.role") or "").strip()
+                    return [para(f"Designation: {designation}" if designation else "Designation", element=element)]
+            # Older LPO layouts put a label and its merge token into the same
+            # text object while also rendering a separate label above it.
+            # Keep the value on this line only, avoiding outputs such as
+            # "Date19/11/2026" and "DesignationExecutive Director".
+            for slot in ("prepared_by", "checked_by", "approved_by"):
+                date_token = re.escape("{{" + slot + ".date}}")
+                text = re.sub(r"(?i)\bdate\s*:?\s*(" + date_token + r")", r"\1", text)
+                for role_key in ("role", "designation"):
+                    role_token = re.escape("{{" + slot + "." + role_key + "}}")
+                    text = re.sub(r"(?i)\bdesignation\s*:?\s*(" + role_token + r")", r"\1", text)
+                    text = re.sub(r"(?i)(" + role_token + r")\s*designation\b", r"\1", text)
+            resolved_text = _subst_tokens(str(text or ""), values).strip()
+            text_image = _decode_data_url_image(resolved_text)
+            if text_image:
+                return [value_flowable(text, available_width, element=element)]
+            if resolved_text.casefold().startswith("data:image/"):
+                return []
             # Older saved LPO designs represent signature spaces as a label
             # followed by a run of dots. Render those as real signing fields
             # too, so existing database templates get the spacing fix without
@@ -1273,8 +1332,9 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
         if kind == "field_group":
             fields = element.get("fields") or []
             label_width = min(float(element.get("labelWidth") or 120) * .75, available_width * .45)
+            value_width = max(10, available_width - label_width)
             rows = [[para(field.get("label", ""), element={"style": {"bold": bool(field.get("boldLabel"))}}),
-                     para(field.get("value", ""), element={"style": {"bold": bool(field.get("boldValue"))}})] for field in fields]
+                     value_flowable(field.get("value", ""), value_width, element={"style": {"bold": bool(field.get("boldValue"))}})] for field in fields]
             table = Table(rows, colWidths=[label_width, max(10, available_width - label_width)], hAlign="LEFT")
             table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 4), ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
             return [table]
@@ -1293,7 +1353,7 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             header_color = as_color(element.get("headerColor"), "#FFFFFF")
             header_style = ParagraphStyle("DesignerV2TableHeader", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=max(8, base_size - 1), leading=base_size, textColor=header_color)
             data = [[para(column.get("label", ""), style=header_style) for column in columns]]
-            data.extend([[para(row[i] if i < len(row) else "") for i in range(len(columns))] for row in rows])
+            data.extend([[value_flowable(row[i] if i < len(row) else "", widths[i]) for i in range(len(columns))] for row in rows])
             summaries = element.get("summaries") or []
             summary_spans = []
             for summary in summaries:
@@ -1350,6 +1410,10 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
                 raw_name = _subst_tokens(str(signature.get("name") or ""), values).strip()
                 raw_date = _subst_tokens(str(signature.get("date") or ""), values).strip()
                 raw_signature = _subst_tokens(str(signature.get("signature") or ""), values).strip()
+                # The template owns the "Date:" label; merge values may
+                # themselves contain it from older templates, so strip it
+                # before adding the label once below.
+                raw_date = re.sub(r"^\s*date\s*:?\s*", "", raw_date, flags=re.IGNORECASE)
                 signature_raw = _decode_data_url_image(raw_signature)
                 is_line = lambda value: bool(value) and all(char in ". _-" for char in value)
                 name_text = "Name: __________________________" if is_line(raw_name) or not raw_name else f"Name: {raw_name}"
@@ -1401,7 +1465,21 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
         if kind == "divider":
             return [HRFlowable(width="100%", thickness=float(style.get("borderWidth", 1)), color=as_color(style.get("borderColor"), "#94A3B8"))]
         if kind in ("spacer", "box"):
-            return [Spacer(1, float(element.get("height") or style.get("minHeight") or 12) * .75)]
+            spacer_height = float(element.get("height") or style.get("minHeight") or 12) * .75
+            element_id = str(element.get("id") or "").casefold()
+            lpo_slot = next((slot for slot in ("checked_by", "approved_by")
+                             if element_id.startswith(f"cassoa-{slot.removesuffix('_by').replace('_', '-')}-")), None)
+            if kind == "spacer" and lpo_slot and element_id.endswith("-label-signing-space"):
+                signature_raw = _decode_data_url_image(values.get(f"{lpo_slot}.signature"))
+                if signature_raw:
+                    signature_image = RLImage(BytesIO(signature_raw))
+                    max_width = min(max(1, available_width * .82), 72 * mm)
+                    max_height = min(18 * mm, max(1, spacer_height - 3))
+                    ratio = min(max_width / max(signature_image.imageWidth, 1), max_height / max(signature_image.imageHeight, 1))
+                    signature_image.drawWidth = signature_image.imageWidth * ratio
+                    signature_image.drawHeight = signature_image.imageHeight * ratio
+                    return [signature_image, Spacer(1, max(1, spacer_height - signature_image.drawHeight))]
+            return [Spacer(1, spacer_height)]
         return []
 
     story = []

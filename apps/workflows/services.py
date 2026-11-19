@@ -602,12 +602,15 @@ class WorkflowService:
             execution_lane == "main"
             and action.action == "approved"
             and doc is not None
-            and str(getattr(instance.template, "phase", "")).strip().lower() == "lpo"
+            and (
+                str(getattr(instance.rule, "phase", "")).strip().lower() == "lpo"
+                or WorkflowService._document_workflow_phase(doc) == "lpo"
+            )
             and not step.prepare_lpo_after_approval
         ):
             try:
                 from apps.documents.lpo import refresh_lpo_documents_for_approval
-                refresh_lpo_documents_for_approval(doc)
+                refresh_lpo_documents_for_approval(doc, actor=actor, step=step)
             except Exception:
                 # A signature refresh must not undo an approval already
                 # recorded or prevent its configured workflow/posting action.
