@@ -256,6 +256,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
   const currentUser = useAuthStore((s) => s.user);
   const hasDocument = Boolean(documentId);
   const targetLabel = task.target_type === "payment_run" ? "payment run" : "document";
+  const approvalHeading = `${approveButtonLabel} ${targetLabel}`;
   const capitalizedTargetLabel = `${targetLabel[0].toUpperCase()}${targetLabel.slice(1)}`;
 
   const [activeAction, setActiveAction] = useState<
@@ -600,7 +601,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
           <div className="absolute bottom-full right-3 z-40 mb-2 w-[min(92vw,28rem)] border border-[#AEB5BB] bg-white p-4 shadow-2xl">
             {activeAction === "approve" && (
               <div className="space-y-3">
-                <p className="text-sm font-bold text-[#1F2933]">Approve {targetLabel}</p>
+                <p className="text-sm font-bold text-[#1F2933]">{approvalHeading}</p>
                 {routingOptions?.next && (
                   <ApproverChoice
                     title="Choose the next approver"
@@ -934,7 +935,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
       {/* ── Approve form ─────────────────────────────────────────────────── */}
       {activeAction === "approve" && (
         <div className="space-y-3 border border-[#C8CDD2] p-4 bg-white">
-          <p className="text-sm font-medium text-foreground">Approve {targetLabel}</p>
+          <p className="text-sm font-medium text-foreground">{approvalHeading}</p>
           {routingOptions?.next && (
             <ApproverChoice
               title="Choose the next approver"
