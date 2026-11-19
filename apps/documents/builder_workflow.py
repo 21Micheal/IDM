@@ -276,18 +276,45 @@ def open_travel_retirement_phase(document: Document) -> bool:
         not is_procurement_document(document)
         or not is_travel_requisition(document)
         or not travel_retirement_config(document)
-        or "lpo" not in completed_procurement_stages(document)
     ):
         return False
-    meta = dict(document.metadata or {})
-    form = dict(meta.get("form") or {})
-    if form.get("workflow_phase") == "retirement":
-        return False
-    form["workflow_phase"] = "retirement"
-    meta["form"] = form
-    document.metadata = meta
-    document.save(update_fields=["metadata", "updated_at"])
-    return True
+
+    # Read and merge current JSON under a row lock. The LPO and Imprest
+    # posting callbacks can update this form at nearly the same time.
+    from django.db import transaction
+
+    with transaction.atomic():
+        current = Document.objects.select_for_update().get(pk=document.pk)
+        if (current.status or "").strip() != DocumentStatus.APPROVED:
+            return False
+        try:
+            from apps.workflows.models import WorkflowInstance
+
+            if WorkflowInstance.objects.filter(document=current, status="in_progress").exists():
+                return False
+        except Exception:
+            return False
+
+        meta = dict(current.metadata or {})
+        form = dict(meta.get("form") or {})
+        completed = completed_procurement_stages(current)
+        if "lpo" not in completed and not _lpo_stage_postings_complete(current):
+            return False
+        if form.get("workflow_phase") == "retirement":
+            return False
+        if "lpo" not in completed:
+            form["completed_workflow_stages"] = [*completed, "lpo"]
+        if form.get("imprest_request_posting_required_for_lpo"):
+            form["imprest_request_posting_required_for_lpo"] = False
+        form["lpo_posting_complete"] = True
+        form["lpo_generation_ready"] = False
+        form["workflow_phase"] = "retirement"
+        meta["form"] = form
+        current.metadata = meta
+        current.save(update_fields=["metadata", "updated_at"])
+        document.metadata = current.metadata
+        document.status = current.status
+        return True
 
 
 def has_retirement_workflow_route(document: Document) -> bool:
@@ -350,6 +377,44 @@ def completed_procurement_stages(document: Document) -> list[str]:
         for stage in stages
         if str(stage).strip().lower() in PROCUREMENT_WORKFLOW_STAGES
     ]
+
+
+def _lpo_stage_postings_complete(document: Document) -> bool:
+    """Recover an approved LPO stage whose completion marker was overwritten."""
+    try:
+        from apps.sunsystems.config import get_purchase_order_postings
+        from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+        requested = get_purchase_order_postings(document)
+        stages = {int(item["stage"]) for item in requested if item.get("stage") is not None}
+        if not stages:
+            return False
+        posted = set(
+            JournalPosting.objects.filter(
+                document=document,
+                stage__in=stages,
+                status=JournalPostingStatus.POSTED,
+            ).values_list("stage", flat=True)
+        )
+        if not stages.issubset(posted):
+            return False
+
+        form = ((document.metadata or {}).get("form") or {})
+        generated = {
+            int(row["posting_stage"])
+            for row in (form.get("lpo_documents") or [])
+            if isinstance(row, dict)
+            and str(row.get("posting_stage", "")).isdigit()
+            and row.get("reference")
+            and not row.get("prepared")
+        }
+        if not stages.issubset(generated):
+            return False
+        if form.get("imprest_request_posting_required_for_lpo"):
+            return imprest_request_postings_complete(document)
+        return True
+    except Exception:
+        return False
 
 
 def requisition_type_config(document: Document) -> tuple[str, str]:
