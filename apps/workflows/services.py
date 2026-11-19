@@ -598,6 +598,21 @@ class WorkflowService:
         if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, task_step_order, execution_lane):
             return
 
+        if (
+            execution_lane == "main"
+            and action.action == "approved"
+            and doc is not None
+            and str(getattr(instance.template, "phase", "")).strip().lower() == "lpo"
+            and not step.prepare_lpo_after_approval
+        ):
+            try:
+                from apps.documents.lpo import refresh_lpo_documents_for_approval
+                refresh_lpo_documents_for_approval(doc)
+            except Exception:
+                # A signature refresh must not undo an approval already
+                # recorded or prevent its configured workflow/posting action.
+                logger.exception("Could not refresh LPO signatures for %s", doc.pk)
+
         if execution_lane == "main" and step.prepare_lpo_after_approval and doc is not None:
             if WorkflowService._prepare_lpo_documents(instance, step, doc, actor=actor):
                 # Keep this approved step with its approver until they have

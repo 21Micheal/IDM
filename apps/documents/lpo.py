@@ -61,6 +61,7 @@ def generate_lpo_for_document(
     table_label=None,
     values_override=None,
     prepared=False,
+    force_refresh=False,
 ):
     """Generate an LPO document, using the SSC reference when supplied.
 
@@ -83,9 +84,11 @@ def generate_lpo_for_document(
         if match:
             existing = Document.objects.filter(pk=match.get("id")).first()
             if existing:
-                if prepared and match.get("prepared"):
+                if force_refresh:
+                    refresh_target = existing
+                elif prepared and match.get("prepared"):
                     return existing
-                if not prepared and match.get("prepared"):
+                elif not prepared and match.get("prepared"):
                     refresh_target = existing
                 else:
                     return existing
@@ -327,6 +330,37 @@ def generate_lpo_for_posting(document, posting, actor=None):
     return lpo
 
 
+def refresh_lpo_documents_for_approval(document):
+    """Refresh generated LPO PDFs so newly approved profile signatures appear."""
+    from apps.sunsystems.config import get_journal_mapping
+
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    for record in form.get("lpo_documents") or []:
+        if not isinstance(record, dict) or not record.get("id"):
+            continue
+        raw_stage = record.get("posting_stage")
+        try:
+            stage = int(raw_stage)
+        except (TypeError, ValueError):
+            continue
+        mapping = get_journal_mapping(document, stage=stage) or {}
+        po = mapping.get("purchase_order") or {}
+        lines = po.get("lines") or []
+        line_spec = lines[0] if lines and isinstance(lines[0], dict) else {}
+        reference = str(record.get("reference") or "Pending SunSystems number")
+        generate_lpo_for_document(
+            document,
+            actor=None,
+            purchase_order_reference=reference,
+            posting_stage=stage,
+            table_key=record.get("table_key") or str(line_spec.get("repeat_over") or "") or None,
+            table_label=record.get("table_label") or line_spec.get("table_label") or mapping.get("_posting_label"),
+            values_override=mapping.get("_posting_values") if isinstance(mapping.get("_posting_values"), dict) else None,
+            prepared=bool(record.get("prepared")),
+            force_refresh=True,
+        )
+
+
 def _lpo_delivery_waiting_for_approval(document) -> bool:
     """True while a workflow is paused at its configured LPO generation gate."""
     try:
@@ -412,7 +446,10 @@ def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None
     valid_until = _ticket_expiry_date(values, sections)
     currency = _first_currency(values, lines) or "KES"
 
-    prepared_by = _requestor_name(values, sections) or _user_name(getattr(document, "uploaded_by", None))
+    signatories = _lpo_workflow_signatories(document)
+    prepared_by = signatories["prepared_by"]
+    prepared_by["name"] = prepared_by["name"] or _requestor_name(values, sections) or _user_name(getattr(document, "uploaded_by", None))
+    prepared_by["role"] = prepared_by["role"] or "Procurement Approval"
     line_descriptions = list(dict.fromkeys(
         _as_text(line.get("description") or line.get("item")) for line in lines
         if _as_text(line.get("description") or line.get("item"))
@@ -442,12 +479,18 @@ def build_lpo_merge_values(document, lpo_reference, *, doc_type=None, actor=None
         "company.address": org_address,
         "company.email": "",
         "company.phone": "",
-        "prepared_by.name": prepared_by,
-        "prepared_by.role": _as_text(values.get("department_chk9")) or "Requestor",
-        "prepared_by.date": today,
-        "approved_by.name": _user_name(actor),
-        "approved_by.role": "Approver",
-        "approved_by.date": today,
+        "prepared_by.name": prepared_by["name"],
+        "prepared_by.role": prepared_by["role"],
+        "prepared_by.date": prepared_by["date"] or today,
+        "prepared_by.signature": prepared_by["signature"],
+        "checked_by.name": signatories["checked_by"]["name"],
+        "checked_by.role": signatories["checked_by"]["role"] or "LPO Check",
+        "checked_by.date": signatories["checked_by"]["date"],
+        "checked_by.signature": signatories["checked_by"]["signature"],
+        "approved_by.name": signatories["approved_by"]["name"],
+        "approved_by.role": signatories["approved_by"]["role"] or "LPO Approval",
+        "approved_by.date": signatories["approved_by"]["date"],
+        "approved_by.signature": signatories["approved_by"]["signature"],
     }
 
 
@@ -894,6 +937,72 @@ def _today():
 
 def _today_str() -> str:
     return _today().strftime("%d %b %Y")
+
+
+def _approval_signature_data(user):
+    """Return a data URL for the user's active profile signature, if present."""
+    if user is None:
+        return ""
+    signature = user.signatures.filter(is_active=True).order_by("-created_at").first()
+    if signature is None:
+        return ""
+    try:
+        import base64
+        signature.image.open("rb")
+        raw = signature.image.read()
+        mime = "image/jpeg" if signature.image.name.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    except Exception:
+        logger.exception("Could not load saved LPO signature for user %s", getattr(user, "pk", "?"))
+        return ""
+    finally:
+        try:
+            signature.image.close()
+        except Exception:
+            pass
+
+
+def _lpo_workflow_signatories(document):
+    """Resolve the three LPO signatories from approved LPO workflow actions."""
+    from apps.workflows.models import WorkflowTaskAction
+
+    actions = list(WorkflowTaskAction.objects.filter(
+        task__workflow_instance__document=document,
+        task__workflow_instance__template__phase="lpo",
+        action="approved",
+        actor__isnull=False,
+    ).select_related("actor", "task__step").order_by("created_at"))
+    prepared = checked = None
+    approval_actions = []
+    for action in actions:
+        step = action.task.step
+        name = str(step.name or "").strip()
+        folded = name.casefold()
+        if getattr(step, "prepare_lpo_after_approval", False) or ("procurement" in folded and "approval" in folded):
+            prepared = action
+        elif "check" in folded:
+            checked = action
+        elif "approval" in folded:
+            approval_actions.append(action)
+    approved = approval_actions[-1] if approval_actions else None
+
+    def details(action, fallback_name="", fallback_role=""):
+        if action is None:
+            return {"name": fallback_name, "role": fallback_role, "date": "", "signature": ""}
+        actor = action.actor
+        from django.utils import timezone
+        return {
+            "name": _user_name(actor),
+            "role": str(action.task.step.name or fallback_role).strip(),
+            "date": timezone.localtime(action.created_at).strftime("%d/%m/%Y") if action.created_at else "",
+            "signature": _approval_signature_data(actor),
+        }
+
+    return {
+        "prepared_by": details(prepared),
+        "checked_by": details(checked),
+        "approved_by": details(approved),
+    }
 
 
 def _dec(value) -> Decimal:

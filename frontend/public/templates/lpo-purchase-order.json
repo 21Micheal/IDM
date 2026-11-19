@@ -279,23 +279,19 @@
           "id": "lpo-approvals-row",
           "columns": [
             {
-              "id": "lpo-prepared-cell",
+              "id": "lpo-signatures-cell",
               "width": 1,
               "elements": [
-                { "id": "lpo-prepared-title", "type": "text", "text": "1. Prepared By", "style": { "bold": true, "fontSize": 11, "marginBottom": 1 } },
-                { "id": "lpo-prepared-role", "type": "text", "text": "{{prepared_by.role}}", "style": { "bold": true, "fontSize": 11, "marginBottom": 3 } },
-                { "id": "lpo-prepared-name", "type": "text", "text": "{{prepared_by.name}}", "style": { "fontSize": 11, "marginBottom": 6 } },
-                { "id": "lpo-prepared-date", "type": "text", "text": "Date: {{prepared_by.date}}", "style": { "fontSize": 10 } }
-              ]
-            },
-            {
-              "id": "lpo-approved-cell",
-              "width": 1,
-              "elements": [
-                { "id": "lpo-approved-title", "type": "text", "text": "2. Approved By", "style": { "bold": true, "fontSize": 11, "marginBottom": 1 } },
-                { "id": "lpo-approved-role", "type": "text", "text": "{{approved_by.role}}", "style": { "bold": true, "fontSize": 11, "marginBottom": 3 } },
-                { "id": "lpo-approved-name", "type": "text", "text": "{{approved_by.name}}", "style": { "fontSize": 11, "marginBottom": 6 } },
-                { "id": "lpo-approved-date", "type": "text", "text": "Date: {{approved_by.date}}", "style": { "fontSize": 10 } }
+                {
+                  "id": "lpo-signatures",
+                  "type": "signature_group",
+                  "signatories": [
+                    { "id": "lpo-prepared-signature", "step": "1", "role": "Prepared By · {{prepared_by.role}}", "name": "{{prepared_by.name}}", "date": "{{prepared_by.date}}", "signature": "{{prepared_by.signature}}" },
+                    { "id": "lpo-checked-signature", "step": "2", "role": "Checked By · {{checked_by.role}}", "name": "{{checked_by.name}}", "date": "{{checked_by.date}}", "signature": "{{checked_by.signature}}" },
+                    { "id": "lpo-approved-signature", "step": "3", "role": "Approved By · {{approved_by.role}}", "name": "{{approved_by.name}}", "date": "{{approved_by.date}}", "signature": "{{approved_by.signature}}" }
+                  ],
+                  "style": { "columnsPerRow": 3, "signatureSpace": 66, "fontSize": 11, "lineColor": "#334155", "color": "#172033" }
+                }
               ]
             }
           ],
@@ -345,7 +341,8 @@
     "lpo.number", "lpo.date", "lpo.valid_until", "lpo.description", "lpo.currency",
     "lpo.subtotal", "lpo.vat_total", "lpo.grand_total", "lpo.amount_words",
     "supplier.code", "supplier.name", "supplier.email", "supplier.phone", "supplier.address",
-    "prepared_by.name", "prepared_by.role", "prepared_by.date",
-    "approved_by.name", "approved_by.role", "approved_by.date", "line_items"
+    "prepared_by.name", "prepared_by.role", "prepared_by.date", "prepared_by.signature",
+    "checked_by.name", "checked_by.role", "checked_by.date", "checked_by.signature",
+    "approved_by.name", "approved_by.role", "approved_by.date", "approved_by.signature", "line_items"
   ]
 }

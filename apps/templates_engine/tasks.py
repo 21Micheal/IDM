@@ -1214,18 +1214,50 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             # needing a re-import of the JSON design.
             dotted_label = re.split(r"\.{8,}", str(text), maxsplit=1)[0].strip().rstrip(":") if re.search(r"\.{8,}", str(text)) else ""
             element_id = str(element.get("id") or "")
-            is_lpo_sign_field = element_id.startswith(("cassoa-checked-", "cassoa-approved-"))
-            if kind == "text" and is_lpo_sign_field and dotted_label.casefold() in ("checked by", "approved by", "date", "designation"):
+            is_lpo_sign_field = element_id.startswith(("cassoa-prepared-", "cassoa-checked-", "cassoa-approved-"))
+            if kind == "text" and is_lpo_sign_field and dotted_label.casefold() in ("prepared by", "checked by", "approved by", "date", "designation"):
                 label = dotted_label
                 normalized_label = label.casefold()
-                signing_height = 34 * mm if normalized_label in ("checked by", "approved by") else 14 * mm
+                # Keep signature, date, and designation rules on the same
+                # baseline across the legacy three-column approval rows.
+                signing_height = 34 * mm
                 label_element = {"style": {"bold": True, "fontSize": style.get("fontSize", 11), "color": style.get("color")}}
+                slot = "prepared_by" if element_id.startswith("cassoa-prepared-") else "checked_by" if element_id.startswith("cassoa-checked-") else "approved_by"
+                if normalized_label == "date" and values.get(f"{slot}.date"):
+                    label = f"Date: {values[f'{slot}.date']}"
+                elif normalized_label == "designation" and values.get(f"{slot}.role"):
+                    label = f"Designation: {values[f'{slot}.role']}"
+                if normalized_label in ("prepared by", "checked by", "approved by"):
+                    image_raw = _decode_data_url_image(values.get(f"{slot}.signature"))
+                    if image_raw:
+                        signature_image = RLImage(BytesIO(image_raw))
+                        max_width, max_height = min(available_width * .82, 72 * mm), 18 * mm
+                        ratio = min(max_width / max(signature_image.imageWidth, 1), max_height / max(signature_image.imageHeight, 1))
+                        signature_image.drawWidth = signature_image.imageWidth * ratio
+                        signature_image.drawHeight = signature_image.imageHeight * ratio
+                        signer_space = max(2, signing_height - signature_image.drawHeight - 5 * mm)
+                        return [
+                            para(label, element=label_element), Spacer(1, 2 * mm), signature_image,
+                            Spacer(1, signer_space),
+                            HRFlowable(width="100%", thickness=0.65, color=as_color(style.get("color"), "#334155"), spaceBefore=0, spaceAfter=0),
+                            Spacer(1, 2 * mm),
+                            para(_subst_tokens(f"{{{{{slot}.name}}}}", values), element={"style": {"fontSize": style.get("fontSize", 10)}}),
+                        ]
                 return [
                     para(label, element=label_element),
                     Spacer(1, signing_height),
                     HRFlowable(width="100%", thickness=0.65, color=as_color(style.get("color"), "#334155"), spaceBefore=0, spaceAfter=0),
                     Spacer(1, 7),
                 ]
+            if kind == "text" and "{{prepared_by.name}}" in str(text):
+                signature_raw = _decode_data_url_image(values.get("prepared_by.signature"))
+                if signature_raw:
+                    signature_image = RLImage(BytesIO(signature_raw))
+                    max_width, max_height = min(54 * mm, available_width * .8), 12 * mm
+                    ratio = min(max_width / max(signature_image.imageWidth, 1), max_height / max(signature_image.imageHeight, 1))
+                    signature_image.drawWidth = signature_image.imageWidth * ratio
+                    signature_image.drawHeight = signature_image.imageHeight * ratio
+                    return [para(text, element=element), Spacer(1, 1 * mm), signature_image]
             if kind == "heading":
                 level = int(element.get("level") or 2)
                 size = max(9, round(float(style.get("fontSize", {1: 24, 2: 18, 3: 16}.get(level, 18))) * .75))
@@ -1290,7 +1322,7 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             mark = "•" if kind == "bulleted_list" else None
             return [Paragraph(xml_escape(_subst_tokens(str(item), values)), styles["Normal"], bulletText=mark) for item in (element.get("items") or [])]
         if kind in ("image", "logo"):
-            raw = _decode_data_url_image(element.get("src"))
+            raw = _decode_data_url_image(_subst_tokens(str(element.get("src") or ""), values))
             if raw:
                 image = RLImage(BytesIO(raw))
                 max_width = min(float(element.get("width") or 120) * .75, available_width)
@@ -1314,19 +1346,29 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
 
             def signer_block(signature):
                 role = f"{signature.get('step')}. " if signature.get("step") else ""
-                role += str(signature.get("role") or "")
+                role += _subst_tokens(str(signature.get("role") or ""), values).strip()
                 raw_name = _subst_tokens(str(signature.get("name") or ""), values).strip()
                 raw_date = _subst_tokens(str(signature.get("date") or ""), values).strip()
+                raw_signature = _subst_tokens(str(signature.get("signature") or ""), values).strip()
+                signature_raw = _decode_data_url_image(raw_signature)
                 is_line = lambda value: bool(value) and all(char in ". _-" for char in value)
                 name_text = "Name: __________________________" if is_line(raw_name) or not raw_name else f"Name: {raw_name}"
                 date_text = "Date: __________________" if is_line(raw_date) or not raw_date else f"Date: {raw_date}"
-                block = [
-                    Spacer(1, signature_space),
+                if signature_raw:
+                    signature_image = RLImage(BytesIO(signature_raw))
+                    max_width, max_height = min(block_width - 14, 72 * mm), 18 * mm
+                    ratio = min(max_width / max(signature_image.imageWidth, 1), max_height / max(signature_image.imageHeight, 1))
+                    signature_image.drawWidth = signature_image.imageWidth * ratio
+                    signature_image.drawHeight = signature_image.imageHeight * ratio
+                    block = [signature_image, Spacer(1, 3)]
+                else:
+                    block = [Spacer(1, signature_space)]
+                block.extend([
                     HRFlowable(width="100%", thickness=0.65, color=as_color(signature_style.get("lineColor"), "#334155"), spaceBefore=0, spaceAfter=0),
                     Spacer(1, 4),
                     para(role, element={"style": {"bold": True, "fontSize": signature_font / .75, "color": signature_color_value}}),
                     Spacer(1, 3),
-                ]
+                ])
                 detail_style = ParagraphStyle(
                     "SignerDetail", parent=styles["Normal"], fontName="Helvetica",
                     fontSize=max(8, signature_font - 1), leading=max(10, signature_font + 2),
