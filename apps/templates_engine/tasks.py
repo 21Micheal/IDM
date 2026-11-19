@@ -1208,6 +1208,24 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
         style = element.get("style") or {}
         if kind in ("text", "note", "heading"):
             text = element.get("text", "")
+            # Older saved LPO designs represent signature spaces as a label
+            # followed by a run of dots. Render those as real signing fields
+            # too, so existing database templates get the spacing fix without
+            # needing a re-import of the JSON design.
+            dotted_label = re.split(r"\.{8,}", str(text), maxsplit=1)[0].strip().rstrip(":") if re.search(r"\.{8,}", str(text)) else ""
+            element_id = str(element.get("id") or "")
+            is_lpo_sign_field = element_id.startswith(("cassoa-checked-", "cassoa-approved-"))
+            if kind == "text" and is_lpo_sign_field and dotted_label.casefold() in ("checked by", "approved by", "date", "designation"):
+                label = dotted_label
+                normalized_label = label.casefold()
+                signing_height = 34 * mm if normalized_label in ("checked by", "approved by") else 14 * mm
+                label_element = {"style": {"bold": True, "fontSize": style.get("fontSize", 11), "color": style.get("color")}}
+                return [
+                    para(label, element=label_element),
+                    Spacer(1, signing_height),
+                    HRFlowable(width="100%", thickness=0.65, color=as_color(style.get("color"), "#334155"), spaceBefore=0, spaceAfter=0),
+                    Spacer(1, 7),
+                ]
             if kind == "heading":
                 level = int(element.get("level") or 2)
                 size = max(9, round(float(style.get("fontSize", {1: 24, 2: 18, 3: 16}.get(level, 18))) * .75))
@@ -1286,7 +1304,9 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
                 return []
             signature_style = element.get("style") or {}
             columns_per_row = max(1, min(4, int(signature_style.get("columnsPerRow", 2))))
-            signature_space = max(18, float(signature_style.get("signatureSpace", 42)) * .75)
+            # Keep a full, writable space above the signer rule even for older
+            # saved designs whose signatureSpace was configured very tightly.
+            signature_space = max(52, float(signature_style.get("signatureSpace", 42)) * .75)
             block_width = available_width / columns_per_row
             signature_font = max(8, round(float(signature_style.get("fontSize", 12)) * .75))
             signature_color_value = signature_style.get("color") or theme.get("textColor", "#1F2933")
@@ -1303,17 +1323,22 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
                 block = [
                     para(role, element={"style": {"bold": True, "fontSize": signature_font / .75, "color": signature_color_value}}),
                     Spacer(1, signature_space),
-                    HRFlowable(width="100%", thickness=0.65, color=as_color(signature_style.get("lineColor"), "#334155"), spaceBefore=0, spaceAfter=3),
+                    HRFlowable(width="100%", thickness=0.65, color=as_color(signature_style.get("lineColor"), "#334155"), spaceBefore=0, spaceAfter=0),
+                    Spacer(1, 16),
                 ]
                 detail_style = ParagraphStyle(
                     "SignerDetail", parent=styles["Normal"], fontName="Helvetica",
                     fontSize=max(8, signature_font - 1), leading=max(10, signature_font + 2),
                     textColor=signature_color,
                 )
-                detail = Table([[para(name_text, style=detail_style), para(date_text, style=detail_style)]], colWidths=[block_width * .62, block_width * .38])
+                detail = Table([
+                    [para(name_text, style=detail_style)],
+                    [Spacer(1, 10)],
+                    [para(date_text, style=detail_style)],
+                ], colWidths=[block_width])
                 detail.setStyle(TableStyle([
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                     ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
                 ]))
                 block.append(detail)
@@ -1327,7 +1352,7 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             table.setStyle(TableStyle([
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 7), ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-                ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+                ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 22),
             ]))
             return [table]
         if kind == "divider":
@@ -1341,6 +1366,11 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
         if page_index:
             story.append(PageBreak())
         for row in page_spec.get("rows") or []:
+            # The legacy CASSOA LPO has a full-width divider immediately before
+            # the signer labels; each signer now gets an individual lower rule
+            # after its own handwriting area instead.
+            if row.get("id") == "cassoa-signature-divider":
+                continue
             cells = row.get("columns") or []
             if not cells:
                 continue
