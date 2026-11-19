@@ -1321,10 +1321,11 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
                 name_text = "Name: __________________________" if is_line(raw_name) or not raw_name else f"Name: {raw_name}"
                 date_text = "Date: __________________" if is_line(raw_date) or not raw_date else f"Date: {raw_date}"
                 block = [
-                    para(role, element={"style": {"bold": True, "fontSize": signature_font / .75, "color": signature_color_value}}),
                     Spacer(1, signature_space),
                     HRFlowable(width="100%", thickness=0.65, color=as_color(signature_style.get("lineColor"), "#334155"), spaceBefore=0, spaceAfter=0),
-                    Spacer(1, 16),
+                    Spacer(1, 4),
+                    para(role, element={"style": {"bold": True, "fontSize": signature_font / .75, "color": signature_color_value}}),
+                    Spacer(1, 3),
                 ]
                 detail_style = ParagraphStyle(
                     "SignerDetail", parent=styles["Normal"], fontName="Helvetica",

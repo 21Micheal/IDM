@@ -92,7 +92,8 @@ def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict 
 
     values = get_form_values(document)
     classified = classify_retirement(retirement, values)
-    if classified.get("scenario") != "over" or Decimal(classified.get("variance") or 0) <= Decimal("0.005"):
+    scenario_name = str(classified.get("scenario") or "").strip().lower()
+    if scenario_name not in {"under", "over"} or Decimal(classified.get("variance") or 0) <= Decimal("0.005"):
         return None
 
     spent = retirement.get("spent_amount") or {}
@@ -150,12 +151,15 @@ def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict 
         if description_spec:
             break
     description = resolve_value(description_spec, values).strip() if description_spec else ""
-    description = description or str(classified.get("description") or "Imprest retirement over-expenditure").strip()
+    description = description or str(classified.get("description") or "Imprest retirement variance").strip()
 
-    # The refund is charged to the account configured for the debit variance
-    # line in the over-expenditure scenario (issued - spent is negative).
+    # Use the account configured for the debit variance line in the matching
+    # retirement scenario. The scenario mapping distinguishes returned funds
+    # (under) from reimbursement (over), while the voucher amount stays the
+    # absolute variance in either case.
     account_code = ""
-    for line in ((retirement.get("scenarios") or {}).get("over") or {}).get("lines") or []:
+    scenario_lines = ((retirement.get("scenarios") or {}).get(scenario_name) or {}).get("lines") or []
+    for line in scenario_lines:
         if not isinstance(line, dict):
             continue
         amount_source = str(line.get("amount_source") or "spent").strip().lower()
@@ -192,9 +196,10 @@ def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict 
 def generate_payment_voucher_for_retirement(document, posting, actor=None):
     """Create one linked payment voucher once all retirement journals are posted.
 
-    Returns ``None`` for non-retirement/incomplete postings or exact/underspent
-    retirements. The first successful over-expenditure creates the built-in PV
-    type and template if the client has not customized them already.
+    Returns ``None`` for non-retirement/incomplete postings or exact-spend
+    retirements. Both under- and over-expenditure create a voucher for the
+    absolute variance, using the debit variance account configured for the
+    matching scenario.
     """
     from apps.documents.models import Document, DocumentRelationship
     from apps.sunsystems.models import JournalPosting, JournalPostingStatus
@@ -275,7 +280,7 @@ def generate_payment_voucher_for_retirement(document, posting, actor=None):
         source_document=locked,
         target_document=voucher,
         relation_type=DocumentRelationship.RelationType.REFERENCES,
-        defaults={"created_by": user, "note": "Payment voucher generated for retirement over-expenditure"},
+        defaults={"created_by": user, "note": "Payment voucher generated for retirement variance"},
     )
     form_meta["payment_voucher_document_id"] = str(voucher.pk)
     form_meta["payment_voucher_reference"] = voucher.reference_number

@@ -343,12 +343,14 @@ export default function FormDetailPage() {
       // another member. The completion overlay is terminal on this page, so
       // stop polling the detail record while it is shown.
       if (workflowActionCompleted) return false;
-      const form = (query.state.data as { metadata?: { form?: { imprest_request_workflow_status?: string; payment_voucher_document_id?: string; imprest_payment_voucher_document_id?: string; imprest_payment_voucher_status?: string; retirement_workflow_status?: string; retirement_variance?: { scenario?: string; kind?: string } } } } | undefined)
+      const form = (query.state.data as { metadata?: { form?: { imprest_request_workflow_status?: string; payment_voucher_document_id?: string; imprest_payment_voucher_document_id?: string; imprest_payment_voucher_status?: string; retirement_payment_voucher_status?: string; retirement_workflow_status?: string; retirement_variance?: { scenario?: string; kind?: string } } } } | undefined)
         ?.metadata?.form;
       if (form?.imprest_payment_voucher_status === "pending" && !form.imprest_payment_voucher_document_id) return 1_500;
       if (String(form?.retirement_workflow_status || "").toLowerCase() === "approved"
-        && (form?.retirement_variance?.scenario === "over" || form?.retirement_variance?.kind === "over")
-        && !form?.payment_voucher_document_id) return 1_500;
+        && (["over", "under"].includes(String(form?.retirement_variance?.scenario || "").toLowerCase())
+          || ["over", "under"].includes(String(form?.retirement_variance?.kind || "").toLowerCase()))
+        && !form?.payment_voucher_document_id
+        && String(form?.retirement_payment_voucher_status || "").toLowerCase() !== "failed") return 1_500;
       if (String(form?.imprest_request_workflow_status || "").toLowerCase() === "posting") return 3_000;
       return 8_000;
     },
@@ -377,6 +379,8 @@ export default function FormDetailPage() {
       imprest_payment_voucher_reference?: string;
       imprest_payment_voucher_status?: string;
       imprest_payment_voucher_error?: string;
+      retirement_payment_voucher_status?: string;
+      retirement_payment_voucher_error?: string;
       imprest_request_posting_required_for_lpo?: boolean;
       booked_early?: { reason?: string; blocking_reference?: string; raised_at?: string };
     }
@@ -447,7 +451,8 @@ export default function FormDetailPage() {
   const imprestPaymentVoucherId = formData?.imprest_payment_voucher_document_id;
   const imprestPaymentVoucherReference = formData?.imprest_payment_voucher_reference;
   const retirementVoucherExpected =
-    (formData?.retirement_variance?.scenario === "over" || formData?.retirement_variance?.kind === "over");
+    (["over", "under"].includes(String(formData?.retirement_variance?.scenario || "").toLowerCase())
+      || ["over", "under"].includes(String(formData?.retirement_variance?.kind || "").toLowerCase()));
   const retirementVoucherPending =
     String(formData?.retirement_workflow_status || "").toLowerCase() === "approved"
     && retirementVoucherExpected
@@ -2257,6 +2262,9 @@ export default function FormDetailPage() {
           title="Generating Payment Voucher"
           pendingMessage="Retirement approval is complete. The Payment Voucher is being generated from the posted retirement journal. This preview will open automatically when it is ready."
           failedPostings={failedRetirementGatePostings}
+          generationError={formData?.retirement_payment_voucher_status === "failed"
+            ? `The retirement Payment Voucher could not be generated after several attempts. ${formData.retirement_payment_voucher_error || "The retirement journal remains posted; request administrator review to retry voucher generation."}`
+            : undefined}
           retrying={gateRetrying}
           onRetry={() => void retryGatePostings(failedRetirementGatePostings)}
           onDismiss={dismissPaymentVoucherGate}

@@ -1001,7 +1001,20 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
                     form["imprest_payment_voucher_status"] = "generated"
                     form.pop("imprest_payment_voucher_error", None)
 
-            if lpo_records or form.get("imprest_payment_voucher_document_id"):
+            if not form.get("payment_voucher_document_id"):
+                retirement_voucher_link = instance.outgoing_relationships.filter(
+                    relation_type=DocumentRelationship.RelationType.REFERENCES,
+                    target_document__metadata__payment_voucher__source_document_id=str(instance.pk),
+                    target_document__metadata__payment_voucher__kind="retirement",
+                ).select_related("target_document").order_by("created_at").first()
+                if retirement_voucher_link:
+                    voucher = retirement_voucher_link.target_document
+                    form["payment_voucher_document_id"] = str(voucher.pk)
+                    form["payment_voucher_reference"] = voucher.reference_number
+                    form["retirement_payment_voucher_status"] = "generated"
+                    form.pop("retirement_payment_voucher_error", None)
+
+            if lpo_records or form.get("imprest_payment_voucher_document_id") or form.get("payment_voucher_document_id"):
                 metadata["form"] = form
                 data["metadata"] = metadata
         suggestions = metadata.get("relationship_suggestions") if isinstance(metadata, dict) else None
