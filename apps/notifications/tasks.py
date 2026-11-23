@@ -1351,13 +1351,15 @@ def notify_workflow_action(
         )
         default_subject = f"DMS — {target_type.capitalize()} rejected: {reference}"
         body_tail = (
-            f"Your {target_type} has been rejected and requires revision.\n\n"
+            f"Your {target_type} has been rejected. This decision closes its approval workflow; "
+            f"it cannot be amended or resubmitted through this workflow.\n\n"
             f"  {target_type.capitalize()}: {title}\n"
             f"  Reference: {reference}\n"
             f"  Rejected by: {actor_name}\n"
             f"  Step: {step_name}\n"
             + reason_line
-            + "\nPlease make the required changes and resubmit.\n"
+            + "\nIf changes are needed before a decision is made, the approver should use Send back "
+            + "instead of Reject so the item can be amended and resubmitted.\n"
         )
     elif action_type == "returned":
         template_key = "action_returned"

@@ -394,7 +394,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
       return workflowAPI.approveTask(task.id, comment, result ?? undefined, nextApproverId || undefined);
     },
     onMutate: () => beginOptimisticAction("approve"),
-    onSuccess: async () => { toast.success(`${capitalizedTargetLabel} approved`); await completeAction("approve"); },
+    onSuccess: async () => { toast.success("Approval completed successfully."); await completeAction("approve"); },
     onError:   (e: { message?: string; response?: { data?: { detail?: string } } }) => {
       if (e?.message === "FORM_REQUIRED_FIELDS") {
         setOptimisticAction(null);
