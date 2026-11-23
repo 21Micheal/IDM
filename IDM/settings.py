@@ -317,6 +317,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.notifications.tasks.remind_pending_signatures",
         "schedule": 24 * 60 * 60,
     },
+    "scheduled-retirement-reports": {
+        "task": "apps.notifications.tasks.send_scheduled_retirement_reports",
+        "schedule": 15 * 60,
+    },
     "mailbox-email-ingestion-poll": {
         "task": "apps.documents.tasks.poll_active_mailboxes",
         # Short tick: each mailbox decides due-ness via its own

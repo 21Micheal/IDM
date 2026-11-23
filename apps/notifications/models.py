@@ -39,3 +39,36 @@ class Notification(models.Model):
             models.Index(fields=["recipient", "-created_at"]),
             models.Index(fields=["type", "-created_at"]),
         ]
+
+
+class RetirementReportSchedule(models.Model):
+    class Frequency(models.TextChoices):
+        DAILY = "daily", "Daily"
+        WEEKLY = "weekly", "Weekly"
+        MONTHLY = "monthly", "Monthly"
+
+    class Audience(models.TextChoices):
+        HODS_FINANCE = "hods_finance", "Department Heads and Finance Approvers"
+        ALL_MANAGEMENT = "all_mgmt", "Executive Leadership and Audit Committee"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    key = models.CharField(max_length=40, unique=True, default="outstanding_retirements")
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="updated_retirement_report_schedules",
+    )
+    frequency = models.CharField(max_length=12, choices=Frequency.choices, default=Frequency.WEEKLY)
+    audience = models.CharField(max_length=20, choices=Audience.choices, default=Audience.HODS_FINANCE)
+    enabled = models.BooleanField(default=False)
+    last_sent_on = models.DateField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["enabled", "frequency"], name="notif_ret_rpt_en_freq_idx")]
+
+    def __str__(self):
+        return f"{self.get_frequency_display()} outstanding-retirements report"

@@ -1637,3 +1637,150 @@ def remind_pending_signatures() -> None:
                 notify_signature_requested.delay(str(s.signer_id), str(req.id))
         except Exception as exc:
             logger.warning("remind_pending_signatures: request %s error: %s", req.id, exc)
+
+
+def _retirement_report_recipients(audience):
+    """Resolve configured report audiences from active organization groups."""
+    from django.db.models import Q
+    from django.utils import timezone
+    from apps.accounts.models import User, UserGroup
+
+    now = timezone.now()
+    active_membership = (
+        Q(group_memberships__expires_at__isnull=True)
+        | Q(group_memberships__expires_at__gt=now)
+    )
+    if audience == "hods_finance":
+        groups = UserGroup.objects.filter(is_active=True).filter(
+            Q(name__iexact=UserGroup.HOD_GROUP_NAME)
+            | Q(name__icontains="finance")
+        )
+        users = User.objects.filter(
+            Q(headed_departments__isnull=False)
+            | Q(role__iexact="finance")
+            | Q(group_memberships__group__in=groups) & active_membership
+            | Q(headed_groups__in=groups)
+        )
+    else:
+        groups = UserGroup.objects.filter(is_active=True).filter(
+            Q(can_view_system_audit=True)
+            | Q(name__icontains="executive")
+            | Q(name__icontains="leadership")
+            | Q(name__icontains="audit")
+            | Q(name__icontains="administrator")
+        )
+        users = User.objects.filter(
+            Q(group_memberships__group__in=groups) & active_membership
+            | Q(headed_groups__in=groups)
+        )
+    return list(users.filter(is_active=True).exclude(email="").distinct().order_by("email"))
+
+
+def _retirement_report_csv():
+    from apps.documents.models import Document
+    from apps.documents.requisition_reports import (
+        build_outstanding_retirements_report,
+        generate_outstanding_retirements_csv,
+    )
+
+    documents = Document.objects.filter(
+        deleted_at__isnull=True,
+        metadata__form__isnull=False,
+    ).select_related("uploaded_by", "uploaded_by__department", "document_type")
+    data = build_outstanding_retirements_report(
+        documents,
+        {"include_reconciled": "true"},
+    )
+    return generate_outstanding_retirements_csv(data), data["summary"]
+
+
+def _send_retirement_report_email(recipient, *, test=False):
+    from django.core.mail import EmailMessage
+    from django.utils import timezone
+
+    csv_content, summary = _retirement_report_csv()
+    today = timezone.localdate()
+    prefix = "Test — " if test else ""
+    subject = f"{prefix}Outstanding Retirements Report — {today:%d %b %Y}"
+    body = (
+        f"Hello {recipient.first_name or 'there'},\n\n"
+        f"Attached is the outstanding retirements aging report as of {today:%d %B %Y}.\n\n"
+        f"Summary: {summary.get('total_records', 0)} records; "
+        f"{summary.get('total_overdue_records', 0)} overdue; "
+        f"{summary.get('total_reconciled', 0)} reconciled.\n\n"
+        "The CSV includes the traveller, department, advance, spent amount, outstanding balance, and workflow state.\n"
+    )
+    message = EmailMessage(
+        subject=subject,
+        body=body,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[recipient.email],
+    )
+    message.attach(
+        f"outstanding_retirements_{today:%Y%m%d}.csv",
+        csv_content,
+        "text/csv",
+    )
+    sent_count = message.send(fail_silently=False)
+    if sent_count != 1:
+        raise RuntimeError(f"Report email was not accepted by the mail backend for {recipient.email}.")
+    return sent_count
+
+
+def _schedule_is_due(schedule, local_now):
+    today = local_now.date()
+    if local_now.hour < 8 or schedule.last_sent_on == today:
+        return False
+    if schedule.frequency == "daily":
+        return local_now.weekday() < 5
+    if schedule.frequency == "weekly":
+        return local_now.weekday() == 0
+    if schedule.frequency == "monthly":
+        return today.day == 1
+    return False
+
+
+@shared_task(queue="notifications")
+def send_scheduled_retirement_reports():
+    """Dispatch due report schedules; invoked by Celery Beat every 15 minutes."""
+    from django.db import transaction
+    from django.utils import timezone
+    from apps.notifications.models import RetirementReportSchedule
+
+    local_now = timezone.localtime()
+    schedule_ids = list(
+        RetirementReportSchedule.objects.filter(enabled=True).values_list("id", flat=True)
+    )
+    sent = 0
+    for schedule_id in schedule_ids:
+        try:
+            with transaction.atomic():
+                schedule = RetirementReportSchedule.objects.select_for_update().get(
+                    pk=schedule_id,
+                    enabled=True,
+                )
+                if not _schedule_is_due(schedule, local_now):
+                    continue
+                recipients = _retirement_report_recipients(schedule.audience)
+                if not recipients:
+                    logger.warning(
+                        "Retirement report schedule %s has no active recipients for audience %s",
+                        schedule.pk,
+                        schedule.audience,
+                    )
+                    continue
+                for recipient in recipients:
+                    _send_retirement_report_email(recipient)
+                schedule.last_sent_on = local_now.date()
+                schedule.save(update_fields=["last_sent_on", "updated_at"])
+                sent += 1
+        except Exception:
+            logger.exception("Could not send retirement report schedule %s", schedule_id)
+    return {"schedules_sent": sent}
+
+
+def send_retirement_report_test_email(user):
+    """Send the current aging report to the requesting administrator only."""
+    if not user or not getattr(user, "is_active", False) or not getattr(user, "email", ""):
+        raise ValueError("Your account needs an active email address to receive a test report.")
+    _send_retirement_report_email(user, test=True)

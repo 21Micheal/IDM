@@ -346,6 +346,15 @@ export const documentsAPI = {
       responseType: "blob",
     }),
 
+  retirementReportSchedule: () =>
+    api.get("/documents/retirement-report-schedule/"),
+
+  saveRetirementReportSchedule: (data: { frequency: string; audience: string; enabled?: boolean }) =>
+    api.put("/documents/retirement-report-schedule/", data),
+
+  sendRetirementReportScheduleTest: () =>
+    api.post("/documents/retirement-report-schedule-test/"),
+
   exportRetirementsAgingReportUrl: (params?: RetirementsAgingReportParams) => {
     const searchParams = new URLSearchParams();
     searchParams.set("export", "csv");

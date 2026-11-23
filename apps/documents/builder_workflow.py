@@ -110,26 +110,37 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
     if status is None:
         status = _retirement_workflow_statuses([document.id]).get(document.id)
     variance_summary = ((document.metadata or {}).get("form") or {}).get("retirement_variance")
+    if status in {"in_progress", "approved", "posting", "posted"}:
+        try:
+            from apps.sunsystems.variance import compute_retirement_variance
+            variance_summary = compute_retirement_variance(document, workflow_status=status) or variance_summary
+        except Exception:
+            pass
 
-    if phase != "retirement":
-        label = "LPO pending"
-        kind = "not_started"
-    elif status == "approved" or retirement_journal_posted(document):
+    lpo_complete = (
+        "lpo" in completed_procurement_stages(document)
+        or bool(((document.metadata or {}).get("form") or {}).get("lpo_posting_complete"))
+        or _lpo_stage_postings_complete(document)
+    )
+    retirement_posted = retirement_journal_posted(document)
+
+    # Workflow phase can remain `lpo` after the retirement CASE completes (or
+    # on older records where the phase mirror was never advanced). The actual
+    # retirement workflow/posting result is authoritative and must win over
+    # that stale phase label.
+    if status == "approved" or retirement_posted:
         # Approval (and, for older flows, a completed posting) closes the
         # retirement obligation for now. Keep the variance in its own register
         # column so an under/overspend remains visible without reading as due.
-        try:
-            from apps.sunsystems.variance import compute_retirement_variance
-            variance_summary = compute_retirement_variance(document) or variance_summary
-        except Exception:
-            pass
         label, kind = "Reconciled", "reconciled"
-    elif status == "in_progress":
+    elif status in {"in_progress", "posting", "posted"}:
         label, kind = "Awaiting Finance", "awaiting_finance"
     elif status == "returned":
         label, kind = "Returned for revision", "returned"
     elif status == "rejected":
         label, kind = "Retirement rejected", "rejected"
+    elif phase != "retirement" and not lpo_complete:
+        label, kind = "LPO pending", "not_started"
     elif not travel_return_date(document):
         label, kind = "Return date missing", "return_date_missing"
     elif due and timezone.localdate() > due:

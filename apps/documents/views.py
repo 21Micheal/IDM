@@ -970,6 +970,59 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         return Response(report_data, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=["get", "put"], url_path="retirement-report-schedule")
+    def retirement_report_schedule(self, request):
+        """Read or save the organization's automated aging-report schedule."""
+        if not request.user.has_admin_access:
+            return Response({"detail": "Only administrators can manage scheduled report delivery."}, status=status.HTTP_403_FORBIDDEN)
+        from apps.notifications.models import RetirementReportSchedule
+
+        if request.method == "PUT":
+            schedule, _ = RetirementReportSchedule.objects.get_or_create(
+                key="outstanding_retirements",
+                defaults={"enabled": False},
+            )
+            frequency = str(request.data.get("frequency") or "").strip().lower()
+            audience = str(request.data.get("audience") or "").strip().lower()
+            if frequency not in RetirementReportSchedule.Frequency.values:
+                return Response({"detail": "Choose daily, weekly, or monthly delivery."}, status=status.HTTP_400_BAD_REQUEST)
+            if audience not in RetirementReportSchedule.Audience.values:
+                return Response({"detail": "Choose a valid report recipient group."}, status=status.HTTP_400_BAD_REQUEST)
+            schedule.frequency = frequency
+            schedule.audience = audience
+            enabled_value = request.data.get("enabled", True)
+            schedule.enabled = str(enabled_value).strip().lower() not in {"false", "0", "no", "off"}
+            schedule.updated_by = request.user
+            schedule.save(update_fields=["frequency", "audience", "enabled", "updated_by", "updated_at"])
+        else:
+            schedule = RetirementReportSchedule.objects.filter(key="outstanding_retirements").first()
+            if schedule is None:
+                return Response({
+                    "frequency": RetirementReportSchedule.Frequency.WEEKLY,
+                    "audience": RetirementReportSchedule.Audience.HODS_FINANCE,
+                    "enabled": False,
+                    "last_sent_on": None,
+                })
+        return Response({
+            "frequency": schedule.frequency,
+            "audience": schedule.audience,
+            "enabled": schedule.enabled,
+            "last_sent_on": schedule.last_sent_on.isoformat() if schedule.last_sent_on else None,
+        })
+
+    @action(detail=False, methods=["post"], url_path="retirement-report-schedule-test")
+    def retirement_report_schedule_test(self, request):
+        """Send a real sample aging report to the administrator's own inbox."""
+        if not request.user.has_admin_access:
+            return Response({"detail": "Only administrators can send a scheduled report test."}, status=status.HTTP_403_FORBIDDEN)
+        from apps.notifications.tasks import send_retirement_report_test_email
+        try:
+            send_retirement_report_test_email(request.user)
+        except Exception as exc:
+            logger.exception("Failed to send retirement report test to %s", request.user.pk)
+            return Response({"detail": str(exc) or "Could not send the test report."}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response({"detail": "Test aging report sent to your account email."}, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=["get"], url_path="duplicate-check")
     def duplicate_check(self, request):
         dms_settings = DMSSettings.load()

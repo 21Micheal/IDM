@@ -524,7 +524,7 @@ def build_outstanding_retirements_report(
         ret_info = retirement_status(doc) or {}
         status_kind = ret_info.get("status", "not_started")
         status_label = ret_info.get("label", "LPO pending")
-        available_statuses.add(status_label)
+        available_statuses.add((status_kind, status_label))
 
         ret_date = travel_return_date(doc)
         due_date = travel_retirement_due_date(doc)
@@ -593,13 +593,22 @@ def build_outstanding_retirements_report(
         due_date_str = due_date.strftime("%Y-%m-%d") if due_date else ""
 
         # Advance & Variance Amounts
-        advance_amount = _to_float(
-            values.get("total_dsa")
-            or values.get("total_imprest_gross")
-            or values.get("grand_total")
-            or 0.0
-        )
         variance = ret_info.get("variance") or {}
+        issued_value = variance.get("issued")
+        if issued_value in (None, ""):
+            try:
+                from apps.sunsystems.variance import get_requested_amount
+                issued_value = get_requested_amount(doc)
+            except Exception:
+                issued_value = None
+        advance_amount = _to_float(issued_value)
+        if advance_amount <= 0:
+            advance_amount = _to_float(
+                values.get("total_dsa")
+                or values.get("total_imprest_gross")
+                or values.get("grand_total")
+                or 0.0
+            )
         spent_amount = _to_float(variance.get("spent") or 0.0)
         variance_amount = _to_float(variance.get("amount") or 0.0)
         variance_scenario = _text(variance.get("scenario") or variance.get("kind") or "")
@@ -795,7 +804,10 @@ def build_outstanding_retirements_report(
     filter_options = {
         "departments": sorted(list(available_departments)),
         "travellers": sorted(list(available_travellers)),
-        "statuses": sorted(list(available_statuses)),
+        "statuses": [
+            {"key": key, "label": label}
+            for key, label in sorted(available_statuses, key=lambda item: item[1].lower())
+        ],
         "aging_buckets": [
             {"key": "all", "label": "All Aging Categories"},
             {"key": "current", "label": "Current / Not Due"},

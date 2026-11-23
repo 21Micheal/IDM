@@ -157,7 +157,7 @@ export interface TravellerAgingSummary {
 export interface RetirementsAgingReportFilterOptions {
   departments: string[];
   travellers: string[];
-  statuses: string[];
+  statuses: Array<{ key: string; label: string }>;
   aging_buckets: Array<{ key: string; label: string }>;
 }
 

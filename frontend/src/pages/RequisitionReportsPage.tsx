@@ -29,8 +29,8 @@ import {
   CheckCircle2, Clock, AlertTriangle, TrendingUp, BarChart3,
   Building2, ClipboardList, RefreshCw, ExternalLink, Layers,
   ChevronLeft, ChevronRight, SlidersHorizontal, Loader2,
-  Calendar, Mail, User, ShieldAlert, Sparkles, Send, BellRing,
-  HelpCircle, ArrowUpDown, Check, CheckCircle, ChevronDown, ChevronUp,
+  Calendar, Mail, User, ShieldAlert, Send, BellRing,
+  ArrowUpDown, Check,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
@@ -145,9 +145,9 @@ function AgingBadge({ bucket, label, days }: { bucket: string; label: string; da
 function JournalStatusBadge({ status, journalNumber }: { status: string; journalNumber?: string }) {
   if (journalNumber && journalNumber !== "—") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200 print:border-none print:px-0 print:py-0 print:text-[9px]">
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200 print:inline-block print:max-w-full print:whitespace-normal print:break-all print:border-none print:px-0 print:py-0 print:text-[9px]">
         <CheckCircle2 className="h-3 w-3 text-emerald-600 print:hidden" />
-        <span className="font-mono">#{journalNumber}</span>
+        <span className="font-mono print:break-all">#{journalNumber}</span>
       </span>
     );
   }
@@ -225,23 +225,14 @@ export default function RequisitionReportsPage() {
   const [retSortField, setRetSortField] = useState<string>("due_date");
   const [retSortDirection, setRetSortDirection] = useState<SortDirection>("asc");
 
-  // Q&A Assistant state in Retirements tab
-  const [qaOpen, setQaOpen] = useState(false);
-  const [qaQuery, setQaQuery] = useState("");
-  const [qaAnswer, setQaAnswer] = useState<{
-    queryText: string;
-    headline: string;
-    detail: string;
-    matchCount: number;
-    matchAmount: number;
-  } | null>(null);
-
   // Export & Schedule Modals
   const [exportingCsv, setExportingCsv] = useState(false);
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
   const [scheduleFrequency, setScheduleFrequency] = useState("weekly");
   const [scheduleRecipients, setScheduleRecipients] = useState("hods_finance");
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [scheduleSendingTest, setScheduleSendingTest] = useState(false);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
 
   // Print mode detection for unpaginated full print rendering
   const [isPrinting, setIsPrinting] = useState(false);
@@ -310,6 +301,20 @@ export default function RequisitionReportsPage() {
     queryFn: () => documentsAPI.retirementsAgingReport(retirementsParams).then((r) => r.data),
     staleTime: 60_000,
   });
+
+  const { data: savedSchedule, isLoading: isLoadingSchedule, isError: scheduleLoadFailed } = useQuery({
+    queryKey: ["retirement-report-schedule"],
+    queryFn: () => documentsAPI.retirementReportSchedule().then((r) => r.data),
+    enabled: scheduleModalOpen,
+    staleTime: 0,
+  });
+
+  useEffect(() => {
+    if (!savedSchedule) return;
+    if (savedSchedule.frequency) setScheduleFrequency(savedSchedule.frequency);
+    if (savedSchedule.audience) setScheduleRecipients(savedSchedule.audience);
+    setScheduleEnabled(Boolean(savedSchedule.enabled));
+  }, [savedSchedule]);
 
   const finSummary = financialData?.summary || {
     total_amount: 0,
@@ -407,115 +412,6 @@ export default function RequisitionReportsPage() {
 
   const totalRetirementPages = Math.ceil(sortedRetirements.length / retPageSize) || 1;
 
-  // ── Q&A Smart Query Handler ────────────────────────────────────────────────
-  const executeQaQuery = (questionText: string) => {
-    const text = questionText.trim().toLowerCase();
-    if (!text) return;
-    setQaQuery(questionText);
-    setQaOpen(true);
-
-    const rows = retirementsData?.retirements || [];
-
-    if (text.includes("30") || text.includes("month") || text.includes("overdue by more than 30")) {
-      const matches = rows.filter((r) => r.days_overdue > 30);
-      const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
-      setRetAgingBucket("31_60");
-      setQaAnswer({
-        queryText: questionText,
-        headline: matches.length > 0
-          ? `Found ${matches.length} retirement${matches.length === 1 ? "" : "s"} overdue by > 30 days.`
-          : "No retirements are currently overdue by more than 30 days.",
-        detail: matches.length > 0
-          ? `Total delinquent balance: ${formatCurrency(totalAmt)}. Table filtered to 31–60+ days overdue.`
-          : "All active travel retirements are either current or within the initial 30-day grace period.",
-        matchCount: matches.length,
-        matchAmount: totalAmt,
-      });
-      return;
-    }
-
-    if (text.includes("travel") || text.includes("travel department")) {
-      const matches = rows.filter((r) => r.department.toLowerCase().includes("travel"));
-      const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
-      const overdue = matches.filter((r) => r.days_overdue > 0).length;
-      setRetDepartment("Travel");
-      setQaAnswer({
-        queryText: questionText,
-        headline: `Travel Department: ${matches.length} retirements found (${overdue} overdue).`,
-        detail: `Total outstanding balance is ${formatCurrency(totalAmt)}. Table filtered to Travel Department.`,
-        matchCount: matches.length,
-        matchAmount: totalAmt,
-      });
-      return;
-    }
-
-    if (text.includes("finance") || text.includes("awaiting finance") || text.includes("review")) {
-      const matches = rows.filter((r) => r.retirement_status === "awaiting_finance");
-      const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
-      setRetStatus("awaiting_finance");
-      setQaAnswer({
-        queryText: questionText,
-        headline: `${matches.length} retirement${matches.length === 1 ? "" : "s"} currently Awaiting Finance review.`,
-        detail: `The traveler has submitted actual expenses. Total outstanding reconciliation: ${formatCurrency(totalAmt)}.`,
-        matchCount: matches.length,
-        matchAmount: totalAmt,
-      });
-      return;
-    }
-
-    if (text.includes("highest") || text.includes("top") || text.includes("most") || text.includes("2000")) {
-      const matches = rows.filter((r) => r.outstanding_amount >= 2000);
-      const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
-      setQaAnswer({
-        queryText: questionText,
-        headline: `High Value: ${matches.length} travel advance${matches.length === 1 ? "" : "s"} exceed $2,000.00.`,
-        detail: `Total value of high-balance retirements: ${formatCurrency(totalAmt)}.`,
-        matchCount: matches.length,
-        matchAmount: totalAmt,
-      });
-      return;
-    }
-
-    if (text.includes("overdue") || text.includes("late") || text.includes("deadline")) {
-      const matches = rows.filter((r) => r.days_overdue > 0 && r.retirement_status !== "reconciled");
-      const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
-      setRetStatus("overdue");
-      setQaAnswer({
-        queryText: questionText,
-        headline: `${matches.length} overdue retirement${matches.length === 1 ? "" : "s"} detected across all departments.`,
-        detail: `Total overdue balance: ${formatCurrency(totalAmt)}. Table filter set to Overdue.`,
-        matchCount: matches.length,
-        matchAmount: totalAmt,
-      });
-      return;
-    }
-
-    // Default search fallback
-    setRetSearch(questionText);
-    const matches = rows.filter((r) =>
-      `${r.document_reference} ${r.traveller_name} ${r.department} ${r.retirement_status_label}`
-        .toLowerCase()
-        .includes(text),
-    );
-    const totalAmt = matches.reduce((sum, r) => sum + r.outstanding_amount, 0);
-    setQaAnswer({
-      queryText: questionText,
-      headline: `Showing ${matches.length} results matching "${questionText}".`,
-      detail: `Filtered results represent ${formatCurrency(totalAmt)} in total outstanding retirement balance.`,
-      matchCount: matches.length,
-      matchAmount: totalAmt,
-    });
-  };
-
-  const clearQa = () => {
-    setQaQuery("");
-    setQaAnswer(null);
-    setRetSearch("");
-    setRetDepartment("");
-    setRetStatus("");
-    setRetAgingBucket("all");
-  };
-
   // ── CSV Export ─────────────────────────────────────────────────────────────
   const handleExportCsv = async () => {
     try {
@@ -559,13 +455,33 @@ export default function RequisitionReportsPage() {
     }, 150);
   };
 
-  const handleSendTestSchedule = () => {
+  const handleSendTestSchedule = async () => {
     setScheduleSendingTest(true);
-    setTimeout(() => {
+    try {
+      const response = await documentsAPI.sendRetirementReportScheduleTest();
+      toast.success(response.data?.detail || "Test aging report sent to your account email.");
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail || "Could not send the test report. Check the mail service and try again.");
+    } finally {
       setScheduleSendingTest(false);
+    }
+  };
+
+  const handleSaveSchedule = async () => {
+    setScheduleSaving(true);
+    try {
+      await documentsAPI.saveRetirementReportSchedule({
+        frequency: scheduleFrequency,
+        audience: scheduleRecipients,
+        enabled: scheduleEnabled,
+      });
+      toast.success("Retirement report schedule saved.");
       setScheduleModalOpen(false);
-      toast.success("Test aging schedule email sent successfully to your inbox.");
-    }, 1200);
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail || "Could not save the report schedule.");
+    } finally {
+      setScheduleSaving(false);
+    }
   };
 
   // Visuals for Retirements
@@ -653,12 +569,11 @@ export default function RequisitionReportsPage() {
 
   const retStatusOptions = useMemo(() => [
     { value: "", label: "All Statuses" },
-    { value: "overdue", label: "Retirement Overdue" },
-    { value: "awaiting_finance", label: "Awaiting Finance" },
-    { value: "not_started", label: "LPO Pending / In Progress" },
-    { value: "reconciled", label: "Reconciled" },
-    { value: "not_due", label: "Not Yet Returned" },
-  ], []);
+    ...(retirementsData?.filter_options.statuses || []).map((item) => ({
+      value: item.key,
+      label: item.label,
+    })),
+  ], [retirementsData?.filter_options.statuses]);
 
   const pageSizeOptions = useMemo(() => [
     { value: "10", label: "10 rows / page" },
@@ -1111,11 +1026,11 @@ export default function RequisitionReportsPage() {
                     <colgroup className="hidden print:table-column-group">
                       <col className="w-[10%]" />
                       <col className="w-[8%]" />
-                      <col className="w-[13%]" />
-                      <col className="w-[9%]" />
-                      <col className="w-[20%]" />
+                      <col className="w-[12%]" />
                       <col className="w-[8%]" />
-                      <col className="w-[7%]" />
+                      <col className="w-[18%]" />
+                      <col className="w-[11%]" />
+                      <col className="w-[8%]" />
                       <col className="w-[10%]" />
                       <col className="w-[8%]" />
                       <col className="w-[7%]" />
@@ -1196,7 +1111,7 @@ export default function RequisitionReportsPage() {
                             <td className="py-2.5 px-3 print:py-1 print:px-1 text-right font-bold tabular-nums text-[#1E293B]">
                               {formatCurrency(line.amount, line.currency)}
                             </td>
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
+                            <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap print:whitespace-normal print:break-all">
                               <JournalStatusBadge status={line.journal_status} journalNumber={line.journal_number} />
                             </td>
                             <td className="py-2.5 px-3 print:py-1 print:px-1">
@@ -1437,121 +1352,6 @@ export default function RequisitionReportsPage() {
               </div>
             </div>
 
-            {/* ── Compact Q&A Assistant Header / Toggle ── */}
-            <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD]/70 p-3 shadow-xs print:hidden">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[#C5E6F5] text-[#287EAD]">
-                    <Sparkles className="h-3.5 w-3.5" />
-                  </span>
-                  <span className="text-xs font-bold text-[#0A4D68]">
-                    Smart Aging Assistant (Q&A)
-                  </span>
-                  {qaAnswer && (
-                    <span className="rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5 text-[10px] font-bold">
-                      Filter Active
-                    </span>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setQaOpen((o) => !o)}
-                  className="flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline cursor-pointer"
-                >
-                  {qaOpen ? "Collapse Q&A" : "Open Q&A Query Box"}
-                  {qaOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                </button>
-              </div>
-
-              {qaOpen && (
-                <div className="mt-3 space-y-2 pt-2 border-t border-[#C5E6F5]/60">
-                  <div className="relative flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={qaQuery}
-                      onChange={(e) => setQaQuery(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") executeQaQuery(qaQuery);
-                      }}
-                      placeholder="Ask any question (e.g., 'Who has retirements overdue > 30 days?', 'Show Travel department', 'Awaiting finance')…"
-                      className="flex-1 rounded-lg border border-[#CBD5E1] bg-white px-3.5 py-1.5 text-xs text-[#1E293B] placeholder-[#94A3B8] shadow-2xs focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD] focus:outline-hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => executeQaQuery(qaQuery)}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] transition-colors cursor-pointer"
-                    >
-                      <Send className="h-3.5 w-3.5" />
-                      Ask
-                    </button>
-                    {(qaAnswer || qaQuery) && (
-                      <button
-                        type="button"
-                        onClick={clearQa}
-                        className="inline-flex items-center gap-1 rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-1.5 text-xs font-medium text-[#64748B] hover:text-[#1E293B] shadow-2xs cursor-pointer"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                        Clear
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Quick question prompts */}
-                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                    <span className="text-[#64748B]">Quick queries:</span>
-                    <button
-                      type="button"
-                      onClick={() => executeQaQuery("Who has retirements overdue by more than 30 days?")}
-                      className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors cursor-pointer"
-                    >
-                      Overdue &gt; 30 Days
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => executeQaQuery("Show outstanding retirements for Travel department")}
-                      className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors cursor-pointer"
-                    >
-                      Travel Department
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => executeQaQuery("Show retirements awaiting finance verification")}
-                      className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors cursor-pointer"
-                    >
-                      Awaiting Finance Review
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => executeQaQuery("Which advances exceed $2,000?")}
-                      className="rounded-full border border-[#C5E6F5] bg-white px-2.5 py-0.5 text-[#0A4D68] hover:bg-[#C5E6F5]/40 transition-colors cursor-pointer"
-                    >
-                      High Value (&gt; $2,000)
-                    </button>
-                  </div>
-
-                  {/* Answer Box */}
-                  {qaAnswer && (
-                    <div className="mt-2 rounded-lg border border-[#287EAD]/30 bg-white p-3 shadow-xs">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <CheckCircle className="h-4 w-4 text-emerald-600 shrink-0" />
-                            <h4 className="text-xs font-bold text-[#1E293B]">{qaAnswer.headline}</h4>
-                          </div>
-                          <p className="mt-1 text-xs text-[#475569] pl-6 leading-relaxed">
-                            {qaAnswer.detail}
-                          </p>
-                        </div>
-                        <span className="shrink-0 rounded-md bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-1 text-[11px] font-semibold text-[#0A4D68]">
-                          {qaAnswer.matchCount} records
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
             {/* ── Retirements Filter Toolbar (CustomListbox Dropdowns) ── */}
             <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-xs print:hidden">
               <div className="flex flex-wrap items-center gap-3">
@@ -1661,7 +1461,6 @@ export default function RequisitionReportsPage() {
                       setRetAgingBucket("all");
                       setRetIncludeReconciled(false);
                       setRetPage(1);
-                      clearQa();
                     }}
                     className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline cursor-pointer"
                   >
@@ -2194,6 +1993,26 @@ export default function RequisitionReportsPage() {
             </div>
 
             <div className="p-5 space-y-4 text-xs">
+              {isLoadingSchedule && (
+                <p className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-slate-600">Loading saved schedule…</p>
+              )}
+              {scheduleLoadFailed && (
+                <p className="rounded-lg border border-rose-200 bg-rose-50 p-2 text-rose-700">
+                  Scheduled delivery can only be managed by an administrator.
+                </p>
+              )}
+              {savedSchedule?.last_sent_on && (
+                <p className="text-[11px] text-[#64748B]">Last sent: {formatDateDisplay(savedSchedule.last_sent_on)}</p>
+              )}
+              <label className="flex items-center gap-2 rounded-lg border border-[#C5E6F5] bg-[#F0F8FD] p-3 font-semibold text-[#0A4D68]">
+                <input
+                  type="checkbox"
+                  checked={scheduleEnabled}
+                  onChange={(event) => setScheduleEnabled(event.target.checked)}
+                  className="rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD]"
+                />
+                Enable automated delivery
+              </label>
               <div>
                 <label className="block font-semibold text-[#1E293B] mb-1">
                   Dispatch Frequency
@@ -2263,7 +2082,7 @@ export default function RequisitionReportsPage() {
               <button
                 type="button"
                 onClick={handleSendTestSchedule}
-                disabled={scheduleSendingTest}
+                disabled={scheduleSendingTest || scheduleLoadFailed}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-2xs hover:bg-[#F8FAFC] disabled:opacity-60 cursor-pointer"
               >
                 {scheduleSendingTest ? (
@@ -2289,14 +2108,12 @@ export default function RequisitionReportsPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    setScheduleModalOpen(false);
-                    toast.success(`Automated ${scheduleFrequency} report schedule saved successfully.`);
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-4 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] cursor-pointer"
+                  onClick={() => void handleSaveSchedule()}
+                  disabled={scheduleSaving || isLoadingSchedule || scheduleLoadFailed}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-4 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  <Check className="h-3.5 w-3.5" />
-                  Save Schedule
+                  {scheduleSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                  {scheduleSaving ? "Saving…" : "Save Schedule"}
                 </button>
               </div>
             </div>

@@ -71,7 +71,7 @@ def _find_retirement_mapping(document) -> dict | None:
     return None
 
 
-def compute_retirement_variance(document) -> dict | None:
+def compute_retirement_variance(document, *, workflow_status=None) -> dict | None:
     """Return a JSON-safe variance summary for `document`, or None if this
     form has no retirement mapping configured (a request-only form, or a
     template whose Retirement panel was never wired up) or has no form
@@ -107,21 +107,19 @@ def compute_retirement_variance(document) -> dict | None:
         return None
 
     form = (getattr(document, "metadata", None) or {}).get("form") or {}
-    retirement_status = str(form.get("retirement_workflow_status") or "").strip().lower()
+    retirement_status = str(
+        workflow_status or form.get("retirement_workflow_status") or ""
+    ).strip().lower()
     # An empty table is a valid exact-spend retirement now. Only classify it
     # after submission starts, so an unsubmitted retirement-ready requisition
     # does not appear reconciled in the list.
     if retirement_status not in {"in_progress", "approved", "rejected", "posting", "posted"}:
         return None
 
-    spent_spec = retirement.get("spent_amount") or {}
-    table_key = spent_spec.get("table")
-    if table_key and not isinstance(retirement.get("under_spend_condition"), dict):
-        rows = values.get(table_key)
-        if not isinstance(rows, list) or len(rows) == 0:
-            # No retirement data submitted yet - don't compute variance
-            return None
-
+    # Once retirement submission has started, an empty expenses table is a
+    # valid exact-spend case: the issued amount is the amount spent. The
+    # workflow-status guard above keeps an unsubmitted, retirement-ready form
+    # from being classified prematurely.
     classified = classify_retirement(retirement, values)
     scenario = classified["scenario"]
 
