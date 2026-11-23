@@ -25,6 +25,7 @@ connection) is data in the mapping; this module is pure orchestration.
 from __future__ import annotations
 
 import logging
+import xml.etree.ElementTree as ET
 
 from django.utils import timezone
 
@@ -38,6 +39,71 @@ logger = logging.getLogger(__name__)
 
 class JournalPostingError(RuntimeError):
     """Raised for an unrecoverable posting failure (after the row is marked failed)."""
+
+
+def _is_duplicate_second_reference(message: str) -> bool:
+    normalized = " ".join(str(message or "").lower().replace("_", " ").split())
+    return "duplicate second reference" in normalized or "duplicate secondreference" in normalized
+
+
+def _unique_purchase_order_reference_xml(xml: str, document, stage: int) -> tuple[str, str] | None:
+    """Add a stable document/stage suffix to a PO SecondReference.
+
+    Requisition references come from the local database sequence. If that
+    database is restored or reset while SunSystems retains old purchase
+    orders, a valid new requisition can reuse an old SecondReference. Only
+    called after SunSystems reports that exact collision, so ordinary payloads
+    continue using the configured reference unchanged.
+    """
+    try:
+        root = ET.fromstring(xml)
+    except (ET.ParseError, TypeError):
+        return None
+
+    order = next((el for el in root.iter() if el.tag.rsplit("}", 1)[-1].lower() == "purchaseorder"), None)
+    if order is None:
+        return None
+    second_reference = next(
+        (el for el in list(order) if el.tag.rsplit("}", 1)[-1].lower() == "secondreference"),
+        None,
+    )
+    current = (second_reference.text or "").strip() if second_reference is not None else ""
+    if not current:
+        return None
+
+    document_token = str(getattr(document, "pk", "") or "").replace("-", "")[:8].upper()
+    if not document_token:
+        return None
+    suffix = f"-{document_token}-{int(stage)}"
+    unique_reference = current[: max(0, 30 - len(suffix))] + suffix
+    if unique_reference == current:
+        return None
+    second_reference.text = unique_reference
+    return ET.tostring(root, encoding="unicode"), unique_reference
+
+
+def _execute_with_duplicate_reference_recovery(client, build, document, stage: int):
+    """Execute once normally, retrying a rejected duplicate PO reference once."""
+    try:
+        response_xml = client.execute(build.component, build.method, build.ssc_xml)
+    except SunSystemsError as exc:
+        if not _is_duplicate_second_reference(str(exc)):
+            raise
+        recovered = _unique_purchase_order_reference_xml(build.ssc_xml, document, stage)
+        if not recovered:
+            raise
+        build.ssc_xml, unique_reference = recovered
+        return client.execute(build.component, build.method, build.ssc_xml), unique_reference
+
+    result = parse_posting_response(build.component, response_xml)
+    if result.ok or not _is_duplicate_second_reference(result.message or result.raw):
+        return response_xml, None
+
+    recovered = _unique_purchase_order_reference_xml(build.ssc_xml, document, stage)
+    if not recovered:
+        return response_xml, None
+    build.ssc_xml, unique_reference = recovered
+    return client.execute(build.component, build.method, build.ssc_xml), unique_reference
 
 
 def post_journal_for_document(
@@ -130,7 +196,9 @@ def post_journal_for_document(
     # 2) Send it.
     own_client = client or SunSystemsClient(config)
     try:
-        response_xml = own_client.execute(build.component, build.method, build.ssc_xml)
+        response_xml, recovered_second_reference = _execute_with_duplicate_reference_recovery(
+            own_client, build, document, stage
+        )
     except SunSystemsError as exc:
         error_text = str(exc)
         if warning_prefix:
@@ -142,6 +210,12 @@ def post_journal_for_document(
     result = parse_posting_response(build.component, response_xml)
     posting.response_xml = result.raw
     message_text = result.message
+    if recovered_second_reference and result.ok:
+        recovery_note = (
+            "Duplicate SecondReference was detected; posting succeeded with "
+            f"unique reference {recovered_second_reference}."
+        )
+        message_text = f"{message_text} | {recovery_note}" if message_text else recovery_note
     if warning_prefix:
         message_text = f"{warning_prefix} | {message_text}" if message_text else warning_prefix
     if (
