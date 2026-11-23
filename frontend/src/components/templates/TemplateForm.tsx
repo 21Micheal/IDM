@@ -1643,23 +1643,26 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   const update = (ri: number, key: string, val: unknown) => {
     const next = rowsRef.current.map((r, i) => i === ri ? { ...r, [key]: val } : r);
     rowsRef.current = next;
+    lastValueRef.current = JSON.stringify(next);
     setRows(next);
-    // computedRows effect will fire and call onChange with the merged result.
-    // For non-calc tables (no calc columns), call onChange directly now.
-    const hasCalcCols = allCols.some((c) => c.calc?.expression && c.key);
-    if (!hasCalcCols) onChange(next);
+    // Send the raw user edit immediately so the parent marks the form dirty.
+    // Calculated columns are merged by the effect above; marking that update
+    // internal alone would let approval skip the save-before-approve flush.
+    onChange(next);
   };
   const addRow = () => {
-    const next = [...rows, emptyRow()];
+    const next = [...rowsRef.current, emptyRow()];
+    rowsRef.current = next;
+    lastValueRef.current = JSON.stringify(next);
     setRows(next);
-    const hasCalcCols = allCols.some((c) => c.calc?.expression && c.key);
-    if (!hasCalcCols) onChange(next);
+    onChange(next);
   };
   const removeRow = (i: number) => {
-    const next = rows.filter((_, idx) => idx !== i);
+    const next = rowsRef.current.filter((_, idx) => idx !== i);
+    rowsRef.current = next;
+    lastValueRef.current = JSON.stringify(next);
     setRows(next);
-    const hasCalcCols = allCols.some((c) => c.calc?.expression && c.key);
-    if (!hasCalcCols) onChange(next);
+    onChange(next);
   };
 
   return (
