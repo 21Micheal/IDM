@@ -437,7 +437,7 @@
                 {
                   "id": "cassoa-bottom-spacer",
                   "type": "spacer",
-                  "height": 12
+                  "height": 36
                 }
               ]
             }
@@ -628,9 +628,10 @@
             }
           ],
           "gap": 12,
-          "marginBottom": 16,
+          "marginBottom": 42,
           "minHeight": 0,
-          "keepTogether": true
+          "keepTogether": true,
+          "marginTop": 34
         },
         {
           "id": "cassoa-approved-row",
@@ -724,7 +725,7 @@
             }
           ],
           "gap": 12,
-          "marginBottom": 0,
+          "marginBottom": 32,
           "minHeight": 0,
           "keepTogether": true
         }

@@ -291,6 +291,16 @@ def _template_with_lpo_signatory_tokens(template):
             if item_id in labels and value.get("type") == "text":
                 label, token = labels[item_id]
                 value["text"] = f"{label}: {{{{{token}}}}}"
+            # Existing LPO templates are stored in the database. Apply these
+            # layout defaults to their render copy so deployed designs gain
+            # the extra vertical rhythm without requiring a manual re-import.
+            if item_id == "cassoa-bottom-spacer" and value.get("type") == "spacer":
+                value["height"] = max(float(value.get("height") or 0), 36)
+            if item_id == "cassoa-checked-row":
+                value["marginTop"] = max(float(value.get("marginTop") or 0), 34)
+                value["marginBottom"] = max(float(value.get("marginBottom") or 0), 42)
+            if item_id == "cassoa-approved-row":
+                value["marginBottom"] = max(float(value.get("marginBottom") or 0), 32)
             for child in value.values():
                 walk(child)
         elif isinstance(value, list):
