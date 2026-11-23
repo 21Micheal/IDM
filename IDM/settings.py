@@ -5,6 +5,7 @@ Reads environment via django-environ. Copy .env.example → .env and adjust.
 from pathlib import Path
 from datetime import timedelta
 from decimal import Decimal
+from email.utils import formataddr, parseaddr
 from urllib.parse import urlparse
 import environ
 import dj_database_url
@@ -510,7 +511,16 @@ EMAIL_PORT = env.int("EMAIL_PORT", default=587)
 EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
 EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
-DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="dms@example.com")
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="")
+if not parseaddr(DEFAULT_FROM_EMAIL)[1]:
+    # SMTP requires a mailbox address in the envelope sender. Some deployments
+    # configured only the display name (for example, "EAC Travel REQ"), which
+    # causes Office 365 to reject OTP mail with 501 Invalid address.
+    sender_address = parseaddr(EMAIL_HOST_USER)[1] or EMAIL_HOST_USER.strip()
+    if sender_address and "@" in sender_address:
+        DEFAULT_FROM_EMAIL = formataddr(("EAC Travel Req", sender_address))
+    else:
+        DEFAULT_FROM_EMAIL = "procurement@example.local"
 EMAIL_AUTH_METHOD = env("EMAIL_AUTH_METHOD", default="password").lower()
 EMAIL_OAUTH_TENANT_ID = env("EMAIL_OAUTH_TENANT_ID", default="")
 EMAIL_OAUTH_CLIENT_ID = env("EMAIL_OAUTH_CLIENT_ID", default="")
