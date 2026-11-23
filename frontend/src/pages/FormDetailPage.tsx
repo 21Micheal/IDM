@@ -37,7 +37,7 @@ import { format } from "date-fns";
 import {
   ArrowLeft, Send, Loader2, Edit2, Info, FileCode, Eye, EyeOff, Check, X, Save,
   MessageSquare, Download, AlertTriangle, ShieldCheck, PanelRightOpen, PanelRightClose,
-  TrendingUp, TrendingDown, CheckCircle2, Printer, RefreshCw, Trash2,
+  TrendingUp, TrendingDown, CheckCircle2, XCircle, Printer, RefreshCw, Trash2,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -301,8 +301,12 @@ export default function FormDetailPage() {
   const [auditPage, setAuditPage] = useState(1);
   const navigationState = location.state as {
     workflowActionCompleted?: boolean;
+    workflowAction?: string;
     awaitLpo?: boolean;
   } | null;
+  const [workflowCompletionAction, setWorkflowCompletionAction] = useState(
+    navigationState?.workflowAction ?? "approve",
+  );
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(
     Boolean(navigationState?.workflowActionCompleted && !navigationState?.awaitLpo),
   );
@@ -1983,9 +1987,11 @@ export default function FormDetailPage() {
                   setAwaitingLpo(false);
                   setAwaitingImprestPostSince(0);
                   setGateRetrying(false);
+                  setWorkflowCompletionAction(action);
                   setWorkflowActionCompleted(true);
                   return;
                 }
+                setWorkflowCompletionAction(action);
                 setWorkflowActionCompleted(false);
                 const phase = String((formData as any)?.workflow_phase ?? doc?.builder_workflow_phase ?? "").toLowerCase();
                 const lpoApprovalSteps = (workflowData?.steps ?? []).filter((step) =>
@@ -2338,9 +2344,23 @@ export default function FormDetailPage() {
             className="w-full max-w-sm border border-[#C8CDD2] bg-white shadow-2xl"
           >
             <div className="flex flex-col items-center px-6 pt-6 pb-5 text-center">
-              <CheckCircle2 className="mb-3 h-10 w-10 text-emerald-600" aria-hidden="true" />
+              {workflowCompletionAction === "reject" ? (
+                <XCircle className="mb-3 h-10 w-10 text-rose-600" aria-hidden="true" />
+              ) : (
+                <CheckCircle2 className="mb-3 h-10 w-10 text-emerald-600" aria-hidden="true" />
+              )}
               <h2 id="workflow-complete-title" className="text-sm font-bold text-[#1F2933]">
-                {reworkResubmitted ? "Form resubmitted" : "Approved Successfully"}
+                {reworkResubmitted
+                  ? "Form resubmitted"
+                  : workflowCompletionAction === "reject"
+                    ? "Workflow Rejected"
+                    : workflowCompletionAction === "return"
+                      ? "Form Sent Back"
+                      : workflowCompletionAction === "hold"
+                        ? "Task On Hold"
+                        : workflowCompletionAction === "release"
+                          ? "Task Reopened"
+                          : "Action Completed Successfully"}
               </h2>
             </div>
             <div className="flex justify-center pb-5">

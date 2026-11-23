@@ -20,7 +20,7 @@ import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Unlock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw, ChevronDown, FileText,
-  Printer, Trash2, X, Check, CheckCircle2, ExternalLink, Columns2, Eye, EyeOff, Archive, FileCode, MoreHorizontal, Save,
+  Printer, Trash2, X, Check, CheckCircle2, XCircle, ExternalLink, Columns2, Eye, EyeOff, Archive, FileCode, MoreHorizontal, Save,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -261,6 +261,7 @@ export default function DocumentDetailPage() {
     signedFileUrlsEnabled: false,
   });
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
+  const [workflowCompletionAction, setWorkflowCompletionAction] = useState("approve");
   const [compareDocumentId, setCompareDocumentId] = useState<string | null>(null);
   const [showDownloadTray, setShowDownloadTray] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
@@ -942,9 +943,21 @@ export default function DocumentDetailPage() {
             className="w-full max-w-sm border border-[#C8CDD2] bg-white shadow-2xl"
           >
             <div className="flex flex-col items-center px-6 pt-6 pb-5 text-center">
-              <CheckCircle2 className="mb-3 h-10 w-10 text-emerald-600" aria-hidden="true" />
+              {workflowCompletionAction === "reject" ? (
+                <XCircle className="mb-3 h-10 w-10 text-rose-600" aria-hidden="true" />
+              ) : (
+                <CheckCircle2 className="mb-3 h-10 w-10 text-emerald-600" aria-hidden="true" />
+              )}
               <h2 id="workflow-complete-title" className="text-sm font-bold text-[#1F2933]">
-                Approved Successfully
+                {workflowCompletionAction === "reject"
+                  ? "Workflow Rejected"
+                  : workflowCompletionAction === "return"
+                    ? "Form Sent Back"
+                    : workflowCompletionAction === "hold"
+                      ? "Task On Hold"
+                      : workflowCompletionAction === "release"
+                        ? "Task Reopened"
+                        : "Action Completed Successfully"}
               </h2>
             </div>
             <div className="flex justify-center pb-5">
@@ -1437,6 +1450,7 @@ export default function DocumentDetailPage() {
                         task={activeTask}
                         documentId={id!}
                         onCompleted={(action) => {
+                          setWorkflowCompletionAction(action);
                           if ((doc as any)?.metadata?.form?.sections) {
                             const phase = String(
                               (doc as any)?.metadata?.form?.workflow_phase
@@ -1461,10 +1475,12 @@ export default function DocumentDetailPage() {
                               state: {
                                 awaitLpo: action === "approve" && isLastLpoApprover,
                                 workflowActionCompleted: action !== "approve" || !isLastLpoApprover,
+                                workflowAction: action,
                               },
                             });
                             return;
                           }
+                          setWorkflowCompletionAction(action);
                           setWorkflowActionCompleted(true);
                         }}
                       />

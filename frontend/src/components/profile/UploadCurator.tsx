@@ -63,7 +63,6 @@ export default function UploadCurator({ onChange, className }: UploadCuratorProp
   const [showTuning, setShowTuning] = useState(false);
   const [presetId, setPresetId] = useState("auto");
   const [opts, setOpts] = useState<CurateOptions>(DEFAULT_CURATE_OPTIONS);
-  const [compare, setCompare] = useState(50);
   const runId = useRef(0);
 
   /* ---- run the curation pipeline whenever source or options change ---- */
@@ -183,7 +182,7 @@ export default function UploadCurator({ onChange, className }: UploadCuratorProp
 
   return (
     <div className={clsx("space-y-3", className)}>
-      {/* before / after comparison on a checkerboard so transparency is visible */}
+      {/* Show the cleaned, transparent PNG that will be saved and used. */}
       <div className="relative h-44 w-full select-none overflow-hidden rounded-md border border-[#C8CDD2] bg-[repeating-conic-gradient(#eef1f4_0%_25%,#ffffff_0%_50%)] bg-[length:16px_16px]">
         <div className="absolute inset-0 flex items-center justify-center p-3">
           {result ? (
@@ -192,23 +191,8 @@ export default function UploadCurator({ onChange, className }: UploadCuratorProp
             <span className="text-xs text-[#9AA4AD]">Processing…</span>
           )}
         </div>
-        {/* original revealed on the left of the slider */}
-        <div className="absolute inset-0 overflow-hidden" style={{ width: `${compare}%` }}>
-          <div className="flex h-44 w-full items-center justify-center bg-white p-3" style={{ width: "100%" }}>
-            <img
-              src={original}
-              alt="Original upload"
-              className="max-h-full max-w-full object-contain"
-              style={{ maxWidth: "none", width: "auto" }}
-            />
-          </div>
-          <div className="absolute right-0 top-0 h-full w-px bg-[#287EAD]" />
-        </div>
-        <span className="absolute left-2 top-2 rounded bg-black/55 px-1.5 py-0.5 text-[10px] font-medium text-white">
-          Original
-        </span>
         <span className="absolute right-2 top-2 rounded bg-[#287EAD] px-1.5 py-0.5 text-[10px] font-medium text-white">
-          Background removed
+          Cleaned PNG preview
         </span>
         {busy && (
           <span className="absolute inset-x-0 bottom-2 mx-auto flex w-fit items-center gap-1.5 rounded-full bg-white/90 px-2 py-1 text-[11px] text-[#5E6870] shadow">
@@ -216,16 +200,6 @@ export default function UploadCurator({ onChange, className }: UploadCuratorProp
           </span>
         )}
       </div>
-
-      <input
-        type="range"
-        min={0}
-        max={100}
-        value={compare}
-        onChange={(e) => setCompare(Number(e.target.value))}
-        aria-label="Compare original and cleaned signature"
-        className="w-full accent-[#287EAD]"
-      />
 
       {/* presets */}
       <div className="flex flex-wrap gap-1.5">

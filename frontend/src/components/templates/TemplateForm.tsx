@@ -2066,7 +2066,7 @@ function SignatureField({ fieldKey, disabled, value, onChangeCb, onLaunchSignatu
     color: signatureStyle?.color || '#1F2933',
     fontSize: signatureStyle?.fontSize || '16px',
     fontFamily: signatureStyle?.fontFamily || 'inherit',
-    fontWeight: '600' as const,
+    fontWeight: '400' as const,
   };
 
   return (

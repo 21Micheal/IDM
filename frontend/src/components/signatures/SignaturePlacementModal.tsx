@@ -125,7 +125,7 @@ export async function compositeSignatureWithMetadata(
     thickenStroke?: boolean;
   }
 ): Promise<string> {
-  const { name, includeName, date, includeDate, scale = 2, thickenStroke = true } = options;
+  const { name, includeName, date, includeDate, scale = 2, thickenStroke = false } = options;
 
   return new Promise((resolve) => {
     const img = new Image();
@@ -194,15 +194,17 @@ export async function compositeSignatureWithMetadata(
 
         if (showName) {
           const text = name ?? "";
-          const size = fitFont(text, 800, nameFont);
+          const size = fitFont(text, 500, nameFont);
           ctx.fillStyle = "#0B1220";
+          ctx.font = `500 ${size}px ${fontStack}`;
           ctx.fillText(text, padding, currentY + size - 2);
           currentY += lineHeight;
         }
         if (showDate) {
           const text = `Date: ${date}`;
-          const size = fitFont(text, 700, dateFont);
+          const size = fitFont(text, 400, dateFont);
           ctx.fillStyle = "#1E293B";
+          ctx.font = `400 ${size}px ${fontStack}`;
           ctx.fillText(text, padding, currentY + size - 2);
           currentY += lineHeight;
         }
