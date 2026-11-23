@@ -1241,6 +1241,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         if (
             is_travel_requisition(doc)
+            and doc.status == DocumentStatus.DRAFT
             and current_phase != "retirement"
             and requested_stage in ("", "requisition")
         ):

@@ -976,6 +976,7 @@ def can_submit_request_workflow(
         # reconciliation can actually be completed.
         if (
             user is not None
+            and status == DocumentStatus.DRAFT
             and not allow_unreconciled_retirement
             and phase != "retirement"
             and is_travel_requisition(document)

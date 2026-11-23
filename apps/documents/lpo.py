@@ -407,11 +407,21 @@ def refresh_lpo_documents_for_approval(document, *, actor=None, step=None):
                 logger.exception("Could not resolve LPO signatory slot for step %s", step_name)
         if slot:
             from django.utils import timezone
+            from apps.workflows.models import WorkflowTaskAction
+            approval_action = WorkflowTaskAction.objects.filter(
+                task__workflow_instance__document=document,
+                task__step=step,
+                task__execution_lane="main",
+                action="approved",
+                actor=actor,
+            ).select_related("document_signature__source_signature").order_by("-created_at").first()
             signatories_override[slot] = {
                 "name": _user_name(actor),
-                "role": str(getattr(actor, "job_description", "") or step_name).strip(),
+                # The printed designation is the person's profile role. A
+                # workflow step label describes the action, not the person.
+                "role": str(getattr(actor, "job_description", "") or "").strip(),
                 "date": timezone.localdate().strftime("%d/%m/%Y"),
-                "signature": _approval_signature_data(actor),
+                "signature": _approval_signature_data(actor, action=approval_action),
             }
 
     form = ((getattr(document, "metadata", None) or {}).get("form") or {})
@@ -1028,11 +1038,16 @@ def _today_str() -> str:
     return _today().strftime("%d %b %Y")
 
 
-def _approval_signature_data(user):
-    """Return a data URL for the user's active profile signature, if present."""
+def _approval_signature_data(user, *, action=None):
+    """Return the profile signature, falling back to the signature used to approve."""
     if user is None:
         return ""
     signature = user.signatures.filter(is_active=True).order_by("-created_at").first()
+    if signature is None and action is not None:
+        try:
+            signature = action.document_signature.source_signature
+        except Exception:
+            signature = None
     if signature is None:
         return ""
     try:
@@ -1100,9 +1115,9 @@ def _lpo_workflow_signatories(document):
         from django.utils import timezone
         return {
             "name": _user_name(actor),
-            "role": str(getattr(actor, "job_description", "") or action.task.step.name or fallback_role).strip(),
+            "role": str(getattr(actor, "job_description", "") or "").strip(),
             "date": timezone.localtime(action.created_at).strftime("%d/%m/%Y") if action.created_at else "",
-            "signature": _approval_signature_data(actor),
+            "signature": _approval_signature_data(actor, action=action),
         }
 
     return {

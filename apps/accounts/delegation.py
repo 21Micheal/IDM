@@ -8,7 +8,7 @@ from apps.accounts.models import User, UserDelegation
 from apps.workflows.models import WorkflowTask
 
 ACTIVE_TASK_STATUSES = ("in_progress", "held")
-VISIBLE_TASK_STATUSES = (*ACTIVE_TASK_STATUSES, "awaiting_posting")
+VISIBLE_TASK_STATUSES = (*ACTIVE_TASK_STATUSES, "awaiting_posting", "rework")
 
 
 def active_delegations_qs(

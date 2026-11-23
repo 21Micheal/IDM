@@ -1469,7 +1469,12 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
             element_id = str(element.get("id") or "").casefold()
             lpo_slot = next((slot for slot in ("checked_by", "approved_by")
                              if element_id.startswith(f"cassoa-{slot.removesuffix('_by').replace('_', '-')}-")), None)
-            if kind == "spacer" and lpo_slot and element_id.endswith("-label-signing-space"):
+            lpo_prefix = "checked" if lpo_slot == "checked_by" else "approved"
+            if (
+                kind == "spacer"
+                and lpo_slot
+                and element_id == f"cassoa-{lpo_prefix}-label-signing-space"
+            ):
                 signature_raw = _decode_data_url_image(values.get(f"{lpo_slot}.signature"))
                 if signature_raw:
                     signature_image = RLImage(BytesIO(signature_raw))

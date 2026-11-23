@@ -943,6 +943,8 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     def get_status_display(self, obj):
         document = self._document(obj)
         form = ((getattr(document, "metadata", None) or {}).get("form") or {}) if document else {}
+        if obj.status == "rework":
+            return "Returned for resubmission"
         if (
             obj.status == "awaiting_posting"
             and (

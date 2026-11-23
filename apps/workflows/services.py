@@ -379,13 +379,54 @@ class WorkflowService:
             document=document, status="in_progress"
         ).first()
         if existing:
+            handoff_consumed = False
+            handoff_target = None
+            if document is not None:
+                metadata = dict(document.metadata or {})
+                form = dict(metadata.get("form") or {})
+                handoff = form.get("return_for_rework") or {}
+                resume_step_id = handoff.get("resume_step_id")
+                rework_task_id = handoff.get("rework_task_id")
+                if resume_step_id:
+                    handoff_target = existing.template.steps.filter(pk=resume_step_id).first()
+                    if handoff_target:
+                        # Returning to a previous approver is an edit/resubmit
+                        # handoff. On resubmission, resume at the step that
+                        # sent the form back, in that step's CASE phase. The
+                        # cursor and phase can differ from the editor's phase,
+                        # especially across Request -> LPO or LPO -> Request.
+                        resume_phase = str(
+                            handoff.get("resume_phase")
+                            or WorkflowService._phase_for_step(handoff_target)
+                            or ""
+                        ).strip().lower()
+                        if resume_phase:
+                            form["workflow_phase"] = resume_phase
+                        metadata["form"] = form
+                        document.metadata = metadata
+                        WorkflowService._save_document(document, update_fields=["metadata", "updated_at"])
+                        if existing.current_step_order != handoff_target.order:
+                            existing.current_step_order = handoff_target.order
+                            existing.save(update_fields=["current_step_order", "updated_at"])
+                        if rework_task_id:
+                            WorkflowTask.objects.filter(
+                                pk=rework_task_id,
+                                workflow_instance=existing,
+                                status="rework",
+                            ).update(
+                                status="skipped",
+                                acted_at=timezone.now(),
+                                updated_at=timezone.now(),
+                            )
+                        handoff_consumed = True
+
             if not WorkflowService._has_active_step_tasks(existing, existing.current_step_order):
                 # Use v2 activation if applicable
                 if WorkflowService.is_v2_workflow(existing.template):
                     WorkflowService._activate_v2_step(existing)
                 else:
                     WorkflowService._activate_step(existing, order=existing.current_step_order)
-            if document is not None:
+            if document is not None and handoff_consumed:
                 metadata = dict(document.metadata or {})
                 form = dict(metadata.get("form") or {})
                 handoff = form.pop("return_for_rework", None)
@@ -773,6 +814,18 @@ class WorkflowService:
         rework_editor = selected_approver.id if selected_approver else (
             previous_approval_action.actor_id if previous_approval_action else None
         )
+        rework_task = None
+        if return_to == "previous_step" and previous_approval_action and rework_editor:
+            # Give the previous approver a visible work-queue item while they
+            # amend and resubmit. This marker has no approval controls; the
+            # actual workflow resumes at the step that sent the document back.
+            rework_task = WorkflowTask.objects.create(
+                workflow_instance=instance,
+                step=previous_approval_action.task.step,
+                assigned_to_id=rework_editor,
+                status="rework",
+                execution_lane=previous_approval_action.task.execution_lane or "main",
+            )
 
         # A returned document is a rework handoff. The previous approver gets
         # edit access and a notification, but no approval task controls. On
@@ -787,15 +840,19 @@ class WorkflowService:
         form = dict(metadata.get("form") or {})
         if return_to == "previous_step":
             document_phase = (
-                WorkflowService._phase_for_step(previous_approval_action.task.step)
+                WorkflowService._phase_for_step(task.step)
                 or WorkflowService._document_workflow_phase(doc)
             )
             form["return_for_rework"] = {
                 "editor_id": str(rework_editor),
                 "returned_by_task_id": str(task.id),
                 "resume_step_id": str(task.step_id),
+                "resume_phase": document_phase,
                 "execution_lane": execution_lane,
-                "editor_process_step": f"{document_phase}_pending",
+                "rework_task_id": str(rework_task.id) if rework_task else None,
+                "editor_process_step": (
+                    f"{WorkflowService._phase_for_step(previous_approval_action.task.step) or document_phase}_pending"
+                ),
             }
         else:
             form.pop("return_for_rework", None)

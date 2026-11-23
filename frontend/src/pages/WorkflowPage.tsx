@@ -440,6 +440,11 @@ export default function WorkflowPage() {
                         Awaiting SunSystems posting
                       </span>
                     )}
+                    {task.status === "rework" && (
+                      <span className="border border-sky-200 bg-sky-50 px-2 py-1 font-semibold text-sky-800">
+                        Returned for resubmission
+                      </span>
+                    )}
                     {uploaderName && (
                       <span>{isPaymentRun ? "Submitted by" : "Uploader"}: <span className="font-semibold text-[#1F2933]">{uploaderName}</span></span>
                     )}

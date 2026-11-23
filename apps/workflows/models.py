@@ -468,6 +468,7 @@ class WorkflowTask(models.Model):
     STATUS_CHOICES = [
         ("pending",     "Pending"),
         ("in_progress", "In Progress"),
+        ("rework",      "Returned for Resubmission"),
         ("approved",    "Approved"),
         ("awaiting_posting", "Awaiting SunSystems posting"),
         ("rejected",    "Rejected"),

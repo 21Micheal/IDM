@@ -761,6 +761,7 @@ function mapTaskStatus(taskStatus?: string, action?: string, actedAt?: string | 
   if (["approved", "completed"].includes(normalizedStatus)) return "completed";
   if (normalizedStatus === "rejected") return "rejected";
   if (normalizedStatus === "returned") return "returned";
+  if (normalizedStatus === "rework") return "in-progress";
   if (normalizedStatus === "held") return "on-hold";
   // The generator task stays in the actor's queue while SunSystems posts and
   // the LPO is built. Its approval action is already complete during that
