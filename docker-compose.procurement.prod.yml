@@ -17,8 +17,10 @@ x-procurement-app: &procurement-app
     DEBUG: "False"
     SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in /opt/flaxem/config/.env}
     SECURE_SSL: ${SECURE_SSL:-False}
-    ALLOWED_HOSTS: ${ALLOWED_HOSTS:?Set ALLOWED_HOSTS in /opt/flaxem/config/.env}
-    CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:?Set CSRF_TRUSTED_ORIGINS in /opt/flaxem/config/.env}
+    # The application is also accessed by this DNS name on Sofia; include it
+    # even when the protected .env still lists only the server IP.
+    ALLOWED_HOSTS: ${ALLOWED_HOSTS:?Set ALLOWED_HOSTS in /opt/flaxem/config/.env},financeserver.eacassoa.org
+    CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:?Set CSRF_TRUSTED_ORIGINS in /opt/flaxem/config/.env},http://financeserver.eacassoa.org,http://financeserver.eacassoa.org:${HTTP_PORT:-8080}
     FRONTEND_URL: ${FRONTEND_URL:?Set FRONTEND_URL in /opt/flaxem/config/.env}
     CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
     DB_ENGINE: postgres
