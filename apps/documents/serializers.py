@@ -1017,6 +1017,20 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             if lpo_records or form.get("imprest_payment_voucher_document_id") or form.get("payment_voucher_document_id"):
                 metadata["form"] = form
                 data["metadata"] = metadata
+        current_metadata = data.get("metadata")
+        current_form = current_metadata.get("form") if isinstance(current_metadata, dict) else None
+        booked_early = current_form.get("booked_early") if isinstance(current_form, dict) else None
+        if isinstance(booked_early, dict):
+            from apps.documents.builder_workflow import booked_early_reconciliation_status
+
+            gate = booked_early_reconciliation_status(instance)
+            if gate is not None:
+                current_metadata = dict(current_metadata)
+                current_form = dict(current_form)
+                current_form["booked_early"] = {**booked_early, **gate}
+                current_metadata["form"] = current_form
+                data["metadata"] = current_metadata
+                metadata = current_metadata
         suggestions = metadata.get("relationship_suggestions") if isinstance(metadata, dict) else None
         if (
             user

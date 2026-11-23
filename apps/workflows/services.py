@@ -1837,6 +1837,23 @@ class WorkflowService:
             and (instance or task.workflow_instance).imprest_request_status != "in_progress"
         ):
             raise WorkflowError("The Imprest request approval lane is no longer active.")
+        workflow_instance = instance or task.workflow_instance
+        document = getattr(workflow_instance, "document", None)
+        if document is not None:
+            from apps.documents.builder_workflow import booked_early_reconciliation_status
+
+            phase = WorkflowService._document_workflow_phase(document)
+            # Early-booked tickets must still pass through requisition
+            # approvals so the ticket can be booked. Pause actions starting
+            # with the following Request phase, while the earlier retirement
+            # remains unresolved.
+            early_gate = booked_early_reconciliation_status(document)
+            if early_gate and early_gate["pending"] and phase in {"request", "rfq", "lpo", "retirement"}:
+                reference = early_gate.get("blocking_reference") or "the earlier requisition"
+                raise WorkflowError(
+                    f"Approval is paused because reconciliation for {reference} is still outstanding. "
+                    "This workflow will become actionable automatically once that retirement is approved."
+                )
 
     @staticmethod
     def _save_document(document: Document, update_fields=None) -> None:

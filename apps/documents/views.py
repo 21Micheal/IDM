@@ -1249,6 +1249,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         form = ((doc.metadata or {}).get("form") or {})
         current_phase = str(form.get("workflow_phase") or "requisition").strip().lower()
         booked_early_reference = None
+        booked_early_document_id = None
         if (
             str(form.get("workflow_type") or "").strip().lower() == "requisition"
             and current_phase != "retirement"
@@ -1285,6 +1286,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             form_metadata["booked_early"] = {
                 "reason": "unreconciled_retirement",
                 "blocking_reference": booked_early_reference,
+                "blocking_document_id": str(booked_early_document_id) if booked_early_document_id else None,
                 "raised_at": timezone.now().isoformat(),
                 "raised_by_id": str(request.user.id),
             }
@@ -1308,6 +1310,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 )
                 if allow_unreconciled_retirement:
                     booked_early_reference = overdue.reference_number
+                    booked_early_document_id = overdue.id
                 else:
                     return Response(
                         {

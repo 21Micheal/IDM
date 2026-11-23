@@ -11,7 +11,8 @@
  *   ⏸ Hold         (requires comment + duration — auto-releases)
  *   ▶ Release hold (only shown when task is currently held)
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
@@ -104,6 +105,8 @@ interface TaskAction {
 interface Props {
   task: WorkflowTask;
   documentId?: string;
+  disabledReason?: string;
+  reconciliationResolved?: boolean;
   onCompleted?: (action: WorkflowActionKind) => void | Promise<void>;
   onBeforeApprove?: () => Promise<void>;
   variant?: "panel" | "bar";
@@ -247,7 +250,7 @@ function TaskHistoryDrawer({ taskId, task, currentUserId: _currentUserId }: { ta
 }
 
 // ── Main panel ────────────────────────────────────────────────────────────────
-export default function WorkflowActionPanel({ task, documentId, onCompleted, onBeforeApprove, variant = "panel" }: Props) {
+export default function WorkflowActionPanel({ task, documentId, disabledReason, reconciliationResolved = false, onCompleted, onBeforeApprove, variant = "panel" }: Props) {
   const approveButtonLabel = task.step.approve_button_label?.trim() || "Approve";
   const approvalConfirmLabel = approveButtonLabel.toLowerCase() === "approve"
     ? "Confirm Approval"
@@ -272,6 +275,20 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
   const [returnTo, setReturnTo] = useState<"previous_step" | "uploader">("uploader");
   const [nextApproverId, setNextApproverId] = useState("");
   const [returnApproverId, setReturnApproverId] = useState("");
+  const [serverGateReason, setServerGateReason] = useState<string | null>(null);
+  const [dismissedGateReason, setDismissedGateReason] = useState<string | null>(null);
+  const actionLockReason = disabledReason || serverGateReason;
+  const actionsLocked = Boolean(actionLockReason);
+  const showGateOverlay = Boolean(actionLockReason && dismissedGateReason !== actionLockReason);
+  useEffect(() => {
+    if (reconciliationResolved) setServerGateReason(null);
+  }, [reconciliationResolved]);
+  useEffect(() => {
+    if (!actionsLocked) return;
+    setActiveAction(null);
+    setShowSignaturePlacement(false);
+    setSignedResult(null);
+  }, [actionsLocked]);
   const { data: routingOptions } = useQuery<{ next: RoutingTarget | null; previous: RoutingTarget | null }>({
     queryKey: ["workflow-routing-options", task.id],
     queryFn: () => workflowAPI.routingOptions(task.id).then((response) => response.data),
@@ -289,12 +306,6 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
     ? Boolean(task.step.allow_return_submitter)
     : task.step?.allow_return !== false;
   const canReturn = canReturnPrevious || canReturnSubmitter;
-
-  const removeTaskFromQueues = () => {
-    qc.setQueriesData<WorkflowTask[]>({ queryKey: ["workflow", "my-tasks"] }, (prev) =>
-      Array.isArray(prev) ? prev.filter((item) => item.id !== task.id) : prev,
-    );
-  };
 
   const patchTaskInQueues = (patch: Partial<WorkflowTask>) => {
     qc.setQueriesData<WorkflowTask[]>({ queryKey: ["workflow", "my-tasks"] }, (prev) =>
@@ -345,17 +356,14 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
   const beginOptimisticAction = (action: WorkflowActionKind) => {
     setOptimisticAction(action);
     if (action === "approve") {
-      removeTaskFromQueues();
       patchDocumentStatus("pending_approval");
       return;
     }
     if (action === "reject") {
-      removeTaskFromQueues();
       patchDocumentStatus("rejected");
       return;
     }
     if (action === "return") {
-      removeTaskFromQueues();
       patchDocumentStatus("returned");
       return;
     }
@@ -384,6 +392,12 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
 
   const failAction = (message: string) => {
     setOptimisticAction(null);
+    const normalizedMessage = message.toLowerCase();
+    if (normalizedMessage.includes("approval is paused") && normalizedMessage.includes("reconciliation") && normalizedMessage.includes("still outstanding")) {
+      setServerGateReason(message);
+      refetchWorkflowState();
+      return;
+    }
     toast.error(message);
     refetchWorkflowState();
   };
@@ -487,6 +501,63 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, onB
         <div className="flex items-center gap-3 text-sm text-[#1F2933]">
           <Loader2 className="h-4 w-4 animate-spin text-[#287EAD]" />
           Updating workflow state...
+        </div>
+      </div>
+    );
+  }
+
+  if (actionsLocked) {
+    return (
+      <div className={clsx(isBar ? "px-4 py-3" : "space-y-3 border border-[#C8CDD2] bg-[#F5F7F8] p-4")}>
+        {showGateOverlay && createPortal(
+          <div className="fixed inset-0 z-[1000] flex items-start justify-center bg-black/40 px-4 pt-[10vh]" role="presentation">
+            <div
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="reconciliation-gate-title"
+              aria-describedby="reconciliation-gate-description"
+              className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-2xl"
+            >
+              <div className="px-6 pb-4 pt-5">
+                <h2 id="reconciliation-gate-title" className="text-base font-bold text-[#1F2933]">Reconciliation required</h2>
+                <p id="reconciliation-gate-description" className="mt-2 text-sm leading-relaxed text-[#5E6870]">
+                  {actionLockReason}
+                </p>
+              </div>
+              <div className="flex justify-end border-t border-[#E1E5E8] px-6 py-4">
+                <button
+                  type="button"
+                  onClick={() => setDismissedGateReason(actionLockReason ?? null)}
+                  className="bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99]"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-[#1F2933]">{task.step.name}</p>
+            <p className="text-xs text-[#5E6870]">{task.status_display}</p>
+          </div>
+          <TaskHistoryDrawer taskId={task.id} task={task} currentUserId={currentUser?.id || ""} />
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-900">
+          <span className="inline-flex items-center gap-2">
+            <Clock className="h-4 w-4 shrink-0 text-amber-700" />
+            Approval actions are paused pending reconciliation.
+          </span>
+          {!showGateOverlay && (
+            <button
+              type="button"
+              onClick={() => setDismissedGateReason(null)}
+              className="text-xs font-semibold underline underline-offset-2 hover:text-amber-950"
+            >
+              View details
+            </button>
+          )}
         </div>
       </div>
     );

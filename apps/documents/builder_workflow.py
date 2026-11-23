@@ -188,6 +188,42 @@ def overdue_travel_retirement_for_user(user, *, exclude_document_id=None) -> Doc
     return None
 
 
+def booked_early_reconciliation_status(document) -> dict | None:
+    """Return the live reconciliation gate for a requisition raised early."""
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    marker = form.get("booked_early")
+    if not isinstance(marker, dict) or marker.get("reason") != "unreconciled_retirement":
+        return None
+
+    reference = str(marker.get("blocking_reference") or "").strip()
+    blocking_id = marker.get("blocking_document_id")
+    target = None
+    queryset = Document.objects.filter(deleted_at__isnull=True).only(
+        "id", "metadata", "reference_number", "document_type_id",
+        "uploaded_by_id", "owned_by_id",
+    )
+    if blocking_id:
+        target = queryset.filter(pk=blocking_id).first()
+    if target is None and reference:
+        # Compatibility for early-booking records created before we stored the
+        # exact blocking document id, and recovery if the stored id is stale.
+        # Scope the reference to the same owner.
+        owner_filter = Q(uploaded_by_id=document.uploaded_by_id)
+        if getattr(document, "owned_by_id", None):
+            owner_filter |= Q(owned_by_id=document.owned_by_id)
+        target = queryset.filter(owner_filter, reference_number=reference).first()
+
+    pending = bool(target and not (
+        _retirement_workflow_statuses([target.id]).get(target.id) == "approved"
+        or retirement_journal_posted(target)
+    ))
+    return {
+        "pending": pending,
+        "blocking_reference": reference or (target.reference_number if target else ""),
+        "blocking_document_id": str(target.id) if target else str(blocking_id or "") or None,
+    }
+
+
 def infer_builder_workflow_phase(document: Document) -> str | None:
     """Return ``request`` / ``retirement`` for builder forms, else ``None``."""
     if not is_built_form_document(document):

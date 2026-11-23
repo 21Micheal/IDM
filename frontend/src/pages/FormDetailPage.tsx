@@ -347,8 +347,9 @@ export default function FormDetailPage() {
       // another member. The completion overlay is terminal on this page, so
       // stop polling the detail record while it is shown.
       if (workflowActionCompleted) return false;
-      const form = (query.state.data as { metadata?: { form?: { imprest_request_workflow_status?: string; payment_voucher_document_id?: string; imprest_payment_voucher_document_id?: string; imprest_payment_voucher_status?: string; retirement_payment_voucher_status?: string; retirement_workflow_status?: string; retirement_variance?: { scenario?: string; kind?: string } } } } | undefined)
+      const form = (query.state.data as { metadata?: { form?: { imprest_request_workflow_status?: string; payment_voucher_document_id?: string; imprest_payment_voucher_document_id?: string; imprest_payment_voucher_status?: string; retirement_payment_voucher_status?: string; retirement_workflow_status?: string; retirement_variance?: { scenario?: string; kind?: string }; booked_early?: { reconciliation_pending?: boolean } } } } | undefined)
         ?.metadata?.form;
+      if (form?.booked_early?.reconciliation_pending) return 2_000;
       if (form?.imprest_payment_voucher_status === "pending" && !form.imprest_payment_voucher_document_id) return 1_500;
       if (String(form?.retirement_workflow_status || "").toLowerCase() === "approved"
         && (["over", "under"].includes(String(form?.retirement_variance?.scenario || "").toLowerCase())
@@ -363,6 +364,7 @@ export default function FormDetailPage() {
   const formData = (doc?.metadata as Record<string, any> | undefined)?.form as
     | {
       workflow_type?: string;
+      workflow_phase?: string;
       travel_start_date_field?: string;
       template_id?: string;
       sections?: unknown[];
@@ -386,7 +388,7 @@ export default function FormDetailPage() {
       retirement_payment_voucher_status?: string;
       retirement_payment_voucher_error?: string;
       imprest_request_posting_required_for_lpo?: boolean;
-      booked_early?: { reason?: string; blocking_reference?: string; raised_at?: string };
+      booked_early?: { reason?: string; blocking_reference?: string; raised_at?: string; reconciliation_pending?: boolean };
     }
     | undefined;
 
@@ -1971,6 +1973,12 @@ export default function FormDetailPage() {
             <WorkflowActionPanel
               task={activeTask}
               documentId={id!}
+              disabledReason={formData?.booked_early?.reconciliation_pending
+                && ["request", "rfq", "lpo", "retirement"].includes(String(formData.workflow_phase || "").toLowerCase())
+                ? `Approval is paused until reconciliation for ${formData.booked_early.blocking_reference || "the earlier requisition"} is approved.`
+                : undefined}
+              reconciliationResolved={formData?.booked_early?.reason === "unreconciled_retirement"
+                && formData.booked_early.reconciliation_pending === false}
               variant="bar"
               onBeforeApprove={savePendingFormEditsBeforeApproval}
               onCompleted={(action) => {
