@@ -885,7 +885,7 @@ export default function FormDetailPage() {
       setMissingFields([]);
       if (formEditing && formDirtyRef.current) {
         // Never advance a workflow with values that exist only in this tab.
-        await updateFormMutation.mutateAsync();
+        await updateFormMutation.mutateAsync({ suppressSuccessToast: true });
       }
       return documentsAPI.submit(id!, {
         ...(workflowStage ? { workflow_stage: workflowStage } : {}),
@@ -966,9 +966,9 @@ export default function FormDetailPage() {
   });
 
   const updateFormMutation = useMutation({
-    mutationFn: () => formAutosave.finalizeNow(),
-    onSuccess: () => {
-      toast.success("Form updated.");
+    mutationFn: (_options?: { suppressSuccessToast?: boolean }) => formAutosave.finalizeNow(),
+    onSuccess: (_data, options) => {
+      if (!options?.suppressSuccessToast) toast.success("Form updated.");
       setFormEditing(false);
       formDirtyRef.current = false;
       setFormIsDirty(false);
@@ -1392,7 +1392,7 @@ export default function FormDetailPage() {
     }
     setMissingFields([]);
     if (formEditing && formDirtyRef.current) {
-      await updateFormMutation.mutateAsync();
+      await updateFormMutation.mutateAsync({ suppressSuccessToast: true });
     }
   };
   const dismissWorkflowCompletion = () => {
