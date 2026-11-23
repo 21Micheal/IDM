@@ -1366,7 +1366,7 @@ export default function FormDetailPage() {
       return;
     }
     setMissingFields([]);
-    updateFormMutation.mutate();
+    updateFormMutation.mutate({});
   };
   const savePendingFormEditsBeforeApproval = async () => {
     const valuesToCheck = formEditing ? formValues : (formData?.values ?? {});
