@@ -389,7 +389,7 @@ def _notify_delegates_of_task(task, *, only_delegation=None) -> None:
         _create_once(delegation.delegate, message, link, "delegation")
         _send_email(
             delegation.delegate,
-            subject=f"DMS — Delegated approval: {target_ctx['reference']}",
+            subject=f"EAC Travel Req — Delegated approval: {target_ctx['reference']}",
             body=f"Hello {delegation.delegate.first_name},\n\n{body}",
             link=link,
         )
@@ -723,7 +723,7 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
                 total_amount=str(run.total_amount),
                 currencies=currencies,
             )
-            default_subject = f"DMS — Payment run {verb}: {run.payment_reference}"
+            default_subject = f"EAC Travel Req — Payment run {verb}: {run.payment_reference}"
             default_body = (
                 f"Hello {recipient.first_name},\n\n"
                 f"Your payment run has been {verb}.\n\n"
@@ -731,7 +731,7 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
                 f"  Lines: {run.line_count}\n"
                 f"  Total: {total}\n"
                 f"  Status: {verb.capitalize()}\n\n"
-                f"Log in to DMS to view the payment run status.\n"
+                f"Log in to EAC Travel Req to view the payment run status.\n"
             )
             subject, body = _resolve_email(
                 instance.template, "workflow_complete", default_subject, default_body, **ctx
@@ -754,14 +754,14 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
             outcome_label=verb.capitalize(),
             document_url=_document_url(doc.id),
         )
-        default_subject = f"DMS — Document {verb}: {doc.reference_number}"
+        default_subject = f"EAC Travel Req — Document {verb}: {doc.reference_number}"
         default_body = (
             f"Hello {recipient.first_name},\n\n"
             f"Your document has been {verb}.\n\n"
             f"  Document: {doc.title}\n"
             f"  Reference: {doc.reference_number}\n"
             f"  Status: {verb.capitalize()}\n\n"
-            f"Log in to DMS to view the document.\n"
+            f"Log in to EAC Travel Req to view the document.\n"
         )
         subject, body = _resolve_email(
             instance.template, "workflow_complete", default_subject, default_body, **ctx
@@ -802,7 +802,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
     _create_notification(uploader, message, link, "document_returned")
     _send_email(
         uploader,
-        subject=f"DMS — Document returned for review: {doc.reference_number}",
+        subject=f"EAC Travel Req — Document returned for review: {doc.reference_number}",
         body=(
             f"Hello {uploader.first_name},\n\n"
             f"Your document has been returned and requires your attention.\n\n"
@@ -811,7 +811,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
             f"  Returned by: {approver.get_full_name() if approver else 'Approver'}\n"
             f"  Reason: {comment}\n\n"
             f"Please update the document and resubmit for approval.\n\n"
-            f"Log in to DMS to view and resubmit.\n"
+            f"Log in to EAC Travel Req to view and resubmit.\n"
         ),
         link=link,
     )
@@ -858,7 +858,7 @@ def notify_document_held(task_id: str, comment: str, hold_hours: int) -> None:
     _create_notification(uploader, message, link, "document_held")
     _send_email(
         uploader,
-        subject=f"DMS — Document on hold: {doc.reference_number}",
+        subject=f"EAC Travel Req — Document on hold: {doc.reference_number}",
         body=(
             f"Hello {uploader.first_name},\n\n"
             f"Your document has been placed on hold.\n\n"
@@ -869,7 +869,7 @@ def notify_document_held(task_id: str, comment: str, hold_hours: int) -> None:
             f"  Reason: {comment}\n\n"
             f"The document will resume the approval process automatically "
             f"after the hold period ends, or when manually released.\n\n"
-            f"Log in to DMS to view the document status.\n"
+            f"Log in to EAC Travel Req to view the document status.\n"
         ),
         link=link,
     )
@@ -902,7 +902,7 @@ def notify_hold_released(task_id: str) -> None:
     _create_notification(uploader, msg_uploader, link, "hold_released")
     _send_email(
         uploader,
-        subject=f"DMS — Hold released: {doc.reference_number}",
+        subject=f"EAC Travel Req — Hold released: {doc.reference_number}",
         body=(
             f"Hello {uploader.first_name},\n\n"
             f"The hold on your document has been released.\n\n"
@@ -922,14 +922,14 @@ def notify_hold_released(task_id: str) -> None:
         _create_notification(approver, msg_approver, link, "hold_released")
         _send_email(
             approver,
-            subject=f"DMS — Hold released, action required: {doc.reference_number}",
+            subject=f"EAC Travel Req — Hold released, action required: {doc.reference_number}",
             body=(
                 f"Hello {approver.first_name},\n\n"
                 f"The hold you placed on the following document has been released.\n\n"
                 f"  Document: {doc.title}\n"
                 f"  Reference: {doc.reference_number}\n"
                 f"  Step: {task.step.name}\n\n"
-                f"Please log in to DMS to continue the approval.\n"
+                f"Please log in to EAC Travel Req to continue the approval.\n"
             ),
             link=link,
         )
@@ -974,14 +974,14 @@ def notify_hold_ending(task_id: str) -> None:
             hold_ends_at=hold_ends,
             document_url=target_ctx["direct_url"],
         )
-        default_subject = f"DMS — Hold ending soon: {target_ctx['reference']}"
+        default_subject = f"EAC Travel Req — Hold ending soon: {target_ctx['reference']}"
         default_body = (
             f"Hello {approver.first_name},\n\n"
             f"A hold you scheduled is approaching its end.\n\n"
             + "\n".join(target_ctx["detail_lines"]) + "\n"
             f"  Step: {step_name}\n"
             f"  Hold ends: {hold_ends}\n\n"
-            f"Please log in to DMS if you need to action or extend the task.\n"
+            f"Please log in to EAC Travel Req if you need to action or extend the task.\n"
         )
         subject, body = _resolve_email(
             task.workflow_instance.template, "hold_ending",
@@ -1024,13 +1024,13 @@ def notify_hold_auto_released(task_id: str) -> None:
         step_name=step_name,
         document_url=target_ctx["direct_url"],
     )
-    default_subject = f"DMS — Hold expired, action required: {target_ctx['reference']}"
+    default_subject = f"EAC Travel Req — Hold expired, action required: {target_ctx['reference']}"
     default_body = (
         f"Hello {approver.first_name},\n\n"
         f"The hold period you set on a {target_ctx['target_label']} has expired.\n\n"
         + "\n".join(target_ctx["detail_lines"]) + "\n"
         f"  Step: {step_name}\n\n"
-        f"Please log in to DMS to action this approval.\n"
+        f"Please log in to EAC Travel Req to action this approval.\n"
     )
     subject, body = _resolve_email(
         task.workflow_instance.template, "hold_expired",
@@ -1079,14 +1079,14 @@ def notify_task_sla_warning(task_id: str) -> None:
             due_at=due_at,
             document_url=target_ctx["direct_url"],
         )
-        default_subject = f"DMS — SLA approaching: {target_ctx['reference']}"
+        default_subject = f"EAC Travel Req — SLA approaching: {target_ctx['reference']}"
         default_body = (
             f"Hello {approver.first_name},\n\n"
             f"An approval task is approaching its SLA deadline.\n\n"
             + "\n".join(target_ctx["detail_lines"]) + "\n"
             f"  Step: {step_name}\n"
             f"  Due by: {due_at}\n\n"
-            f"Please log in to DMS to action this request.\n"
+            f"Please log in to EAC Travel Req to action this request.\n"
         )
         subject, body = _resolve_email(
             task.workflow_instance.template, "sla_warning",
@@ -1137,14 +1137,14 @@ def notify_task_overdue(task_id: str) -> None:
             due_at=due_at,
             document_url=target_ctx["direct_url"],
         )
-        default_subject = f"DMS — SLA overdue: {target_ctx['reference']}"
+        default_subject = f"EAC Travel Req — SLA overdue: {target_ctx['reference']}"
         default_body = (
             f"Hello {approver.first_name},\n\n"
             f"An approval task has passed its SLA deadline and requires urgent action.\n\n"
             + "\n".join(target_ctx["detail_lines"]) + "\n"
             f"  Step: {step_name}\n"
             f"  Was due: {due_at}\n\n"
-            f"Please log in to DMS immediately.\n"
+            f"Please log in to EAC Travel Req immediately.\n"
         )
         subject, body = _resolve_email(
             task.workflow_instance.template, "sla_overdue",
@@ -1333,7 +1333,7 @@ def notify_workflow_action(
             f"✓ Approved: Your {target_type} '{title}' ({reference}) "
             f"has been approved by {actor_name}."
         )
-        default_subject = f"DMS — {target_type.capitalize()} approved: {reference}"
+        default_subject = f"EAC Travel Req — {target_type.capitalize()} approved: {reference}"
         body_tail = (
             f"Your {target_type} has been approved.\n\n"
             f"  {target_type.capitalize()}: {title}\n"
@@ -1341,7 +1341,7 @@ def notify_workflow_action(
             f"  Approved by: {actor_name}\n"
             f"  Step: {step_name}\n"
             + comment_line
-            + f"\nLog in to DMS to view the {target_type} status.\n"
+            + f"\nLog in to EAC Travel Req to view the {target_type} status.\n"
         )
     elif action_type == "rejected":
         template_key = "action_rejected"
@@ -1349,7 +1349,7 @@ def notify_workflow_action(
             f"✗ Rejected: Your {target_type} '{title}' ({reference}) "
             f"has been rejected by {actor_name}."
         )
-        default_subject = f"DMS — {target_type.capitalize()} rejected: {reference}"
+        default_subject = f"EAC Travel Req — {target_type.capitalize()} rejected: {reference}"
         body_tail = (
             f"Your {target_type} has been rejected. This decision closes its approval workflow; "
             f"it cannot be amended or resubmitted through this workflow.\n\n"
@@ -1372,7 +1372,7 @@ def notify_workflow_action(
             f"↩ Returned: Your {target_type} '{title}' ({reference}) "
             f"has been returned {return_destination}."
         )
-        default_subject = f"DMS — {target_type.capitalize()} returned for review: {reference}"
+        default_subject = f"EAC Travel Req — {target_type.capitalize()} returned for review: {reference}"
         body_tail = (
             f"Your {target_type} has been returned and requires your attention.\n\n"
             f"  {target_type.capitalize()}: {title}\n"
@@ -1392,7 +1392,7 @@ def notify_workflow_action(
             f"⏸ On Hold: Your {target_type} '{title}' ({reference}) "
             f"has been placed on hold for {hold_duration}."
         )
-        default_subject = f"DMS — {target_type.capitalize()} on hold: {reference}"
+        default_subject = f"EAC Travel Req — {target_type.capitalize()} on hold: {reference}"
         body_tail = (
             f"Your {target_type} has been placed on hold during the approval process.\n\n"
             f"  {target_type.capitalize()}: {title}\n"
@@ -1408,7 +1408,7 @@ def notify_workflow_action(
             f"▶ Released: The hold on your {target_type} '{title}' ({reference}) "
             f"has been released."
         )
-        default_subject = f"DMS — Hold released: {reference}"
+        default_subject = f"EAC Travel Req — Hold released: {reference}"
         body_tail = (
             f"The hold on your {target_type} has been released.\n\n"
             f"  {target_type.capitalize()}: {title}\n"
@@ -1419,14 +1419,14 @@ def notify_workflow_action(
         )
     else:
         msg = f"{title} ({reference}): {action.get_action_display()} by {actor_name}."
-        default_subject = f"DMS — {target_type.capitalize()} action: {reference}"
+        default_subject = f"EAC Travel Req — {target_type.capitalize()} action: {reference}"
         body_tail = (
             f"An action has been taken on your {target_type}.\n\n"
             f"  {target_type.capitalize()}: {title}\n"
             f"  Reference: {reference}\n"
             f"  Action: {action.get_action_display()}\n"
             f"  By: {actor_name}\n\n"
-            f"Log in to DMS to view the {target_type} status.\n"
+            f"Log in to EAC Travel Req to view the {target_type} status.\n"
         )
 
     return_destination = {
@@ -1464,7 +1464,7 @@ def notify_workflow_action(
             recipient_msg = (
                 f"✎ Action required: Please amend {target_type} '{title}' ({reference}) and resubmit it."
             )
-            recipient_subject = f"DMS — Amend and resubmit: {reference}"
+            recipient_subject = f"EAC Travel Req — Amend and resubmit: {reference}"
             recipient_body_tail = (
                 f"You have been asked to amend and resubmit this {target_type}.\n\n"
                 f"  {target_type.capitalize()}: {title}\n"
@@ -1525,13 +1525,13 @@ def notify_signature_requested(signer_id: str, request_id: str) -> None:
     _create_once(signer, msg, link, "signature_requested")
     _send_email(
         signer,
-        subject=f"DMS — Signature requested: {doc.title}",
+        subject=f"EAC Travel Req — Signature requested: {doc.title}",
         body=(
             f"Hello {signer.first_name},\n\n"
             f"{requester} has requested your signature on a document.\n\n"
             f"  Document: {doc.title}\n"
             + (f"  Note: {req.message}\n" if req.message else "")
-            + "\nLog in to DMS to review and sign.\n"
+            + "\nLog in to EAC Travel Req to review and sign.\n"
         ),
         link=link,
     )
@@ -1589,7 +1589,7 @@ def notify_signature_declined(request_id: str, signer_id: str) -> None:
     )
     _send_email(
         req.requested_by,
-        subject=f"DMS — Signature declined: {doc.title}",
+        subject=f"EAC Travel Req — Signature declined: {doc.title}",
         body=(
             f"Hello {req.requested_by.first_name},\n\n"
             f"{who_name} declined to sign '{doc.title}'.\n\n"
@@ -1616,11 +1616,11 @@ def notify_signature_completed(request_id: str) -> None:
     )
     _send_email(
         req.requested_by,
-        subject=f"DMS — Fully signed: {doc.title}",
+        subject=f"EAC Travel Req — Fully signed: {doc.title}",
         body=(
             f"Hello {req.requested_by.first_name},\n\n"
             f"All requested signatures have been collected on '{doc.title}'.\n"
-            f"The signed document is ready in DMS.\n"
+            f"The signed document is ready in EAC Travel Req.\n"
         ),
         link=link,
     )
