@@ -83,6 +83,7 @@ interface WorkflowTask {
   };
   requires_signature?: boolean;
   assigned_to?:   { id: string; full_name: string };
+  is_delegated?: boolean;
   due_at?:        string | null;
   held_until?:    string | null;
   target_type?:   string;
@@ -274,6 +275,7 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
   const [holdHours, setHoldHours] = useState(24);
   const [returnTo, setReturnTo] = useState<"previous_step" | "uploader">("uploader");
   const [nextApproverId, setNextApproverId] = useState("");
+  const [nextApproverStepId, setNextApproverStepId] = useState("");
   const [returnApproverId, setReturnApproverId] = useState("");
   const [serverGateReason, setServerGateReason] = useState<string | null>(null);
   const [dismissedGateReason, setDismissedGateReason] = useState<string | null>(null);
@@ -381,6 +383,7 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
     setActiveAction(null);
     setComment("");
     setNextApproverId("");
+    setNextApproverStepId("");
     setReturnApproverId("");
     // Approval/rejection/return can remove the actor's document access as soon
     // as the task leaves their queue. The completion overlay is already the
@@ -405,7 +408,13 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
   const approveMutation = useMutation({
     mutationFn: async (result?: SignaturePlacementResult) => {
       await onBeforeApprove?.();
-      return workflowAPI.approveTask(task.id, comment, result ?? undefined, nextApproverId || undefined);
+      return workflowAPI.approveTask(
+        task.id,
+        comment,
+        result ?? undefined,
+        nextApproverId || undefined,
+        nextApproverStepId || undefined,
+      );
     },
     onMutate: () => beginOptimisticAction("approve"),
     onSuccess: async () => { await completeAction("approve"); },
@@ -465,8 +474,23 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
   const isBar = variant === "bar";
   const _isActionable = isHeld || isActive;
   void _isActionable;
+  const canActOnTask = Boolean(
+    currentUser?.id
+    && (String(task.assigned_to?.id ?? "") === String(currentUser.id) || task.is_delegated),
+  );
   const anyPending = approveMutation.isPending || rejectMutation.isPending ||
                      returnMutation.isPending  || holdMutation.isPending;
+
+  if (!canActOnTask) {
+    return (
+      <div className={clsx(isBar ? "px-4 py-3" : "border border-[#C8CDD2] bg-[#F5F7F8] p-4")}>
+        <p className="text-sm font-semibold text-[#1F2933]">{task.step.name}</p>
+        <p className="mt-1 text-xs text-[#5E6870]">
+          Assigned to {task.assigned_to?.full_name || "the configured approver"}. You can view the workflow, but only the assignee or their delegate can act on it.
+        </p>
+      </div>
+    );
+  }
 
   const openReturnForm = () => {
     setReturnTo(canReturnSubmitter ? "uploader" : "previous_step");
@@ -479,6 +503,7 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
     setHoldHours(24);
     setReturnTo("uploader");
     setNextApproverId("");
+    setNextApproverStepId("");
     setReturnApproverId("");
     setActiveAction(null);
     setSignedResult(null);
@@ -678,7 +703,10 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
                     title="Choose the next approver"
                     target={routingOptions.next}
                     value={nextApproverId}
-                    onChange={setNextApproverId}
+                    onChange={(value) => {
+                      setNextApproverId(value);
+                      setNextApproverStepId(value ? routingOptions.next!.step_id : "");
+                    }}
                   />
                 )}
                 <div>

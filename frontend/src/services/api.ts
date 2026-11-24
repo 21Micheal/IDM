@@ -1479,10 +1479,11 @@ export const workflowAPI = {
   myTasks: () => api.get("/workflows/tasks/my_tasks/"),
   listTasks: (params?: Record<string, unknown>) =>
     api.get("/workflows/tasks/", { params }),
-  approveTask: (id: string, comment = "", result?: SignSubmission, nextApproverId?: string) => {
+  approveTask: (id: string, comment = "", result?: SignSubmission, nextApproverId?: string, nextApproverStepId?: string) => {
     if (result) {
       const form = buildSignatureForm(result, { comment });
       if (nextApproverId) form.append("next_approver_id", nextApproverId);
+      if (nextApproverStepId) form.append("next_approver_step_id", nextApproverStepId);
       return api.post(`/workflows/tasks/${id}/approve/`, form, {
         headers: { "Content-Type": undefined },
       });
@@ -1490,6 +1491,7 @@ export const workflowAPI = {
     return api.post(`/workflows/tasks/${id}/approve/`, {
       comment,
       ...(nextApproverId ? { next_approver_id: nextApproverId } : {}),
+      ...(nextApproverStepId ? { next_approver_step_id: nextApproverStepId } : {}),
     });
   },
   routingOptions: (id: string) => api.get(`/workflows/tasks/${id}/routing_options/`),

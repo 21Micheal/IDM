@@ -557,6 +557,7 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
                 use_new_signature=use_new_signature,
                 signature_image=signature_image,
                 next_approver_id=request.data.get("next_approver_id"),
+                next_approver_step_id=request.data.get("next_approver_step_id"),
             )
         except WorkflowError as exc:
             return Response({"detail": str(exc)}, status=400)
@@ -711,7 +712,10 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     # ── Helper ─────────────────────────────────────────────────────────────
 
     def _check_permission(self, task, user):
-        if task.assigned_to == user or user.has_admin_access:
+        # Document administration grants visibility and configuration access,
+        # not authority to approve another person's assigned workflow task.
+        # Only the assignee (or an active delegate) may take workflow actions.
+        if task.assigned_to_id == user.id:
             return
         if user_can_action_task_via_delegation(user, task):
             return

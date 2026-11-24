@@ -542,7 +542,7 @@ class WorkflowService:
     @transaction.atomic
     def approve(task: WorkflowTask, actor, comment: str = "", request=None, signature_placement=None,
                 items=None, use_new_signature: bool = False, signature_image=None,
-                next_approver_id=None) -> None:
+                next_approver_id=None, next_approver_step_id=None) -> None:
         # Lock the workflow instance before the task. ``group_any`` creates a
         # task for every eligible member; locking only a task would let two
         # members approve different sibling tasks at the same time and advance
@@ -555,19 +555,32 @@ class WorkflowService:
         task.acted_at = timezone.now()
         task.save(update_fields=["status", "comment", "acted_at"])
 
-        next_step = WorkflowService._next_assignee_selection_step(
+        next_step = WorkflowService._next_assignee_selection_target(
             instance, task.step, task.execution_lane or "main",
         )
         selected_approver = None
         if next_approver_id:
-            selected_approver = WorkflowService._validate_selected_approver(next_step, next_approver_id)
+            selected_step = next_step
+            if next_approver_step_id:
+                selected_step = WorkflowStep.objects.filter(pk=next_approver_step_id).first()
+                if not selected_step or not selected_step.allow_assignee_selection:
+                    raise WorkflowError("The selected workflow step is not configured for approver selection.")
+                if not next_step or next_step.pk != selected_step.pk:
+                    raise WorkflowError("The selected approver step is no longer the configured target for this approval.")
+                if selected_step.order <= task.step.order and selected_step.template_id == instance.template_id:
+                    raise WorkflowError("The selected approver step must follow the current approval.")
+                if selected_step.template_id != instance.template_id:
+                    next_phase_step = WorkflowService._next_procurement_phase_approval_step(instance)
+                    if not next_phase_step or next_phase_step.pk != selected_step.pk:
+                        raise WorkflowError("The selected approver step is not the next configured workflow phase.")
+            selected_approver = WorkflowService._validate_selected_approver(selected_step, next_approver_id)
         action = WorkflowTaskAction.objects.create(
             task=task,
             actor=actor,
             action="approved",
             comment=comment,
             selected_approver=selected_approver,
-            selected_approver_step=next_step if selected_approver else None,
+            selected_approver_step=selected_step if selected_approver else None,
         )
 
         # Use the task's current mirrored order. The graph node keeps the same
@@ -918,6 +931,16 @@ class WorkflowService:
                         if found:
                             return found
                     found = visit(block.get("default_blocks") or [], phase)
+                    if found:
+                        return found
+                elif block.get("kind") == "if_else":
+                    for branch in block.get("branches") or []:
+                        if not isinstance(branch, dict):
+                            continue
+                        found = visit(branch.get("blocks") or [], phase)
+                        if found:
+                            return found
+                    found = visit(block.get("else_blocks") or [], phase)
                     if found:
                         return found
                 else:
@@ -1680,76 +1703,88 @@ class WorkflowService:
         return None
 
     @staticmethod
-    def _next_assignee_selection_step(instance: WorkflowInstance, step: WorkflowStep, execution_lane="main"):
-        """Find the next approval explicitly configured for prior-approver selection.
+    def _step_is_conditionally_nested(step: WorkflowStep) -> bool:
+        """Whether a v2 approval sits inside an IF/ELSE or non-phase switch."""
+        if not WorkflowService.is_v2_workflow(step.template) or not step.node_id:
+            return False
 
-        An IF/ELSE node is not an approval target. Resolving only the currently
-        active immediate approval makes a choice made by the prior approver
-        depend on which conditional branch happens to be active at that moment.
-        Store the choice against the next opted-in approval instead; when that
-        node is reached, activation applies the saved choice by step ID.
-        """
-        candidates = instance.template.steps.filter(
-            order__gt=step.order,
-            step_type="approval",
-            allow_assignee_selection=True,
-        ).order_by("order")
+        definition = step.template.definition or {}
+        target_id = str(step.node_id)
 
-        current_phase = WorkflowService._phase_for_step(step) if WorkflowService.is_v2_workflow(instance.template) else None
-        for candidate in candidates:
-            candidate_lane = WorkflowService._step_parallel_lane(candidate)
-            if execution_lane == "imprest_request":
-                if candidate_lane != "imprest_request":
-                    continue
-            elif candidate_lane == "imprest_request":
-                continue
-
-            if WorkflowService.is_v2_workflow(instance.template):
-                if WorkflowService._phase_for_step(candidate) != current_phase:
-                    continue
-            return candidate
-
-        # Phase CASEs are separate workflow instances. Preserve the existing
-        # cross-phase selection feature when the current phase has no opted-in
-        # target, but expose it only when the target itself enables the option.
-        if execution_lane == "main":
-            next_phase_step = WorkflowService._next_procurement_phase_approval_step(instance)
-            if next_phase_step and next_phase_step.allow_assignee_selection:
-                return next_phase_step
-        return None
-
-    @staticmethod
-    def _step_parallel_lane(step: WorkflowStep) -> str:
-        """Read the execution lane marker from a v2 definition node."""
-        definition = getattr(step.template, "definition", None) or {}
-        target_id = str(step.node_id or "")
-        if not target_id:
-            return "main"
-
-        def visit(blocks):
+        def visit(blocks, conditional=False):
             for block in blocks or []:
                 if not isinstance(block, dict):
                     continue
                 if str(block.get("id") or "") == target_id:
-                    return str((block.get("step") or {}).get("parallel_lane") or "main")
+                    return conditional
+
+                kind = block.get("kind")
+                nested_conditional = conditional or kind == "if_else"
+                if kind == "switch" and str(block.get("field_id") or "").strip() != "context.phase":
+                    nested_conditional = True
                 for key in ("blocks", "then_blocks", "else_blocks", "true_blocks", "false_blocks"):
-                    found = visit(block.get(key))
-                    if found:
+                    found = visit(block.get(key), nested_conditional)
+                    if found is not None:
                         return found
                 for branch in block.get("branches") or []:
-                    found = visit(branch.get("blocks"))
-                    if found:
+                    found = visit(branch.get("blocks"), nested_conditional)
+                    if found is not None:
                         return found
                 for case in block.get("cases") or []:
-                    found = visit(case.get("blocks"))
-                    if found:
+                    found = visit(case.get("blocks"), nested_conditional)
+                    if found is not None:
                         return found
-                found = visit(block.get("default_blocks"))
-                if found:
+                found = visit(block.get("default_blocks"), nested_conditional)
+                if found is not None:
                     return found
-            return ""
+            return None
 
-        return visit(definition.get("blocks") or []) or "main"
+        return bool(visit(definition.get("blocks") or []))
+
+    @staticmethod
+    def _next_assignee_selection_target(instance: WorkflowInstance, step: WorkflowStep, execution_lane="main"):
+        """Resolve a configured target without offering cross-phase choices on conditional approvals.
+
+        A phase's final unconditional approval can nominate the next phase's
+        first approver, even when an intervening conditional approval may run.
+        That conditional approval must not present the same picker a second
+        time. Direct next-step selection continues to follow the active branch.
+        """
+        active_next = WorkflowService._next_approval_step(instance, step, execution_lane)
+        if (
+            active_next
+            and WorkflowService.is_v2_workflow(instance.template)
+            and WorkflowService._phase_for_step(active_next) != WorkflowService._phase_for_step(step)
+        ):
+            # _next_approval_step falls back to the next procurement CASE when
+            # this branch has no later approval. Treat that as a phase handoff
+            # so conditional approvals cannot expose its picker themselves.
+            active_next = None
+        if active_next and active_next.allow_assignee_selection:
+            return active_next
+
+        if execution_lane != "main" or WorkflowService._step_is_conditionally_nested(step):
+            return None
+
+        # If another unconditional approval remains in this phase, its normal
+        # routing owns the next selection opportunity.
+        if WorkflowService.is_v2_workflow(instance.template):
+            active_orders, _ = WorkflowService._v2_active_step_orders(instance, execution_lane)
+            later_orders = [order for order in active_orders if order > step.order]
+            later_approvals = instance.template.steps.filter(
+                order__in=later_orders,
+                step_type="approval",
+            ).order_by("order")
+            if any(not WorkflowService._step_is_conditionally_nested(candidate) for candidate in later_approvals):
+                return None
+        elif instance.template.steps.filter(
+            order__gt=step.order,
+            step_type="approval",
+        ).exists():
+            return None
+
+        next_phase_step = WorkflowService._next_procurement_phase_approval_step(instance)
+        return next_phase_step if next_phase_step and next_phase_step.allow_assignee_selection else None
 
     @staticmethod
     def _next_procurement_phase_approval_step(instance: WorkflowInstance):
@@ -1870,7 +1905,7 @@ class WorkflowService:
         lane = task.execution_lane or "main"
         previous_action = WorkflowService._previous_approval_action(task)
         targets = {
-            "next": WorkflowService._next_assignee_selection_step(instance, task.step, lane),
+            "next": WorkflowService._next_assignee_selection_target(instance, task.step, lane),
             "previous": previous_action.task.step if previous_action else None,
         }
         result = {}
