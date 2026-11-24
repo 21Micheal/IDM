@@ -856,7 +856,7 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
                     metadata__form__workflow_type="requisition",
                     deleted_at__isnull=True,
                 )
-                .exclude(status__in=["draft", "void"])
+                .exclude(status__in=["draft", "void", "rejected"])
                 .exclude(reference_number="")
                 .only("id", "metadata", "created_at", "reference_number", "uploaded_by_id")
             )

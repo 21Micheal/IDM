@@ -127,6 +127,10 @@ def duplicate_travel_date_map(documents: list[Any]) -> dict[str, list[dict[str, 
     first_seen: dict[tuple[Any, str], Any] = {}
     duplicates: dict[str, list[dict[str, str]]] = {}
     for document in ordered:
+        # Rejection ends the requisition's lifecycle. It must not reserve the
+        # travel date or be reported as a duplicate for later submissions.
+        if str(getattr(document, "status", "")).strip().lower() == "rejected":
+            continue
         date_text = travel_start_date(document)
         owner_id = getattr(document, "uploaded_by_id", None)
         if not date_text or owner_id is None:
@@ -175,7 +179,7 @@ def find_existing_travel_date_duplicates_for_owner(
             metadata__form__workflow_type="requisition",
             deleted_at__isnull=True,
         )
-        .exclude(status="void")
+        .exclude(status__in=["void", "rejected"])
         .order_by("created_at")
         .only("id", "metadata", "created_at", "reference_number", "uploaded_by_id")
     )
