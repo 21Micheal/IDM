@@ -86,6 +86,113 @@ def _find_template_and_type():
     return template, doc_type
 
 
+def _payment_voucher_signatory_values(document, posting, requisitioner, *, include_later_approvals=False) -> dict:
+    """Resolve the voucher's Finance, Executive Director, and receipt signers.
+
+    Imprest vouchers are created by a posting task, which may run after the
+    workflow action that triggered it. Resolve the approved request-phase
+    actors from the task audit trail and limit candidates to approvals recorded
+    no later than this posting. This avoids accidentally using retirement or
+    later procurement approvers on the advance voucher.
+    """
+    from apps.workflows.models import WorkflowTaskAction
+    from apps.documents.lpo import _approval_signature_data, _user_name
+
+    cutoff = timezone.now() if include_later_approvals else getattr(posting, "posted_at", None)
+    if cutoff is None:
+        cutoff = getattr(posting, "updated_at", None) or getattr(posting, "created_at", None)
+    actions = WorkflowTaskAction.objects.filter(
+        task__workflow_instance__document=document,
+        task__execution_lane="main",
+        action="approved",
+        actor__isnull=False,
+    ).select_related("actor", "task__step", "task__step__assignee_group").order_by("created_at")
+
+    finance_action = executive_action = None
+    for action in actions:
+        if cutoff and action.created_at and action.created_at > cutoff:
+            continue
+        step = action.task.step
+        group_name = getattr(getattr(step, "assignee_group", None), "name", "") or ""
+        role_name = getattr(action.actor, "job_description", "") or ""
+        search = " ".join((str(step.name or ""), str(group_name), str(role_name))).casefold()
+        if "executive director" in search:
+            executive_action = action
+        elif "finance" in search:
+            finance_action = action
+
+    def signer(action):
+        if action is None:
+            return {"name": "", "role": "", "date": "", "signature": ""}
+        actor = action.actor
+        return {
+            "name": _user_name(actor),
+            "role": str(getattr(actor, "job_description", "") or action.task.step.name or "").strip(),
+            "date": timezone.localtime(action.created_at).strftime("%d-%m-%Y") if action.created_at else "",
+            "signature": _approval_signature_data(actor, action=action),
+        }
+
+    received_date = timezone.localdate().strftime("%d-%m-%Y")
+    received_name = _user_name(requisitioner)
+    if not received_name and requisitioner:
+        received_name = requisitioner.get_username()
+    received = {
+        "name": received_name,
+        "role": str(getattr(requisitioner, "job_description", "") or "Requisitioner").strip(),
+        "date": received_date,
+        "signature": _approval_signature_data(requisitioner),
+    }
+    values = {}
+    for slot, detail in (
+        ("prepared_by", signer(finance_action)),
+        ("approved_by", signer(executive_action)),
+        ("received_by", received),
+    ):
+        for key, value in detail.items():
+            values[f"{slot}.{key}"] = value
+    return values
+
+
+def _template_with_payment_voucher_signatories(template):
+    """Apply signatory mappings to existing saved PV templates at render time."""
+    import copy
+
+    design = getattr(template, "design", None)
+    if not isinstance(design, dict):
+        return template
+    design = copy.deepcopy(design)
+    mappings = {
+        "pv-prepared": ("Prepared By", "prepared_by"),
+        "pv-approved": ("Approved By", "approved_by"),
+        "pv-received": ("Received By", "received_by"),
+    }
+
+    def walk(value):
+        if isinstance(value, dict):
+            if value.get("type") == "signature_group" and value.get("id") == "pv-signatories":
+                value.setdefault("style", {})["signatureAfterDate"] = True
+                for signature in value.get("signatories") or []:
+                    mapping = mappings.get(str(signature.get("id") or ""))
+                    if mapping:
+                        role, slot = mapping
+                        signature.update({
+                            "role": role,
+                            "name": "{{" + slot + ".name}}",
+                            "date": "{{" + slot + ".date}}",
+                            "signature": "{{" + slot + ".signature}}",
+                        })
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(design)
+    rendered_template = copy.copy(template)
+    rendered_template.design = design
+    return rendered_template
+
+
 def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict | None:
     from apps.sunsystems.config import get_form_values
     from apps.sunsystems.mapping import classify_retirement, resolve_value
@@ -187,8 +294,7 @@ def _voucher_values(document, retirement: dict, posting, requisitioner) -> dict 
             "currency": currency,
             "amount": f'{Decimal(classified["variance"]):.2f}',
         }],
-        # The caller passes the requisitioner as the template's current user so
-        # its Prepared By formula resolves to this person's name.
+        **_payment_voucher_signatory_values(document, posting, requisitioner),
     }
 
 
@@ -261,7 +367,8 @@ def generate_payment_voucher_for_retirement(document, posting, actor=None):
     reference = _generate_unique_reference(doc_type)
     title = f"Payment Voucher — {locked.reference_number}"
     voucher = generate_document_from_template_sync(
-        template, render_values, fmt="pdf", title=title, user=user,
+        _template_with_payment_voucher_signatories(template), render_values,
+        fmt="pdf", title=title, user=user,
         type_id=doc_type.id, reference_number=reference,
     )
     voucher_metadata = dict(voucher.metadata or {})
@@ -292,7 +399,7 @@ def generate_payment_voucher_for_retirement(document, posting, actor=None):
 
 
 @transaction.atomic
-def generate_payment_voucher_for_imprest(document, posting, actor=None):
+def generate_payment_voucher_for_imprest(document, posting, actor=None, *, force_refresh=False):
     """Create the advance DSA voucher after every Imprest journal is posted."""
     from decimal import Decimal, InvalidOperation
     from apps.documents.models import Document, DocumentRelationship
@@ -314,17 +421,20 @@ def generate_payment_voucher_for_imprest(document, posting, actor=None):
     metadata = dict(locked.metadata or {})
     form_meta = dict(metadata.get("form") or {})
     existing_id = form_meta.get("imprest_payment_voucher_document_id")
+    refresh_target = None
     if existing_id:
         existing = Document.objects.filter(pk=existing_id).first()
         if existing:
-            return existing
+            if not force_refresh:
+                return existing
+            refresh_target = existing
     existing = Document.objects.filter(
         incoming_relationships__source_document=locked,
         incoming_relationships__relation_type=DocumentRelationship.RelationType.REFERENCES,
         metadata__payment_voucher__source_document_id=str(locked.pk),
         metadata__payment_voucher__kind="imprest",
     ).order_by("created_at").first()
-    if existing:
+    if existing and not refresh_target and not force_refresh:
         form_meta["imprest_payment_voucher_document_id"] = str(existing.pk)
         form_meta["imprest_payment_voucher_reference"] = existing.reference_number
         form_meta["imprest_payment_voucher_status"] = "generated"
@@ -332,6 +442,9 @@ def generate_payment_voucher_for_imprest(document, posting, actor=None):
         locked.metadata = metadata
         locked.save(update_fields=["metadata", "updated_at"])
         return existing
+    if existing and not refresh_target:
+        refresh_target = existing
+        form_meta["imprest_payment_voucher_document_id"] = str(existing.pk)
 
     debit_lines = []
     for item in requested:
@@ -398,6 +511,9 @@ def generate_payment_voucher_for_imprest(document, posting, actor=None):
             "currency": const_value(line, "currency", currency),
             "amount": f"{amount:.2f}",
         } for amount, _, line in debit_lines],
+        **_payment_voucher_signatory_values(
+            locked, posting, requisitioner, include_later_approvals=force_refresh,
+        ),
     }
     template, doc_type = _find_template_and_type()
     if template is None or doc_type is None:
@@ -407,10 +523,36 @@ def generate_payment_voucher_for_imprest(document, posting, actor=None):
     user = requisitioner or actor or locked.owned_by
     if user is None:
         raise RuntimeError("Cannot create the Imprest Payment Voucher without a user.")
-    voucher = generate_document_from_template_sync(
-        template, render_values, fmt="pdf", title=f"Imprest Payment Voucher — {locked.reference_number}",
+    rendered_voucher = generate_document_from_template_sync(
+        _template_with_payment_voucher_signatories(template), render_values,
+        fmt="pdf", title=f"Imprest Payment Voucher — {locked.reference_number}",
         user=user, type_id=doc_type.id, reference_number=_generate_unique_reference(doc_type),
     )
+    voucher = rendered_voucher
+    if refresh_target:
+        from django.core.files.base import ContentFile
+        rendered_voucher.file.open("rb")
+        rendered_bytes = rendered_voucher.file.read()
+        rendered_voucher.file.close()
+        refresh_target.file.delete(save=False)
+        refresh_target.file.save(rendered_voucher.file_name, ContentFile(rendered_bytes), save=False)
+        refresh_target.title = rendered_voucher.title
+        refresh_target.file_name = rendered_voucher.file_name
+        refresh_target.file_size = rendered_voucher.file_size
+        refresh_target.file_mime_type = rendered_voucher.file_mime_type
+        refresh_target.checksum = rendered_voucher.checksum
+        refresh_target.metadata = rendered_voucher.metadata
+        refresh_target.amount = rendered_voucher.amount
+        refresh_target.currency = rendered_voucher.currency
+        refresh_target.document_date = rendered_voucher.document_date
+        refresh_target.due_date = rendered_voucher.due_date
+        refresh_target.save(update_fields=[
+            "file", "title", "file_name", "file_size", "file_mime_type", "checksum",
+            "metadata", "amount", "currency", "document_date", "due_date", "updated_at",
+        ])
+        rendered_voucher.file.delete(save=False)
+        rendered_voucher.delete()
+        voucher = refresh_target
     voucher_metadata = dict(voucher.metadata or {})
     voucher_metadata["payment_voucher"] = {
         "kind": "imprest", "source_document_id": str(locked.pk),
@@ -432,3 +574,26 @@ def generate_payment_voucher_for_imprest(document, posting, actor=None):
     locked.metadata = metadata
     locked.save(update_fields=["metadata", "updated_at"])
     return voucher
+
+
+def refresh_imprest_payment_voucher_for_request_approval(document, *, actor=None):
+    """Refresh an existing DSA voucher after a later Request approval signs it."""
+    from apps.documents.models import Document
+    from apps.sunsystems.config import get_imprest_request_postings
+    from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    voucher_id = form.get("imprest_payment_voucher_document_id")
+    if not voucher_id or not Document.objects.filter(pk=voucher_id).exists():
+        return None
+    stages = {int(item["stage"]) for item in get_imprest_request_postings(document) if item.get("stage") is not None}
+    if not stages:
+        return None
+    posting = JournalPosting.objects.filter(
+        document=document, stage__in=stages, status=JournalPostingStatus.POSTED,
+    ).order_by("-posted_at", "-updated_at").first()
+    if not posting:
+        return None
+    return generate_payment_voucher_for_imprest(
+        document, posting, actor=actor, force_refresh=True,
+    )

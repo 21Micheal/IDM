@@ -657,6 +657,20 @@ class WorkflowService:
                 # recorded or prevent its configured workflow/posting action.
                 logger.exception("Could not refresh LPO signatures for %s", doc.pk)
 
+        if (
+            execution_lane == "main"
+            and action.action == "approved"
+            and doc is not None
+            and WorkflowService._document_workflow_phase(doc) == "request"
+        ):
+            try:
+                from apps.documents.payment_voucher import refresh_imprest_payment_voucher_for_request_approval
+                refresh_imprest_payment_voucher_for_request_approval(doc, actor=actor)
+            except Exception:
+                # Keep the approval successful if refreshing an already-issued
+                # DSA voucher encounters a file or template error.
+                logger.exception("Could not refresh Imprest voucher signatures for %s", doc.pk)
+
         if execution_lane == "main" and step.prepare_lpo_after_approval and doc is not None:
             if WorkflowService._prepare_lpo_documents(instance, step, doc, actor=actor):
                 # Keep this approved step with its approver until they have

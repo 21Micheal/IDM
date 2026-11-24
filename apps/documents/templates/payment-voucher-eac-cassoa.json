@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "name": "EAC CASSOA Payment Voucher",
-  "description": "One page payment voucher based on EAC_PV.srdl. Prepared By is populated from the requisitioner; remaining signature fields are completed manually.",
+  "description": "One page payment voucher based on EAC_PV.srdl. Prepared By is the Finance approver, Approved By is the Executive Director, and Received By is the requisitioner; their dates and saved profile signatures are populated automatically.",
   "category": "finance",
   "tags": [
     "payment voucher",
@@ -436,9 +436,9 @@
                     {
                       "id": "pv-prepared",
                       "role": "Prepared By",
-                      "name": "{{prepared_by}}",
-                      "date": "",
-                      "signature": "........................................"
+                      "name": "{{prepared_by.name}}",
+                      "date": "{{prepared_by.date}}",
+                      "signature": "{{prepared_by.signature}}"
                     },
                     {
                       "id": "pv-checked",
@@ -450,23 +450,24 @@
                     {
                       "id": "pv-approved",
                       "role": "Approved By",
-                      "name": "",
-                      "date": "",
-                      "signature": "........................................"
+                      "name": "{{approved_by.name}}",
+                      "date": "{{approved_by.date}}",
+                      "signature": "{{approved_by.signature}}"
                     },
                     {
                       "id": "pv-received",
-                      "role": "Received/Dispatched by",
-                      "name": "",
-                      "date": "",
-                      "signature": ""
+                      "role": "Received By",
+                      "name": "{{received_by.name}}",
+                      "date": "{{received_by.date}}",
+                      "signature": "{{received_by.signature}}"
                     }
                   ],
                   "style": {
                     "fontSize": 12,
                     "color": "#061A64",
                     "signatureSpace": 74,
-                    "columnsPerRow": 2
+                    "columnsPerRow": 2,
+                    "signatureAfterDate": true
                   }
                 }
               ]

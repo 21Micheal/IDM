@@ -1424,15 +1424,9 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
                     ratio = min(max_width / max(signature_image.imageWidth, 1), max_height / max(signature_image.imageHeight, 1))
                     signature_image.drawWidth = signature_image.imageWidth * ratio
                     signature_image.drawHeight = signature_image.imageHeight * ratio
-                    block = [signature_image, Spacer(1, 3)]
+                    signature_area = [signature_image, Spacer(1, 3)]
                 else:
-                    block = [Spacer(1, signature_space)]
-                block.extend([
-                    HRFlowable(width="100%", thickness=0.65, color=as_color(signature_style.get("lineColor"), "#334155"), spaceBefore=0, spaceAfter=0),
-                    Spacer(1, 4),
-                    para(role, element={"style": {"bold": True, "fontSize": signature_font / .75, "color": signature_color_value}}),
-                    Spacer(1, 3),
-                ])
+                    signature_area = [Spacer(1, signature_space)]
                 detail_style = ParagraphStyle(
                     "SignerDetail", parent=styles["Normal"], fontName="Helvetica",
                     fontSize=max(8, signature_font - 1), leading=max(10, signature_font + 2),
@@ -1448,7 +1442,24 @@ def _generate_designer_pdf_v2(design, values) -> bytes:
                     ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                     ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
                 ]))
-                block.append(detail)
+                role_label = para(role, element={"style": {"bold": True, "fontSize": signature_font / .75, "color": signature_color_value}})
+                signature_line = HRFlowable(
+                    width="100%", thickness=0.65,
+                    color=as_color(signature_style.get("lineColor"), "#334155"),
+                    spaceBefore=0, spaceAfter=0,
+                )
+                if signature_style.get("signatureAfterDate"):
+                    # Payment vouchers print signer identity and date first,
+                    # followed by the saved signature or a writable signing
+                    # area and its rule.
+                    block = [role_label, Spacer(1, 3), detail, Spacer(1, 4)]
+                    block.extend(signature_area)
+                    block.extend([signature_line, Spacer(1, 4)])
+                else:
+                    block = signature_area
+                    block.extend([
+                        signature_line, Spacer(1, 4), role_label, Spacer(1, 3), detail,
+                    ])
                 return block
 
             signer_blocks = [signer_block(signature) for signature in signatures]
