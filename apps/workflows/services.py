@@ -555,7 +555,9 @@ class WorkflowService:
         task.acted_at = timezone.now()
         task.save(update_fields=["status", "comment", "acted_at"])
 
-        next_step = WorkflowService._next_approval_step(instance, task.step, task.execution_lane or "main")
+        next_step = WorkflowService._next_assignee_selection_step(
+            instance, task.step, task.execution_lane or "main",
+        )
         selected_approver = None
         if next_approver_id:
             selected_approver = WorkflowService._validate_selected_approver(next_step, next_approver_id)
@@ -1678,6 +1680,78 @@ class WorkflowService:
         return None
 
     @staticmethod
+    def _next_assignee_selection_step(instance: WorkflowInstance, step: WorkflowStep, execution_lane="main"):
+        """Find the next approval explicitly configured for prior-approver selection.
+
+        An IF/ELSE node is not an approval target. Resolving only the currently
+        active immediate approval makes a choice made by the prior approver
+        depend on which conditional branch happens to be active at that moment.
+        Store the choice against the next opted-in approval instead; when that
+        node is reached, activation applies the saved choice by step ID.
+        """
+        candidates = instance.template.steps.filter(
+            order__gt=step.order,
+            step_type="approval",
+            allow_assignee_selection=True,
+        ).order_by("order")
+
+        current_phase = WorkflowService._phase_for_step(step) if WorkflowService.is_v2_workflow(instance.template) else None
+        for candidate in candidates:
+            candidate_lane = WorkflowService._step_parallel_lane(candidate)
+            if execution_lane == "imprest_request":
+                if candidate_lane != "imprest_request":
+                    continue
+            elif candidate_lane == "imprest_request":
+                continue
+
+            if WorkflowService.is_v2_workflow(instance.template):
+                if WorkflowService._phase_for_step(candidate) != current_phase:
+                    continue
+            return candidate
+
+        # Phase CASEs are separate workflow instances. Preserve the existing
+        # cross-phase selection feature when the current phase has no opted-in
+        # target, but expose it only when the target itself enables the option.
+        if execution_lane == "main":
+            next_phase_step = WorkflowService._next_procurement_phase_approval_step(instance)
+            if next_phase_step and next_phase_step.allow_assignee_selection:
+                return next_phase_step
+        return None
+
+    @staticmethod
+    def _step_parallel_lane(step: WorkflowStep) -> str:
+        """Read the execution lane marker from a v2 definition node."""
+        definition = getattr(step.template, "definition", None) or {}
+        target_id = str(step.node_id or "")
+        if not target_id:
+            return "main"
+
+        def visit(blocks):
+            for block in blocks or []:
+                if not isinstance(block, dict):
+                    continue
+                if str(block.get("id") or "") == target_id:
+                    return str((block.get("step") or {}).get("parallel_lane") or "main")
+                for key in ("blocks", "then_blocks", "else_blocks", "true_blocks", "false_blocks"):
+                    found = visit(block.get(key))
+                    if found:
+                        return found
+                for branch in block.get("branches") or []:
+                    found = visit(branch.get("blocks"))
+                    if found:
+                        return found
+                for case in block.get("cases") or []:
+                    found = visit(case.get("blocks"))
+                    if found:
+                        return found
+                found = visit(block.get("default_blocks"))
+                if found:
+                    return found
+            return ""
+
+        return visit(definition.get("blocks") or []) or "main"
+
+    @staticmethod
     def _next_procurement_phase_approval_step(instance: WorkflowInstance):
         """Resolve the first approval in the next procurement CASE.
 
@@ -1796,7 +1870,7 @@ class WorkflowService:
         lane = task.execution_lane or "main"
         previous_action = WorkflowService._previous_approval_action(task)
         targets = {
-            "next": WorkflowService._next_approval_step(instance, task.step, lane),
+            "next": WorkflowService._next_assignee_selection_step(instance, task.step, lane),
             "previous": previous_action.task.step if previous_action else None,
         }
         result = {}
