@@ -1,4 +1,4 @@
-import { Suspense, useState, useMemo, useEffect, useRef } from "react";
+import { Suspense, useState, useMemo, useEffect, useRef, type CSSProperties } from "react";
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -447,7 +447,10 @@ export default function Layout({
   const roleLabel = user?.has_admin_access ? "Administrator" : "Procurement User";
 
   return (
-    <div className="flex h-full w-full max-w-full overflow-hidden bg-[#F4F6F8] font-sans antialiased text-[#1F2933] print:h-auto print:overflow-visible print:bg-white">
+    <div
+      className="flex h-full w-full max-w-full overflow-hidden bg-[#F4F6F8] font-sans antialiased text-[#1F2933] print:h-auto print:overflow-visible print:bg-white"
+      style={{ "--procurement-sidebar-width": collapsed ? "4rem" : "16rem" } as CSSProperties}
+    >
       {/* ── Scoped Sidebar ── */}
       <aside
         className={cn(

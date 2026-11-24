@@ -37,7 +37,7 @@ import { format } from "date-fns";
 import {
   ArrowLeft, Send, Loader2, Edit2, Info, FileCode, Eye, EyeOff, Check, X, Save,
   MessageSquare, Download, AlertTriangle, ShieldCheck, PanelRightOpen, PanelRightClose,
-  TrendingUp, TrendingDown, CheckCircle2, XCircle, Printer, RefreshCw, Trash2,
+  TrendingUp, TrendingDown, CheckCircle2, XCircle, Printer, RefreshCw, Trash2, ListChecks,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -277,6 +277,7 @@ export default function FormDetailPage() {
     searchParams.get("tab") === "audit" ? "audit" : "workflow",
   );
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [procurementDiagnosticsOpen, setProcurementDiagnosticsOpen] = useState(false);
   const [formEditing, setFormEditing] = useState(false);
   const [duplicateDateNotice, setDuplicateDateNotice] = useState<{
     travel_date: string;
@@ -1188,6 +1189,11 @@ export default function FormDetailPage() {
     : doc.status === "returned"
       ? "Resubmit"
       : "Submit for approval";
+  const hideWorkflowDiagnosticsInline = ["lpo", "retirement"].includes(workflowPhase);
+  const hasWorkflowDiagnostics = isWorkflowActiveOrCompleted(step) || sunSystemsPostingEnabled;
+  const hasStickyApprovalFooter = Boolean(
+    activeTask && activeTask.status !== "awaiting_posting" && !isReturnedReworkEditor,
+  );
 
   const startFormEdit = () => {
     if (!(["draft", "returned"].includes(doc.status) && canEdit)) return;
@@ -1822,7 +1828,7 @@ export default function FormDetailPage() {
             />
           )}
 
-          {!showRetirementSubmit && (isWorkflowActiveOrCompleted(step) || sunSystemsPostingEnabled) && (
+          {!hideWorkflowDiagnosticsInline && hasWorkflowDiagnostics && (
             <div className={cn("grid gap-3", isWorkflowActiveOrCompleted(step) && sunSystemsPostingEnabled ? "lg:grid-cols-2" : "")}>
               {isWorkflowActiveOrCompleted(step) && (
                 <ApprovalStagesTable
@@ -1847,6 +1853,83 @@ export default function FormDetailPage() {
                 availableStages={availableStages}
               />
             </div>
+          )}
+
+          {hideWorkflowDiagnosticsInline && hasWorkflowDiagnostics && (
+            <>
+              {!hasStickyApprovalFooter && (
+                <button
+                  type="button"
+                  onClick={() => setProcurementDiagnosticsOpen(true)}
+                  title="Open workflow approvals and SunSystems posting details"
+                  className="fixed z-[120] inline-flex items-center gap-2 border border-[#287EAD] bg-white px-3 py-2 text-xs font-semibold text-[#1E648A] shadow-lg transition hover:bg-[#EEF6FB]"
+                  style={{ left: "calc(var(--procurement-sidebar-width, 16rem) + 0.75rem)", bottom: "1.5rem" }}
+                >
+                  <ListChecks className="h-4 w-4" />
+                  Workflow details
+                </button>
+              )}
+
+              {procurementDiagnosticsOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-[230] bg-black/35"
+                    role="presentation"
+                    onMouseDown={(event) => {
+                      if (event.target === event.currentTarget) setProcurementDiagnosticsOpen(false);
+                    }}
+                  />
+                  <aside
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="procurement-diagnostics-title"
+                    className="fixed bottom-0 top-0 z-[240] flex flex-col border-l border-[#C8CDD2] bg-[#F5F7F8] shadow-2xl"
+                    style={{
+                      left: "var(--procurement-sidebar-width, 16rem)",
+                      width: "min(38rem, calc(100vw - var(--procurement-sidebar-width, 16rem)))",
+                    }}
+                  >
+                    <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-white px-4 py-3">
+                      <div>
+                        <h2 id="procurement-diagnostics-title" className="text-sm font-bold text-[#1F2933]">Workflow and posting details</h2>
+                        <p className="mt-0.5 text-xs text-[#5E6870]">Approval progress and SunSystems results for this procurement.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setProcurementDiagnosticsOpen(false)}
+                        aria-label="Close workflow details"
+                        className="flex h-8 w-8 shrink-0 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F5F7F8]"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                    <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+                      {isWorkflowActiveOrCompleted(step) && (
+                        <ApprovalStagesTable
+                          steps={workflowData?.steps ?? []}
+                          isLoading={workflowDataLoading}
+                          phase={workflowData?.phase ?? doc.builder_workflow_phase}
+                          retirementAwaitingSubmission={retirementAwaitingSubmission}
+                          lpoAwaitingSubmission={Boolean(formData?.lpo_generation_ready)}
+                        />
+                      )}
+                      {sunSystemsPostingEnabled && (
+                        <JournalPostingCard
+                          documentId={doc.id}
+                          expectPosting={
+                            ["request_approved", "fully_approved"].includes(step)
+                            || imprestPostingGateActive
+                            || lpoPostingGateActive
+                          }
+                          watchKey={`${step}:${doc.updated_at}`}
+                          availableStages={availableStages}
+                        />
+                      )}
+                    </div>
+                  </aside>
+                </>
+              )}
+            </>
           )}
 
         </div>
@@ -1967,8 +2050,19 @@ export default function FormDetailPage() {
         )}
       </div>
 
-        {activeTask && activeTask.status !== "awaiting_posting" && !isReturnedReworkEditor && (
-        <div ref={taskPanelRef} className="z-10 shrink-0 border-t border-[#C8CDD2] bg-white">
+        {hasStickyApprovalFooter && (
+        <div ref={taskPanelRef} className="z-10 flex shrink-0 items-stretch border-t border-[#C8CDD2] bg-white">
+          {hideWorkflowDiagnosticsInline && hasWorkflowDiagnostics && (
+            <button
+              type="button"
+              onClick={() => setProcurementDiagnosticsOpen(true)}
+              className="inline-flex shrink-0 items-center gap-2 border-r border-[#C8CDD2] bg-[#F7FAFC] px-4 text-xs font-semibold text-[#1E648A] transition hover:bg-[#EEF6FB]"
+            >
+              <ListChecks className="h-4 w-4" />
+              Workflow details
+            </button>
+          )}
+          <div className="min-w-0 flex-1">
           <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
             <WorkflowActionPanel
               task={activeTask}
@@ -2067,6 +2161,7 @@ export default function FormDetailPage() {
               }}
             />
           </Suspense>
+        </div>
         </div>
       )}
 
