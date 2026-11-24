@@ -988,7 +988,12 @@ def can_submit_retirement_workflow(document: Document, *, user=None) -> bool:
 
     if retirement_journal_posted(document):
         return False
-    if user is not None and not user_may_submit_document(user, document):
+    # Only the requisitioner starts retirement; approval or admin permissions
+    # must not allow an approver to submit someone else's retirement.
+    if user is not None and (
+        not getattr(user, "is_authenticated", False)
+        or document.uploaded_by_id != user.id
+    ):
         return False
     return True
 

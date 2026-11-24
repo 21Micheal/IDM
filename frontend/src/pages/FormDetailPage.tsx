@@ -1170,7 +1170,10 @@ export default function FormDetailPage() {
     || Boolean(doc.metadata?.form?.travel_retirement?.enabled);
   const canSubmitRetirement = !isUnassignedHandoffViewer && !isReturnedReworkEditor && Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage
     && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
-  const canInitiateRetirement = canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit");
+  // Retirement is submitted by the person who raised the requisition. Approval
+  // permissions and document-level submit access must not expose this action to approvers.
+  const isRequisitioner = String(doc.uploaded_by?.id ?? "") === String(user?.id ?? "");
+  const canInitiateRetirement = isRequisitioner;
   const showRetirementSubmit = !isUnassignedHandoffViewer && !isReturnedReworkEditor && Boolean(doc.metadata?.form?.travel_retirement?.enabled)
     && requisitionApproved
     && canInitiateRetirement
