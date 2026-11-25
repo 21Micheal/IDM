@@ -524,6 +524,14 @@ def build_outstanding_retirements_report(
         ret_info = retirement_status(doc) or {}
         status_kind = ret_info.get("status", "not_started")
         status_label = ret_info.get("label", "LPO pending")
+
+        # This report is specifically about retirement obligations. A travel
+        # requisition that has not reached the retirement stage is not an
+        # outstanding retirement, even when the caller asks to include
+        # reconciled records.
+        if status_kind == "not_started":
+            continue
+
         available_statuses.add((status_kind, status_label))
 
         ret_date = travel_return_date(doc)
