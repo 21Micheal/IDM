@@ -1503,7 +1503,10 @@ def email_generated_lpo_to_supplier(self, lpo_id: str, supplier_email: str, requ
     from django.conf import settings
     from django.core.mail import EmailMultiAlternatives
     from django.db import transaction
+    from django.utils.html import escape
     from django.utils import timezone
+    from email.mime.image import MIMEImage
+    from pathlib import Path
 
     from .models import Document
 
@@ -1545,10 +1548,16 @@ def email_generated_lpo_to_supplier(self, lpo_id: str, supplier_email: str, requ
                 .first()
                 or ""
             )
+        supplier = dict((lpo.metadata or {}).get("lpo_supplier") or {})
+        supplier_name = str(supplier.get("name") or "Supplier").strip() or "Supplier"
         subject = f"Purchase Order {lpo_reference}"
-        body = f"Please find attached Purchase Order {lpo_reference}."
+        body = (
+            f"Dear {supplier_name},\n\n"
+            f"Please find attached Purchase Order {lpo_reference}."
+        )
         if requisition_reference:
             body += f"\nRequisition reference: {requisition_reference}."
+        body += "\n\nKind regards,\nCASSOA Procurement Department"
 
         email = EmailMultiAlternatives(
             subject=subject,
@@ -1556,6 +1565,46 @@ def email_generated_lpo_to_supplier(self, lpo_id: str, supplier_email: str, requ
             from_email=settings.DEFAULT_FROM_EMAIL,
             to=[recipient],
         )
+        requisition_row = (
+            f'<tr><th style="padding:10px 12px;text-align:left;background:#f3f6f8;'
+            f'border:1px solid #d9e0e5;color:#263746">Requisition reference</th>'
+            f'<td style="padding:10px 12px;border:1px solid #d9e0e5">{escape(requisition_reference)}</td></tr>'
+            if requisition_reference else ""
+        )
+        html_message = f'''<!doctype html>
+<html><body style="margin:0;background:#f3f6f8;font-family:Arial,Helvetica,sans-serif;color:#263746">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f6f8;padding:28px 12px">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;background:#ffffff;border:1px solid #dfe5e9">
+        <tr><td style="padding:22px 28px;border-bottom:4px solid #287e8a">
+          <img src="cid:cassoa-logo" alt="CASSOA" width="112" style="display:block;width:112px;height:auto;border:0">
+        </td></tr>
+        <tr><td style="padding:26px 28px 12px;font-size:16px;line-height:1.6">
+          <p style="margin:0 0 18px;font-size:18px;font-weight:bold">Dear {escape(supplier_name)},</p>
+          <p style="margin:0 0 20px">Please find attached your Purchase Order. The order details are below.</p>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 22px">
+            <tr><th style="width:38%;padding:10px 12px;text-align:left;background:#f3f6f8;border:1px solid #d9e0e5;color:#263746">Purchase Order</th>
+                <td style="padding:10px 12px;border:1px solid #d9e0e5">{escape(str(lpo_reference))}</td></tr>
+            {requisition_row}
+          </table>
+          <p style="margin:0 0 18px">Please refer to the attached PDF for the full purchase order details.</p>
+          <p style="margin:0">Kind regards,<br><strong>CASSOA Procurement Department</strong></p>
+        </td></tr>
+        <tr><td style="padding:14px 28px;background:#f8fafb;border-top:1px solid #e7ecef;color:#687782;font-size:12px">
+          This is an automated email regarding Purchase Order {escape(str(lpo_reference))}.
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>'''
+        email.attach_alternative(html_message, "text/html")
+        logo_path = Path(__file__).resolve().parent / "assets" / "CASSOA-logo.png"
+        if logo_path.is_file():
+            with logo_path.open("rb") as logo_file:
+                logo = MIMEImage(logo_file.read(), _subtype="png")
+            logo.add_header("Content-ID", "<cassoa-logo>")
+            logo.add_header("Content-Disposition", "inline", filename="CASSOA-logo.png")
+            email.attach(logo)
         email.attach(lpo.file_name or f"Purchase Order {lpo_reference}.pdf", attachment, "application/pdf")
         email.send(fail_silently=False)
 

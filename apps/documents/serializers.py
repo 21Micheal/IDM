@@ -697,15 +697,33 @@ class DocumentListSerializer(serializers.ModelSerializer):
             from apps.documents.builder_workflow import _retirement_workflow_statuses, retirement_status
             cache_key = "_retirement_workflow_statuses"
             statuses = self.context.get(cache_key)
+            root_instance = getattr(self.root, "instance", None)
+            if root_instance is not None and hasattr(root_instance, "__iter__") and not isinstance(root_instance, Document):
+                root_documents = [item for item in root_instance if getattr(item, "id", None)]
+                document_ids = [item.id for item in root_documents]
+            else:
+                root_documents = [obj]
+                document_ids = [obj.id]
             if statuses is None:
-                root_instance = getattr(self.root, "instance", None)
-                if root_instance is not None and hasattr(root_instance, "__iter__") and not isinstance(root_instance, Document):
-                    document_ids = [item.id for item in root_instance if getattr(item, "id", None)]
-                else:
-                    document_ids = [obj.id]
                 statuses = _retirement_workflow_statuses(document_ids)
                 self.context[cache_key] = statuses
-            retirement = retirement_status(obj, workflow_status=statuses.get(obj.id))
+            posted_cache_key = "_posted_journal_stages_by_document"
+            posted_stages = self.context.get(posted_cache_key)
+            if posted_stages is None:
+                from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+                posted_stages = {document_id: set() for document_id in document_ids}
+                rows = JournalPosting.objects.filter(
+                    document_id__in=document_ids,
+                    status=JournalPostingStatus.POSTED,
+                ).values_list("document_id", "stage")
+                for document_id, stage in rows:
+                    posted_stages.setdefault(document_id, set()).add(int(stage))
+                self.context[posted_cache_key] = posted_stages
+            retirement = retirement_status(
+                obj,
+                workflow_status=statuses.get(obj.id),
+                posted_stage_numbers=posted_stages.get(obj.id, set()),
+            )
         except Exception:
             retirement = None
         return {"values": values, "retirement_variance": variance, "retirement": retirement}
@@ -755,9 +773,9 @@ class DocumentListSerializer(serializers.ModelSerializer):
 class RequisitionSummaryListSerializer(DocumentListSerializer):
     """Compact list representation for the two procurement requisition tables.
 
-    Those pages need the form's field keys and values for amount/supplier
-    display, but not the full template schema or per-document permission,
-    preview, relationship, and bulk-action calculations from the general list.
+    Those pages only need mapped amount and supplier values, the PO references,
+    and the retirement summary. Keep large unrelated form values out of the
+    response and batch workflow/posting status lookups for the current page.
     """
     metadata = serializers.SerializerMethodField()
     has_pending_approval = serializers.SerializerMethodField()
@@ -790,6 +808,8 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
         form = metadata.get("form") if isinstance(metadata.get("form"), dict) else {}
         values = form.get("values") if isinstance(form.get("values"), dict) else {}
         sections = []
+        compact_values = {}
+        amount_roles = {"journal_amount", "travel_line_amount", "line_amount", "dsa_line_amount"}
         for section in form.get("sections") or []:
             if not isinstance(section, dict):
                 continue
@@ -798,30 +818,63 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
                 if not isinstance(field, dict):
                     continue
                 sunsystems = field.get("sunsystems")
-                compact_field = {
-                    key: field[key] for key in ("key", "type", "label") if key in field
-                }
-                if isinstance(sunsystems, dict) and sunsystems.get("role"):
-                    compact_field["sunsystems"] = {"role": sunsystems["role"]}
-                columns = []
+                role = str(sunsystems.get("role") or "").lower() if isinstance(sunsystems, dict) else ""
+                is_supplier = (
+                    field.get("type") == "sunsystems_account"
+                    or role == "supplier_code"
+                    or "supplier" in str(field.get("label") or "").lower()
+                )
+                relevant_columns = []
                 for column in field.get("columns") or []:
                     if not isinstance(column, dict):
                         continue
-                    compact_column = {
-                        key: column[key] for key in ("key", "type", "label") if key in column
-                    }
                     column_sunsystems = column.get("sunsystems")
-                    if isinstance(column_sunsystems, dict) and column_sunsystems.get("role"):
-                        compact_column["sunsystems"] = {"role": column_sunsystems["role"]}
-                    columns.append(compact_column)
-                if columns:
-                    compact_field["columns"] = columns
-                fields.append(compact_field)
+                    column_role = str(column_sunsystems.get("role") or "").lower() if isinstance(column_sunsystems, dict) else ""
+                    column_is_supplier = (
+                        column.get("type") == "sunsystems_account"
+                        or column_role == "supplier_code"
+                        or "supplier" in str(column.get("label") or "").lower()
+                    )
+                    if column_role in amount_roles or column_is_supplier:
+                        relevant_columns.append(column)
+                compact_field = {
+                    key: field[key] for key in ("key", "type", "label") if key in field
+                }
+                if role:
+                    compact_field["sunsystems"] = {"role": role}
+                if field.get("type") == "table":
+                    compact_columns = []
+                    for column in relevant_columns:
+                        compact_column = {
+                            key: column[key] for key in ("key", "type", "label") if key in column
+                        }
+                        column_sunsystems = column.get("sunsystems")
+                        if isinstance(column_sunsystems, dict) and column_sunsystems.get("role"):
+                            compact_column["sunsystems"] = {"role": column_sunsystems["role"]}
+                        compact_columns.append(compact_column)
+                    if compact_columns:
+                        compact_field["columns"] = compact_columns
+                        row_values = values.get(field.get("key"))
+                        field_key = field.get("key")
+                        if field_key and isinstance(row_values, list):
+                            keys = {column.get("key") for column in relevant_columns if column.get("key")}
+                            compact_values[field_key] = [
+                                {key: row.get(key) for key in keys if key in row}
+                                for row in row_values if isinstance(row, dict)
+                            ]
+                        fields.append(compact_field)
+                elif role in amount_roles or is_supplier:
+                    if field.get("key") in values:
+                        compact_values[field["key"]] = values[field["key"]]
+                    fields.append(compact_field)
             sections.append({"fields": fields})
 
         compact_form = {
             "sections": sections,
-            "values": values,
+            "values": {
+                **compact_values,
+                **{key: values[key] for key in ("supplier", "supplier_name") if key in values},
+            },
         }
         for key in (
             "lpo_documents", "lpo_document_id", "lpo_reference",
@@ -851,8 +904,15 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
         if duplicates is None:
             from apps.documents.requisition_duplicates import duplicate_travel_date_map
 
+            root_instance = getattr(self.root, "instance", None)
+            try:
+                page_documents = list(root_instance) if root_instance is not None and not isinstance(root_instance, Document) else [obj]
+            except TypeError:
+                page_documents = [obj]
+            owner_ids = {item.uploaded_by_id for item in page_documents if getattr(item, "uploaded_by_id", None)}
             candidates = list(
                 Document.objects.filter(
+                    uploaded_by_id__in=owner_ids,
                     metadata__form__workflow_type="requisition",
                     deleted_at__isnull=True,
                 )
@@ -864,6 +924,34 @@ class RequisitionSummaryListSerializer(DocumentListSerializer):
             self.context[cache_key] = duplicates
         matches = duplicates.get(str(obj.id), [])
         return {"is_duplicate": bool(matches), "matches": matches}
+
+
+class RetirementQueueSerializer(RequisitionSummaryListSerializer):
+    can_submit_retirement = serializers.SerializerMethodField()
+
+    class Meta(RequisitionSummaryListSerializer.Meta):
+        fields = [*RequisitionSummaryListSerializer.Meta.fields, "can_submit_retirement"]
+
+    def get_can_submit_retirement(self, obj):
+        from apps.documents.builder_workflow import can_submit_retirement_workflow, has_retirement_workflow_route
+        request = self.context.get("request")
+        route_cache = self.context.setdefault("_retirement_routes_by_document_type", {})
+        document_type_id = obj.document_type_id
+        if document_type_id not in route_cache:
+            route_cache[document_type_id] = has_retirement_workflow_route(obj)
+        return can_submit_retirement_workflow(
+            obj,
+            user=getattr(request, "user", None),
+            retirement_route_exists=route_cache[document_type_id],
+        )
+
+    def get_form_summary(self, obj):
+        # This queue doesn't display duplicate-date warnings. Reuse the compact
+        # retirement summary without triggering the requisition-wide duplicate scan.
+        summary = DocumentListSerializer.get_form_summary(self, obj)
+        if isinstance(summary, dict):
+            summary.pop("values", None)
+        return summary
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):

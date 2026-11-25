@@ -476,6 +476,7 @@ export default function FormDetailPage() {
     onSaved: () => {
       void qc.invalidateQueries({ queryKey: ["forms"] });
       void qc.invalidateQueries({ queryKey: ["requisitions"] });
+      void qc.invalidateQueries({ queryKey: ["retirements"] });
     },
   });
   const markFormDirty = useCallback(() => {
@@ -911,6 +912,7 @@ export default function FormDetailPage() {
   });
 
   const refreshRequisitionListings = async () => {
+    await qc.invalidateQueries({ queryKey: ["retirements"] });
     await qc.invalidateQueries({ queryKey: ["requisitions"] });
     await qc.fetchQuery({
       queryKey: ["requisitions", "pool"],
@@ -2153,6 +2155,7 @@ export default function FormDetailPage() {
               variant="bar"
               onBeforeApprove={savePendingFormEditsBeforeApproval}
               onCompleted={(action) => {
+                void qc.invalidateQueries({ queryKey: ["retirements"] });
                 // Refresh behind the completion overlay. The query remains
                 // enabled but stops polling while that overlay is displayed.
                 void qc.invalidateQueries({

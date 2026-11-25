@@ -304,6 +304,7 @@ export const tenantAPI = {
 export const documentsAPI = {
   list: (params?: Record<string, unknown>) =>
     api.get("/documents/", { params }),
+  myRetirements: () => api.get("/documents/my-retirements/"),
 
   /** Distinct supplier names across all documents the user can see. */
   suppliers: () => api.get<string[]>("/documents/suppliers/"),

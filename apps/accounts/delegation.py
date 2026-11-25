@@ -32,7 +32,10 @@ def active_delegations_qs(
 def delegation_covers_task(delegation: UserDelegation, task: WorkflowTask) -> bool:
     if task.assigned_to_id != delegation.delegator_id:
         return False
-    if task.status not in ACTIVE_TASK_STATUSES:
+    # A prepared LPO keeps the approved task in `awaiting_posting` until the
+    # same approver explicitly releases it to the next workflow step. A delegate
+    # who approved that task must remain authorized for this follow-up action.
+    if task.status not in (*ACTIVE_TASK_STATUSES, "awaiting_posting"):
         return False
     if delegation.document_type_id:
         doc = task.workflow_instance.document

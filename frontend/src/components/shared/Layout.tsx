@@ -31,7 +31,8 @@ import {
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { notificationsAPI, workflowAPI, sunsystemsAPI, normalizeListResponse } from "@/services/api";
+import { documentsAPI, notificationsAPI, workflowAPI, sunsystemsAPI, normalizeListResponse } from "@/services/api";
+import { fetchMyUnreconciledTravelRequisitions, myRetirementsQueryKey } from "@/lib/retirements";
 import type { Notification } from "@/types";
 import { QUERY_ONE_MINUTE_STALE } from "@/lib/reactQueryDefaults";
 import { cn } from "@/lib/utils";
@@ -272,6 +273,16 @@ export default function Layout({
   });
   const pendingApprovalsCount = myTasks.length;
 
+  const { data: myRetirements = [] } = useQuery({
+    queryKey: myRetirementsQueryKey(user?.id),
+    queryFn: () => fetchMyUnreconciledTravelRequisitions(user?.id),
+    enabled: Boolean(user?.id),
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: true,
+  });
+  const retirementCount = myRetirements.length;
+
   // Live SunSystems connection status check
   const { data: sunConnection } = useQuery({
     queryKey: ["sunsystems", "connection-status"],
@@ -298,6 +309,12 @@ export default function Layout({
         to: "/list",
         label: "All Requisitions",
         icon: ClipboardList,
+      },
+      {
+        to: "/retirements",
+        label: "Retirements",
+        icon: ClipboardCheck,
+        count: retirementCount,
       },
       {
         to: "/trash",
@@ -345,7 +362,7 @@ export default function Layout({
         icon: Activity,
       },
     ],
-    [pendingApprovalsCount, unreadCount, hasAdminAccess, canViewSystemAudit]
+    [pendingApprovalsCount, unreadCount, retirementCount, hasAdminAccess, canViewSystemAudit]
   );
 
   const adminNavItems = useMemo(

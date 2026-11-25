@@ -48,7 +48,7 @@ from .models import (
     SignatureRequestSigner,
 )
 from .serializers import (
-    DocumentListSerializer, RequisitionSummaryListSerializer, DocumentDetailSerializer,
+    DocumentListSerializer, RequisitionSummaryListSerializer, RetirementQueueSerializer, DocumentDetailSerializer,
     DocumentUploadSerializer, DocumentTypeSerializer, DocumentTypeWriteSerializer,
     DocumentVersionSerializer, DocumentCommentSerializer,
     DocumentMetadataEditSerializer, DocumentBulkActionSerializer,
@@ -445,6 +445,38 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     ordering_fields    = ["created_at", "updated_at", "document_date", "amount", "title", "reference_number"]
     ordering           = ["-created_at"]
     parser_classes     = [MultiPartParser, FormParser, JSONParser]
+
+    @action(detail=False, methods=["get"], url_path="my-retirements")
+    def my_retirements(self, request):
+        """Return only this travel requisitioner’s still-open retirement cases."""
+        documents = (
+            Document.objects.filter(
+                uploaded_by=request.user,
+                metadata__form__workflow_type="requisition",
+                metadata__form__travel_retirement__enabled=True,
+                deleted_at__isnull=True,
+            )
+            .exclude(status__in=[
+                DocumentStatus.DRAFT,
+                DocumentStatus.REJECTED,
+                DocumentStatus.VOID,
+                DocumentStatus.ARCHIVED,
+            ])
+            .select_related(
+                "document_type",
+                "document_type__workflow_template",
+                "uploaded_by",
+                "uploaded_by__department",
+                "department",
+                "workflow_instance",
+            )
+            .order_by("-created_at")
+        )
+        return Response(RetirementQueueSerializer(
+            documents,
+            many=True,
+            context={"request": request},
+        ).data)
 
     def get_object(self):
         # Resolve a single document by id even when it is an UNCLASS draft that

@@ -99,7 +99,7 @@ def _retirement_workflow_statuses(document_ids):
         return {}
 
 
-def retirement_status(document: Document, *, workflow_status=None) -> dict | None:
+def retirement_status(document: Document, *, workflow_status=None, posted_stage_numbers=None) -> dict | None:
     """Mapping-driven status summary used by requisition registers."""
     config = travel_retirement_config(document)
     if not config or not is_travel_requisition(document):
@@ -120,9 +120,9 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
     lpo_complete = (
         "lpo" in completed_procurement_stages(document)
         or bool(((document.metadata or {}).get("form") or {}).get("lpo_posting_complete"))
-        or _lpo_stage_postings_complete(document)
+        or _lpo_stage_postings_complete(document, posted_stage_numbers=posted_stage_numbers)
     )
-    retirement_posted = retirement_journal_posted(document)
+    retirement_posted = retirement_journal_posted(document, posted_stage_numbers=posted_stage_numbers)
 
     # Workflow phase can remain `lpo` after the retirement CASE completes (or
     # on older records where the phase mirror was never advanced). The actual
@@ -140,7 +140,7 @@ def retirement_status(document: Document, *, workflow_status=None) -> dict | Non
     elif status == "rejected":
         label, kind = "Retirement rejected", "rejected"
     elif phase != "retirement" and not lpo_complete:
-        label, kind = "LPO pending", "not_started"
+        label, kind = "Retirement not reached", "not_started"
     elif not travel_return_date(document):
         label, kind = "Return date missing", "return_date_missing"
     elif due and timezone.localdate() > due:
@@ -426,7 +426,7 @@ def completed_procurement_stages(document: Document) -> list[str]:
     ]
 
 
-def _lpo_stage_postings_complete(document: Document) -> bool:
+def _lpo_stage_postings_complete(document: Document, *, posted_stage_numbers=None) -> bool:
     """Recover an approved LPO stage whose completion marker was overwritten."""
     try:
         from apps.sunsystems.config import get_purchase_order_postings
@@ -436,12 +436,16 @@ def _lpo_stage_postings_complete(document: Document) -> bool:
         stages = {int(item["stage"]) for item in requested if item.get("stage") is not None}
         if not stages:
             return False
-        posted = set(
-            JournalPosting.objects.filter(
-                document=document,
-                stage__in=stages,
-                status=JournalPostingStatus.POSTED,
-            ).values_list("stage", flat=True)
+        posted = (
+            set(posted_stage_numbers)
+            if posted_stage_numbers is not None
+            else set(
+                JournalPosting.objects.filter(
+                    document=document,
+                    stage__in=stages,
+                    status=JournalPostingStatus.POSTED,
+                ).values_list("stage", flat=True)
+            )
         )
         if not stages.issubset(posted):
             return False
@@ -802,7 +806,7 @@ def sync_retirement_variance(document: Document) -> dict | None:
         return variance
 
 
-def retirement_journal_posted(document: Document) -> bool:
+def retirement_journal_posted(document: Document, *, posted_stage_numbers=None) -> bool:
     """True when the configured retirement journal posting(s) have posted.
 
     Older templates stored retirement as journal stage 2. Procurement forms
@@ -828,11 +832,15 @@ def retirement_journal_posted(document: Document) -> bool:
             }
         if not stage_nums:
             return False
-        posted_stages = set(JournalPosting.objects.filter(
-            document=document,
-            stage__in=stage_nums,
-            status=JournalPostingStatus.POSTED,
-        ).values_list("stage", flat=True))
+        posted_stages = (
+            set(posted_stage_numbers)
+            if posted_stage_numbers is not None
+            else set(JournalPosting.objects.filter(
+                document=document,
+                stage__in=stage_nums,
+                status=JournalPostingStatus.POSTED,
+            ).values_list("stage", flat=True))
+        )
         return stage_nums.issubset(posted_stages)
     except Exception:
         return False
@@ -943,13 +951,20 @@ def user_may_submit_document(user, document: Document) -> bool:
     )
 
 
-def can_submit_retirement_workflow(document: Document, *, user=None) -> bool:
+def can_submit_retirement_workflow(
+    document: Document,
+    *,
+    user=None,
+    retirement_route_exists: bool | None = None,
+) -> bool:
     """Whether the retirement (stage-2) approval cycle can be started."""
     if not is_built_form_document(document):
         return False
 
     # v2 workflows route by context.phase CASE and do not need a legacy rule row.
-    if not has_retirement_workflow_route(document):
+    if retirement_route_exists is False or (
+        retirement_route_exists is None and not has_retirement_workflow_route(document)
+    ):
         return False
     form = (document.metadata or {}).get("form") or {}
     retirement_status_value = str(form.get("retirement_workflow_status") or "").strip().lower()

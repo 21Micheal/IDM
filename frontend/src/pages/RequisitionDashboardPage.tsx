@@ -243,7 +243,9 @@ export default function RequisitionDashboardPage() {
 
   // 1. Requisitions pool
   const { data: poolData, isLoading: docsLoading } = useQuery({
-    queryKey: ["requisitions", "dashboard-pool", recentReqsPage],
+    // The API request is one fixed pool; paging the table is client-side and
+    // must not issue an identical network request for every visible page.
+    queryKey: ["requisitions", "dashboard-pool"],
     queryFn: () =>
       documentsAPI.list({
         is_form: true,
