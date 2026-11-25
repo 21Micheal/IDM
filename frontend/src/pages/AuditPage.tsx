@@ -186,9 +186,9 @@ export default function AuditPage() {
     queryFn: () =>
       api.get(listEndpoint, {
         params: {
-          search:    searchTerm   || undefined,
-          actor:     actorFilter  || undefined,
-          event:     eventFilter  || undefined,
+          search:    searchTerm.trim()  || undefined,
+          actor:     actorFilter.trim() || undefined,
+          event:     eventFilter        || undefined,
           form_reference: formReference.trim() || undefined,
           date_from: dateFrom     || undefined,
           date_to:   dateTo       || undefined,
@@ -206,8 +206,8 @@ export default function AuditPage() {
       const response = await api.get("/audit/export/", {
         params: {
           file_format: fileFormat,
-          search: searchTerm || undefined,
-          actor: actorFilter || undefined,
+          search: searchTerm.trim() || undefined,
+          actor: actorFilter.trim() || undefined,
           event: eventFilter || undefined,
           form_reference: formReference.trim() || undefined,
           date_from: dateFrom || undefined,
@@ -217,15 +217,18 @@ export default function AuditPage() {
       });
       const mime = fileFormat === "xlsx"
         ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        : "text/csv;charset=utf-8";
+        : "text/csv;charset=utf-8;";
+      const disposition = response.headers?.["content-disposition"] as string | undefined;
+      const serverFilename = disposition?.match(/filename="?([^";]+)"?/i)?.[1];
+      const fallbackFilename = `audit-trail-${format(new Date(), "yyyy-MM-dd")}.${fileFormat}`;
       const url  = window.URL.createObjectURL(new Blob([response.data], { type: mime }));
       const link = document.createElement("a");
       link.href  = url;
-      link.setAttribute("download", `audit-trail-${format(new Date(), "yyyy-MM-dd")}.${fileFormat}`);
+      link.setAttribute("download", serverFilename || fallbackFilename);
       document.body.appendChild(link);
       link.click();
       link.remove();
-      window.URL.revokeObjectURL(url);
+      window.setTimeout(() => window.URL.revokeObjectURL(url), 1000);
       toast.success(`Audit report exported as ${fileFormat.toUpperCase()}`);
     } catch {
       toast.error("Failed to export audit log");

@@ -1,15 +1,14 @@
-import csv
-import json
-from io import BytesIO
-
 from django.http import HttpResponse
 from django.db.models import Q
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import generics, permissions
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
+
+from .export import build_audit_xlsx, write_audit_csv
 from .models import AuditEvent, AuditLog, LOW_SIGNAL_AUDIT_EVENTS
 from .serializers import AuditLogSerializer
-from django.utils.dateparse import parse_date
 from apps.documents.models import Document
 from apps.workflows.models import WorkflowTask
 
@@ -115,70 +114,25 @@ class AuditLogExportView(AuditLogListView):
             raise PermissionDenied("You do not have permission to export the system audit log.")
 
         qs = self.filter_queryset(self.get_queryset())
-        headers = [
-            "timestamp",
-            "event",
-            "summary",
-            "actor_name",
-            "actor_email",
-            "actor_job_description",
-            "object_type",
-            "object_id",
-            "object_repr",
-            "ip_address",
-            "changes",
-        ]
         # `format` is reserved by Django REST Framework for renderer
         # negotiation; an unsupported renderer such as `xlsx` yields a 404
         # before this view runs. Use a distinct query parameter instead.
         export_format = request.query_params.get("file_format", "csv").lower()
         if export_format not in {"csv", "xlsx"}:
-            return Response({"detail": "format must be csv or xlsx."}, status=400)
+            return Response({"detail": "file_format must be csv or xlsx."}, status=400)
 
+        date_stamp = timezone.localdate().isoformat()
         if export_format == "xlsx":
-            from openpyxl import Workbook
-
-            workbook = Workbook(write_only=True)
-            sheet = workbook.create_sheet("Audit Trail")
-            sheet.append(headers)
-            for log in qs.iterator():
-                actor_name = log.actor.get_full_name() if log.actor else "System"
-                sheet.append([
-                    log.timestamp.isoformat(), log.event,
-                    AuditLogSerializer(log).data.get("summary", ""),
-                    actor_name, log.actor.email if log.actor else "",
-                    log.actor.job_description if log.actor else "",
-                    log.object_type, log.object_id, log.object_repr,
-                    log.ip_address or "",
-                    json.dumps(log.changes, ensure_ascii=False, default=str),
-                ])
-            output = BytesIO()
-            workbook.save(output)
+            xlsx_bytes, row_count = build_audit_xlsx(qs.iterator())
             response = HttpResponse(
-                output.getvalue(),
+                xlsx_bytes,
                 content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-            response["Content-Disposition"] = 'attachment; filename="audit-trail.xlsx"'
+            response["Content-Disposition"] = f'attachment; filename="audit-trail-{date_stamp}.xlsx"'
         else:
             response = HttpResponse(content_type="text/csv; charset=utf-8")
-            response["Content-Disposition"] = 'attachment; filename="audit-trail.csv"'
-            writer = csv.writer(response)
-            writer.writerow(headers)
-            for log in qs.iterator():
-                actor_name = log.actor.get_full_name() if log.actor else "System"
-                writer.writerow([
-                    log.timestamp.isoformat(),
-                    log.event,
-                    AuditLogSerializer(log).data.get("summary", ""),
-                    actor_name,
-                    log.actor.email if log.actor else "",
-                    log.actor.job_description if log.actor else "",
-                    log.object_type,
-                    log.object_id,
-                    log.object_repr,
-                    log.ip_address or "",
-                    json.dumps(log.changes, ensure_ascii=False, default=str),
-                ])
+            response["Content-Disposition"] = f'attachment; filename="audit-trail-{date_stamp}.csv"'
+            row_count = write_audit_csv(qs.iterator(), response)
 
         AuditLog.objects.create(
             event=AuditEvent.AUDIT_EXPORTED,
@@ -192,7 +146,7 @@ class AuditLogExportView(AuditLogListView):
                     for key in ("search", "actor", "event", "form_reference", "date_from", "date_to")
                     if request.query_params.get(key)
                 },
-                "row_count": qs.count(),
+                "row_count": row_count,
             },
             ip_address=request.META.get("REMOTE_ADDR"),
             user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
