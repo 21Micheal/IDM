@@ -1527,7 +1527,8 @@ export default function FormDetailPage() {
         body.requisition-print-enabled #requisition-print-root { display: block !important; position: static !important; width: 100% !important; padding: 0 !important; color: #1f2933 !important; background: white !important; font-family: Arial, sans-serif !important; }
         #requisition-print-root * { color: #1f2933 !important; }
         #requisition-print-root .rq-print-document { display: block !important; width: 100% !important; color: #1f2933 !important; font: 8pt Arial, sans-serif !important; }
-        #requisition-print-root .rq-print-org { display: block !important; padding: 2mm 0 1mm; margin-bottom: 0; border: 0; text-align: center; font-size: 10pt; font-weight: 700; line-height: 1.5; }
+        #requisition-print-root .rq-print-org { display: flex !important; flex-direction: column; align-items: center; gap: 1mm; padding: 1mm 0 1mm; margin-bottom: 0; border: 0; text-align: center; font-size: 10pt; font-weight: 700; line-height: 1.5; }
+        #requisition-print-root .rq-print-logo { display: block !important; width: 25mm !important; height: auto !important; max-height: 15mm; object-fit: contain; }
         #requisition-print-root .rq-print-title { position: relative; display: flex !important; justify-content: center; align-items: baseline; border-bottom: 1.5pt solid #287ead; padding: 1mm 0 2.5mm; margin-bottom: 3mm; text-align: center; }
         #requisition-print-root .rq-print-title h2 { margin: 0; padding: 0; border: 0; background: transparent !important; font-size: 9pt; font-weight: 600; text-transform: uppercase; }
         #requisition-print-root .rq-print-title span { position: absolute; right: 0; font-weight: 700; }

@@ -2,6 +2,7 @@ import type { WorkflowStep } from "@/components/notifications/workflow-visualize
 import { useQuery } from "@tanstack/react-query";
 import { sunsystemsAPI } from "@/services/api";
 import { formatDateTimeValue, formatDateValue } from "@/lib/dateFormatting";
+import cassoaLogo from "@/assets/images/CASSOA-logo.png";
 
 type AnyRecord = Record<string, any>;
 
@@ -433,7 +434,10 @@ export default function PrintableRequisition({
 
   return (
     <article className="rq-print-document">
-      <div className="rq-print-org">EAST AFRICAN COMMUNITY CIVIL AVIATION SAFETY AND SECURITY OVERSIGHT AGENCY</div>
+      <div className="rq-print-org">
+        <img className="rq-print-logo" src={cassoaLogo} alt="CASSOA logo" />
+        <span>EAST AFRICAN COMMUNITY CIVIL AVIATION SAFETY AND SECURITY OVERSIGHT AGENCY</span>
+      </div>
       <div className="rq-print-title"><h2>TRAVEL REQUISITION AND AUTHORISATION FORM</h2><span>{reference}</span></div>
       <section><h2>A. Details of Requesting Officer and the Trip</h2><div className="rq-print-details">
         {top.map(([label, value]) => <div key={label}><b>{label}</b><span>{value || "—"}</span></div>)}
