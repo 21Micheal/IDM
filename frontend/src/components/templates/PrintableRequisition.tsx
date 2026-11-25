@@ -220,7 +220,16 @@ function WorkflowApprovalSignatures({
     // Workflow actions record the person who actually approved. Prefer these
     // to placement records so delegated/reassigned approvals print the acting
     // approver's saved signature and name.
-    const record = matchingRecord(approvalSignatureRecords) || matchingRecord(explicitSignatureRecords);
+    const approvalRecord = matchingRecord(approvalSignatureRecords);
+    const explicitRecord = matchingRecord(explicitSignatureRecords);
+    // The approval action record may provide the correct name/date while its
+    // signer had no profile signature. In that case use an explicitly captured
+    // signature for this document instead of letting the empty action record
+    // mask it.
+    const record = (approvalRecord && text(approvalRecord.signature_data) ? approvalRecord : null)
+      || (explicitRecord && text(explicitRecord.signature_data) ? explicitRecord : null)
+      || approvalRecord
+      || explicitRecord;
     const image = text(record?.signature_data);
     const name = text(record?.signer?.full_name || step.approver);
     const date = displayDate(record?.signed_at || step.completedAt);

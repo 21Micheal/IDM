@@ -1163,7 +1163,9 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             task__workflow_instance__document=obj,
             action="approved",
             actor__isnull=False,
-        ).select_related("actor", "task__step").order_by("created_at")
+        ).select_related(
+            "actor", "task__step", "document_signature__source_signature",
+        ).order_by("created_at")
         results = []
         signature_cache = {}
         for action in actions:
@@ -1171,6 +1173,11 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             if actor.pk not in signature_cache:
                 signature_cache[actor.pk] = actor.signatures.filter(is_active=True).order_by("-created_at").first()
             signature = signature_cache[actor.pk]
+            if signature is None:
+                try:
+                    signature = action.document_signature.source_signature
+                except Exception:
+                    signature = None
             image_data = None
             if signature:
                 try:
