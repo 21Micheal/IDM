@@ -17,7 +17,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { extractApiError } from "@/lib/apiError";
-import { templatesAPI, documentsAPI, authAPI } from "@/services/api";
+import { templatesAPI, documentsAPI, authAPI, profileAPI } from "@/services/api";
 import TemplateForm, { pastDateFieldLabels, requiredFieldLabels } from "@/components/templates/TemplateForm";
 import TravelPolicyNoticeModal from "@/components/templates/TravelPolicyNoticeModal";
 import { useFormDraftAutosave } from "@/hooks/useFormDraftAutosave";
@@ -36,6 +36,36 @@ import SignaturePlacementModal, {
   SignaturePlacementResult,
 } from "@/components/signatures/SignaturePlacementModal";
 
+function hasReceivedBySignature(values: Record<string, unknown>, sections: unknown) {
+  const matchingKeys = new Set<string>();
+  const collectFields = (value: unknown) => {
+    if (Array.isArray(value)) value.forEach(collectFields);
+    else if (value && typeof value === "object") {
+      const field = value as Record<string, unknown>;
+      const key = String(field.key ?? field.id ?? "").toLowerCase();
+      const label = String(field.label ?? field.name ?? "").toLowerCase();
+      if ((String(field.type ?? "").toLowerCase().includes("signature") || label.includes("signature"))
+        && key && /(received|requisitioner|requester)/i.test(`${key} ${label}`)) matchingKeys.add(key);
+      Object.values(field).forEach(collectFields);
+    }
+  };
+  collectFields(sections);
+  const visit = (value: unknown, path = ""): boolean => {
+    if (Array.isArray(value)) return value.some((item, index) => visit(item, `${path}.${index}`));
+    if (!value || typeof value !== "object") return false;
+    return Object.entries(value as Record<string, unknown>).some(([key, child]) => {
+      const nextPath = `${path}.${key}`.toLowerCase();
+      const matchingKey = [...matchingKeys].some((fieldKey) => nextPath.endsWith(`.${fieldKey}`));
+      const roleMatches = /(received|requisitioner|requester)/i.test(nextPath) || matchingKey;
+      if (roleMatches && nextPath.includes("signature") || (roleMatches && matchingKey)) {
+        if (typeof child === "string" && child.startsWith("data:image/")) return true;
+      }
+      return visit(child, nextPath);
+    });
+  };
+  return visit(values);
+}
+
 export default function NewRequisitionPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -52,6 +82,7 @@ export default function NewRequisitionPage() {
   const [missingFields, setMissingFields] = useState<string[]>([]);
   const [isSigningOpen, setIsSigningOpen] = useState(false);
   const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
+  const [pendingSubmitForSignature, setPendingSubmitForSignature] = useState<boolean | null>(null);
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [formInstanceKey, setFormInstanceKey] = useState(0);
   const [isClearingDraft, setIsClearingDraft] = useState(false);
@@ -80,6 +111,13 @@ export default function NewRequisitionPage() {
     refetchOnMount: "always",
     refetchOnWindowFocus: false,
   });
+
+  const { data: savedProfileSignature, isLoading: profileSignatureLoading } = useQuery({
+    queryKey: ["profile-signature"],
+    queryFn: () => profileAPI.getSignature().then((response) => response.data.signature ?? null),
+    enabled: Boolean(user?.id),
+  });
+  const activeProfileSignature = (savedProfileSignature as any)?.signature ?? savedProfileSignature;
 
   useEffect(() => {
     if (freshUser) setUser(freshUser);
@@ -433,6 +471,31 @@ export default function NewRequisitionPage() {
     },
   });
 
+  const hasImprestRequestPosting = (selectedTemplate?.sunsystems?.journal?.stages ?? []).some((stage: any) => {
+    const number = Number(stage?.stage ?? stage?.stage_number ?? 0);
+    return stage?.enabled !== false && number >= 20000 && number < 30000;
+  });
+  const requestRequisitionSubmit = (allowUnreconciledRetirement = false) => {
+    if (hasImprestRequestPosting && profileSignatureLoading) {
+      toast.info("Checking your saved signature. Please try again in a moment.");
+      return;
+    }
+    if (
+      hasImprestRequestPosting
+      && !activeProfileSignature?.image_data
+      && !hasReceivedBySignature(formValues, selectedTemplate?.sections)
+    ) {
+      setPendingSubmitForSignature(allowUnreconciledRetirement);
+      const receivedSignatureField = detectedFormFields.find((field) =>
+        field.kind === "signature" && /(received|requisitioner|requester)/i.test(field.key),
+      );
+      setTargetSignatureField(receivedSignatureField?.key ?? null);
+      setIsSigningOpen(true);
+      return;
+    }
+    submitMutation.mutate(allowUnreconciledRetirement);
+  };
+
   // Handle direct signature injection into form values
   const handleApplySignature = (fieldValues: Record<string, unknown>, result: SignaturePlacementResult) => {
     setFormValues((prev) => {
@@ -686,7 +749,7 @@ export default function NewRequisitionPage() {
             </button>
             <button
               type="button"
-              onClick={() => submitMutation.mutate()}
+              onClick={() => requestRequisitionSubmit()}
               disabled={isSubmitting || isClearingDraft}
               className="inline-flex h-9 items-center gap-1.5 bg-[#287EAD] px-5 text-sm font-semibold text-white shadow-sm hover:bg-[#1E6F99] disabled:opacity-50 transition-colors"
             >
@@ -725,7 +788,7 @@ export default function NewRequisitionPage() {
         <TravelPolicyNoticeModal
           message={travelPolicyNotice}
           onDismiss={() => setTravelPolicyNotice(null)}
-          onRaiseAnyway={() => { setTravelPolicyNotice(null); submitMutation.mutate(true); }}
+          onRaiseAnyway={() => { setTravelPolicyNotice(null); requestRequisitionSubmit(true); }}
           submitting={submitMutation.isPending}
         />
       )}
@@ -741,8 +804,17 @@ export default function NewRequisitionPage() {
           onCancel={() => {
             setIsSigningOpen(false);
             setTargetSignatureField(null);
+            setPendingSubmitForSignature(null);
           }}
           onConfirm={(result) => {
+            if (pendingSubmitForSignature !== null) {
+              const allowUnreconciledRetirement = pendingSubmitForSignature;
+              setPendingSubmitForSignature(null);
+              setIsSigningOpen(false);
+              setTargetSignatureField(null);
+              submitMutation.mutate(allowUnreconciledRetirement);
+              return;
+            }
             if (result.formFieldValues && Object.keys(result.formFieldValues).length > 0) {
               handleApplySignature(result.formFieldValues, result);
             } else if (result.signatureImage && targetSignatureField) {
@@ -752,6 +824,7 @@ export default function NewRequisitionPage() {
             setTargetSignatureField(null);
           }}
           onApplyToForm={(fields, rawResult) => {
+            if (pendingSubmitForSignature !== null) return;
             handleApplySignature(fields, rawResult);
             setIsSigningOpen(false);
             setTargetSignatureField(null);

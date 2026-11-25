@@ -15,7 +15,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, workflowAPI } from "@/services/api";
+import { documentsAPI, profileAPI, workflowAPI } from "@/services/api";
 import {
   CheckCircle, XCircle, RotateCcw, PauseCircle,
   PlayCircle, Loader2, Clock, ChevronDown, History,
@@ -110,6 +110,10 @@ interface Props {
   reconciliationResolved?: boolean;
   onCompleted?: (action: WorkflowActionKind) => void | Promise<void>;
   onBeforeApprove?: () => Promise<void>;
+  /** Prompt mapped LPO/PV approvers to capture a profile signature when absent. */
+  captureSignatureIfMissing?: boolean;
+  /** A signature for this mapped signer is already present in the form values. */
+  hasMappedFormSignature?: boolean;
   variant?: "panel" | "bar";
 }
 
@@ -251,7 +255,7 @@ function TaskHistoryDrawer({ taskId, task, currentUserId: _currentUserId }: { ta
 }
 
 // ── Main panel ────────────────────────────────────────────────────────────────
-export default function WorkflowActionPanel({ task, documentId, disabledReason, reconciliationResolved = false, onCompleted, onBeforeApprove, variant = "panel" }: Props) {
+export default function WorkflowActionPanel({ task, documentId, disabledReason, reconciliationResolved = false, onCompleted, onBeforeApprove, captureSignatureIfMissing = false, hasMappedFormSignature = false, variant = "panel" }: Props) {
   const approveButtonLabel = task.step.approve_button_label?.trim() || "Approve";
   const approvalConfirmLabel = approveButtonLabel.toLowerCase() === "approve"
     ? "Confirm Approval"
@@ -267,6 +271,9 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
     "approve" | "reject" | "return" | "hold" | null
   >(null);
   const [showSignaturePlacement, setShowSignaturePlacement] = useState(false);
+  const [signatureOnlyCapture, setSignatureOnlyCapture] = useState(false);
+  const [continueAfterSignatureCapture, setContinueAfterSignatureCapture] = useState(false);
+  const [dismissedSignaturePromptTask, setDismissedSignaturePromptTask] = useState<string | null>(null);
   // Captured signature (placement + image) from the explicit "Sign document"
   // step; applied when the approver then confirms the approval.
   const [signedResult, setSignedResult] = useState<SignaturePlacementResult | null>(null);
@@ -279,6 +286,38 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
   const [returnApproverId, setReturnApproverId] = useState("");
   const [serverGateReason, setServerGateReason] = useState<string | null>(null);
   const [dismissedGateReason, setDismissedGateReason] = useState<string | null>(null);
+  const { data: profileSignatureData, isLoading: profileSignatureLoading } = useQuery<any>({
+    queryKey: ["profile-signature"],
+    queryFn: () => profileAPI.getSignature().then((response) => response.data.signature ?? null),
+    enabled: captureSignatureIfMissing,
+  });
+  const savedProfileSignature = profileSignatureData?.signature ?? profileSignatureData;
+  const signatureRequired = Boolean(task.requires_signature || (
+    captureSignatureIfMissing
+    && !hasMappedFormSignature
+    && !savedProfileSignature?.image_data
+  ));
+  useEffect(() => {
+    if (
+      !captureSignatureIfMissing
+      || profileSignatureLoading
+      || hasMappedFormSignature
+      || savedProfileSignature?.image_data
+      || dismissedSignaturePromptTask === task.id
+      || showSignaturePlacement
+    ) return;
+    setSignatureOnlyCapture(true);
+    setContinueAfterSignatureCapture(false);
+    setShowSignaturePlacement(true);
+  }, [
+    captureSignatureIfMissing,
+    dismissedSignaturePromptTask,
+    hasMappedFormSignature,
+    profileSignatureLoading,
+    savedProfileSignature?.image_data,
+    showSignaturePlacement,
+    task.id,
+  ]);
   const actionLockReason = disabledReason || serverGateReason;
   const actionsLocked = Boolean(actionLockReason);
   const showGateOverlay = Boolean(actionLockReason && dismissedGateReason !== actionLockReason);
@@ -513,7 +552,13 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
   // captured first (via the explicit "Sign document" step), so it's applied
   // atomically with the approval — no signed version is created if they back out.
   const confirmApproval = () => {
-    if (task.requires_signature && !signedResult) {
+    if (captureSignatureIfMissing && profileSignatureLoading) {
+      toast.info("Checking your saved signature. Please try again in a moment.");
+      return;
+    }
+    if (signatureRequired && !signedResult) {
+      setSignatureOnlyCapture(!task.requires_signature);
+      setContinueAfterSignatureCapture(!task.requires_signature);
       setShowSignaturePlacement(true);
       return;
     }
@@ -597,9 +642,26 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
             documentTitle={task.document_title}
             documentRef={task.document_ref ?? ""}
             note={comment ? `Approval note: ${comment}` : undefined}
+            mode={signatureOnlyCapture ? "form" : "auto"}
             confirmLabel="Save signature"
-            onCancel={() => setShowSignaturePlacement(false)}
-            onConfirm={(result) => { setSignedResult(result); setShowSignaturePlacement(false); }}
+            onCancel={() => {
+              setShowSignaturePlacement(false);
+              setSignatureOnlyCapture(false);
+              setContinueAfterSignatureCapture(false);
+              setDismissedSignaturePromptTask(task.id);
+            }}
+            onConfirm={(result) => {
+              setShowSignaturePlacement(false);
+              if (signatureOnlyCapture) {
+                const shouldContinue = continueAfterSignatureCapture;
+                setSignatureOnlyCapture(false);
+                setContinueAfterSignatureCapture(false);
+                setSignedResult(null);
+                if (shouldContinue) approveMutation.mutate(undefined);
+              } else {
+                setSignedResult(result);
+              }
+            }}
             isSubmitting={false}
           />
         )}
@@ -634,7 +696,7 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
                   <span className="font-semibold text-[#3F474F]">Instructions: </span>{task.step.instructions}
                 </p>
               )}
-              {task.requires_signature && (
+              {signatureRequired && (
                 <span className="inline-flex items-center gap-1 font-semibold text-[#287EAD]">
                   <FileSignature className="h-3.5 w-3.5" /> Signature required
                 </span>
@@ -720,7 +782,7 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
                     autoFocus
                   />
                 </div>
-                {task.requires_signature && (
+                {signatureRequired && (
                   signedResult ? (
                     <div className="flex items-center justify-between gap-2 border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-700">
                       <span className="inline-flex items-center gap-2">
@@ -744,7 +806,7 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
                   <button onClick={resetForm} className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-bold text-[#5E6870] hover:bg-[#F5F7F8]">Cancel</button>
                   <button
                     onClick={confirmApproval}
-                    disabled={anyPending || (task.requires_signature && !signedResult)}
+                    disabled={anyPending || (signatureRequired && !signedResult)}
                     className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#206D99] disabled:opacity-50"
                   >
                     {approveMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
@@ -923,14 +985,31 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
   return (
     <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-4 space-y-4">
       {showSignaturePlacement && (
-        <SignaturePlacementModal
+          <SignaturePlacementModal
           documentId={documentId ?? ""}
           documentTitle={task.document_title}
           documentRef={task.document_ref ?? ""}
           note={comment ? `Approval note: ${comment}` : undefined}
+          mode={signatureOnlyCapture ? "form" : "auto"}
           confirmLabel="Save signature"
-          onCancel={() => setShowSignaturePlacement(false)}
-          onConfirm={(result) => { setSignedResult(result); setShowSignaturePlacement(false); }}
+          onCancel={() => {
+            setShowSignaturePlacement(false);
+            setSignatureOnlyCapture(false);
+            setContinueAfterSignatureCapture(false);
+            setDismissedSignaturePromptTask(task.id);
+          }}
+          onConfirm={(result) => {
+            setShowSignaturePlacement(false);
+            if (signatureOnlyCapture) {
+              const shouldContinue = continueAfterSignatureCapture;
+              setSignatureOnlyCapture(false);
+              setContinueAfterSignatureCapture(false);
+              setSignedResult(null);
+              if (shouldContinue) approveMutation.mutate(undefined);
+            } else {
+              setSignedResult(result);
+            }
+          }}
           isSubmitting={false}
         />
       )}
@@ -970,10 +1049,12 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
         </div>
       )}
 
-      {task.requires_signature && (
+      {signatureRequired && (
         <div className="flex items-start gap-2 text-xs text-primary bg-primary/5 rounded-lg px-3 py-2 border border-primary/20">
           <FileSignature className="w-4 h-4 mt-0.5 flex-shrink-0" />
-          <span>Approval will apply your saved e-signature to a new signed PDF version.</span>
+          <span>{captureSignatureIfMissing && !hasMappedFormSignature && !savedProfileSignature?.image_data
+            ? "Capture your signature once; it will be saved to your profile and used on the generated LPO or Payment Voucher."
+            : "Approval will apply your saved e-signature to a new signed PDF version."}</span>
         </div>
       )}
 
@@ -1056,7 +1137,7 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
           </div>
 
           {/* Explicit signing step — required before approval can complete. */}
-          {task.requires_signature && (
+          {signatureRequired && (
             signedResult ? (
               <div className="flex items-center justify-between gap-2 text-xs bg-green-50 text-green-700 rounded-lg px-3 py-2 border border-green-200">
                 <span className="flex items-center gap-2">
@@ -1091,8 +1172,8 @@ export default function WorkflowActionPanel({ task, documentId, disabledReason, 
           <div className="flex gap-2">
             <button
               onClick={confirmApproval}
-              disabled={anyPending || (task.requires_signature && !signedResult)}
-              title={task.requires_signature && !signedResult ? "Sign the document first" : approvalConfirmLabel}
+              disabled={anyPending || (signatureRequired && !signedResult)}
+              title={signatureRequired && !signedResult ? "Sign the document first" : approvalConfirmLabel}
               className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {approveMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}

@@ -61,6 +61,43 @@ function isLpoPurchaseOrderStage(stage: number) {
   return stage >= 1000 && stage < 20000;
 }
 
+function hasSignatureValueForRole(values: unknown, roleMarkers: string[], sections: unknown = []) {
+  const matchingKeys = new Set<string>();
+  const collectFields = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(collectFields);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const field = value as Record<string, unknown>;
+    const key = String(field.key ?? field.id ?? "").toLowerCase();
+    const label = String(field.label ?? field.name ?? "").toLowerCase();
+    const fieldType = String(field.type ?? "").toLowerCase();
+    const isSignatureField = fieldType.includes("signature") || label.includes("signature");
+    if (isSignatureField && roleMarkers.some((marker) => `${key} ${label}`.includes(marker)) && key) {
+      matchingKeys.add(key);
+    }
+    Object.values(field).forEach(collectFields);
+  };
+  collectFields(sections);
+  const visit = (value: unknown, path = ""): boolean => {
+    if (!value || typeof value !== "object") return false;
+    if (Array.isArray(value)) return value.some((item, index) => visit(item, `${path}.${index}`));
+    return Object.entries(value as Record<string, unknown>).some(([key, child]) => {
+      const nextPath = `${path}.${key}`.toLowerCase();
+      const matchingFieldKey = [...matchingKeys].some((key) => nextPath.endsWith(`.${key}`));
+      if (child && typeof child === "string" && (nextPath.includes("signature") || matchingFieldKey)) {
+        const matchesRole = roleMarkers.some((marker) => nextPath.includes(marker)) || matchingFieldKey;
+        const looksLikeImage = child.startsWith("data:image/")
+          || (/^https?:\/\//i.test(child) && /\.(png|jpe?g|webp)(\?|$)/i.test(child));
+        if (matchesRole && looksLikeImage) return true;
+      }
+      return visit(child, nextPath);
+    });
+  };
+  return visit(values);
+}
+
 function postingGateErrorSummary(postings: JournalPosting[]): string {
   const failed = postings.filter((p) => p.status === "failed" || p.status === "skipped");
   const first = failed[0];
@@ -810,6 +847,41 @@ export default function FormDetailPage() {
     },
   });
   const workflowStepsCount = workflowData?.steps?.length ?? 0;
+  const activeStepName = String(activeTask?.step?.name || "").toLowerCase();
+  const activeStepOrder = Number(activeTask?.step?.order || 0);
+  const taskWorkflowPhase = String(workflowData?.phase || workflowPhase || doc?.builder_workflow_phase || "").toLowerCase();
+  const lpoApprovalWorkflowSteps = (workflowData?.steps ?? []).filter((workflowStep: any) =>
+    workflowStep.kind === "task"
+    && /^approver-\d+$/.test(workflowStep.id)
+    && (!workflowStep.phase || workflowStep.phase === "lpo"),
+  );
+  const isLastLpoSignatureStep = taskWorkflowPhase === "lpo"
+    && activeStepOrder > 0
+    && lpoApprovalWorkflowSteps.some((workflowStep: any) => workflowStep.id === `approver-${activeStepOrder}`)
+    && !lpoApprovalWorkflowSteps.some((workflowStep: any) => Number(workflowStep.id.slice("approver-".length)) > activeStepOrder);
+  const isMappedLpoSignatureStep = taskWorkflowPhase === "lpo"
+    && (activeStepName.includes("procurement") || activeStepName.includes("check") || isLastLpoSignatureStep);
+  const isMappedImprestRequestSignatureStep = taskWorkflowPhase === "request"
+    && (activeStepName.includes("finance") || activeStepName.includes("executive director"));
+  const captureMappedSignatureIfMissing = Boolean(
+    activeTask
+    && activeTask.status === "in_progress"
+    && (isMappedLpoSignatureStep || isMappedImprestRequestSignatureStep),
+  );
+  const mappedSignatureRoleMarkers = activeStepName.includes("finance")
+    ? ["finance", "prepared_by"]
+    : activeStepName.includes("executive director")
+      ? ["executive", "director", "approved_by"]
+      : activeStepName.includes("check")
+        ? ["check", "checked_by"]
+      : isLastLpoSignatureStep
+        ? ["executive", "director", "approved_by"]
+        : ["procurement", "prepared_by"];
+  const hasMappedFormSignature = hasSignatureValueForRole(
+    formEditing ? formValues : formData?.values,
+    mappedSignatureRoleMarkers,
+    formData?.sections,
+  );
 
   // Inspect template schema for signature and date fields
   const detectedFormFields: FormTargetField[] = useMemo(() => {
@@ -2076,6 +2148,8 @@ export default function FormDetailPage() {
                 : undefined}
               reconciliationResolved={formData?.booked_early?.reason === "unreconciled_retirement"
                 && formData.booked_early.reconciliation_pending === false}
+              captureSignatureIfMissing={captureMappedSignatureIfMissing}
+              hasMappedFormSignature={hasMappedFormSignature}
               variant="bar"
               onBeforeApprove={savePendingFormEditsBeforeApproval}
               onCompleted={(action) => {

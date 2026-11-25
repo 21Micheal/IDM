@@ -96,7 +96,7 @@ def _payment_voucher_signatory_values(document, posting, requisitioner, *, inclu
     later procurement approvers on the advance voucher.
     """
     from apps.workflows.models import WorkflowTaskAction
-    from apps.documents.lpo import _approval_signature_data, _user_name
+    from apps.documents.lpo import _approval_signature_data, _form_signature_data, _user_name
 
     cutoff = timezone.now() if include_later_approvals else getattr(posting, "posted_at", None)
     if cutoff is None:
@@ -121,31 +121,40 @@ def _payment_voucher_signatory_values(document, posting, requisitioner, *, inclu
         elif "finance" in search:
             finance_action = action
 
-    def signer(action):
+    def signer(action, signature_markers):
         if action is None:
-            return {"name": "", "role": "", "date": "", "signature": ""}
+            return {
+                "name": "", "role": "", "date": "",
+                "signature": _form_signature_data(document, signature_markers),
+            }
         actor = action.actor
+        signature = _approval_signature_data(actor, action=action)
+        if not signature:
+            signature = _form_signature_data(document, signature_markers)
         return {
             "name": _user_name(actor),
             "role": str(getattr(actor, "job_description", "") or action.task.step.name or "").strip(),
             "date": timezone.localtime(action.created_at).strftime("%d-%m-%Y") if action.created_at else "",
-            "signature": _approval_signature_data(actor, action=action),
+            "signature": signature,
         }
 
     received_date = timezone.localdate().strftime("%d-%m-%Y")
     received_name = _user_name(requisitioner)
     if not received_name and requisitioner:
         received_name = requisitioner.get_username()
+    received_signature = _approval_signature_data(requisitioner)
+    if not received_signature:
+        received_signature = _form_signature_data(document, ("requisitioner", "requester", "received_by"))
     received = {
         "name": received_name,
         "role": str(getattr(requisitioner, "job_description", "") or "Requisitioner").strip(),
         "date": received_date,
-        "signature": _approval_signature_data(requisitioner),
+        "signature": received_signature,
     }
     values = {}
     for slot, detail in (
-        ("prepared_by", signer(finance_action)),
-        ("approved_by", signer(executive_action)),
+        ("prepared_by", signer(finance_action, ("finance", "prepared_by"))),
+        ("approved_by", signer(executive_action, ("executive", "director", "approved_by"))),
         ("received_by", received),
     ):
         for key, value in detail.items():

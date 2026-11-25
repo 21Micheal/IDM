@@ -1076,6 +1076,53 @@ def _approval_signature_data(user, *, action=None):
             pass
 
 
+def _form_signature_data(document, role_markers):
+    """Read a role-specific signature image already captured in form values."""
+    form = ((getattr(document, "metadata", None) or {}).get("form") or {})
+    values = form.get("values") or {}
+    markers = [str(marker).casefold() for marker in role_markers]
+    matching_keys = set()
+
+    def collect_fields(value):
+        if isinstance(value, list):
+            for child in value:
+                collect_fields(child)
+        elif isinstance(value, dict):
+            key = str(value.get("key") or value.get("id") or "").casefold()
+            label = str(value.get("label") or value.get("name") or "").casefold()
+            field_type = str(value.get("type") or "").casefold()
+            if ("signature" in field_type or "signature" in label) and key and any(
+                marker in f"{key} {label}" for marker in markers
+            ):
+                matching_keys.add(key)
+            for child in value.values():
+                collect_fields(child)
+
+    collect_fields(form.get("sections") or [])
+
+    def find(value, path=""):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                result = find(child, f"{path}.{key}".casefold())
+                if result:
+                    return result
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                result = find(child, f"{path}.{index}".casefold())
+                if result:
+                    return result
+        elif isinstance(value, str):
+            matching_field_key = any(path.endswith(f".{key}") for key in matching_keys)
+            has_signature_key = "signature" in path or matching_field_key
+            if has_signature_key and (
+                matching_field_key or any(marker in path for marker in markers)
+            ) and value.startswith("data:image/"):
+                return value
+        return ""
+
+    return find(values)
+
+
 def _lpo_workflow_signatories(document):
     """Resolve Prepared By, LPO Check, and final approver from LPO workflow actions."""
     from apps.workflows.models import WorkflowTaskAction
@@ -1118,22 +1165,30 @@ def _lpo_workflow_signatories(document):
     ]
     approved = final_candidates[-1] if final_candidates else None
 
-    def details(action, fallback_name="", fallback_role=""):
+    def details(action, fallback_name="", fallback_role="", signature_markers=()):
         if action is None:
-            return {"name": fallback_name, "role": fallback_role, "date": "", "signature": ""}
+            return {
+                "name": fallback_name,
+                "role": fallback_role,
+                "date": "",
+                "signature": _form_signature_data(document, signature_markers),
+            }
         actor = action.actor
         from django.utils import timezone
+        signature = _approval_signature_data(actor, action=action)
+        if not signature:
+            signature = _form_signature_data(document, signature_markers)
         return {
             "name": _user_name(actor),
             "role": str(getattr(actor, "job_description", "") or "").strip(),
             "date": timezone.localtime(action.created_at).strftime("%d/%m/%Y") if action.created_at else "",
-            "signature": _approval_signature_data(actor, action=action),
+            "signature": signature,
         }
 
     return {
-        "prepared_by": details(prepared),
-        "checked_by": details(checked),
-        "approved_by": details(approved),
+        "prepared_by": details(prepared, signature_markers=("finance", "procurement", "prepared_by")),
+        "checked_by": details(checked, signature_markers=("check", "checked_by")),
+        "approved_by": details(approved, signature_markers=("executive", "director", "approved_by")),
     }
 
 
