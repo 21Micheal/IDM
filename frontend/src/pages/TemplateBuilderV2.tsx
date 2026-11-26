@@ -112,7 +112,7 @@ export interface CalcConfig {
 export type TableColumnType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
   | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
-  | "percentage" | "rating" | "url" | "multi_select" | "image" | "external" | "sunsystems_account" | "budget" | "budget_line";
+  | "percentage" | "rating" | "url" | "multi_select" | "image" | "multi_file" | "external" | "sunsystems_account" | "budget" | "budget_line";
 
 export interface BudgetLineConfig {
   /** SunSystems AnalysisDimensionIds shown in the Budget Line editor modal. */
@@ -1257,6 +1257,7 @@ function cellPlaceholder(c: TableColumn): string {
     case "reference": return `↗ ${c.referenceSource ?? "record"}`;
     case "user": return "👤 user";
     case "file": return "📎 file";
+    case "multi_file": return "📎 files";
     case "textarea": return "Long text…";
     case "percentage": return "0 %";
     case "url": return "https://…";
@@ -2407,7 +2408,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                     text: Type, textarea: AlignLeft, number: Hash, currency: Hash,
                     date: Calendar, datetime: Calendar, time: Clock, select: List,
                     boolean: CheckSquare, radio: CircleDot, rating: Star, email: Mail, phone: Phone, reference: Link2,
-                    user: UserIcon, file: Paperclip, image: ImageIcon, multi_select: List,
+                    user: UserIcon, file: Paperclip, image: ImageIcon, multi_file: Files, multi_select: List,
                     url: UrlIcon, percentage: Percent, external: Package, sunsystems_account: Building2, budget: Wallet, budget_line: Wallet,
                   } as Record<TableColumnType, React.ElementType>)[(c.type ?? "text") as TableColumnType] ?? Type;
                   return (
@@ -2917,6 +2918,7 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
   { value: "reference", label: "Reference" },
   { value: "user", label: "User picker" },
   { value: "file", label: "File / Attachment" },
+  { value: "multi_file", label: "Multiple files" },
   { value: "image", label: "Image" },
   { value: "percentage", label: "Percentage" },
   { value: "rating", label: "Rating" },

@@ -53,7 +53,7 @@ import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOp
 
 type ColType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
-  | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
+  | "select" | "radio" | "boolean" | "email" | "phone" | "reference" | "user" | "file" | "multi_file"
   | "url" | "percentage" | "rating" | "multi_select" | "image" | "external" | "sunsystems_account" | "budget" | "budget_line";
 
 type Column = {
@@ -878,6 +878,125 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey, i
   );
 }
 
+function TableMultiFileCell({ value, onChange, disabled, documentId, attachmentKey }: {
+  value: unknown;
+  onChange: (v: unknown) => void;
+  disabled?: boolean;
+  documentId?: string;
+  attachmentKey?: string;
+}) {
+  const rawFiles = Array.isArray(value) ? value : value == null || value === "" ? [] : [value];
+  const files = rawFiles.map((item, slot) => ({ item, slot })).filter(({ item }) => item != null && item !== "");
+  const [open, setOpen] = useState(false);
+  const [preview, setPreview] = useState<{ url: string; name: string; revoke?: boolean } | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => () => {
+    if (preview?.revoke) URL.revokeObjectURL(preview.url);
+  }, [preview]);
+
+  const addFiles = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const selected = Array.from(input.files ?? []);
+    input.value = "";
+    const accepted = selected.filter((file) => {
+      const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+      if (COMMON_ATTACHMENT_EXTENSIONS.has(ext)) return true;
+      toast.error(`${file.name} is not a supported attachment type.`);
+      return false;
+    });
+    if (accepted.length) onChange([...rawFiles, ...accepted]);
+  };
+
+  const download = async (item: unknown, index: number) => {
+    if (!documentId || !attachmentKey || !isAttachmentValue(item)) return;
+    const key = `${attachmentKey}~${index}`;
+    setBusyKey(key);
+    try {
+      const response = await documentsAPI.downloadFormAttachment(documentId, key);
+      const blob = new Blob([response.data], { type: item.content_type || response.data?.type || "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = item.name || "attachment";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error("Could not download this attachment.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const viewImage = async (item: unknown, index: number) => {
+    if (item instanceof File) {
+      const url = URL.createObjectURL(item);
+      setPreview({ url, name: item.name, revoke: true });
+      return;
+    }
+    if (!documentId || !attachmentKey || !isAttachmentValue(item)) return;
+    setBusyKey(`${attachmentKey}~${index}`);
+    try {
+      const response = await documentsAPI.downloadFormAttachment(documentId, `${attachmentKey}~${index}`);
+      const url = URL.createObjectURL(new Blob([response.data], { type: item.content_type || "image/*" }));
+      setPreview({ url, name: item.name || "Image", revoke: true });
+    } catch {
+      toast.error("Could not open this image.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}
+        className="flex min-h-10 w-full min-w-0 items-center justify-center gap-2 border border-slate-200 bg-white px-2 text-xs font-medium text-slate-700 hover:border-sky-500 hover:bg-sky-50/40">
+        <Paperclip className="h-4 w-4 flex-shrink-0 text-primary" />
+        <span className="truncate">{files.length ? `${files.length} file${files.length === 1 ? "" : "s"}` : disabled ? "No attachments" : "Attach files"}</span>
+      </button>
+      {open && createPortal(
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/50 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
+          <div role="dialog" aria-modal="true" aria-label="Table attachments" className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 bg-[#C5E6F5] px-5 py-3">
+              <div><h3 className="text-sm font-semibold text-slate-800">Attachments</h3><p className="mt-0.5 text-xs text-slate-600">{files.length} file{files.length === 1 ? "" : "s"}</p></div>
+              <button type="button" onClick={() => setOpen(false)} className="rounded p-1 text-slate-600 hover:bg-white/70" aria-label="Close"><X className="h-4 w-4" /></button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              {files.length ? <div className="space-y-2">{files.map(({ item, slot }) => {
+                const descriptor = isAttachmentValue(item) ? item : null;
+                const file = item instanceof File ? item : null;
+                const name = file?.name || descriptor?.name || String(item);
+                const mime = file?.type || descriptor?.content_type || "";
+                const isImage = mime.startsWith("image/") || /\.(jpe?g|png|gif|webp|bmp|tiff?)$/i.test(name);
+                return <div key={`${name}-${slot}`} className="flex min-w-0 items-center gap-3 rounded-md border border-slate-200 bg-white p-2.5">
+                  <button type="button" onClick={() => isImage ? void viewImage(item, slot) : void download(item, slot)}
+                    className="flex h-12 w-12 flex-shrink-0 items-center justify-center overflow-hidden border border-slate-200 bg-slate-50 hover:border-sky-500" title={isImage ? "View image" : "Download file"}>
+                    <FileTypeIcon name={name} contentType={mime} className="h-6 w-6" />
+                  </button>
+                  <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium text-slate-800" title={name}>{name}</div><div className="mt-0.5 text-xs text-slate-500">{formatFileSize(file?.size ?? descriptor?.size)}</div></div>
+                  <button type="button" onClick={() => isImage ? void viewImage(item, slot) : void download(item, slot)} disabled={busyKey === `${attachmentKey}~${slot}`} className="rounded p-2 text-sky-700 hover:bg-sky-50 disabled:opacity-50" title={isImage ? "View image" : "Download"}>
+                    {busyKey === `${attachmentKey}~${slot}` ? <Loader2 className="h-4 w-4 animate-spin" /> : isImage ? <ImageIcon className="h-4 w-4" /> : <Download className="h-4 w-4" />}
+                  </button>
+                  {!disabled && <button type="button" onClick={() => onChange(rawFiles.filter((_, fileIndex) => fileIndex !== slot))} className="rounded p-2 text-slate-500 hover:bg-red-50 hover:text-red-600" title="Remove"><X className="h-4 w-4" /></button>}
+                </div>;
+              })}</div> : <p className="py-8 text-center text-sm text-slate-500">No files attached yet.</p>}
+            </div>
+            <div className="flex justify-between gap-3 border-t border-slate-200 bg-slate-50 px-4 py-3">
+              {!disabled ? <label className="inline-flex cursor-pointer items-center gap-2 rounded border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:border-sky-500 hover:text-sky-700"><Upload className="h-3.5 w-3.5" /> Attach file<input ref={inputRef} type="file" multiple accept={COMMON_ATTACHMENT_ACCEPT} className="sr-only" onChange={addFiles} /></label> : <span />}
+              <button type="button" onClick={() => setOpen(false)} className="rounded bg-[#287EAD] px-4 py-2 text-xs font-semibold text-white hover:bg-[#1E6F99]">Done</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+      {preview && <ImagePreviewModal image={preview.url} name={preview.name} onClose={() => setPreview(null)} />}
+    </>
+  );
+}
+
 function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentId, attachmentKey, row, allValues, allFields, tableColumns, wrapText = false }: {
   col: Column; value: unknown; onChange: (v: unknown) => void; readOnly?: boolean;
   wrapText?: boolean;
@@ -943,6 +1062,9 @@ function TableColInput({ col, value, onChange, onChangeCell, readOnly, documentI
     );
   }
 
+  if (type === "multi_file") {
+    return <TableMultiFileCell value={value} onChange={onChange} disabled={dis} documentId={documentId} attachmentKey={attachmentKey} />;
+  }
   if (type === "file" || type === "image") {
     return (
       <TableFileCell value={value} onChange={onChange} disabled={dis} imageOnly={type === "image"}
@@ -1721,7 +1843,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                       const cellLocked = readOnly || !colEditableInRow(col, row);
                       const protectedCell = cellLocked || Boolean(col.calc?.expression);
                       const cellIssue = columnIssue(col, ri, row[key]);
-                      const fillsCell = ["select", "radio", "multi_select", "external", "sunsystems_account", "reference", "user"].includes(col.type ?? "");
+                      const fillsCell = ["select", "radio", "multi_select", "multi_file", "external", "sunsystems_account", "reference", "user"].includes(col.type ?? "");
                       return (
                         <td key={col.id ?? ci}
                             data-protected-cell={protectedCell ? "true" : undefined}
@@ -1858,10 +1980,27 @@ function FileTypeIcon({ name, contentType, className = "h-5 w-5" }: { name?: str
   return <FileText className={className} style={{ color: "#64748b" }} />;
 }
 
+function ImagePreviewModal({ image, name, onClose }: { image: string; name: string; onClose: () => void }) {
+  return createPortal(
+    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/75 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div role="dialog" aria-modal="true" aria-label={name} className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg bg-white shadow-2xl">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+          <span className="truncate text-sm font-semibold text-slate-800" title={name}>{name}</span>
+          <button type="button" onClick={onClose} className="rounded p-1 text-slate-600 hover:bg-slate-100" aria-label="Close image"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-slate-100 p-4">
+          <img src={image} alt={name} className="max-h-[78vh] max-w-full object-contain" />
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 /** Compact thumbnail chip for a single attached file. */
-function FileChip({ name, contentType, size, onRemove, onDownload, downloading, disabled }: {
+function FileChip({ name, contentType, size, onRemove, onClick, onDownload, previewUrl, downloading, disabled }: {
   name: string; contentType?: string; size?: number;
-  onRemove?: () => void; onDownload?: () => void;
+  onRemove?: () => void; onClick?: () => void; onDownload?: () => void; previewUrl?: string;
   downloading?: boolean; disabled?: boolean;
 }) {
   return (
@@ -1880,14 +2019,15 @@ function FileChip({ name, contentType, size, onRemove, onDownload, downloading, 
       {/* Icon box */}
       <button
         type="button"
-        onClick={onDownload}
-        disabled={!onDownload || downloading}
+        onClick={onClick ?? onDownload}
+        disabled={!(onClick ?? onDownload) || downloading}
         className="flex h-[52px] w-[52px] flex-shrink-0 items-center justify-center border border-[#E3E7EA] bg-white shadow-sm hover:border-[#287EAD]/40 hover:bg-[#F0F7FC] transition-colors disabled:cursor-default disabled:hover:bg-white disabled:hover:border-[#E3E7EA]"
-        title={onDownload ? "Download" : name}
+        title={previewUrl || onClick ? "View image" : onDownload ? "Download" : name}
       >
         {downloading
           ? <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-          : <FileTypeIcon name={name} contentType={contentType} className="h-6 w-6" />}
+          : previewUrl ? <img src={previewUrl} alt="" className="h-full w-full object-cover" />
+            : <FileTypeIcon name={name} contentType={contentType} className="h-6 w-6" />}
       </button>
       {/* Filename */}
       <span className="max-w-[72px] truncate text-center text-[10px] leading-tight text-[#3D454D]" title={name}>
@@ -1920,7 +2060,12 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
   // Generate a preview data-URL whenever the staged image changes.
   const [filePreview, setFilePreview] = useState<string | null>(null);
   useEffect(() => {
-    if (!stagedFile || !imageOnly) { setFilePreview(null); return; }
+    const stagedImage = stagedFile && (
+      imageOnly
+      || stagedFile.type.startsWith("image/")
+      || /\.(jpe?g|png|gif|webp|bmp|tiff?|heic|heif)$/i.test(stagedFile.name)
+    );
+    if (!stagedImage || !stagedFile) { setFilePreview(null); return; }
     let cancelled = false;
     const reader = new FileReader();
     reader.onload = (e) => { if (!cancelled) setFilePreview(e.target?.result as string); };
@@ -1930,6 +2075,10 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
 
   const [downloading, setDownloading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [imageModal, setImageModal] = useState<{ url: string; name: string; revoke: boolean } | null>(null);
+  useEffect(() => () => {
+    if (imageModal?.revoke) URL.revokeObjectURL(imageModal.url);
+  }, [imageModal]);
 
   // Only update the parent — filePreview updates automatically via effect.
   const pick = (f: File | null) => {
@@ -1957,93 +2106,66 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
     }
   };
 
-  // ── Saved image attachment ────────────────────────────────────────────────
-  if (!stagedFile && descriptor && descriptor.content_type?.startsWith("image/")) {
-    return (
-      <div className="space-y-2">
-        <div className="overflow-hidden border border-border bg-slate-50">
-          <img
-            src={`/api/attachments/${descriptor.storage_path}`}
-            alt={descriptor.name || label}
-            className="h-40 w-full object-contain"
-          />
-        </div>
-        {documentId && (
-          <div className="flex items-center gap-2">
-            <button type="button" onClick={downloadAttachment} disabled={downloading}
-              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1F2933] hover:bg-[#F5F7F8] disabled:opacity-50">
-              {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-              Download
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  }
+  const chipName = stagedFile ? stagedFile.name : (descriptor?.name || label);
+  const chipMime = stagedFile ? stagedFile.type : descriptor?.content_type;
+  const chipSize = stagedFile ? stagedFile.size : descriptor?.size;
+  const isImage = (chipMime || "").startsWith("image/")
+    || /\.(jpe?g|png|gif|webp|bmp|tiff?|heic|heif)$/i.test(chipName);
+  const openImage = async () => {
+    if (filePreview && stagedFile) {
+      setImageModal({ url: filePreview, name: chipName, revoke: false });
+      return;
+    }
+    if (!documentId || !descriptor) return;
+    setDownloading(true);
+    try {
+      const response = await documentsAPI.downloadFormAttachment(documentId, fieldKey);
+      const url = URL.createObjectURL(new Blob([response.data], { type: descriptor.content_type || "image/*" }));
+      setImageModal({ url, name: chipName, revoke: true });
+    } catch {
+      toast.error("Could not open this image.");
+    } finally {
+      setDownloading(false);
+    }
+  };
 
-  // ── Newly staged image (with preview) ────────────────────────────────────
-  if (stagedFile && filePreview) {
-    return (
-      <div className="space-y-2">
-        <div className="overflow-hidden border border-border bg-slate-50">
-          <img src={filePreview} alt={stagedFile.name} className="h-40 w-full object-contain" />
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-[#5E6870] truncate min-w-0">{stagedFile.name}</span>
-          {!disabled && (
-            <button type="button" onClick={() => pick(null)}
-              className="flex-shrink-0 text-xs font-semibold text-red-500 hover:text-red-700">
-              Remove
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Saved non-image OR staged non-image — compact chip ────────────────────
   const hasChip = stagedFile || descriptor;
-  if (hasChip) {
-    const chipName = stagedFile ? stagedFile.name : (descriptor?.name || label);
-    const chipMime = stagedFile ? stagedFile.type : descriptor?.content_type;
-    const chipSize = stagedFile ? stagedFile.size : descriptor?.size;
-    return (
-      <div className="flex flex-wrap items-start gap-3">
-        <FileChip
-          name={chipName}
-          contentType={chipMime}
-          size={chipSize}
-          onDownload={descriptor && documentId ? downloadAttachment : undefined}
-          downloading={downloading}
-          disabled={disabled}
-          onRemove={!disabled ? () => pick(null) : undefined}
-        />
-      </div>
-    );
-  }
-
-  // ── Empty state — compact upload button ───────────────────────────────────
   return (
-    <label
-      className={`inline-flex cursor-pointer items-center gap-2 border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-3 py-2 text-xs font-semibold text-[#5E6870] transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD] ${
-        disabled ? "pointer-events-none opacity-50" : ""
-      }`}
-    >
-      {imageOnly ? (
-        <ImageIcon className="h-4 w-4 flex-shrink-0" />
-      ) : (
-        <Upload className="h-4 w-4 flex-shrink-0" />
-      )}
-      {imageOnly ? "Upload image" : "Attach file"}
+    <>
+      {/* Keep one picker mounted at a stable position. The previous empty/file
+          branches each created their own input, which could detach the input
+          while the browser was returning from its native chooser. */}
       <input
         ref={inputRef}
         type="file"
         accept={imageOnly ? COMMON_IMAGE_ACCEPT : COMMON_ATTACHMENT_ACCEPT}
         disabled={disabled}
-        className="sr-only"
+        className="hidden"
         onChange={(e) => chooseCommonAttachment(e, (file) => pick(file ?? null), imageOnly)}
       />
-    </label>
+      {hasChip ? (
+        <div className="flex flex-wrap items-start gap-3">
+          <FileChip
+            name={chipName}
+            contentType={chipMime}
+            size={chipSize}
+            onClick={isImage ? () => { void openImage(); } : undefined}
+            onDownload={!isImage && descriptor && documentId ? downloadAttachment : undefined}
+            previewUrl={isImage && stagedFile ? filePreview ?? undefined : undefined}
+            downloading={downloading}
+            disabled={disabled}
+            onRemove={!disabled ? () => pick(null) : undefined}
+          />
+        </div>
+      ) : (
+        <button type="button" disabled={disabled} onClick={() => inputRef.current?.click()}
+          className="inline-flex cursor-pointer items-center gap-2 border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-3 py-2 text-xs font-semibold text-[#5E6870] transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:pointer-events-none disabled:opacity-50">
+          {imageOnly ? <ImageIcon className="h-4 w-4 flex-shrink-0" /> : <Upload className="h-4 w-4 flex-shrink-0" />}
+          {imageOnly ? "Upload image" : "Attach file"}
+        </button>
+      )}
+      {imageModal && <ImagePreviewModal image={imageModal.url} name={imageModal.name} onClose={() => setImageModal(null)} />}
+    </>
   );
 }
 
@@ -2135,18 +2257,30 @@ function MultiFileField({ fieldKey, label, disabled, allValues, documentId, onCh
   documentId?: string;
   onChangeCb: (key: string, val: unknown) => void;
 }) {
-  const existing = Object.keys(allValues)
-    .filter((k) => k.startsWith(`${fieldKey}~`) && allValues[k] != null)
-    .map((k) => Number(k.slice(fieldKey.length + 1)))
-    .filter((n) => Number.isInteger(n) && n >= 0);
-  const highest = existing.length ? Math.max(...existing) : -1;
-  const [slots, setSlots] = useState<number[]>(() =>
-    Array.from({ length: Math.max(highest + 2, 1) }, (_, i) => i)
-  );
-
+  const inputRef = useRef<HTMLInputElement>(null);
+  const slots = Object.keys(allValues)
+    .filter((key) => key.startsWith(`${fieldKey}~`) && allValues[key] != null && allValues[key] !== "")
+    .map((key) => Number(key.slice(fieldKey.length + 1)))
+    .filter((slot) => Number.isInteger(slot) && slot >= 0)
+    .sort((a, b) => a - b);
+  const attach = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const selected = Array.from(input.files ?? []);
+    input.value = "";
+    const accepted = selected.filter((file) => {
+      const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+      if (COMMON_ATTACHMENT_EXTENSIONS.has(extension)) return true;
+      toast.error(`${file.name} is not a supported attachment type.`);
+      return false;
+    });
+    let nextSlot = slots.length ? Math.max(...slots) + 1 : 0;
+    accepted.forEach((file) => {
+      onChangeCb(`${fieldKey}~${nextSlot}`, file);
+      nextSlot += 1;
+    });
+  };
   return (
     <div className="space-y-2">
-      {/* Inline chip row — all slots rendered horizontally */}
       <div className="flex flex-wrap items-start gap-3">
         {slots.map((i) => (
           <FileAttachField
@@ -2156,25 +2290,14 @@ function MultiFileField({ fieldKey, label, disabled, allValues, documentId, onCh
             disabled={disabled}
             value={allValues[`${fieldKey}~${i}`]}
             documentId={documentId}
-            onChangeCb={(k, v) => {
-              onChangeCb(k, v);
-              // If a slot is cleared remove it (keep at least 1)
-              if (v == null && slots.length > 1) {
-                setSlots((prev) => prev.filter((n) => n !== i));
-              }
-            }}
+            onChangeCb={onChangeCb}
           />
         ))}
-        {/* Add-another button — shown inline after existing chips */}
-        {!disabled && (
-          <button
-            type="button"
-            onClick={() => setSlots((prev) => [...prev, (prev[prev.length - 1] ?? -1) + 1])}
-            className="inline-flex items-center gap-1.5 self-center border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-3 py-2 text-xs font-semibold text-[#5E6870] hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD] transition-colors"
-          >
-            <Plus className="h-3.5 w-3.5" /> Add file
-          </button>
-        )}
+        {!disabled && <label className="inline-flex cursor-pointer items-center gap-2 border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-3 py-2 text-xs font-semibold text-[#5E6870] transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]">
+          <Upload className="h-4 w-4" /> Attach file
+          <input ref={inputRef} type="file" multiple accept={COMMON_ATTACHMENT_ACCEPT} className="sr-only" onChange={attach} />
+        </label>}
+        {disabled && slots.length === 0 && <span className="text-xs text-muted-foreground">No files attached</span>}
       </div>
     </div>
   );
@@ -3215,7 +3338,14 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // RHF is the immediate source while a person is interacting. Props are
   // mirrored into RHF above for external updates; keeping props last here can
   // briefly overwrite a freshly toggled checkbox with its previous value.
-  const liveValues: TemplateFormValues = { ...values, ...(watch() as TemplateFormValues), __document_id: documentId };
+  const watchedValues = watch() as TemplateFormValues;
+  const liveValues: TemplateFormValues = { ...values, ...watchedValues, __document_id: documentId };
+  // React Hook Form deliberately doesn't own File values (file inputs need to
+  // be managed by the caller). Preserve freshly selected files from the
+  // parent's values instead of letting an older `watch()` snapshot mask them.
+  for (const [key, value] of Object.entries(values)) {
+    if (typeof File !== "undefined" && value instanceof File) liveValues[key] = value;
+  }
 
   // Viewer context for role-restricted sections.
   const viewer: FormViewer = {

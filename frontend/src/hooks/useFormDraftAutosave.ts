@@ -28,13 +28,25 @@ function writeAttachmentValue(values: Values, field: string, descriptor: Record<
   const parts = field.slice("tableattachment_".length).split("~");
   if (parts.length < 3) return;
   const [tableKey, rowIndexText, ...columnParts] = parts;
+  const slotText = columnParts.length >= 2 ? columnParts.pop() : undefined;
   const rowIndex = Number(rowIndexText);
   const columnKey = columnParts.join("~");
   const rows = values[tableKey];
   if (!Array.isArray(rows) || !Number.isInteger(rowIndex) || !columnKey) return;
   const row = rows[rowIndex];
   if (row && typeof row === "object") {
-    rows[rowIndex] = { ...(row as Record<string, unknown>), [columnKey]: descriptor };
+    const rowValues = { ...(row as Record<string, unknown>) };
+    if (slotText !== undefined) {
+      const slot = Number(slotText);
+      if (!Number.isInteger(slot) || slot < 0) return;
+      const cell = Array.isArray(rowValues[columnKey]) ? [...rowValues[columnKey] as unknown[]] : [];
+      while (cell.length <= slot) cell.push(null);
+      cell[slot] = descriptor;
+      rowValues[columnKey] = cell;
+    } else {
+      rowValues[columnKey] = descriptor;
+    }
+    rows[rowIndex] = rowValues;
   }
 }
 
@@ -44,8 +56,10 @@ function readAttachmentValue(values: Values, field: string): unknown {
   const parts = field.slice("tableattachment_".length).split("~");
   if (parts.length < 3) return undefined;
   const [tableKey, rowIndexText, ...columnParts] = parts;
+  const slotText = columnParts.length >= 2 ? columnParts.pop() : undefined;
   const row = (values[tableKey] as unknown[] | undefined)?.[Number(rowIndexText)];
-  return row && typeof row === "object" ? (row as Record<string, unknown>)[columnParts.join("~")] : undefined;
+  const cell = row && typeof row === "object" ? (row as Record<string, unknown>)[columnParts.join("~")] : undefined;
+  return slotText !== undefined && Array.isArray(cell) ? cell[Number(slotText)] : cell;
 }
 
 function isStoredAttachment(value: unknown): value is Record<string, unknown> {

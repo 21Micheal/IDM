@@ -9,7 +9,8 @@
  *
  * Multipart field-name scheme (mirrors apps/documents/form_attachments.py):
  *   • `attachment_<field_key>`                  — a simple file/image field
- *   • `tableattachment_<table_key>~<row>~<col>` — a file cell inside a table
+ *   • `tableattachment_<table_key>~<row>~<col>` — a single-file table cell
+ *   • `tableattachment_<table_key>~<row>~<col>~<slot>` — a multi-file table cell
  */
 
 export type FormAttachment = { field: string; file: File };
@@ -54,6 +55,15 @@ export function collectFormAttachments(values: Record<string, unknown>): {
               file: cell,
             });
             out[colKey] = cell.name; // placeholder
+          } else if (Array.isArray(cell) && cell.some((item) => isFile(item))) {
+            out[colKey] = cell.map((item, slot) => {
+              if (!isFile(item)) return item;
+              attachments.push({
+                field: `tableattachment_${tableAttachmentKey(key, rowIndex, colKey)}${TABLE_SEP}${slot}`,
+                file: item,
+              });
+              return item.name;
+            });
           } else {
             out[colKey] = cell;
           }

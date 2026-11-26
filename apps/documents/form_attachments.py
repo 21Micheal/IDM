@@ -79,6 +79,10 @@ def rebuild_attachments(values: dict) -> dict:
                 for col_key, cell in row.items():
                     if is_attachment_descriptor(cell):
                         attachments[f"{key}{TABLE_SEP}{row_idx}{TABLE_SEP}{col_key}"] = cell
+                    elif isinstance(cell, list):
+                        for slot, item in enumerate(cell):
+                            if is_attachment_descriptor(item):
+                                attachments[f"{key}{TABLE_SEP}{row_idx}{TABLE_SEP}{col_key}{TABLE_SEP}{slot}"] = item
     return attachments
 
 
@@ -96,9 +100,10 @@ def apply_form_attachments(doc_id, values: dict, files) -> tuple[dict, dict]:
         if field_name.startswith(TABLE_PREFIX):
             path_spec = field_name[len(TABLE_PREFIX):]
             parts = path_spec.split(TABLE_SEP)
-            if len(parts) != 3:
+            if len(parts) not in (3, 4):
                 continue
-            table_key, row_raw, col_key = parts
+            table_key, row_raw, col_key = parts[:3]
+            slot_raw = parts[3] if len(parts) == 4 else None
             try:
                 row_idx = int(row_raw)
             except ValueError:
@@ -108,8 +113,25 @@ def apply_form_attachments(doc_id, values: dict, files) -> tuple[dict, dict]:
                 continue
             if not isinstance(rows[row_idx], dict):
                 continue
+            slot = None
+            if slot_raw is not None:
+                try:
+                    slot = int(slot_raw)
+                except ValueError:
+                    continue
+                if slot < 0:
+                    continue
             rows = [dict(r) if isinstance(r, dict) else r for r in rows]
-            rows[row_idx][col_key] = _store(doc_id, file)
+            descriptor = _store(doc_id, file)
+            if slot is None:
+                rows[row_idx][col_key] = descriptor
+            else:
+                cell = rows[row_idx].get(col_key)
+                cell_files = list(cell) if isinstance(cell, list) else []
+                while len(cell_files) <= slot:
+                    cell_files.append(None)
+                cell_files[slot] = descriptor
+                rows[row_idx][col_key] = cell_files
             values[table_key] = rows
         else:
             field_key = field_name
@@ -130,7 +152,12 @@ def descriptors_to_names(values: dict) -> dict:
     for key, value in (values or {}).items():
         if isinstance(value, list):
             out[key] = [
-                {col_key: _render_cell(cell) for col_key, cell in row.items()}
+                {
+                    col_key: [_render_cell(item) for item in cell]
+                    if isinstance(cell, list) and any(is_attachment_descriptor(item) for item in cell)
+                    else _render_cell(cell)
+                    for col_key, cell in row.items()
+                }
                 if isinstance(row, dict)
                 else row
                 for row in value
