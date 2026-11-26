@@ -113,6 +113,7 @@ type Field = {
   id?: string; key?: string; type?: string; label?: string;
   placeholder?: string; help_text?: string; helpText?: string;
   required?: boolean; colSpan?: number; width?: number;
+  checkboxGroup?: string; checkboxGroupExclusive?: boolean;
   workflowRole?: string;
   options?: string[]; columns?: Column[]; minRows?: number; totalLabel?: string;
   budgetLine?: { dimensions?: string[]; accountCodes?: string[]; dsaAccountCodes?: string[]; taxRateColumn?: string };
@@ -2535,13 +2536,36 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
   // Checkbox / boolean — inline label layout
   if (type === "boolean" || type === "checkbox") {
+    const checkboxGroup = String(field.checkboxGroup ?? "").trim().toLocaleLowerCase();
+    const groupMembers = checkboxGroup
+      ? allFields.filter((candidate) =>
+          (candidate.type === "boolean" || candidate.type === "checkbox")
+          && String(candidate.checkboxGroup ?? "").trim().toLocaleLowerCase() === checkboxGroup,
+        )
+      : [];
+    const exclusiveGroup = groupMembers.some((candidate) => candidate.checkboxGroupExclusive);
+    const anotherGroupChoiceSelected = exclusiveGroup && groupMembers.some((candidate) =>
+      candidate.key !== key && truthyValue(allValues[candidate.key ?? ""]),
+    );
     return (
       <div className="form-renderer-checkbox flex min-h-[62px] min-w-0 flex-col justify-end" style={style}>
         <Controller control={control} name={key} render={({ field: f }) => (
           <label className={`flex h-10 w-full cursor-pointer items-center gap-2.5 text-sm ${validationMessage ? "text-red-700" : "text-foreground"}`}>
-            <input type="checkbox" checked={f.value === true || ["true", "yes", "1", "on", "checked"].includes(String(f.value ?? "").trim().toLowerCase())} disabled={dis}
+            <input type="checkbox" checked={truthyValue(f.value)} disabled={dis || (!truthyValue(f.value) && anotherGroupChoiceSelected)}
               className={`h-4 w-4 rounded accent-primary ${validationMessage ? "outline outline-1 outline-red-500" : "border-border"}`}
-              onChange={(e) => { f.onChange(e.target.checked); onChangeCb(key, e.target.checked); }} />
+              onChange={(e) => {
+                const checked = e.target.checked;
+                f.onChange(checked);
+                onChangeCb(key, checked);
+                if (checked && exclusiveGroup) {
+                  for (const member of groupMembers) {
+                    const memberKey = member.key ?? "";
+                    if (memberKey && memberKey !== key && truthyValue(allValues[memberKey])) {
+                      onChangeCb(memberKey, false);
+                    }
+                  }
+                }
+              }} />
             {label}
             {field.required && <span className="text-red-500">*</span>}
           </label>
@@ -3339,6 +3363,7 @@ export function requiredFieldLabels(
   const list = activeSections(materializeSections(rawList), values);
   const allFields = list.flatMap((s) => s.fields ?? []);
   const missing: string[] = [];
+  const validatedCheckboxGroups = new Set<string>();
   for (const s of list) {
     // Don't require fields the user never sees because their section is hidden
     // (always-hidden, a conditional rule that isn't met, or a role restriction
@@ -3405,7 +3430,24 @@ export function requiredFieldLabels(
 
       const v = values[key];
       if (f.required) {
-        if (type === "multi_file") {
+        const checkboxGroup = (type === "boolean" || type === "checkbox")
+          ? String(f.checkboxGroup ?? "").trim().toLocaleLowerCase()
+          : "";
+        if (checkboxGroup) {
+          if (!validatedCheckboxGroups.has(checkboxGroup)) {
+            validatedCheckboxGroups.add(checkboxGroup);
+            const groupMembers = allFields.filter((member) =>
+              (member.type === "boolean" || member.type === "checkbox")
+              && String(member.checkboxGroup ?? "").trim().toLocaleLowerCase() === checkboxGroup
+              && !member.hidden
+              && evalVisible(member, values, allFields, processStep, null, viewer),
+            );
+            const anySelected = groupMembers.some((member) => truthyValue(values[member.key ?? ""]));
+            if (!anySelected) {
+              missing.push(`${f.label ?? key} (select one option)`);
+            }
+          }
+        } else if (type === "multi_file") {
           const hasAttachment = Object.entries(values).some(([attachmentKey, attachmentValue]) =>
             attachmentKey.startsWith(`${key}~`)
             && (

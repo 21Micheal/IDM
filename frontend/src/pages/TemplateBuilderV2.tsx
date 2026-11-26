@@ -537,6 +537,10 @@ export interface TemplateField {
   helpText?: string;
   help_text?: string;
   required?: boolean;
+  /** Optional group for related checkbox fields; required means any group choice is required. */
+  checkboxGroup?: string;
+  /** When true on any member, checking one group member clears/disables the others. */
+  checkboxGroupExclusive?: boolean;
   options?: string[];
   colSpan?: number;
   width?: number;
@@ -5391,6 +5395,23 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           <InspectorRow label="Help text">
             <input className={inputCls} value={field.helpText ?? ""} onChange={(e) => onUpdate({ helpText: e.target.value })} />
           </InspectorRow>
+          {(field.type === "boolean" || field.type === "checkbox") && (
+            <>
+              <InspectorRow label="Checkbox group" hint="Give related checkboxes the same group name. Required applies to the group: at least one choice must be checked.">
+                <input className={inputCls} value={field.checkboxGroup ?? ""}
+                  onChange={(e) => onUpdate({ checkboxGroup: e.target.value.trim() || undefined })}
+                  placeholder="e.g. travel_funding" />
+              </InspectorRow>
+              {field.checkboxGroup?.trim() && (
+                <label className="flex cursor-pointer items-start gap-2.5 text-sm text-[#1F2933]">
+                  <input type="checkbox" checked={!!field.checkboxGroupExclusive}
+                    onChange={(e) => onUpdate({ checkboxGroupExclusive: e.target.checked })}
+                    className="mt-0.5 h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
+                  <span>Only one choice can be selected at a time</span>
+                </label>
+              )}
+            </>
+          )}
           <InspectorRow label="Tooltip">
             <input className={inputCls} value={field.tooltip ?? ""} onChange={(e) => onUpdate({ tooltip: e.target.value })} />
           </InspectorRow>

@@ -322,7 +322,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             all_fields = [
                 f for section in visible_editable_sections
                 for f in section.get("fields", [])
-                if f.get("required") and f.get("type") not in ("divider", "heading", "button")
+                if f.get("type") not in ("divider", "heading", "button")
                 and not f.get("formula") and not f.get("calc")
                 and _eval_visible(f, generation_values, viewer=viewer)
                 and is_editable(f, generation_values, viewer=viewer)
@@ -343,7 +343,34 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                     )
                 return not generation_values.get(key)
 
-            missing = [f["label"] for f in all_fields if _required_field_missing(f)]
+            required_fields = [field for field in all_fields if field.get("required")]
+            missing = []
+            checked_groups = set()
+
+            def _checkbox_group(field):
+                if field.get("type") not in ("boolean", "checkbox"):
+                    return ""
+                return str(field.get("checkboxGroup") or "").strip().casefold()
+
+            def _checked(value):
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, (int, float)):
+                    return value != 0
+                return str(value or "").strip().casefold() not in {"", "false", "no", "0", "off"}
+
+            for field in required_fields:
+                group = _checkbox_group(field)
+                if group:
+                    if group in checked_groups:
+                        continue
+                    checked_groups.add(group)
+                    group_members = [candidate for candidate in all_fields if _checkbox_group(candidate) == group]
+                    if not any(_checked(generation_values.get(str(member.get("key") or ""))) for member in group_members):
+                        missing.append(f"{field.get('label', field.get('key'))} (select one option)")
+                    continue
+                if _required_field_missing(field):
+                    missing.append(field.get("label", field.get("key")))
 
             # Table COLUMNS carry their own independent `required` flag (the
             # table field itself is rarely marked required — its columns are).
