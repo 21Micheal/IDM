@@ -3424,6 +3424,28 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
           && (!retirementOnlyEdit || isRetirementExpenseSection(section))
           && (!retirementSectionReadOnly || !isRetirementExpenseSection(section));
         const sectionLocked = !readOnly && !sectionEditable;
+        // Keep signatures in their own full-width row group so ordinary fields
+        // never flow into unused signature columns. Consecutive signatures can
+        // still share that row according to each field's configured span.
+        const renderField = (f: Field, fi: number) => (
+          <FormField
+            key={f.id ?? fi}
+            field={f}
+            control={control}
+            errors={errors as Record<string, any>}
+            onChangeCb={onChange}
+            readOnly={readOnly}
+            editable={sectionEditable && evalEditableForViewer(f, liveValues as TemplateFormValues, allFields, processStep, viewer)}
+            allValues={liveValues as TemplateFormValues}
+            processStep={processStep}
+            allFields={allFields}
+            onLaunchSignatureModal={onLaunchSignatureModal}
+            onButtonClick={runButton}
+            buttonDone={f.button?.action === "add_block" && addedIds.includes(f.button?.targetSectionId ?? "")}
+            viewer={viewer}
+            validationIssues={validationIssues}
+          />
+        );
         return (
           <div key={section.id ?? si} className="form-renderer-section overflow-hidden rounded-2xl border border-[#D8E2E9] bg-white shadow-sm">
             {/* Section header */}
@@ -3448,25 +3470,17 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
             </div>
             {/* Fields — 12-column grid */}
             <div className="form-renderer-grid grid grid-cols-12 gap-x-4 gap-y-5 p-5 sm:p-6">
-              {visibleFields.map((f, fi) => (
-                <FormField
-                  key={f.id ?? fi}
-                  field={f}
-                  control={control}
-                  errors={errors as Record<string, any>}
-                  onChangeCb={onChange}
-                  readOnly={readOnly}
-                  editable={sectionEditable && evalEditableForViewer(f, liveValues as TemplateFormValues, allFields, processStep, viewer)}
-                  allValues={liveValues as TemplateFormValues}
-                  processStep={processStep}
-                  allFields={allFields}
-                  onLaunchSignatureModal={onLaunchSignatureModal}
-                  onButtonClick={runButton}
-                  buttonDone={f.button?.action === "add_block" && addedIds.includes(f.button?.targetSectionId ?? "")}
-                  viewer={viewer}
-                  validationIssues={validationIssues}
-                />
-              ))}
+              {visibleFields.map((f, fi) => {
+                if (f.type !== "signature") return renderField(f, fi);
+                if (fi > 0 && visibleFields[fi - 1].type === "signature") return null;
+                let end = fi + 1;
+                while (end < visibleFields.length && visibleFields[end].type === "signature") end += 1;
+                return (
+                  <div key={`signature-row-${f.id ?? fi}`} className="grid min-w-0 grid-cols-12 gap-x-4 gap-y-5" style={{ gridColumn: "span 12 / span 12" }}>
+                    {visibleFields.slice(fi, end).map((signature, offset) => renderField(signature, fi + offset))}
+                  </div>
+                );
+              })}
               {visibleFields.length === 0 && (
                 <p className="col-span-12 text-sm" style={{ color: "#8C969E" }}>No fields in this section.</p>
               )}
