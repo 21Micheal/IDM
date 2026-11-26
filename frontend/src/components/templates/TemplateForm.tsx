@@ -115,7 +115,7 @@ type Field = {
   required?: boolean; colSpan?: number; width?: number;
   checkboxGroup?: string; checkboxGroupExclusive?: boolean;
   workflowRole?: string;
-  options?: string[]; columns?: Column[]; minRows?: number; totalLabel?: string;
+  options?: string[]; columns?: Column[]; minRows?: number; totalLabel?: string; tableLayout?: "columns" | "rows"; tableEntryLabel?: string; tableEntryWidth?: number;
   budgetLine?: { dimensions?: string[]; accountCodes?: string[]; dsaAccountCodes?: string[]; taxRateColumn?: string };
   currencySymbol?: string; currencyFromField?: string; referenceSource?: string; referenceGroupId?: string; tooltip?: string; regex?: string;
   min?: string | number; max?: string | number; minLength?: number; maxLength?: number;
@@ -1773,21 +1773,6 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
     // internal alone would let approval skip the save-before-approve flush.
     onChange(next);
   };
-  const addRow = () => {
-    const next = [...rowsRef.current, emptyRow()];
-    rowsRef.current = next;
-    lastValueRef.current = JSON.stringify(next);
-    setRows(next);
-    onChange(next);
-  };
-  const removeRow = (i: number) => {
-    const next = rowsRef.current.filter((_, idx) => idx !== i);
-    rowsRef.current = next;
-    lastValueRef.current = JSON.stringify(next);
-    setRows(next);
-    onChange(next);
-  };
-
   return (
     <div className="form-renderer-table col-span-12 space-y-3">
       {hiddenExternalDefaultCols.map((col) => (
@@ -1807,11 +1792,44 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
           <span className="ml-2 font-normal text-muted-foreground">{field.helpText ?? field.help_text}</span>
         )}
       </div>
-      <div className="overflow-x-auto border border-border bg-white shadow-sm">
+      {field.tableLayout === "rows" ? (
+        <div className="w-fit max-w-full overflow-x-auto rounded-md border border-border bg-white shadow-sm">
+          <table className="text-sm border-separate border-spacing-0 table-fixed" style={{ width: `${256 + computedRows.length * (field.tableEntryWidth ?? 320)}px` }}>
+            <thead>
+              <tr>
+                <th className="sticky left-0 w-64 min-w-56 border-b border-r border-border/60 bg-slate-50 px-4 py-2.5 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground" style={{ borderRight: "1px solid #94a3b8" }}>Field</th>
+                {computedRows.map((_, ri) => <th key={ri} className="border-b border-border/60 bg-slate-50 px-4 py-2.5 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground" style={{ width: field.tableEntryWidth ?? 320, borderRight: "1px solid #94a3b8" }}>{field.tableEntryLabel?.trim() || "Entry"} {ri + 1}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {cols.map((col, ci) => (
+                <tr key={col.id ?? ci} className="border-b border-border/50 last:border-0 hover:bg-slate-50/40">
+                  <th title={col.tooltip} className="sticky left-0 w-64 min-w-56 bg-slate-50 px-4 py-3 text-left text-xs font-semibold text-foreground border-r border-border/60" style={{ borderRight: "1px solid #94a3b8", borderBottom: "1px solid #e2e8f0" }}>
+                    {col.label}{col.required && <span className="ml-1 text-red-400">*</span>}
+                    {col.additionalText && <div className="mt-1 text-[11px] font-normal text-muted-foreground">{col.additionalText}</div>}
+                  </th>
+                  {computedRows.map((row, ri) => {
+                    const key = col.key ?? `col_${ci}`;
+                    const shown = colVisibleInRow(col, row);
+                    const cellLocked = readOnly || !colEditableInRow(col, row);
+                    const protectedCell = cellLocked || Boolean(col.calc?.expression);
+                    return <td key={ri} className={`p-2 align-top ${protectedCell ? "bg-sky-50/70" : "bg-white"}`} style={{ width: field.tableEntryWidth ?? 320, borderRight: "1px solid #94a3b8", borderBottom: "1px solid #e2e8f0" }}>
+                      {shown ? <TableColInput col={col} value={row[key] ?? ""} row={row} allValues={allValues} allFields={allFields} tableColumns={cols}
+                        onChange={(v) => update(ri, key, v)} onChangeCell={(cellKey, cellVal) => update(ri, cellKey, cellVal)} readOnly={cellLocked || Boolean(col.calc?.expression)}
+                        wrapText={allCols.some((candidate) => candidate.external?.fillDescriptionColumn === key)} documentId={documentId} attachmentKey={`${tableKey}~${ri}~${key}`} />
+                        : <span className="block px-3 py-2 text-sm italic text-muted-foreground/70">—</span>}
+                    </td>;
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : <div className="overflow-x-auto border border-border bg-white shadow-sm">
         <div className="min-w-full">
           <table
             className="w-full min-w-full text-sm border-separate border-spacing-0 table-fixed"
-            style={{ minWidth: `${Math.max(cols.length, 1) * 230 + (!readOnly ? 48 : 0)}px` }}
+            style={{ minWidth: `${Math.max(cols.length, 1) * 230}px` }}
           >
             <thead>
               <tr className="text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -1830,7 +1848,6 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                     {col.additionalText && <div className="mt-1 text-[10px] font-normal text-muted-foreground/80">{col.additionalText}</div>}
                   </th>
                 ))}
-                {!readOnly && <th className="w-8 flex-shrink-0 px-4 py-4 border-b border-border/60 bg-white" />}
               </tr>
             </thead>
             <tbody>
@@ -1873,15 +1890,6 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                         </td>
                       );
                     })}
-                    {!readOnly && (
-                      <td className="w-8 flex-shrink-0 bg-white px-2 py-2 text-center align-top">
-                        {rows.length > 1 && (
-                          <button type="button" onClick={() => removeRow(ri)} className="inline-flex items-center justify-center rounded text-muted-foreground hover:text-red-500 transition-colors">
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        )}
-                      </td>
-                    )}
                   </tr>
                 );
               })}
@@ -1932,21 +1940,15 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                         </td>
                       );
                     })}
-                    {!readOnly && <td className="w-8 px-3 py-3" />}
                   </tr>
                 </tfoot>
               );
             })()}
           </table>
         </div>
-      </div>
+      </div>}
       {tableIssues.length > 0 && (
         <p role="alert" className="flex items-center gap-1 text-xs font-semibold text-red-700"><AlertCircle className="h-3.5 w-3.5" />{tableIssues.join(" · ")}</p>
-      )}
-      {!readOnly && (
-        <button type="button" onClick={addRow} className="flex items-center gap-1.5 text-xs font-semibold text-primary hover:text-primary/80 transition-colors">
-          <Plus className="h-3.5 w-3.5" /> Add row
-        </button>
       )}
     </div>
   );

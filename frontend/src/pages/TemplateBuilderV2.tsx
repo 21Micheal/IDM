@@ -548,6 +548,12 @@ export interface TemplateField {
   workflowRole?: "requisition_lines" | "rfq_required_lines" | "retirement_expenses" | "rfq_supplier_attachments";
   defaultValue?: string;
   minRows?: number;
+  /** Display table fields as columns (default) or as labeled rows. */
+  tableLayout?: "columns" | "rows";
+  /** Singular label for each data entry in the transposed table layout. */
+  tableEntryLabel?: string;
+  /** Fixed width in pixels for each entry column in the transposed layout. */
+  tableEntryWidth?: number;
   totalLabel?: string;
   multi?: boolean;
   /* Extended */
@@ -5585,9 +5591,33 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                   })}
                 />
               )}
-              <InspectorRow label="Minimum rows shown">
+              <InspectorRow label="Rows shown">
                 <input type="number" min={1} max={20} value={field.minRows ?? 2}
                   onChange={(e) => onUpdate({ minRows: Number(e.target.value) })} className={inputCls} />
+              </InspectorRow>
+              {field.tableLayout === "rows" && (
+                <InspectorRow label="Entry label" hint="Used above each data column, followed by its number.">
+                  <input value={field.tableEntryLabel ?? "Entry"}
+                    onChange={(e) => onUpdate({ tableEntryLabel: e.target.value })}
+                    className={inputCls} placeholder="Entry" />
+                </InspectorRow>
+              )}
+              {field.tableLayout === "rows" && (
+                <InspectorRow label="Entry column width (px)" hint="Each entry keeps this width. Narrow tables leave the remaining area empty; wider tables scroll horizontally.">
+                  <input type="number" min={180} max={1000} step={20} value={field.tableEntryWidth ?? 320}
+                    onChange={(e) => onUpdate({ tableEntryWidth: Math.max(180, Math.min(1000, Number(e.target.value) || 320)) })}
+                    className={inputCls} />
+                </InspectorRow>
+              )}
+              <InspectorRow label="Header layout" hint="Choose whether column labels appear across the top or down the left side.">
+                <CustomListbox
+                  value={field.tableLayout ?? "columns"}
+                  onChange={(value) => onUpdate({ tableLayout: value as TemplateField["tableLayout"] })}
+                  options={[{ value: "columns", label: "Headers across columns" }, { value: "rows", label: "Headers down rows" }]}
+                  className={inputCls}
+                  buttonClassName="w-full"
+                  ariaLabel="Table header layout"
+                />
               </InspectorRow>
               {(field.columns ?? []).some((column) => column.showTotal) && (
                 <InspectorRow label="Total row label" hint="Shown before the first total in the table footer.">

@@ -29,6 +29,9 @@ type PreviewField = {
   options?: string[];
   columns?: PreviewColumn[];
   minRows?: number;
+  tableLayout?: "columns" | "rows";
+  tableEntryLabel?: string;
+  tableEntryWidth?: number;
   totalLabel?: string;
   hidden?: boolean;
   visibleWhen?: VisibleWhen | null;
@@ -124,7 +127,21 @@ function PreviewField({ field, isBuiltTemplate }: { field: PreviewField; isBuilt
     return (
       <div className="col-span-2 space-y-1">
         <div className="text-[11px] font-semibold text-slate-500">{label}</div>
-        <div className="overflow-hidden rounded border border-slate-200">
+        <div className="w-fit max-w-full overflow-x-auto overflow-y-hidden rounded border border-slate-200">
+          {field.tableLayout === "rows" ? (
+            <table className="text-[10px] table-fixed border-separate border-spacing-0" style={{ width: `${208 + Math.min(field.minRows ?? 2, 2) * (field.tableEntryWidth ?? 320)}px` }}>
+              <thead><tr>
+                <th className="w-52 bg-slate-100 px-2 py-1 text-left font-semibold text-slate-500" style={{ borderRight: "1px solid #94a3b8" }}>Field</th>
+                {Array.from({ length: Math.min(field.minRows ?? 2, 2) }).map((_, r) => <th key={r} className="bg-slate-100 px-2 py-1 text-left font-semibold text-slate-500" style={{ width: field.tableEntryWidth ?? 320, borderRight: "1px solid #94a3b8" }}>{field.tableEntryLabel?.trim() || "Entry"} {r + 1}</th>)}
+              </tr></thead>
+              <tbody>
+                {cols.map((c, i) => <tr key={c.id ?? i} className="border-b border-slate-100">
+                  <th className="bg-slate-100 px-2 py-1 text-left font-semibold text-slate-500" style={{ borderRight: "1px solid #94a3b8", borderBottom: "1px solid #e2e8f0" }}>{c.label}</th>
+                  {Array.from({ length: Math.min(field.minRows ?? 2, 2) }).map((_, r) => <td key={r} className="px-2 py-1.5 text-slate-300" style={{ width: field.tableEntryWidth ?? 320, borderRight: "1px solid #94a3b8", borderBottom: "1px solid #e2e8f0" }}>—</td>)}
+                </tr>)}
+              </tbody>
+            </table>
+          ) : <>
           <div className="flex bg-slate-100">
             {cols.map((c, i) => (
               <div key={c.id ?? i} className="flex-1 truncate border-r border-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-500 last:border-0">{c.label}</div>
@@ -148,6 +165,7 @@ function PreviewField({ field, isBuiltTemplate }: { field: PreviewField; isBuilt
               ))}
             </div>
           )}
+          </>}
         </div>
       </div>
     );
