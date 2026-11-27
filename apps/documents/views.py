@@ -957,6 +957,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             .select_related("uploaded_by", "uploaded_by__department", "document_type")
             .prefetch_related("journal_postings")
             .order_by("-created_at")
+            .distinct()
         )
 
         report_data = build_requisition_report(qs, request.query_params)
@@ -989,6 +990,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             )
             .select_related("uploaded_by", "uploaded_by__department", "document_type")
             .order_by("-created_at")
+            .distinct()
         )
 
         report_data = build_outstanding_retirements_report(qs, request.query_params)

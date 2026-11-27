@@ -1077,7 +1077,9 @@ export default function RequisitionReportsPage() {
         <div className="mt-1.5 flex items-center justify-between text-[10px] text-slate-500 border-t border-slate-200 pt-1">
           <span>
             {activeMainTab === "financial"
-              ? `Activity: ${finActivityCode || "All"} | Account: ${finAccountCode || "All"} | Scope: ${
+              ? `Activity: ${finActivityCode || "All"} | Account: ${finAccountCode || "All"}${
+                  finStartDate || finEndDate ? ` | Raised: ${finStartDate || "Any"} to ${finEndDate || "Any"}` : ""
+                } | Scope: ${
                   printScope === "selected"
                     ? `Custom Selection (${displayedFinancialLines.length} lines)`
                     : printScope === "page"
@@ -1088,7 +1090,9 @@ export default function RequisitionReportsPage() {
                     ? ` | Columns (${visibleFinCols.size}): ${activeFinColDefs.map((c) => c.label).join(", ")}`
                     : ""
                 }`
-              : `Department: ${retDepartment || "All"} | Aging: ${retAgingBucket || "All"} | Scope: ${
+              : `Department: ${retDepartment || "All"} | Aging: ${retAgingBucket || "All"}${
+                  retStartDate || retEndDate ? ` | Raised: ${retStartDate || "Any"} to ${retEndDate || "Any"}` : ""
+                } | Scope: ${
                   printScope === "selected"
                     ? `Custom Selection (${displayedRetirements.length} records)`
                     : printScope === "page"
@@ -1513,6 +1517,49 @@ export default function RequisitionReportsPage() {
                   />
                 </div>
 
+                {/* Date Range: Raised From / To */}
+                <div className="flex items-center gap-1.5 text-xs text-[#475569] border border-[#CBD5E1] bg-white px-2.5 py-1 shadow-2xs">
+                  <Calendar className="h-3.5 w-3.5 text-[#287EAD]" />
+                  <span className="font-semibold text-[#0A4D68]">Raised:</span>
+                  <input
+                    type="date"
+                    value={finStartDate}
+                    onChange={(e) => {
+                      setFinStartDate(e.target.value);
+                      setFinPage(1);
+                    }}
+                    aria-label="Raised from date"
+                    className="border-0 bg-transparent p-0 text-xs text-[#1E293B] focus:ring-0 focus:outline-hidden"
+                    title="Filter requisitions raised on or after this date"
+                  />
+                  <span className="text-slate-400">to</span>
+                  <input
+                    type="date"
+                    value={finEndDate}
+                    onChange={(e) => {
+                      setFinEndDate(e.target.value);
+                      setFinPage(1);
+                    }}
+                    aria-label="Raised to date"
+                    className="border-0 bg-transparent p-0 text-xs text-[#1E293B] focus:ring-0 focus:outline-hidden"
+                    title="Filter requisitions raised on or before this date"
+                  />
+                  {(finStartDate || finEndDate) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFinStartDate("");
+                        setFinEndDate("");
+                        setFinPage(1);
+                      }}
+                      className="text-slate-400 hover:text-slate-600 p-0.5 cursor-pointer"
+                      title="Clear date filter"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+
                 {/* Journal Only Checkbox */}
                 <label className="flex items-center gap-1.5 text-xs text-[#475569] cursor-pointer select-none">
                   <input
@@ -1528,7 +1575,7 @@ export default function RequisitionReportsPage() {
                 </label>
 
                 {/* Payment Voucher Only Filter Checkbox */}
-                <label className="flex items-center gap-1.5 text-xs text-[#0A4D68] cursor-pointer select-none rounded-lg bg-[#F0F8FD] border border-[#C5E6F5] px-2.5 py-1 hover:bg-[#E2F2FA] transition-colors">
+                <label className="flex items-center gap-1.5 text-xs text-[#0A4D68] cursor-pointer select-none rounded-none bg-[#F0F8FD] border border-[#C5E6F5] px-2.5 py-1 hover:bg-[#E2F2FA] transition-colors">
                   <input
                     type="checkbox"
                     checked={finHasPaymentVoucher === true}
@@ -1557,7 +1604,7 @@ export default function RequisitionReportsPage() {
                       setFinHasPaymentVoucher(null);
                       setFinPage(1);
                     }}
-                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline"
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline cursor-pointer"
                   >
                     <RefreshCw className="h-3 w-3" />
                     Reset
@@ -2296,6 +2343,49 @@ export default function RequisitionReportsPage() {
                   />
                 </div>
 
+                {/* Date Range: Raised From / To */}
+                <div className="flex items-center gap-1.5 text-xs text-[#475569] border border-[#CBD5E1] bg-white px-2.5 py-1 shadow-2xs">
+                  <Calendar className="h-3.5 w-3.5 text-[#287EAD]" />
+                  <span className="font-semibold text-[#0A4D68]">Raised:</span>
+                  <input
+                    type="date"
+                    value={retStartDate}
+                    onChange={(e) => {
+                      setRetStartDate(e.target.value);
+                      setRetPage(1);
+                    }}
+                    aria-label="Raised from date"
+                    className="border-0 bg-transparent p-0 text-xs text-[#1E293B] focus:ring-0 focus:outline-hidden"
+                    title="Filter travel requisitions raised on or after this date"
+                  />
+                  <span className="text-slate-400">to</span>
+                  <input
+                    type="date"
+                    value={retEndDate}
+                    onChange={(e) => {
+                      setRetEndDate(e.target.value);
+                      setRetPage(1);
+                    }}
+                    aria-label="Raised to date"
+                    className="border-0 bg-transparent p-0 text-xs text-[#1E293B] focus:ring-0 focus:outline-hidden"
+                    title="Filter travel requisitions raised on or before this date"
+                  />
+                  {(retStartDate || retEndDate) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRetStartDate("");
+                        setRetEndDate("");
+                        setRetPage(1);
+                      }}
+                      className="text-slate-400 hover:text-slate-600 p-0.5 cursor-pointer"
+                      title="Clear date filter"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+
                 {/* Include Reconciled Toggle */}
                 <label className="flex items-center gap-1.5 text-xs text-[#475569] cursor-pointer select-none">
                   <input
@@ -2311,7 +2401,7 @@ export default function RequisitionReportsPage() {
                 </label>
 
                 {/* Payment Voucher Only Filter Checkbox */}
-                <label className="flex items-center gap-1.5 text-xs text-[#0A4D68] cursor-pointer select-none rounded-lg bg-[#F0F8FD] border border-[#C5E6F5] px-2.5 py-1 hover:bg-[#E2F2FA] transition-colors">
+                <label className="flex items-center gap-1.5 text-xs text-[#0A4D68] cursor-pointer select-none rounded-none bg-[#F0F8FD] border border-[#C5E6F5] px-2.5 py-1 hover:bg-[#E2F2FA] transition-colors">
                   <input
                     type="checkbox"
                     checked={retHasPaymentVoucher === true}
@@ -2325,11 +2415,13 @@ export default function RequisitionReportsPage() {
                 </label>
 
                 {/* Reset Filters */}
-                {(retSearch || retDepartment || retTraveller || retStatus || retAgingBucket !== "all" || retIncludeReconciled || retHasPaymentVoucher !== null) && (
+                {(retSearch || retStartDate || retEndDate || retDepartment || retTraveller || retStatus || retAgingBucket !== "all" || retIncludeReconciled || retHasPaymentVoucher !== null) && (
                   <button
                     type="button"
                     onClick={() => {
                       setRetSearch("");
+                      setRetStartDate("");
+                      setRetEndDate("");
                       setRetDepartment("");
                       setRetTraveller("");
                       setRetStatus("");

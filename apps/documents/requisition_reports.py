@@ -103,6 +103,12 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
 
     # Look through sections and table fields
     for section in sections:
+        section_id = str(section.get("id") or "").lower()
+        section_title = str(section.get("title") or "").lower()
+        # Skip retirement / settlement / itinerary / travel schedule sections
+        if any(w in section_title or w in section_id for w in ("retirement", "settlement", "itinerary", "itenerary", "refund", "travel schedule")):
+            continue
+
         fields = section.get("fields") if isinstance(section, dict) and isinstance(section.get("fields"), list) else []
         for field in fields:
             if not isinstance(field, dict) or field.get("type") != "table":
@@ -110,6 +116,16 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
 
             table_key = field.get("key")
             if not table_key:
+                continue
+
+            table_key_lower = str(table_key).lower()
+            table_label_lower = str(field.get("label") or "").lower()
+            workflow_role = str(field.get("workflowRole") or "").lower()
+
+            # Skip tables that represent retirements, expenditure lists, refund tables, or travel itineraries
+            if workflow_role in ("retirement_expenses", "settlement"):
+                continue
+            if any(w in table_key_lower or w in table_label_lower for w in ("retirement", "settlement", "itinerary", "itenerary", "expenditure", "refund")):
                 continue
 
             rows = values.get(table_key)
@@ -148,7 +164,7 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
                 budget_col
                 or account_col
                 or activity_col
-                or field.get("workflowRole") in ("requisition_lines", "rfq_required_lines", "retirement_expenses")
+                or field.get("workflowRole") in ("requisition_lines", "rfq_required_lines")
                 or any(re.search(r"amount|budget|cost|price|account", c.get("label", ""), re.I) for c in cols)
             )
 
@@ -235,8 +251,8 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
                 # Currency
                 row_currency = _text((r.get(curr_col.get("key")) if curr_col else "") or global_currency or "USD").upper()
 
-                # Skip completely blank lines where amount is 0 and no codes exist
-                if not act_code and not acct_code and amount == 0 and not line_desc:
+                # Skip blank or dummy rows where amount is 0 and no codes exist
+                if amount == 0 and not act_code and not acct_code:
                     continue
 
                 line_id = f"{doc.id}_{table_key}_{idx}"
@@ -266,31 +282,32 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
                 })
 
     # If no lines were in tables, but top-level requisition has financial fields
-    if not lines and (values.get("amount") or values.get("total_travel_gross") or values.get("total_imprest_gross")):
-        top_amt = _to_float(values.get("total_travel_gross") or values.get("total_imprest_gross") or values.get("amount") or doc.amount)
-        lines.append({
-            "id": f"{doc.id}_main_0",
-            "document_id": str(doc.id),
-            "document_reference": doc_ref,
-            "document_title": doc_title,
-            "document_status": doc_status,
-            "date": doc_date,
-            "department": dept_name or "—",
-            "requester": requester_name or "—",
-            "table_name": "Main Requisition",
-            "activity_code": _text(values.get("activity_code") or "—"),
-            "activity_description": top_activity_desc or "—",
-            "account_code": _text(values.get("request_a_c_reference") or values.get("account_code") or "—"),
-            "cost_centre": "—",
-            "description": top_activity_desc or doc_title or "Requisition",
-            "amount": top_amt,
-            "currency": global_currency,
-            "journal_number": primary_jnl or "—",
-            "journal_status": primary_status,
-            "payment_voucher_reference": doc_pv_ref or "—",
-            "payment_voucher_id": doc_pv_id,
-            "has_payment_voucher": doc_has_pv,
-        })
+    if not lines and (values.get("amount") or values.get("total_travel_gross") or values.get("total_imprest_gross") or getattr(doc, "amount", None)):
+        top_amt = _to_float(values.get("total_travel_gross") or values.get("total_imprest_gross") or values.get("amount") or getattr(doc, "amount", None))
+        if top_amt > 0 or values.get("activity_code") or values.get("account_code"):
+            lines.append({
+                "id": f"{doc.id}_main_0",
+                "document_id": str(doc.id),
+                "document_reference": doc_ref,
+                "document_title": doc_title,
+                "document_status": doc_status,
+                "date": doc_date,
+                "department": dept_name or "—",
+                "requester": requester_name or "—",
+                "table_name": "Main Requisition",
+                "activity_code": _text(values.get("activity_code") or "—"),
+                "activity_description": top_activity_desc or "—",
+                "account_code": _text(values.get("request_a_c_reference") or values.get("account_code") or "—"),
+                "cost_centre": "—",
+                "description": top_activity_desc or doc_title or "Requisition",
+                "amount": top_amt,
+                "currency": global_currency,
+                "journal_number": primary_jnl or "—",
+                "journal_status": primary_status,
+                "payment_voucher_reference": doc_pv_ref or "—",
+                "payment_voucher_id": doc_pv_id,
+                "has_payment_voucher": doc_has_pv,
+            })
 
     return lines
 
@@ -326,7 +343,13 @@ def build_requisition_report(queryset: QuerySet, params: Dict[str, Any]) -> Dict
     available_departments = set()
     available_statuses = set()
 
+    seen_doc_ids = set()
     for doc in queryset:
+        doc_id_str = str(doc.id)
+        if doc_id_str in seen_doc_ids:
+            continue
+        seen_doc_ids.add(doc_id_str)
+
         extracted = extract_document_requisition_lines(doc)
         for line in extracted:
             # Track filter options
@@ -355,11 +378,11 @@ def build_requisition_report(queryset: QuerySet, params: Dict[str, Any]) -> Dict
             if filter_has_pv is False and line.get("has_payment_voucher"):
                 continue
 
-            # Date filtering
+            # Date filtering (requisition raised date)
             line_date = line.get("date") or ""
-            if start_date and line_date and line_date < start_date:
+            if start_date and (not line_date or line_date < start_date):
                 continue
-            if end_date and line_date and line_date > end_date:
+            if end_date and (not line_date or line_date > end_date):
                 continue
 
             # Search term check across multiple attributes
@@ -564,7 +587,13 @@ def build_outstanding_retirements_report(
     available_travellers = set()
     available_statuses = set()
 
+    seen_doc_ids = set()
     for doc in queryset:
+        doc_id_str = str(doc.id)
+        if doc_id_str in seen_doc_ids:
+            continue
+        seen_doc_ids.add(doc_id_str)
+
         if not (is_travel_requisition(doc) or travel_retirement_config(doc)):
             continue
 
@@ -756,11 +785,11 @@ def build_outstanding_retirements_report(
             if bucket != aging_bucket_q:
                 continue
 
-        # Date range filter (against due_date, return_date, or created_at)
-        check_date = due_date_str or return_date_str or item["created_at"]
-        if start_date_q and check_date < start_date_q:
+        # Date range filter (against requisition raised date: created_at)
+        raised_date = item.get("created_at") or due_date_str or return_date_str
+        if start_date_q and (not raised_date or raised_date < start_date_q):
             continue
-        if end_date_q and check_date > end_date_q:
+        if end_date_q and (not raised_date or raised_date > end_date_q):
             continue
 
         all_retirements.append(item)
