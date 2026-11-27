@@ -347,7 +347,12 @@ function retirementRuleMatches(rule: unknown, values: Record<string, unknown>, f
     const source = condition.source === "process_step" ? processStep : (() => {
       const referenced = fields.find((field) => field.key === condition.fieldKey || field.id === condition.fieldKey);
       const key = referenced?.key ?? referenced?.id ?? condition.fieldKey;
-      return retirementDisplayValue(values[key]);
+      const rawValue = values[key];
+      // Visibility rules may use `contains "True"` for a checked checkbox.
+      // Keep booleans in their stored true/false form here; display labels
+      // (Yes/No) are for the confirmation UI and do not satisfy that rule.
+      if (typeof rawValue === "boolean") return rawValue ? "true" : "false";
+      return retirementDisplayValue(rawValue);
     })();
     return isKnownOperator(String(condition.operator ?? ""))
       ? matchOperator(String(condition.operator), source, condition.value)
@@ -361,10 +366,20 @@ function retirementRuleMatches(rule: unknown, values: Record<string, unknown>, f
 function buildRetirementReview(sections: unknown[], values: Record<string, unknown>, processStep: string): RetirementReview {
   const sectionRecords = (Array.isArray(sections) ? sections : [])
     .filter((section): section is Record<string, unknown> => Boolean(section) && typeof section === "object");
-  const retirementSections = sectionRecords.filter((section) =>
-    Array.isArray(section.fields) && (section.fields as Array<Record<string, unknown>>)
-      .some((field) => field?.type === "table" && field.workflowRole === "retirement_expenses"),
-  );
+  const retirementSections = sectionRecords.filter((section) => {
+    if (!Array.isArray(section.fields)) return false;
+    const sectionFields = section.fields as Array<Record<string, unknown>>;
+    return sectionFields.some((field) => {
+      if (field?.type === "table" && field.workflowRole === "retirement_expenses") return true;
+      const label = String(field?.label ?? "").trim().toLowerCase();
+      const key = String(field?.key ?? field?.id ?? "").trim().toLowerCase();
+      // Some templates keep the Nil/Refund selectors and the Claim breakdown
+      // table in separate sections. Include those sections in the review too.
+      return ((field?.type === "checkbox" || field?.type === "boolean" || field?.type === "yes_no")
+          && ["nil retirement", "nil settlement", "refund", "claim"].includes(label))
+        || (field?.type === "table" && /retirement|expenditure|expense/.test(`${label} ${key}`));
+    });
+  });
   const fields = retirementSections.flatMap((section) => Array.isArray(section.fields)
     ? section.fields.filter((field): field is Record<string, any> => Boolean(field) && typeof field === "object")
     : []);
@@ -379,24 +394,16 @@ function buildRetirementReview(sections: unknown[], values: Record<string, unkno
     const key = String(field.key ?? field.id ?? "").toLowerCase();
     return labels.includes(label) || key.includes(keyFragment);
   });
-  const exactChoice = findToggle(["nil settlement", "nil retirement", "exact", "exact spend"], "exact_retirement");
-  const refundChoice = findToggle(["refund", "under spend", "underspend", "underexpenditure"], "refund");
-  const claimChoice = findToggle(["claim", "over spend", "overspend", "overexpenditure"], "extra_expenses");
+  const exactChoice = findToggle(["nil retirement"], "nil_retirement");
+  const refundChoice = findToggle(["refund"], "refund");
+  const claimChoice = findToggle(["claim"], "claim");
   const hasExplicitOutcomeChoices = Boolean(exactChoice || refundChoice || claimChoice);
   const isExact = exactChoice ? retirementValueIsTrue(read(exactChoice)) : false;
   const isRefund = refundChoice ? retirementValueIsTrue(read(refundChoice)) : false;
   const isClaim = claimChoice ? retirementValueIsTrue(read(claimChoice)) : false;
-  const earlyReturn = findToggle(["early return?", "early return"], "early_return");
-  const extraExpenses = findToggle(["extra expenses?", "extra expenses"], "extra_expenses");
-  const isEarlyReturn = earlyReturn ? retirementValueIsTrue(read(earlyReturn)) : false;
-  const hasExtraExpenses = extraExpenses ? retirementValueIsTrue(read(extraExpenses)) : false;
-  const outcome = hasExplicitOutcomeChoices
-    ? [isExact, isRefund, isClaim].filter(Boolean).length > 1 ? "Multiple outcomes selected"
-      : !isExact && !isRefund && !isClaim ? "Outcome not selected"
-        : isRefund ? "Refund" : isClaim ? "Claim" : "Nil retirement"
-    : isEarlyReturn && hasExtraExpenses ? "Refund and Claim"
-      : hasExtraExpenses ? "Claim"
-        : isEarlyReturn ? "Refund" : "Nil retirement";
+  const outcome = [isExact, isRefund, isClaim].filter(Boolean).length > 1 ? "Multiple outcomes selected"
+    : !isExact && !isRefund && !isClaim ? "Outcome not selected"
+      : isRefund ? "Refund" : isClaim ? "Claim" : "Nil retirement";
   const explanation = outcome === "Multiple outcomes selected"
     ? "More than one retirement outcome is selected. Return to the form and select only one before submitting."
     : outcome === "Outcome not selected"
@@ -404,10 +411,10 @@ function buildRetirementReview(sections: unknown[], values: Record<string, unkno
     : outcome === "Nil retirement"
     ? "No refund or extra expense claim is selected. Review the supporting documents before submitting."
     : outcome === "Refund"
-      ? "An early return is recorded. Review the amount to be returned and its supporting documents."
+      ? "A refund is recorded. Review the amount to be returned and its supporting documents."
       : outcome === "Claim"
         ? "Extra expenses are recorded. Review the expense breakdown and supporting documents."
-        : "Both an early return and extra expenses are recorded. Review the refund and claim details below.";
+        : "Review the retirement details below.";
 
   const reviewFields: Array<{ label: string; value: string }> = [];
   const infoNotes: string[] = [];
@@ -472,7 +479,7 @@ function buildRetirementReview(sections: unknown[], values: Record<string, unkno
 
     // These figures describe returned funds only. A zero or stale value should
     // not imply a refund when the selected outcome is Nil retirement or Claim.
-    if (!(isRefund || isEarlyReturn) && /total amount (spent|to return)(?:\s+copy)?|number of nights spent/i.test(label)) continue;
+    if (!isRefund && /total amount (spent|to return)(?:\s+copy)?|number of nights spent/i.test(label)) continue;
 
     const value = retirementDisplayValue(read(field));
     if (value) reviewFields.push({ label, value });
