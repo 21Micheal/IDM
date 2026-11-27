@@ -5325,6 +5325,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   processSteps: ProcessStepOption[];
 }) {
   const [tab, setTab] = useState<"field" | "advanced">("field");
+  const [infoTokenField, setInfoTokenField] = useState("");
   const referenceGroups = useRbacGroups();
   const isTable = field.type === "table";
   const isButton = field.type === "button";
@@ -5811,9 +5812,41 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
         <>
           {!isButton && (
             <>
-              <InspectorRow label="Default value">
-                <input className={inputCls} value={field.defaultValue ?? ""} onChange={(e) => onUpdate({ defaultValue: e.target.value })} />
-              </InspectorRow>
+              {field.type === "info" ? (
+                <InspectorRow label="Note text" hint="Use {{field_key}} to display that field's current value, for example: Extra cost: {{extra_ticket_cost}}">
+                  <textarea className={cn(inputCls, "min-h-24 resize-y")} value={field.defaultValue ?? ""}
+                    onChange={(e) => onUpdate({ defaultValue: e.target.value })}
+                    placeholder="You are receiving this approval because the ticket cost is higher than expected by {{extra_ticket_cost}}" />
+                  {siblings.length > 0 && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <CustomListbox
+                        value={infoTokenField}
+                        onChange={setInfoTokenField}
+                        options={[
+                          { value: "", label: "Select a field…" },
+                          ...siblings.map((s) => ({ value: s.key ?? "", label: `${s.label} (${s.key})` })),
+                        ]}
+                        className={inputCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Field value to insert"
+                      />
+                      <button type="button" disabled={!infoTokenField}
+                        onClick={() => {
+                          const current = field.defaultValue ?? "";
+                          const separator = current && !/\s$/.test(current) ? " " : "";
+                          onUpdate({ defaultValue: `${current}${separator}{{${infoTokenField}}}` });
+                        }}
+                        className="shrink-0 border border-[#287EAD] px-2.5 py-2 text-xs font-semibold text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-50">
+                        Insert value
+                      </button>
+                    </div>
+                  )}
+                </InspectorRow>
+              ) : (
+                <InspectorRow label="Default value">
+                  <input className={inputCls} value={field.defaultValue ?? ""} onChange={(e) => onUpdate({ defaultValue: e.target.value })} />
+                </InspectorRow>
+              )}
               <InspectorRow label="Regular expression" hint="Validation pattern, e.g. ^[A-Z0-9-]+$">
                 <input className={cn(inputCls, "font-mono")} value={field.regex ?? ""} onChange={(e) => onUpdate({ regex: e.target.value })} />
               </InspectorRow>

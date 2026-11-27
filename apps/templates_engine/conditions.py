@@ -229,6 +229,7 @@ def _process_step_matches(actual: str, expected: str) -> bool:
         "request_approved",
         "lpo_pending",
         "lpo_approved",
+        "retirement_ready",
         "retirement_pending",
         "retirement_returned",
         "retirement_rejected",
@@ -237,6 +238,7 @@ def _process_step_matches(actual: str, expected: str) -> bool:
     }
     downstream_lpo_approved = {
         "lpo_approved",
+        "retirement_ready",
         "retirement_pending",
         "retirement_returned",
         "retirement_rejected",
@@ -275,30 +277,34 @@ def eval_condition(cond: dict, values: dict, process_step: str, viewer=None) -> 
     return any(match_operator(operator, sv, expected) for sv in candidates)
 
 
-def _eval_normalized(g, values: dict, process_step: str, viewer=None) -> bool:
+def _eval_normalized(g, values: dict, process_step: str, viewer=None, ignore_user_group_conditions=False) -> bool:
+    conditions = [
+        condition for condition in g["conditions"]
+        if not ignore_user_group_conditions or condition.get("source") != "user_group"
+    ]
     nested = [n for n in g["groups"] if _group_has_conditions(n)]
-    if not g["conditions"] and not nested:
+    if not conditions and not nested:
         return True
-    results = [eval_condition(c, values, process_step, viewer) for c in g["conditions"]]
-    results += [_eval_normalized(n, values, process_step, viewer) for n in nested]
+    results = [eval_condition(c, values, process_step, viewer) for c in conditions]
+    results += [_eval_normalized(n, values, process_step, viewer, ignore_user_group_conditions) for n in nested]
     return any(results) if g["combinator"] == "or" else all(results)
 
 
-def eval_group(group, values: dict, process_step: str, viewer=None) -> bool:
+def eval_group(group, values: dict, process_step: str, viewer=None, *, ignore_user_group_conditions=False) -> bool:
     """True if the rule group matches. An empty/absent group is True (no
     restriction). Nested ``groups`` are combined with the group's own combinator."""
     g = _normalize_group(group)
     if g is None:
         return True
-    return _eval_normalized(g, values, process_step, viewer)
+    return _eval_normalized(g, values, process_step, viewer, ignore_user_group_conditions)
 
 
-def is_visible(item: dict, values: dict, process_step: str = "draft", viewer=None) -> bool:
+def is_visible(item: dict, values: dict, process_step: str = "draft", viewer=None, *, ignore_user_group_conditions=False) -> bool:
     """A field/section is visible unless always-hidden or its ``visibleWhen`` group
     doesn't match at the current step/values/viewer."""
     if item.get("hidden"):
         return False
-    return eval_group(item.get("visibleWhen"), values, process_step, viewer)
+    return eval_group(item.get("visibleWhen"), values, process_step, viewer, ignore_user_group_conditions=ignore_user_group_conditions)
 
 
 def is_editable(item: dict, values: dict, process_step: str = "draft", viewer=None) -> bool:

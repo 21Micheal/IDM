@@ -851,10 +851,37 @@ def get_imprest_retirement_postings(document) -> list[dict]:
             if not isinstance(retirement, dict) or not retirement.get("enabled"):
                 continue
             condition_key = retirement_field_key("underSpendConditionField", "Early Return?", "Early Return")
+            # Newer retirement forms use one exclusive choice for the whole
+            # outcome (Nil Settlement / Refund / Claim). Bind those choices
+            # explicitly so stale values in a now-hidden refund field or
+            # expense table cannot determine the posting scenario.
+            scenario_field_candidates: dict[str, str] = {}
+            checkbox_groups: dict[str, list[dict]] = {}
+            for candidate in form_fields:
+                if candidate.get("type") not in {"boolean", "checkbox"}:
+                    continue
+                group_name = str(candidate.get("checkboxGroup") or "").strip().casefold()
+                if group_name:
+                    checkbox_groups.setdefault(group_name, []).append(candidate)
+            for group_members in checkbox_groups.values():
+                if not any(member.get("checkboxGroupExclusive") for member in group_members):
+                    continue
+                for member in group_members:
+                    field_key = str(member.get("key") or member.get("id") or "").strip()
+                    label_key = str(member.get("label") or "").strip().casefold()
+                    name_key = field_key.casefold()
+                    if not field_key:
+                        continue
+                    if label_key in {"nil settlement", "nil retirement", "exact", "exact spend", "exact spend retirement"} or "exact_retirement" in name_key:
+                        scenario_field_candidates.setdefault("exact", field_key)
+                    elif label_key in {"refund", "under spend", "underspend", "underexpenditure"} or "refund" in name_key:
+                        scenario_field_candidates.setdefault("under", field_key)
+                    elif label_key in {"claim", "over spend", "overspend", "overexpenditure"} or "extra_expenses" in name_key:
+                        scenario_field_candidates.setdefault("over", field_key)
             if not isinstance(rows, list):
                 # Exact-spend submissions may contain no retirement table
                 # value at all. Keep legacy mappings table-dependent.
-                if not condition_key:
+                if not condition_key and not scenario_field_candidates:
                     continue
                 rows = []
 
@@ -925,6 +952,8 @@ def get_imprest_retirement_postings(document) -> list[dict]:
                 "retirement": {
                     "issued_amount": issued_amount,
                     "spent_amount": {"table": table.get("key"), "column": amount_column.get("key")},
+                    **({"scenario_conditions": {name: {"field": key} for name, key in scenario_field_candidates.items()}}
+                       if scenario_field_candidates else {}),
                     **({"under_spend_condition": {"field": condition_key}} if condition_key else {}),
                     **({"under_spent_amount": {"field": spent_key}}
                        if (spent_key := retirement_field_key("underSpentAmountField", "Total Amount Spent")) else {}),

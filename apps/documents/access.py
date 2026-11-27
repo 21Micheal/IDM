@@ -252,20 +252,29 @@ def form_has_editable_fields(document: Document, user=None) -> bool:
 
 
 def retirement_editable_section_ids(document: Document, user=None) -> set[str]:
-    """Return visible retirement-expense sections editable after LPO approval.
+    """Return retirement-expense sections editable after LPO approval.
 
     The retirement expense table is a sub-process of a requisition and must stay
-    locked while the LPO workflow is active. Once LPO is approved, its
-    section-level group visibility rule is the access boundary for scoped edits.
+    locked while the LPO workflow is active. Once retirement is ready, the
+    requisitioner may edit their own retirement section even when the template
+    scopes that section to approval groups.
     """
     if user is None or not getattr(user, "is_authenticated", False):
         return set()
     try:
-        from apps.documents.builder_workflow import builder_process_step, completed_procurement_stages
+        from apps.documents.builder_workflow import (
+            builder_process_step,
+            can_submit_retirement_workflow,
+            completed_procurement_stages,
+        )
         if "requisition" not in completed_procurement_stages(document):
             return set()
-        if builder_process_step(document) != "lpo_approved":
+        process_step = builder_process_step(document)
+        retirement_submitter_ready = can_submit_retirement_workflow(document, user=user)
+        if process_step != "lpo_approved" and not retirement_submitter_ready:
             return set()
+        if retirement_submitter_ready:
+            process_step = "retirement_ready"
         form = (document.metadata or {}).get("form")
         if not isinstance(form, dict):
             return set()
@@ -273,7 +282,6 @@ def retirement_editable_section_ids(document: Document, user=None) -> set[str]:
         from apps.templates_engine.conditions import is_editable, is_visible
         values = form.get("values") if isinstance(form.get("values"), dict) else {}
         rendered = descriptors_to_names(values)
-        process_step = builder_process_step(document)
         viewer = viewer_for_user(user)
         result = set()
         for section in form.get("sections") or []:
@@ -282,14 +290,29 @@ def retirement_editable_section_ids(document: Document, user=None) -> set[str]:
             fields = section.get("fields") or []
             if not any(isinstance(field, dict) and field.get("workflowRole") == "retirement_expenses" for field in fields):
                 continue
-            if not is_visible(section, rendered, process_step, viewer) or not is_editable(section, rendered, process_step, viewer):
+            if (
+                not is_visible(
+                    section,
+                    rendered,
+                    process_step,
+                    viewer,
+                    ignore_user_group_conditions=retirement_submitter_ready,
+                )
+                or not is_editable(section, rendered, process_step, viewer)
+            ):
                 continue
             if not any(
                 isinstance(field, dict)
                 and field.get("key")
                 and not field.get("hidden")
                 and not field.get("readonly")
-                and is_visible(field, rendered, process_step, viewer)
+                and is_visible(
+                    field,
+                    rendered,
+                    process_step,
+                    viewer,
+                    ignore_user_group_conditions=retirement_submitter_ready and field.get("workflowRole") == "retirement_expenses",
+                )
                 and is_editable(field, rendered, process_step, viewer)
                 for field in fields
             ):

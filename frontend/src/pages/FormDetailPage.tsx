@@ -44,6 +44,7 @@ import { useAuthStore } from "@/store/authStore";
 import { cn } from "@/lib/utils";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { requisitionStartDate } from "@/lib/requisitionDates";
+import { isKnownOperator, matchOperator } from "@/lib/ruleOperators";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import SignaturePlacementModal, {
   FormTargetField,
@@ -300,6 +301,186 @@ type RetirementVariance = {
   spent?: string;
 };
 
+type RetirementReview = {
+  outcome: string;
+  explanation: string;
+  fields: Array<{ label: string; value: string }>;
+  infoNotes: string[];
+  attachments: string[];
+  tables: Array<{
+    label: string;
+    layout: "rows" | "columns";
+    entryLabel: string;
+    columns: Array<{ key: string; label: string }>;
+    rows: Array<Record<string, string>>;
+  }>;
+};
+
+function retirementValueIsTrue(value: unknown): boolean {
+  if (value === true || value === 1) return true;
+  return ["true", "1", "yes", "y", "on"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+function retirementDisplayValue(value: unknown): string {
+  if (value == null || value === "") return "";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof File !== "undefined" && value instanceof File) return value.name;
+  if (Array.isArray(value)) return value.map(retirementDisplayValue).filter(Boolean).join(", ");
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const nested = record.file ?? record.attachment;
+    if (nested && nested !== value) return retirementDisplayValue(nested);
+    return String(record.name ?? record.file_name ?? record.filename ?? record.label ?? record.reference ?? "Attachment");
+  }
+  return String(value);
+}
+
+function retirementRuleMatches(rule: unknown, values: Record<string, unknown>, fields: Array<Record<string, any>>, processStep: string): boolean {
+  if (!rule || typeof rule !== "object") return true;
+  const ruleRecord = rule as Record<string, any>;
+  const conditions: Array<Record<string, any>> = Array.isArray(ruleRecord.conditions)
+    ? ruleRecord.conditions
+    : typeof ruleRecord.fieldKey === "string" ? [ruleRecord] : [];
+  const nested = Array.isArray(ruleRecord.groups) ? ruleRecord.groups as unknown[] : [];
+  const results = conditions.map((condition) => {
+    if (condition.source === "user_group") return true;
+    const source = condition.source === "process_step" ? processStep : (() => {
+      const referenced = fields.find((field) => field.key === condition.fieldKey || field.id === condition.fieldKey);
+      const key = referenced?.key ?? referenced?.id ?? condition.fieldKey;
+      return retirementDisplayValue(values[key]);
+    })();
+    return isKnownOperator(String(condition.operator ?? ""))
+      ? matchOperator(String(condition.operator), source, condition.value)
+      : true;
+  });
+  results.push(...nested.map((group) => retirementRuleMatches(group, values, fields, processStep)));
+  if (!results.length) return true;
+  return ruleRecord.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+}
+
+function buildRetirementReview(sections: unknown[], values: Record<string, unknown>, processStep: string): RetirementReview {
+  const sectionRecords = (Array.isArray(sections) ? sections : [])
+    .filter((section): section is Record<string, unknown> => Boolean(section) && typeof section === "object");
+  const retirementSections = sectionRecords.filter((section) =>
+    Array.isArray(section.fields) && (section.fields as Array<Record<string, unknown>>)
+      .some((field) => field?.type === "table" && field.workflowRole === "retirement_expenses"),
+  );
+  const fields = retirementSections.flatMap((section) => Array.isArray(section.fields)
+    ? section.fields.filter((field): field is Record<string, any> => Boolean(field) && typeof field === "object")
+    : []);
+  const isVisible = (field: Record<string, any>) => !field.hidden
+    && retirementRuleMatches(field.visibleWhen, values, fields, processStep);
+  const read = (field: Record<string, any>) => {
+    const key = String(field.key ?? field.id ?? "");
+    return key ? values[key] : undefined;
+  };
+  const findToggle = (labels: string[], keyFragment: string) => fields.find((field) => {
+    const label = String(field.label ?? "").trim().toLowerCase();
+    const key = String(field.key ?? field.id ?? "").toLowerCase();
+    return labels.includes(label) || key.includes(keyFragment);
+  });
+  const exactChoice = findToggle(["nil settlement", "nil retirement", "exact", "exact spend"], "exact_retirement");
+  const refundChoice = findToggle(["refund", "under spend", "underspend", "underexpenditure"], "refund");
+  const claimChoice = findToggle(["claim", "over spend", "overspend", "overexpenditure"], "extra_expenses");
+  const hasExplicitOutcomeChoices = Boolean(exactChoice || refundChoice || claimChoice);
+  const isExact = exactChoice ? retirementValueIsTrue(read(exactChoice)) : false;
+  const isRefund = refundChoice ? retirementValueIsTrue(read(refundChoice)) : false;
+  const isClaim = claimChoice ? retirementValueIsTrue(read(claimChoice)) : false;
+  const earlyReturn = findToggle(["early return?", "early return"], "early_return");
+  const extraExpenses = findToggle(["extra expenses?", "extra expenses"], "extra_expenses");
+  const isEarlyReturn = earlyReturn ? retirementValueIsTrue(read(earlyReturn)) : false;
+  const hasExtraExpenses = extraExpenses ? retirementValueIsTrue(read(extraExpenses)) : false;
+  const outcome = hasExplicitOutcomeChoices
+    ? [isExact, isRefund, isClaim].filter(Boolean).length > 1 ? "Multiple outcomes selected"
+      : !isExact && !isRefund && !isClaim ? "Outcome not selected"
+        : isRefund ? "Refund" : isClaim ? "Claim" : "Nil retirement"
+    : isEarlyReturn && hasExtraExpenses ? "Refund and Claim"
+      : hasExtraExpenses ? "Claim"
+        : isEarlyReturn ? "Refund" : "Nil retirement";
+  const explanation = outcome === "Multiple outcomes selected"
+    ? "More than one retirement outcome is selected. Return to the form and select only one before submitting."
+    : outcome === "Outcome not selected"
+      ? "Select one retirement outcome before submitting."
+    : outcome === "Nil retirement"
+    ? "No refund or extra expense claim is selected. Review the supporting documents before submitting."
+    : outcome === "Refund"
+      ? "An early return is recorded. Review the amount to be returned and its supporting documents."
+      : outcome === "Claim"
+        ? "Extra expenses are recorded. Review the expense breakdown and supporting documents."
+        : "Both an early return and extra expenses are recorded. Review the refund and claim details below.";
+
+  const reviewFields: Array<{ label: string; value: string }> = [];
+  const infoNotes: string[] = [];
+  const attachments: string[] = [];
+  const tables: RetirementReview["tables"] = [];
+  for (const field of fields) {
+    const type = String(field.type ?? "");
+    const key = String(field.key ?? field.id ?? "");
+    const label = String(field.label ?? key);
+    if (!isVisible(field) || ["heading", "divider", "spacer", "button"].includes(type)) continue;
+
+    if (type === "info") {
+      if (outcome === "Nil retirement") {
+        const rawNote = retirementDisplayValue(read(field)) || String(field.defaultValue ?? field.helpText ?? "").trim();
+        const note = rawNote.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (token, rawReference: string) => {
+          const reference = rawReference.trim();
+          const source = fields.find((candidate) => candidate.key === reference || candidate.id === reference);
+          return source ? retirementDisplayValue(read(source)) : token;
+        });
+        if (note) infoNotes.push(note);
+      }
+      continue;
+    }
+
+    if (type === "table") {
+      // The expenditure breakdown is only part of a Claim. Old rows can stay
+      // in saved form data after users switch to Nil/Refund, so don't show
+      // those stale rows in the confirmation dialog.
+      if (field.workflowRole === "retirement_expenses" && hasExplicitOutcomeChoices && !isClaim) continue;
+      const columns = (Array.isArray(field.columns) ? field.columns : [])
+        .filter((column: Record<string, any>) => column?.key && !column.hidden)
+        .map((column: Record<string, any>) => ({ key: String(column.key), label: String(column.label ?? column.key) }));
+      const sourceRows = Array.isArray(values[key]) ? values[key] as Array<Record<string, unknown>> : [];
+      const rows = sourceRows.map((row) => columns.reduce((output, column) => {
+        const value = retirementDisplayValue(row?.[column.key]);
+        if (value) output[column.key] = value;
+        return output;
+      }, {} as Record<string, string>))
+        .filter((row) => Object.keys(row).length > 0);
+      tables.push({
+        label,
+        layout: field.tableLayout === "rows" ? "rows" : "columns",
+        entryLabel: String(field.tableEntryLabel ?? "Entry").trim() || "Entry",
+        columns,
+        rows,
+      });
+      continue;
+    }
+
+    if (["file", "image", "multi_file"].includes(type)) {
+      const fileValues = type === "multi_file"
+        ? Object.entries(values).filter(([valueKey]) => valueKey.startsWith(`${key}~`)).map(([, value]) => value)
+        : [read(field)];
+      const names = fileValues.map(retirementDisplayValue).filter(Boolean);
+      attachments.push(...names.map((name) => `${label}: ${name}`));
+      continue;
+    }
+
+    if (type === "checkbox" || type === "boolean" || type === "yes_no") {
+      continue;
+    }
+
+    // These figures describe returned funds only. A zero or stale value should
+    // not imply a refund when the selected outcome is Nil retirement or Claim.
+    if (!(isRefund || isEarlyReturn) && /total amount (spent|to return)(?:\s+copy)?|number of nights spent/i.test(label)) continue;
+
+    const value = retirementDisplayValue(read(field));
+    if (value) reviewFields.push({ label, value });
+  }
+
+  return { outcome, explanation, fields: reviewFields, infoNotes, attachments, tables };
+}
+
 type TabId = "workflow" | "details" | "history" | "comments" | "audit";
 
 export default function FormDetailPage() {
@@ -316,6 +497,7 @@ export default function FormDetailPage() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [procurementDiagnosticsOpen, setProcurementDiagnosticsOpen] = useState(false);
   const [formEditing, setFormEditing] = useState(false);
+  const [retirementConfirmOpen, setRetirementConfirmOpen] = useState(false);
   const [duplicateDateNotice, setDuplicateDateNotice] = useState<{
     travel_date: string;
     matches: Array<{ reference_number: string; date: string }>;
@@ -749,10 +931,14 @@ export default function FormDetailPage() {
       ? doc.metadata?.form?.return_for_rework?.editor_process_step
         ? doc.metadata.form.return_for_rework.editor_process_step
         : doc.builder_process_step || doc.status
-      : returnedForRework ? "draft" : doc.builder_process_step || doc.status;
+      : returnedForRework ? "draft"
+        : doc.can_submit_retirement && doc.builder_process_step === "lpo_approved"
+          ? "retirement_ready"
+          : doc.builder_process_step || doc.status;
     const viewer = {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      isRetirementSubmitter: Boolean(doc.can_submit_retirement),
       canEditConditionalSections: canEdit,
     };
 
@@ -770,7 +956,7 @@ export default function FormDetailPage() {
       formProcessStep,
       viewer,
     );
-    const isEditableApprovalStep = ["request_approved", "requisition_approved", "rfq_approved", "lpo_approved", "retirement_approved"].includes(formProcessStep);
+    const isEditableApprovalStep = ["request_approved", "requisition_approved", "rfq_approved", "lpo_approved", "retirement_ready", "retirement_approved"].includes(formProcessStep);
     if (!formEditing && canEdit && (isAssignedReworkEditor || (isEditableApprovalStep && !isFinalFormProcessStep(formProcessStep))) && hasConfiguredEditableSection) {
       setFormValues({ ...(formData?.values ?? {}) });
       formDirtyRef.current = false;
@@ -938,11 +1124,13 @@ export default function FormDetailPage() {
       const missing = requiredFieldLabels(formData?.sections ?? [], valuesToCheck, {
         groupNames: user?.group_names ?? [],
         isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+        isRetirementSubmitter,
         canEditConditionalSections: canEditConditionalSections(),
       }, process);
       const pastDates = pastDateFieldLabels(formData?.sections ?? [], valuesToCheck, {
         groupNames: user?.group_names ?? [],
         isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+        isRetirementSubmitter,
         canEditConditionalSections: canEditConditionalSections(),
       }, process);
       if (missing.length || pastDates.length) {
@@ -1180,6 +1368,7 @@ export default function FormDetailPage() {
   const canApprove = !isUnassignedHandoffViewer
     && (hasAdminAccess || (doc.permissions ?? []).includes("approve"));
   const hasActiveApprovalTask = Boolean(activeTask && activeTask.status === "in_progress");
+  const isRetirementSubmitter = Boolean(doc.can_submit_retirement);
 
   function formProcessStep() {
     if (isReturnedReworkEditor) {
@@ -1190,7 +1379,9 @@ export default function FormDetailPage() {
     const returnedToSubmitter = doc.status === "returned"
       && !hasPreviousApproverHandoff
       && doc.uploaded_by?.id === user?.id;
-    return returnedToSubmitter ? "draft" : doc.builder_process_step || doc.status;
+    if (returnedToSubmitter) return "draft";
+    if (isRetirementSubmitter && doc.builder_process_step === "lpo_approved") return "retirement_ready";
+    return doc.builder_process_step || doc.status;
   }
   function canEditConditionalSections() {
     return !isUnassignedHandoffViewer && (
@@ -1205,10 +1396,11 @@ export default function FormDetailPage() {
   const canEditRetirementSection = canEdit
     && requisitionApproved
     && lpoApproved
-    && step === "lpo_approved"
+    && ["lpo_approved", "retirement_ready"].includes(step)
     && hasVisibleRetirementEditSection(formData.sections ?? [], formData.values ?? {}, step, {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      isRetirementSubmitter,
     });
   const retirementOnlyEdit = canEditRetirementSection && isApprovalLockedStatus(step) && !hasActiveApprovalTask;
   const retirementSectionReadOnly = !lpoApproved;
@@ -1231,7 +1423,7 @@ export default function FormDetailPage() {
 
   const isRetirementPhase = doc.builder_workflow_phase === "retirement";
   const isRetirementSubmitted = isRetirementPhase && step === "retirement_pending";
-  const isLpoWorkflowStep = ["lpo_pending", "lpo_approved", "retirement_pending", "retirement_approved", "fully_approved"].includes(step);
+  const isLpoWorkflowStep = ["lpo_pending", "lpo_approved", "retirement_ready", "retirement_pending", "retirement_approved", "fully_approved"].includes(step);
   const canPreviewSunSystemsPayload = journalEnabled || (purchaseOrderEnabled && isLpoWorkflowStep);
   const payloadInitialStage = isRetirementSubmitted ? 2 : (purchaseOrderEnabled && isLpoWorkflowStep ? 1000 : 1);
   const isRetirementFinalized = isRetirementPhase && isFinalFormProcessStep(step);
@@ -1255,7 +1447,13 @@ export default function FormDetailPage() {
     && hasVisibleRetirementEditSection(formData.sections ?? [], formData.values ?? {}, step, {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      isRetirementSubmitter,
     });
+  const retirementReview = buildRetirementReview(
+    formData.sections ?? [],
+    formEditing ? formValues : (formData.values ?? {}),
+    step,
+  );
   // Server-computed, travel-aware: requisition -> (rfq | lpo for Travel) -> lpo.
   const procurementNextStage = doc.builder_next_stage ?? null;
   const canSubmitProcurementStage = !isUnassignedHandoffViewer && !isReturnedReworkEditor && Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
@@ -1438,11 +1636,13 @@ export default function FormDetailPage() {
     const missing = requiredFieldLabels(formData.sections ?? [], formValues, {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      isRetirementSubmitter,
       canEditConditionalSections: canEditConditionalSections(),
     }, step);
     const pastDates = pastDateFieldLabels(formData.sections ?? [], formValues, {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      isRetirementSubmitter,
       canEditConditionalSections: canEditConditionalSections(),
     }, step);
     if (missing.length || pastDates.length) {
@@ -1458,6 +1658,7 @@ export default function FormDetailPage() {
     const viewer = {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      isRetirementSubmitter,
       canEditConditionalSections: canEditConditionalSections(),
     };
     const missing = requiredFieldLabels(formData?.sections ?? [], valuesToCheck, viewer, step);
@@ -1812,6 +2013,7 @@ export default function FormDetailPage() {
                   documentId={doc.id}
                   documentStatus={step}
                   canEditConditionalSections={canEditConditionalSections()}
+                  isRetirementSubmitter={isRetirementSubmitter}
                   retirementOnlyEdit={retirementOnlyEdit}
                   retirementSectionReadOnly={retirementSectionReadOnly}
                   onLaunchSignatureModal={(fieldKey?: string) => {
@@ -2273,7 +2475,7 @@ export default function FormDetailPage() {
           {showRetirementSubmit && (
             <button
               type="button"
-              onClick={() => submitMutation.mutate({ workflowStage: "retirement" })}
+              onClick={() => setRetirementConfirmOpen(true)}
               disabled={submitMutation.isPending || !canSubmitRetirement}
               title={canSubmitRetirement ? "Submit this form to the configured Retirement workflow case" : "Available after LPO approval and on or after the configured travel return date"}
               className="inline-flex items-center gap-2 rounded-full bg-[#287EAD] px-5 py-3 text-sm font-semibold text-white shadow-lg ring-1 ring-white/80 hover:bg-[#1E6F99] disabled:cursor-not-allowed disabled:opacity-50"
@@ -2282,6 +2484,102 @@ export default function FormDetailPage() {
               Submit retirement
             </button>
           )}
+        </div>
+      )}
+
+      {retirementConfirmOpen && (
+        <div className="fixed inset-0 z-[240] flex items-center justify-center bg-slate-950/55 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRetirementConfirmOpen(false); }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="retirement-confirm-title" className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden border border-[#C8D6E0] bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-[#DCE6ED] bg-[#F3F8FC] px-5 py-4">
+              <div>
+                <h2 id="retirement-confirm-title" className="text-lg font-bold text-[#1F2933]">Confirm retirement details</h2>
+                <p className="mt-1 text-sm text-[#5E6870]">Review the retirement outcome and captured information before submitting.</p>
+              </div>
+              <button type="button" onClick={() => setRetirementConfirmOpen(false)} className="p-1.5 text-[#5E6870] hover:bg-white" aria-label="Close confirmation"><X className="h-5 w-5" /></button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
+              <section className="border border-[#B9D9EA] bg-[#F5FAFD] p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-[#587081]">Retirement outcome</span>
+                  <span className="border border-[#287EAD] bg-[#287EAD] px-3 py-1 text-xs font-bold text-white">{retirementReview.outcome}</span>
+                </div>
+                <p className="mt-2 text-sm text-[#334B5A]">{retirementReview.explanation}</p>
+              </section>
+
+              {retirementReview.fields.length > 0 && (
+                <section>
+                  <h3 className="mb-2 text-sm font-semibold text-[#1F2933]">Captured details</h3>
+                  <dl className="grid gap-2 sm:grid-cols-2">
+                    {retirementReview.fields.map((item) => (
+                      <div key={item.label} className="min-w-0 border border-[#E1E8ED] px-3 py-2">
+                        <dt className="text-[11px] font-semibold uppercase tracking-wide text-[#6B7C88]">{item.label}</dt>
+                        <dd className="mt-1 break-words text-sm font-medium text-[#1F2933]">{item.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </section>
+              )}
+
+              {retirementReview.infoNotes.map((note, index) => (
+                <section key={`retirement-note-${index}`} className="border border-[#B9D9EA] bg-[#F5FAFD] px-3 py-2.5 text-sm text-[#334B5A]">
+                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-[#587081]">Info note</div>
+                  {note}
+                </section>
+              ))}
+
+              {retirementReview.tables.map((table) => (
+                <section key={table.label}>
+                  <h3 className="mb-2 text-sm font-semibold text-[#1F2933]">{table.label}</h3>
+                  <div className="overflow-x-auto border border-[#D8E2E9]">
+                    {table.layout === "rows" ? (
+                      <table className="w-full min-w-full table-fixed text-left text-xs">
+                        <thead className="bg-[#F3F8FC]"><tr>
+                          <th className="w-64 border-b border-r border-[#D8E2E9] px-3 py-2 font-semibold uppercase tracking-wide text-[#405767]">Field</th>
+                          {table.rows.map((_, index) => <th key={index} className="border-b border-r border-[#D8E2E9] px-3 py-2 font-semibold uppercase tracking-wide text-[#405767]">{table.entryLabel} {index + 1}</th>)}
+                        </tr></thead>
+                        <tbody className="divide-y divide-[#E8EEF2]">
+                          {table.rows.length ? table.columns.map((column) => (
+                            <tr key={column.key}>
+                              <th className="border-r border-[#D8E2E9] bg-[#F8FAFC] px-3 py-2.5 text-left font-semibold text-[#263746]">{column.label}</th>
+                              {table.rows.map((row, index) => <td key={index} className="border-r border-[#E8EEF2] px-3 py-2.5 align-top text-[#263746]">{row[column.key] || "—"}</td>)}
+                            </tr>
+                          )) : <tr><td colSpan={1} className="px-3 py-3 text-center text-[#6B7C88]">No entries</td></tr>}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <table className="min-w-full divide-y divide-[#D8E2E9] text-left text-xs">
+                        <thead className="bg-[#F3F8FC]"><tr>{table.columns.map((column) => <th key={column.key} className="px-3 py-2 font-semibold text-[#405767]">{column.label}</th>)}</tr></thead>
+                        <tbody className="divide-y divide-[#E8EEF2]">
+                          {table.rows.length ? table.rows.map((row, index) => (
+                            <tr key={index}>{table.columns.map((column) => <td key={column.key} className="max-w-xs px-3 py-2 align-top text-[#263746]">{row[column.key] || "—"}</td>)}</tr>
+                          )) : <tr><td colSpan={Math.max(1, table.columns.length)} className="px-3 py-3 text-center text-[#6B7C88]">No entries</td></tr>}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </section>
+              ))}
+
+              <section>
+                <h3 className="mb-2 text-sm font-semibold text-[#1F2933]">Supporting documents</h3>
+                {retirementReview.attachments.length ? (
+                  <ul className="space-y-1.5">{retirementReview.attachments.map((name, index) => <li key={`${name}-${index}`} className="flex items-start gap-2 border border-[#E1E8ED] px-3 py-2 text-sm text-[#334B5A]"><span className="mt-1 h-1.5 w-1.5 flex-shrink-0 bg-[#287EAD]" />{name}</li>)}</ul>
+                ) : (
+                  <p className="border border-dashed border-[#C8D6E0] px-3 py-3 text-sm text-[#6B7C88]">No supporting documents attached.</p>
+                )}
+              </section>
+              <p className="text-xs text-[#6B7C88]">Confirming will submit this retirement to the configured approval workflow.</p>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-[#E1E8ED] bg-[#FAFCFD] px-5 py-3">
+              <button type="button" onClick={() => setRetirementConfirmOpen(false)} className="border border-[#C8D6E0] bg-white px-4 py-2 text-sm font-semibold text-[#405767] hover:bg-[#F3F8FC]">Back to form</button>
+              <button type="button" disabled={submitMutation.isPending || !canSubmitRetirement || retirementReview.outcome === "Multiple outcomes selected" || retirementReview.outcome === "Outcome not selected"}
+                onClick={() => { setRetirementConfirmOpen(false); submitMutation.mutate({ workflowStage: "retirement" }); }}
+                className="inline-flex items-center gap-2 border border-[#287EAD] bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:cursor-wait disabled:opacity-60">
+                {submitMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                Confirm and submit
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

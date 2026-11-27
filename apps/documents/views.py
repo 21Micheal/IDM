@@ -1683,7 +1683,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # tampered request can't slip past. Locked fields are reverted to their
         # stored value; conditions are evaluated against the STORED values (a user
         # can't unlock a field within the same request that edits it).
-        from apps.documents.builder_workflow import builder_process_step, completed_procurement_stages
+        from apps.documents.builder_workflow import (
+            builder_process_step,
+            can_submit_retirement_workflow,
+            completed_procurement_stages,
+        )
         from apps.documents.access import viewer_for_user, retirement_editable_section_ids
         from apps.documents.access import user_has_active_approval_task
         from apps.templates_engine.conditions import is_editable, is_visible
@@ -1703,6 +1707,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         ):
             handoff = ((doc.metadata or {}).get("form") or {}).get("return_for_rework") or {}
             process_step = handoff.get("editor_process_step") or process_step
+        retirement_submitter_ready = can_submit_retirement_workflow(doc, user=request.user)
+        if retirement_submitter_ready:
+            process_step = "retirement_ready"
         viewer = viewer_for_user(request.user)
         prior_render = descriptors_to_names(prior_values)
         lpo_approved = "lpo" in completed_procurement_stages(doc)
@@ -1747,6 +1754,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 isinstance(field, dict) and field.get("workflowRole") == "retirement_expenses"
                 for field in section_fields
             )
+            retirement_owner_scope = retirement_submitter_ready and is_retirement_section
             if is_retirement_section and not lpo_approved:
                 locked_keys.update(
                     f.get("key") for f in section_fields
@@ -1760,13 +1768,25 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 )
                 continue
             section_editable = is_editable(section, prior_render, process_step, viewer)
-            section_visible = is_visible(section, prior_render, process_step, viewer)
+            section_visible = is_visible(
+                section,
+                prior_render,
+                process_step,
+                viewer,
+                ignore_user_group_conditions=retirement_owner_scope,
+            )
             for f in section_fields:
                 key = f.get("key")
                 if not key:
                     continue
                 field_editable = is_editable(f, prior_render, process_step, viewer)
-                field_visible = is_visible(f, prior_render, process_step, viewer)
+                field_visible = is_visible(
+                    f,
+                    prior_render,
+                    process_step,
+                    viewer,
+                    ignore_user_group_conditions=retirement_owner_scope and f.get("workflowRole") == "retirement_expenses",
+                )
                 if not (section_editable and field_editable) or (retirement_only_edit and not (section_visible and field_visible)):
                     locked_keys.add(key)
         for key in locked_keys:

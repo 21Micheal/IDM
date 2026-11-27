@@ -303,13 +303,16 @@ type Section = {
 /** The person filling/viewing the form, used to evaluate role-restricted
  * sections. Visibility group rules apply to admins too; edit permission is
  * evaluated separately. */
-export type FormViewer = { groupNames?: string[]; groupIds?: string[]; isAdmin?: boolean; canEditConditionalSections?: boolean };
+export type FormViewer = { groupNames?: string[]; groupIds?: string[]; isAdmin?: boolean; isRetirementSubmitter?: boolean; canEditConditionalSections?: boolean };
 
 /** A section restricted to RBAC groups is visible only to members of those
  * groups (matched by id or name). An empty
  * / absent list means everyone. When the viewer is unknown we don't hide — the
  * server stays authoritative. */
 function sectionVisibleToViewer(section: Section, viewer?: FormViewer): boolean {
+  // The requisitioner owns the retirement submission. Group restrictions on
+  // the retirement section must not hide the fields they need to complete.
+  if (viewer?.isRetirementSubmitter && isRetirementExpenseSection(section)) return true;
   const groups = section.visibleToGroups ?? [];
   if (groups.length === 0) return true;
   if (!viewer) return true;
@@ -591,12 +594,14 @@ function evalRule(
   processStep: string,
   rowScope?: Record<string, unknown> | null,
   viewer?: FormViewer,
+  ignoreUserGroupConditions = false,
 ): boolean {
   const walk = (g: NormalizedRule): boolean => {
+    const conditions = g.conditions.filter((condition) => !ignoreUserGroupConditions || condition.source !== "user_group");
     const nested = g.groups.filter(ruleHasContent);
-    if (g.conditions.length === 0 && nested.length === 0) return true;
+    if (conditions.length === 0 && nested.length === 0) return true;
     const results = [
-      ...g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope, viewer)),
+      ...conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope, viewer)),
       ...nested.map(walk),
     ];
     return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
@@ -630,11 +635,11 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
     const e = (expected || "").trim().toLowerCase();
     if (a === e) return true;
     const downstreamRequisitionApproved = new Set([
-      "request_approved", "lpo_pending", "lpo_approved", "retirement_pending",
+      "request_approved", "lpo_pending", "lpo_approved", "retirement_ready", "retirement_pending",
       "retirement_returned", "retirement_rejected", "retirement_approved", "fully_approved",
     ]);
     const downstreamLpoApproved = new Set([
-      "lpo_approved", "retirement_pending", "retirement_returned",
+      "lpo_approved", "retirement_ready", "retirement_pending", "retirement_returned",
       "retirement_rejected", "retirement_approved", "fully_approved",
     ]);
     return (e === "requisition_approved" && downstreamRequisitionApproved.has(a))
@@ -711,7 +716,7 @@ function conditionSourceValues(
 // empty/absent rule group means no restriction (visible). `processStep` is the
 // document's current workflow status ("draft" while a new form is being filled).
 function evalVisible(
-  item: { hidden?: boolean; visibleWhen?: VisibleWhen | null },
+  item: { hidden?: boolean; visibleWhen?: VisibleWhen | null; workflowRole?: string; fields?: Field[] },
   values: TemplateFormValues,
   allFields: Field[],
   processStep = "draft",
@@ -719,7 +724,11 @@ function evalVisible(
   viewer?: FormViewer,
 ): boolean {
   if (item.hidden) return false;
-  return evalRule(item.visibleWhen, values, allFields, processStep, rowScope, viewer);
+  const retirementOwnerScope = Boolean(
+    viewer?.isRetirementSubmitter
+    && (item.workflowRole === "retirement_expenses" || (item.fields && isRetirementExpenseSection(item as Section))),
+  );
+  return evalRule(item.visibleWhen, values, allFields, processStep, rowScope, viewer, retirementOwnerScope);
 }
 
 // Editability mirror: a field/section is editable unless always read-only
@@ -2461,6 +2470,30 @@ function AnalysisPanelInput({ value, onChange, disabled, slots }: {
   );
 }
 
+function infoNoteValueText(value: unknown): string {
+  if (value == null || value === "") return "";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (Array.isArray(value)) return value.map(infoNoteValueText).filter(Boolean).join(", ");
+  if (typeof value === "object") {
+    const label = referenceLabel(value);
+    return label && label !== "[object Object]" ? label : "";
+  }
+  return String(value);
+}
+
+/** Resolve `{{field_key}}` (or `{{field_id}}`) references in informational notes. */
+function renderInfoNote(text: string, values: TemplateFormValues, fields: Field[]): string {
+  return text.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (token, rawReference: string) => {
+    const reference = rawReference.trim();
+    const field = fields.find((candidate) => candidate.key === reference || candidate.id === reference);
+    if (!field) return token;
+    const value = field.key && Object.prototype.hasOwnProperty.call(values, field.key)
+      ? values[field.key]
+      : values[field.id];
+    return infoNoteValueText(value);
+  });
+}
+
 function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields, onLaunchSignatureModal, onButtonClick, buttonDone = false, viewer, validationIssues = [] }: {
   field: Field;
   control: any;
@@ -2531,7 +2564,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     <div className="min-w-0" style={{ gridColumn: "span 12 / span 12" }}>
       <div className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
         <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
-        <span>{field.defaultValue || help || label}</span>
+        <span>{renderInfoNote(field.defaultValue || help || label, allValues, allFields)}</span>
       </div>
     </div>
   );
@@ -2681,15 +2714,72 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
               onChange={(e) => {
                 const checked = e.target.checked;
                 f.onChange(checked);
-                onChangeCb(key, checked);
-                if (checked && exclusiveGroup) {
+                const nextValues = { ...allValues, [key]: checked };
+                if (exclusiveGroup) {
                   for (const member of groupMembers) {
                     const memberKey = member.key ?? "";
-                    if (memberKey && memberKey !== key && truthyValue(allValues[memberKey])) {
-                      onChangeCb(memberKey, false);
+                    if (!memberKey || memberKey === key) continue;
+                    if (checked) nextValues[memberKey] = false;
+                    if (checked && truthyValue(allValues[memberKey])) onChangeCb(memberKey, false);
+                  }
+
+                  const groupKeys = new Set(groupMembers.flatMap((member) => [member.key ?? "", member.id ?? ""]).filter(Boolean));
+                  const referencesGroupChoice = (item: { visibleWhen?: VisibleWhen | null }) => {
+                    const normalized = normalizeRule(item.visibleWhen);
+                    const visit = (rule: NormalizedRule | null): boolean => Boolean(rule && (
+                      rule.conditions.some((condition) => groupKeys.has(condition.fieldKey ?? ""))
+                      || rule.groups.some((nested) => visit(nested))
+                    ));
+                    return visit(normalized);
+                  };
+
+                  for (const candidate of allFields) {
+                    const candidateKey = candidate.key ?? candidate.id ?? "";
+                    if (!candidateKey || groupKeys.has(candidateKey)
+                      || ["heading", "divider", "spacer", "info", "button"].includes(candidate.type ?? "")) continue;
+                    const selectedChoice = `${String(field.label ?? "")} ${String(field.key ?? "")}`.toLowerCase();
+                    if (checked && candidate.type === "table" && candidate.workflowRole === "retirement_expenses"
+                      && !/(claim|extra[_ ]?expenses|over[_ ]?spend|overspend)/.test(selectedChoice)) {
+                      // The retirement expense table is only the Claim
+                      // breakdown. It can remain visible independently of the
+                      // outcome checkbox, so normal conditional-field cleanup
+                      // would otherwise leave old Claim rows behind on Exact
+                      // or Refund submissions.
+                      onChangeCb(candidateKey, []);
+                      continue;
                     }
+                    const wasVisible = evalVisible(candidate, allValues, allFields, processStep, null, viewer);
+                    const isVisible = evalVisible(candidate, nextValues, allFields, processStep, null, viewer);
+                    if (wasVisible && !isVisible || (referencesGroupChoice(candidate) && !isVisible)) {
+                      onChangeCb(candidateKey, candidate.type === "table" ? [] : undefined);
+                      for (const attachmentKey of Object.keys(allValues)) {
+                        if (attachmentKey.startsWith(`${candidateKey}~`)) onChangeCb(attachmentKey, undefined);
+                      }
+                      continue;
+                    }
+
+                    if (candidate.type !== "table" || !isVisible) continue;
+                    const rows = Array.isArray(allValues[candidateKey]) ? allValues[candidateKey] as Array<Record<string, unknown>> : [];
+                    let rowsChanged = false;
+                    const nextRows = rows.map((row) => {
+                      const nextRow = { ...row };
+                      for (const column of candidate.columns ?? []) {
+                        const columnKey = column.key;
+                        if (!columnKey || !referencesGroupChoice(column)) continue;
+                        const isColumnVisible = evalVisible(column, nextValues, allFields, processStep, row, viewer);
+                        if (!isColumnVisible) {
+                          if (Object.prototype.hasOwnProperty.call(nextRow, columnKey)) {
+                            delete nextRow[columnKey];
+                            rowsChanged = true;
+                          }
+                        }
+                      }
+                      return nextRow;
+                    });
+                    if (rowsChanged) onChangeCb(candidateKey, nextRows);
                   }
                 }
+                onChangeCb(key, checked);
               }} />
             {label}
             {field.required && <span className="text-red-500">*</span>}
@@ -3188,7 +3278,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections, retirementOnlyEdit = false, retirementSectionReadOnly = false, onLaunchSignatureModal, validationIssues = [] }: {
+function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections, isRetirementSubmitter = false, retirementOnlyEdit = false, retirementSectionReadOnly = false, onLaunchSignatureModal, validationIssues = [] }: {
   sections: unknown[];
   values: TemplateFormValues;
   onChange: (key: string, value: unknown, meta?: { isInternal?: boolean }) => void;
@@ -3198,6 +3288,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // conditions. Absent (a brand-new form) is treated as "draft".
   documentStatus?: string;
   canEditConditionalSections?: boolean;
+  isRetirementSubmitter?: boolean;
   retirementOnlyEdit?: boolean;
   retirementSectionReadOnly?: boolean;
   onLaunchSignatureModal?: (fieldKey?: string) => void;
@@ -3354,6 +3445,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
     groupNames: currentUser?.group_names ?? [],
     groupIds: currentUser?.group_ids ?? [],
     isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
+    isRetirementSubmitter,
     canEditConditionalSections,
   };
 

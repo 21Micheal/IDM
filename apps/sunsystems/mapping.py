@@ -791,11 +791,54 @@ def classify_retirement(retirement: dict, values: dict, warnings: list[str] | No
                 text = row.get(description_column_key)
                 if isinstance(text, str) and text.strip():
                     row_descriptions.append(text.strip())
-    elif not isinstance(retirement.get("under_spend_condition"), dict):
+    elif (
+        not isinstance(retirement.get("under_spend_condition"), dict)
+        and not isinstance(retirement.get("scenario_conditions"), dict)
+    ):
         _warnings.append(f"Retirement table '{table_key}' has no rows; spent amount treated as 0.")
 
+    scenario_conditions = retirement.get("scenario_conditions")
+    selected_scenarios = []
+    if isinstance(scenario_conditions, dict):
+        for name in ("exact", "under", "over"):
+            condition = scenario_conditions.get(name)
+            if isinstance(condition, dict) and resolve_value(condition, values).strip().casefold() in {"true", "1", "yes", "y", "on"}:
+                selected_scenarios.append(name)
+
+    if len(selected_scenarios) > 1:
+        _warnings.append(
+            "More than one retirement outcome is selected. The configured exclusive outcome fields conflict; "
+            "the posting uses the first selected outcome in Exact, Refund, Claim order."
+        )
+    selected_scenario = selected_scenarios[0] if selected_scenarios else None
     under_condition = retirement.get("under_spend_condition")
-    if isinstance(under_condition, dict):
+    if selected_scenario == "exact":
+        # Exact/Nil retirement has no spend breakdown. Ignore values left in
+        # hidden Refund/Claim fields and tables from earlier scenario testing.
+        spent = issued
+        variance = Decimal("0")
+        row_descriptions = []
+        scenario_name = "exact"
+    elif selected_scenario == "under":
+        under_spent_spec = retirement.get("under_spent_amount") or {}
+        under_variance_spec = retirement.get("under_variance_amount") or {}
+        spent_key = under_spent_spec.get("field") if isinstance(under_spent_spec, dict) else None
+        variance_key = under_variance_spec.get("field") if isinstance(under_variance_spec, dict) else None
+        if spent_key:
+            spent = resolve_amount(under_spent_spec, values)
+            row_descriptions = []
+        if variance_key:
+            variance = abs(resolve_amount(under_variance_spec, values))
+        else:
+            variance = abs(issued - spent)
+            _warnings.append("Early-return variance amount is not configured; it was calculated from issued minus spent.")
+        scenario_name = "under"
+    elif selected_scenario == "over":
+        # The expense table contains only the additional claim amount.
+        variance = spent
+        spent = issued + variance
+        scenario_name = "over"
+    elif isinstance(under_condition, dict):
         condition_key = under_condition.get("field")
         if condition_key and condition_key not in (values or {}):
             _warnings.append(
