@@ -588,12 +588,11 @@ export default function RequisitionReportsPage() {
 
   const toggleSelectAllFinOnPage = () => {
     setSelectedFinIds((prev) => {
-      const next = new Set(prev);
       if (allFinPageSelected) {
-        paginatedFinancialLines.forEach((l) => next.delete(l.id));
-      } else {
-        paginatedFinancialLines.forEach((l) => next.add(l.id));
+        return new Set();
       }
+      const next = new Set(prev);
+      paginatedFinancialLines.forEach((l) => next.add(l.id));
       return next;
     });
   };
@@ -681,12 +680,11 @@ export default function RequisitionReportsPage() {
 
   const toggleSelectAllRetOnPage = () => {
     setSelectedRetIds((prev) => {
-      const next = new Set(prev);
       if (allRetPageSelected) {
-        paginatedRetirements.forEach((r) => next.delete(r.id));
-      } else {
-        paginatedRetirements.forEach((r) => next.add(r.id));
+        return new Set();
       }
+      const next = new Set(prev);
+      paginatedRetirements.forEach((r) => next.add(r.id));
       return next;
     });
   };
@@ -761,7 +759,15 @@ export default function RequisitionReportsPage() {
 
   const currentRetSummary = isPrinting && printScope === "selected" ? selectedRetSummary : retSummary;
 
-  const activeSelectedCount = activeMainTab === "financial" ? selectedFinIds.size : selectedRetIds.size;
+  const matchingFinSelectedCount = useMemo(() => {
+    return sortedFinancialLines.filter((l) => selectedFinIds.has(l.id)).length;
+  }, [sortedFinancialLines, selectedFinIds]);
+
+  const matchingRetSelectedCount = useMemo(() => {
+    return sortedRetirements.filter((r) => selectedRetIds.has(r.id)).length;
+  }, [sortedRetirements, selectedRetIds]);
+
+  const activeSelectedCount = activeMainTab === "financial" ? matchingFinSelectedCount : matchingRetSelectedCount;
   const totalFilteredCount = activeMainTab === "financial" ? sortedFinancialLines.length : sortedRetirements.length;
   const currentPageRowsCount = activeMainTab === "financial" ? paginatedFinancialLines.length : paginatedRetirements.length;
 
@@ -1694,7 +1700,7 @@ export default function RequisitionReportsPage() {
             {financialTab === "lines" && (
               <div className="space-y-3">
                 {/* Custom Selection Bar */}
-                {selectedFinIds.size > 0 && (
+                {matchingFinSelectedCount > 0 && (
                   <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] px-4 py-2.5 text-xs shadow-2xs print:hidden animate-in fade-in duration-150">
                     <div className="flex items-center gap-2.5">
                       <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white border border-[#C5E6F5] text-[#287EAD]">
@@ -1702,7 +1708,7 @@ export default function RequisitionReportsPage() {
                       </div>
                       <div>
                         <span className="font-bold text-[#0A4D68]">
-                          {selectedFinIds.size} of {sortedFinancialLines.length} {selectedFinIds.size === 1 ? "line" : "lines"} selected
+                          {matchingFinSelectedCount} of {sortedFinancialLines.length} {matchingFinSelectedCount === 1 ? "line" : "lines"} selected
                         </span>
                         <span className="ml-2 text-slate-500 font-medium">
                           (Total: <span className="font-semibold text-slate-700">{formatCurrency(selectedFinSummary.total_amount)}</span>)
@@ -1715,7 +1721,7 @@ export default function RequisitionReportsPage() {
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      {selectedFinIds.size < sortedFinancialLines.length && (
+                      {matchingFinSelectedCount < sortedFinancialLines.length && (
                         <button
                           type="button"
                           onClick={handleSelectAllFilteredFin}
@@ -1737,7 +1743,7 @@ export default function RequisitionReportsPage() {
                         className="inline-flex items-center gap-1.5 rounded-lg border border-[#287EAD] bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-[#1E6F99] transition-colors cursor-pointer"
                       >
                         <Printer className="h-3.5 w-3.5" />
-                        Print Selected ({selectedFinIds.size})
+                        Print Selected ({matchingFinSelectedCount})
                       </button>
                       <button
                         type="button"
@@ -1763,14 +1769,16 @@ export default function RequisitionReportsPage() {
                       <thead>
                         <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
                           <th className="w-10 px-3 py-2.5 text-center print:hidden">
-                            <input
-                              ref={finHeaderCheckboxRef}
-                              type="checkbox"
-                              aria-label="Select all lines on this page"
-                              checked={allFinPageSelected}
-                              onChange={toggleSelectAllFinOnPage}
-                              className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
-                            />
+                            <label className="flex items-center justify-center cursor-pointer p-1 -m-1" title="Select / deselect all lines on this page">
+                              <input
+                                ref={finHeaderCheckboxRef}
+                                type="checkbox"
+                                aria-label="Select all lines on this page"
+                                checked={allFinPageSelected}
+                                onChange={toggleSelectAllFinOnPage}
+                                className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                              />
+                            </label>
                           </th>
                           {visibleFinCols.has("document_reference") && (
                             <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("document_reference")}>
@@ -1846,17 +1854,16 @@ export default function RequisitionReportsPage() {
                                   isSelected ? "bg-[#F0F8FD] hover:bg-[#E2F2FA]" : "hover:bg-[#F8FAFC]"
                                 )}
                               >
-                                <td
-                                  className="w-10 px-3 py-2.5 text-center print:hidden cursor-pointer"
-                                  onClick={() => toggleSelectFinRow(line.id)}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    aria-label={`Select row ${line.document_reference}`}
-                                    checked={isSelected}
-                                    onChange={() => toggleSelectFinRow(line.id)}
-                                    className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
-                                  />
+                                <td className="w-10 px-3 py-2.5 text-center print:hidden">
+                                  <label className="flex items-center justify-center cursor-pointer p-1 -m-1" title="Select row">
+                                    <input
+                                      type="checkbox"
+                                      aria-label={`Select row ${line.document_reference}`}
+                                      checked={isSelected}
+                                      onChange={() => toggleSelectFinRow(line.id)}
+                                      className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                                    />
+                                  </label>
                                 </td>
                                 {visibleFinCols.has("document_reference") && (
                                   <td className="py-2.5 px-3 print:py-1 print:px-1 font-semibold text-[#287EAD] whitespace-nowrap">
@@ -2435,7 +2442,7 @@ export default function RequisitionReportsPage() {
             {retirementsTab === "register" && (
               <div className="space-y-3">
                 {/* Custom Selection Bar */}
-                {selectedRetIds.size > 0 && (
+                {matchingRetSelectedCount > 0 && (
                   <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] px-4 py-2.5 text-xs shadow-2xs print:hidden animate-in fade-in duration-150">
                     <div className="flex items-center gap-2.5">
                       <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white border border-[#C5E6F5] text-[#287EAD]">
@@ -2443,7 +2450,7 @@ export default function RequisitionReportsPage() {
                       </div>
                       <div>
                         <span className="font-bold text-[#0A4D68]">
-                          {selectedRetIds.size} of {sortedRetirements.length} {selectedRetIds.size === 1 ? "record" : "records"} selected
+                          {matchingRetSelectedCount} of {sortedRetirements.length} {matchingRetSelectedCount === 1 ? "record" : "records"} selected
                         </span>
                         <span className="ml-2 text-slate-500 font-medium">
                           (Outstanding: <span className="font-semibold text-slate-700">{formatCurrency(selectedRetSummary.total_outstanding_amount)}</span>)
@@ -2456,7 +2463,7 @@ export default function RequisitionReportsPage() {
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      {selectedRetIds.size < sortedRetirements.length && (
+                      {matchingRetSelectedCount < sortedRetirements.length && (
                         <button
                           type="button"
                           onClick={handleSelectAllFilteredRet}
@@ -2478,7 +2485,7 @@ export default function RequisitionReportsPage() {
                         className="inline-flex items-center gap-1.5 rounded-lg border border-[#287EAD] bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-[#1E6F99] transition-colors cursor-pointer"
                       >
                         <Printer className="h-3.5 w-3.5" />
-                        Print Selected ({selectedRetIds.size})
+                        Print Selected ({matchingRetSelectedCount})
                       </button>
                       <button
                         type="button"
@@ -2504,14 +2511,16 @@ export default function RequisitionReportsPage() {
                       <thead>
                         <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
                           <th className="w-10 px-3 py-2.5 text-center print:hidden">
-                            <input
-                              ref={retHeaderCheckboxRef}
-                              type="checkbox"
-                              aria-label="Select all retirements on this page"
-                              checked={allRetPageSelected}
-                              onChange={toggleSelectAllRetOnPage}
-                              className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
-                            />
+                            <label className="flex items-center justify-center cursor-pointer p-1 -m-1" title="Select / deselect all retirements on this page">
+                              <input
+                                ref={retHeaderCheckboxRef}
+                                type="checkbox"
+                                aria-label="Select all retirements on this page"
+                                checked={allRetPageSelected}
+                                onChange={toggleSelectAllRetOnPage}
+                                className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                              />
+                            </label>
                           </th>
                           {visibleRetCols.has("document_reference") && (
                             <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("document_reference")}>
@@ -2605,17 +2614,16 @@ export default function RequisitionReportsPage() {
                                   isSelected ? "bg-[#F0F8FD] hover:bg-[#E2F2FA]" : "hover:bg-[#F8FAFC]"
                                 )}
                               >
-                                <td
-                                  className="w-10 px-3 py-2.5 text-center print:hidden cursor-pointer"
-                                  onClick={() => toggleSelectRetRow(line.id)}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    aria-label={`Select retirement ${line.document_reference}`}
-                                    checked={isSelected}
-                                    onChange={() => toggleSelectRetRow(line.id)}
-                                    className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
-                                  />
+                                <td className="w-10 px-3 py-2.5 text-center print:hidden">
+                                  <label className="flex items-center justify-center cursor-pointer p-1 -m-1" title="Select retirement record">
+                                    <input
+                                      type="checkbox"
+                                      aria-label={`Select retirement ${line.document_reference}`}
+                                      checked={isSelected}
+                                      onChange={() => toggleSelectRetRow(line.id)}
+                                      className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                                    />
+                                  </label>
                                 </td>
                                 {visibleRetCols.has("document_reference") && (
                                   <td className="py-2.5 px-3 print:py-1 print:px-1 font-semibold text-[#287EAD] whitespace-nowrap">
