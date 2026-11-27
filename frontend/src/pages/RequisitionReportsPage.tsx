@@ -21,7 +21,7 @@
  *
  * 3. Print-friendly layout (clean formal print header, hiding all nav, sidebars, filters, and controls).
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -30,7 +30,7 @@ import {
   Building2, ClipboardList, RefreshCw, ExternalLink, Layers,
   ChevronLeft, ChevronRight, SlidersHorizontal, Loader2,
   Calendar, Mail, User, ShieldAlert, Send, BellRing,
-  ArrowUpDown, Check,
+  ArrowUpDown, Check, CheckSquare, ChevronDown,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
@@ -55,6 +55,39 @@ type MainTab = "financial" | "retirements";
 type FinancialLinesTab = "lines" | "activities" | "accounts" | "visuals";
 type RetirementsTab = "register" | "by_department" | "by_traveller" | "visuals";
 type SortDirection = "asc" | "desc";
+
+export interface ReportColumnDef {
+  id: string;
+  label: string;
+  defaultVisible: boolean;
+  weight: number;
+}
+
+export const FINANCIAL_REPORT_COLUMNS: ReportColumnDef[] = [
+  { id: "document_reference", label: "Req Ref", defaultVisible: true, weight: 10 },
+  { id: "date", label: "Date", defaultVisible: true, weight: 8 },
+  { id: "department_requester", label: "Dept / Requester", defaultVisible: true, weight: 12 },
+  { id: "activity_code", label: "Activity Code (Dim 10)", defaultVisible: true, weight: 9 },
+  { id: "description", label: "Description", defaultVisible: true, weight: 18 },
+  { id: "account_code", label: "Account Code", defaultVisible: true, weight: 9 },
+  { id: "cost_centre", label: "Cost Centre", defaultVisible: true, weight: 8 },
+  { id: "amount", label: "Amount", defaultVisible: true, weight: 10 },
+  { id: "journal_number", label: "Journal #", defaultVisible: true, weight: 8 },
+  { id: "document_status", label: "Status", defaultVisible: true, weight: 8 },
+];
+
+export const RETIREMENT_REPORT_COLUMNS: ReportColumnDef[] = [
+  { id: "document_reference", label: "Req Ref", defaultVisible: true, weight: 10 },
+  { id: "traveller_name", label: "Traveller", defaultVisible: true, weight: 14 },
+  { id: "department", label: "Department", defaultVisible: true, weight: 10 },
+  { id: "travel_dates", label: "Travel Dates", defaultVisible: true, weight: 11 },
+  { id: "due_date", label: "Due Date", defaultVisible: true, weight: 8 },
+  { id: "aging_status", label: "Aging Status", defaultVisible: true, weight: 12 },
+  { id: "advance_amount", label: "Advance", defaultVisible: true, weight: 9 },
+  { id: "retired_amount", label: "Retired / Spent", defaultVisible: true, weight: 9 },
+  { id: "outstanding_amount", label: "Outstanding", defaultVisible: true, weight: 9 },
+  { id: "workflow_state", label: "Workflow State", defaultVisible: true, weight: 8 },
+];
 
 const AGING_BAR_COLORS: Record<string, string> = {
   current: "#10B981",  // Emerald
@@ -234,12 +267,154 @@ export default function RequisitionReportsPage() {
   const [scheduleSendingTest, setScheduleSendingTest] = useState(false);
   const [scheduleSaving, setScheduleSaving] = useState(false);
 
+  // Selection state for custom scoped printing
+  const [selectedFinIds, setSelectedFinIds] = useState<Set<string>>(new Set());
+  const [selectedRetIds, setSelectedRetIds] = useState<Set<string>>(new Set());
+  const [printScope, setPrintScope] = useState<"all" | "selected" | "page">("all");
+  const [printDropdownOpen, setPrintDropdownOpen] = useState(false);
+  const printDropdownRef = useRef<HTMLDivElement>(null);
+  const finHeaderCheckboxRef = useRef<HTMLInputElement>(null);
+  const retHeaderCheckboxRef = useRef<HTMLInputElement>(null);
+
+  // Column customization state
+  const [visibleFinCols, setVisibleFinCols] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem("idm_report_fin_columns");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return new Set(parsed);
+      }
+    } catch {}
+    return new Set(FINANCIAL_REPORT_COLUMNS.map((c) => c.id));
+  });
+
+  const [visibleRetCols, setVisibleRetCols] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem("idm_report_ret_columns");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return new Set(parsed);
+      }
+    } catch {}
+    return new Set(RETIREMENT_REPORT_COLUMNS.map((c) => c.id));
+  });
+
+  const [finColDropdownOpen, setFinColDropdownOpen] = useState(false);
+  const [retColDropdownOpen, setRetColDropdownOpen] = useState(false);
+  const finColDropdownRef = useRef<HTMLDivElement>(null);
+  const retColDropdownRef = useRef<HTMLDivElement>(null);
+
+  const toggleFinCol = (colId: string) => {
+    setVisibleFinCols((prev) => {
+      const next = new Set(prev);
+      if (next.has(colId)) {
+        if (next.size <= 1) {
+          toast.warning("At least one column must remain visible.");
+          return prev;
+        }
+        next.delete(colId);
+      } else {
+        next.add(colId);
+      }
+      try {
+        localStorage.setItem("idm_report_fin_columns", JSON.stringify(Array.from(next)));
+      } catch {}
+      return next;
+    });
+  };
+
+  const resetFinCols = () => {
+    const defaultCols = new Set(FINANCIAL_REPORT_COLUMNS.map((c) => c.id));
+    setVisibleFinCols(defaultCols);
+    try {
+      localStorage.removeItem("idm_report_fin_columns");
+    } catch {}
+  };
+
+  const selectAllFinCols = () => {
+    const allCols = new Set(FINANCIAL_REPORT_COLUMNS.map((c) => c.id));
+    setVisibleFinCols(allCols);
+    try {
+      localStorage.setItem("idm_report_fin_columns", JSON.stringify(Array.from(allCols)));
+    } catch {}
+  };
+
+  const toggleRetCol = (colId: string) => {
+    setVisibleRetCols((prev) => {
+      const next = new Set(prev);
+      if (next.has(colId)) {
+        if (next.size <= 1) {
+          toast.warning("At least one column must remain visible.");
+          return prev;
+        }
+        next.delete(colId);
+      } else {
+        next.add(colId);
+      }
+      try {
+        localStorage.setItem("idm_report_ret_columns", JSON.stringify(Array.from(next)));
+      } catch {}
+      return next;
+    });
+  };
+
+  const resetRetCols = () => {
+    const defaultCols = new Set(RETIREMENT_REPORT_COLUMNS.map((c) => c.id));
+    setVisibleRetCols(defaultCols);
+    try {
+      localStorage.removeItem("idm_report_ret_columns");
+    } catch {}
+  };
+
+  const selectAllRetCols = () => {
+    const allCols = new Set(RETIREMENT_REPORT_COLUMNS.map((c) => c.id));
+    setVisibleRetCols(allCols);
+    try {
+      localStorage.setItem("idm_report_ret_columns", JSON.stringify(Array.from(allCols)));
+    } catch {}
+  };
+
+  const activeFinColDefs = useMemo(() => {
+    return FINANCIAL_REPORT_COLUMNS.filter((col) => visibleFinCols.has(col.id));
+  }, [visibleFinCols]);
+
+  const finColTotalWeight = useMemo(() => {
+    return activeFinColDefs.reduce((acc, c) => acc + c.weight, 0) || 1;
+  }, [activeFinColDefs]);
+
+  const activeRetColDefs = useMemo(() => {
+    return RETIREMENT_REPORT_COLUMNS.filter((col) => visibleRetCols.has(col.id));
+  }, [visibleRetCols]);
+
+  const retColTotalWeight = useMemo(() => {
+    return activeRetColDefs.reduce((acc, c) => acc + c.weight, 0) || 1;
+  }, [activeRetColDefs]);
+
   // Print mode detection for unpaginated full print rendering
   const [isPrinting, setIsPrinting] = useState(false);
 
   useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (printDropdownRef.current && !printDropdownRef.current.contains(event.target as Node)) {
+        setPrintDropdownOpen(false);
+      }
+      if (finColDropdownRef.current && !finColDropdownRef.current.contains(event.target as Node)) {
+        setFinColDropdownOpen(false);
+      }
+      if (retColDropdownRef.current && !retColDropdownRef.current.contains(event.target as Node)) {
+        setRetColDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
     const handleBefore = () => setIsPrinting(true);
-    const handleAfter = () => setIsPrinting(false);
+    const handleAfter = () => {
+      setIsPrinting(false);
+      setPrintScope("all");
+    };
     window.addEventListener("beforeprint", handleBefore);
     window.addEventListener("afterprint", handleAfter);
     return () => {
@@ -370,10 +545,66 @@ export default function RequisitionReportsPage() {
     return sortedFinancialLines.slice(start, start + finPageSize);
   }, [sortedFinancialLines, finPage, finPageSize]);
 
-  // When printing, render all filtered lines across multiple printed pages
-  const displayedFinancialLines = isPrinting ? sortedFinancialLines : paginatedFinancialLines;
+  // When printing, render based on printScope; otherwise render paginated lines
+  const displayedFinancialLines = useMemo(() => {
+    if (isPrinting) {
+      if (printScope === "selected") {
+        const filtered = sortedFinancialLines.filter((line) => selectedFinIds.has(line.id));
+        return filtered.length > 0 ? filtered : sortedFinancialLines;
+      }
+      if (printScope === "page") {
+        return paginatedFinancialLines;
+      }
+      return sortedFinancialLines;
+    }
+    return paginatedFinancialLines;
+  }, [isPrinting, printScope, sortedFinancialLines, selectedFinIds, paginatedFinancialLines]);
 
   const totalFinancialPages = Math.ceil(sortedFinancialLines.length / finPageSize) || 1;
+
+  // Financial Lines selection state helpers
+  const allFinPageSelected = useMemo(() => {
+    return paginatedFinancialLines.length > 0 && paginatedFinancialLines.every((l) => selectedFinIds.has(l.id));
+  }, [paginatedFinancialLines, selectedFinIds]);
+
+  const someFinPageSelected = useMemo(() => {
+    return paginatedFinancialLines.some((l) => selectedFinIds.has(l.id));
+  }, [paginatedFinancialLines, selectedFinIds]);
+
+  useEffect(() => {
+    if (finHeaderCheckboxRef.current) {
+      finHeaderCheckboxRef.current.indeterminate = someFinPageSelected && !allFinPageSelected;
+    }
+  }, [someFinPageSelected, allFinPageSelected]);
+
+  const toggleSelectFinRow = (id: string) => {
+    setSelectedFinIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllFinOnPage = () => {
+    setSelectedFinIds((prev) => {
+      const next = new Set(prev);
+      if (allFinPageSelected) {
+        paginatedFinancialLines.forEach((l) => next.delete(l.id));
+      } else {
+        paginatedFinancialLines.forEach((l) => next.add(l.id));
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAllFilteredFin = () => {
+    setSelectedFinIds(new Set(sortedFinancialLines.map((l) => l.id)));
+  };
+
+  const clearFinSelection = () => {
+    setSelectedFinIds(new Set());
+  };
 
   // ── Retirements Sorting & Pagination ───────────────────────────────────────
   const handleRetSort = (field: string) => {
@@ -407,16 +638,214 @@ export default function RequisitionReportsPage() {
     return sortedRetirements.slice(start, start + retPageSize);
   }, [sortedRetirements, retPage, retPageSize]);
 
-  // When printing, render all filtered retirements across multiple printed pages
-  const displayedRetirements = isPrinting ? sortedRetirements : paginatedRetirements;
+  // When printing, render based on printScope; otherwise render paginated retirements
+  const displayedRetirements = useMemo(() => {
+    if (isPrinting) {
+      if (printScope === "selected") {
+        const filtered = sortedRetirements.filter((r) => selectedRetIds.has(r.id));
+        return filtered.length > 0 ? filtered : sortedRetirements;
+      }
+      if (printScope === "page") {
+        return paginatedRetirements;
+      }
+      return sortedRetirements;
+    }
+    return paginatedRetirements;
+  }, [isPrinting, printScope, sortedRetirements, selectedRetIds, paginatedRetirements]);
 
   const totalRetirementPages = Math.ceil(sortedRetirements.length / retPageSize) || 1;
 
+  // Retirements selection state helpers
+  const allRetPageSelected = useMemo(() => {
+    return paginatedRetirements.length > 0 && paginatedRetirements.every((r) => selectedRetIds.has(r.id));
+  }, [paginatedRetirements, selectedRetIds]);
+
+  const someRetPageSelected = useMemo(() => {
+    return paginatedRetirements.some((r) => selectedRetIds.has(r.id));
+  }, [paginatedRetirements, selectedRetIds]);
+
+  useEffect(() => {
+    if (retHeaderCheckboxRef.current) {
+      retHeaderCheckboxRef.current.indeterminate = someRetPageSelected && !allRetPageSelected;
+    }
+  }, [someRetPageSelected, allRetPageSelected]);
+
+  const toggleSelectRetRow = (id: string) => {
+    setSelectedRetIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllRetOnPage = () => {
+    setSelectedRetIds((prev) => {
+      const next = new Set(prev);
+      if (allRetPageSelected) {
+        paginatedRetirements.forEach((r) => next.delete(r.id));
+      } else {
+        paginatedRetirements.forEach((r) => next.add(r.id));
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAllFilteredRet = () => {
+    setSelectedRetIds(new Set(sortedRetirements.map((r) => r.id)));
+  };
+
+  const clearRetSelection = () => {
+    setSelectedRetIds(new Set());
+  };
+
+  // Summaries calculation for custom selection
+  const selectedFinSummary = useMemo(() => {
+    const selectedLines = sortedFinancialLines.filter((l) => selectedFinIds.has(l.id));
+    const total_amount = selectedLines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
+    const postedLinesList = selectedLines.filter((l) => Boolean(l.journal_number) || l.journal_status === "posted");
+    const posted_lines = postedLinesList.length;
+    const posted_amount = postedLinesList.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
+    const distinct_activities = new Set(selectedLines.map((l) => l.activity_code).filter(Boolean)).size;
+    const distinct_accounts = new Set(selectedLines.map((l) => l.account_code).filter(Boolean)).size;
+    return {
+      total_amount,
+      total_lines: selectedLines.length,
+      posted_amount,
+      posted_lines,
+      distinct_activities,
+      distinct_accounts,
+    };
+  }, [sortedFinancialLines, selectedFinIds]);
+
+  const currentFinSummary = isPrinting && printScope === "selected" ? selectedFinSummary : finSummary;
+
+  const selectedRetSummary = useMemo(() => {
+    const selectedLines = sortedRetirements.filter((r) => selectedRetIds.has(r.id));
+    const total_records = selectedLines.length;
+    const total_advance_amount = selectedLines.reduce((acc, r) => acc + (Number(r.advance_amount) || 0), 0);
+    const total_outstanding_amount = selectedLines.reduce((acc, r) => acc + (Number(r.outstanding_amount) || 0), 0);
+    const total_retired_amount = selectedLines.reduce((acc, r) => acc + (Number(r.retired_amount) || 0), 0);
+    const overdueLines = selectedLines.filter((r) => (r.days_overdue || 0) > 0 && (r.outstanding_amount || 0) > 0);
+    const total_overdue_records = overdueLines.length;
+    const total_overdue_amount = overdueLines.reduce((acc, r) => acc + (Number(r.outstanding_amount) || 0), 0);
+    const total_awaiting_finance = selectedLines.filter((r) => r.retirement_status === "submitted" || r.retirement_status === "review").length;
+    const total_reconciled = selectedLines.filter((r) => r.aging_bucket === "reconciled").length;
+    const average_days_aged = overdueLines.length > 0
+      ? Math.round((overdueLines.reduce((acc, r) => acc + (r.days_overdue || 0), 0) / overdueLines.length) * 10) / 10
+      : 0;
+
+    const aging_totals: Record<string, { count: number; amount: number }> = {};
+    for (const r of selectedLines) {
+      const b = r.aging_bucket || "current";
+      if (!aging_totals[b]) {
+        aging_totals[b] = { count: 0, amount: 0 };
+      }
+      aging_totals[b].count += 1;
+      aging_totals[b].amount += Number(r.outstanding_amount) || 0;
+    }
+
+    return {
+      total_records,
+      total_advance_amount,
+      total_outstanding_amount,
+      total_retired_amount,
+      total_overdue_records,
+      total_overdue_amount,
+      total_awaiting_finance,
+      total_reconciled,
+      average_days_aged,
+      aging_totals,
+    };
+  }, [sortedRetirements, selectedRetIds]);
+
+  const currentRetSummary = isPrinting && printScope === "selected" ? selectedRetSummary : retSummary;
+
+  const activeSelectedCount = activeMainTab === "financial" ? selectedFinIds.size : selectedRetIds.size;
+  const totalFilteredCount = activeMainTab === "financial" ? sortedFinancialLines.length : sortedRetirements.length;
+  const currentPageRowsCount = activeMainTab === "financial" ? paginatedFinancialLines.length : paginatedRetirements.length;
+
   // ── CSV Export ─────────────────────────────────────────────────────────────
+  const generateFinCsv = (lines: RequisitionReportLine[], filenamePrefix: string) => {
+    if (lines.length === 0) {
+      toast.error("No lines to export.");
+      return;
+    }
+    const colMappings: { id: string; label: string; getValue: (line: RequisitionReportLine) => string }[] = [
+      { id: "document_reference", label: "Requisition Ref", getValue: (l) => l.document_reference },
+      { id: "date", label: "Date", getValue: (l) => l.date },
+      { id: "department_requester", label: "Dept / Requester", getValue: (l) => `${l.department || ""} / ${l.requester || ""}` },
+      { id: "activity_code", label: "Activity Code (Dim 10)", getValue: (l) => l.activity_code },
+      { id: "description", label: "Description", getValue: (l) => l.description },
+      { id: "account_code", label: "Account Code", getValue: (l) => l.account_code },
+      { id: "cost_centre", label: "Cost Centre", getValue: (l) => l.cost_centre || "" },
+      { id: "amount", label: `Amount (${lines[0]?.currency || "USD"})`, getValue: (l) => String(l.amount) },
+      { id: "journal_number", label: "Journal #", getValue: (l) => l.journal_number || "" },
+      { id: "document_status", label: "Status", getValue: (l) => l.document_status || "" },
+    ];
+
+    const activeCols = colMappings.filter((c) => visibleFinCols.has(c.id));
+    const escapeCsv = (str: any) => `"${String(str ?? "").replace(/"/g, '""')}"`;
+    const headers = activeCols.map((c) => escapeCsv(c.label));
+    const rows = lines.map((l) => activeCols.map((c) => escapeCsv(c.getValue(l))).join(","));
+
+    const csvContent = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${filenamePrefix}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    toast.success(`Exported ${lines.length} lines with ${activeCols.length} columns.`);
+  };
+
+  const generateRetCsv = (retirements: OutstandingRetirementLine[], filenamePrefix: string) => {
+    if (retirements.length === 0) {
+      toast.error("No retirements to export.");
+      return;
+    }
+    const colMappings: { id: string; label: string; getValue: (r: OutstandingRetirementLine) => string }[] = [
+      { id: "document_reference", label: "Requisition Ref", getValue: (r) => r.document_reference },
+      { id: "traveller_name", label: "Traveller", getValue: (r) => `${r.traveller_name} ${r.traveller_email ? `(${r.traveller_email})` : ""}` },
+      { id: "department", label: "Department", getValue: (r) => r.department },
+      { id: "travel_dates", label: "Travel Dates", getValue: (r) => `${formatDateDisplay(r.departure_date)} to ${formatDateDisplay(r.return_date)}` },
+      { id: "due_date", label: "Due Date", getValue: (r) => formatDateDisplay(r.due_date) },
+      { id: "aging_status", label: "Aging Status", getValue: (r) => `${r.aging_bucket_label} (${r.days_overdue}d)` },
+      { id: "advance_amount", label: `Advance (${retirements[0]?.currency || "USD"})`, getValue: (r) => String(r.advance_amount) },
+      { id: "retired_amount", label: `Retired / Spent (${retirements[0]?.currency || "USD"})`, getValue: (r) => String(r.retired_amount) },
+      { id: "outstanding_amount", label: `Outstanding (${retirements[0]?.currency || "USD"})`, getValue: (r) => String(r.outstanding_amount) },
+      { id: "workflow_state", label: "Workflow State", getValue: (r) => r.retirement_status_label },
+    ];
+
+    const activeCols = colMappings.filter((c) => visibleRetCols.has(c.id));
+    const escapeCsv = (str: any) => `"${String(str ?? "").replace(/"/g, '""')}"`;
+    const headers = activeCols.map((c) => escapeCsv(c.label));
+    const rows = retirements.map((r) => activeCols.map((c) => escapeCsv(c.getValue(r))).join(","));
+
+    const csvContent = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${filenamePrefix}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    toast.success(`Exported ${retirements.length} records with ${activeCols.length} columns.`);
+  };
+
   const handleExportCsv = async () => {
     try {
       setExportingCsv(true);
       if (activeMainTab === "financial") {
+        if (visibleFinCols.size < FINANCIAL_REPORT_COLUMNS.length) {
+          generateFinCsv(sortedFinancialLines, "requisition_financial_report_custom_cols");
+          return;
+        }
         const res = await documentsAPI.downloadRequisitionReportCsv(financialParams);
         const blob = new Blob([res.data], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
@@ -429,6 +858,10 @@ export default function RequisitionReportsPage() {
         URL.revokeObjectURL(url);
         toast.success("Requisition financial report CSV downloaded.");
       } else {
+        if (visibleRetCols.size < RETIREMENT_REPORT_COLUMNS.length) {
+          generateRetCsv(sortedRetirements, "outstanding_retirements_aged_custom_cols");
+          return;
+        }
         const res = await documentsAPI.downloadRetirementsAgingReportCsv(retirementsParams);
         const blob = new Blob([res.data], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
@@ -448,7 +881,20 @@ export default function RequisitionReportsPage() {
     }
   };
 
-  const handlePrint = () => {
+  const handleExportSelectedFinCsv = () => {
+    const selectedLines = sortedFinancialLines.filter((l) => selectedFinIds.has(l.id));
+    generateFinCsv(selectedLines, "custom_selected_financial_lines");
+  };
+
+  const handleExportSelectedRetCsv = () => {
+    const selectedLines = sortedRetirements.filter((r) => selectedRetIds.has(r.id));
+    generateRetCsv(selectedLines, "custom_selected_retirements");
+  };
+
+  const handlePrint = (scope: "all" | "selected" | "page" = "all") => {
+    const activeSelectedSize = activeMainTab === "financial" ? selectedFinIds.size : selectedRetIds.size;
+    const effectiveScope = scope === "selected" && activeSelectedSize === 0 ? "all" : scope;
+    setPrintScope(effectiveScope);
     setIsPrinting(true);
     setTimeout(() => {
       window.print();
@@ -593,8 +1039,12 @@ export default function RequisitionReportsPage() {
             </h1>
             <p className="text-xs font-semibold text-[#287EAD] uppercase tracking-wider">
               {activeMainTab === "financial"
-                ? "Requisition Financial Lines & SunSystems GL Analysis Report"
-                : "Outstanding Travel Retirements Aging Report (by Traveller & Department)"}
+                ? (printScope === "selected" || visibleFinCols.size < FINANCIAL_REPORT_COLUMNS.length
+                    ? "Custom Selected Financial Lines & SunSystems GL Report"
+                    : "Requisition Financial Lines & SunSystems GL Analysis Report")
+                : (printScope === "selected" || visibleRetCols.size < RETIREMENT_REPORT_COLUMNS.length
+                    ? "Custom Selected Travel Retirements Aging Report"
+                    : "Outstanding Travel Retirements Aging Report (by Traveller & Department)")}
             </p>
           </div>
           <div className="text-right text-[10px] text-slate-600">
@@ -605,8 +1055,28 @@ export default function RequisitionReportsPage() {
         <div className="mt-1.5 flex items-center justify-between text-[10px] text-slate-500 border-t border-slate-200 pt-1">
           <span>
             {activeMainTab === "financial"
-              ? `Activity: ${finActivityCode || "All"} | Account: ${finAccountCode || "All"} | Total Lines: ${sortedFinancialLines.length}`
-              : `Department: ${retDepartment || "All"} | Aging: ${retAgingBucket || "All"} | Overdue: ${retSummary.total_overdue_records} | Total Records: ${sortedRetirements.length}`}
+              ? `Activity: ${finActivityCode || "All"} | Account: ${finAccountCode || "All"} | Scope: ${
+                  printScope === "selected"
+                    ? `Custom Selection (${displayedFinancialLines.length} lines)`
+                    : printScope === "page"
+                    ? `Current Page (${displayedFinancialLines.length} lines)`
+                    : `All Filtered (${sortedFinancialLines.length} lines)`
+                }${
+                  visibleFinCols.size < FINANCIAL_REPORT_COLUMNS.length
+                    ? ` | Columns (${visibleFinCols.size}): ${activeFinColDefs.map((c) => c.label).join(", ")}`
+                    : ""
+                }`
+              : `Department: ${retDepartment || "All"} | Aging: ${retAgingBucket || "All"} | Scope: ${
+                  printScope === "selected"
+                    ? `Custom Selection (${displayedRetirements.length} records)`
+                    : printScope === "page"
+                    ? `Current Page (${displayedRetirements.length} records)`
+                    : `All Filtered (${sortedRetirements.length} records)`
+                } | Overdue: ${currentRetSummary.total_overdue_records}${
+                  visibleRetCols.size < RETIREMENT_REPORT_COLUMNS.length
+                    ? ` | Columns (${visibleRetCols.size}): ${activeRetColDefs.map((c) => c.label).join(", ")}`
+                    : ""
+                }`}
           </span>
           <span>Currency: USD / Functional</span>
         </div>
@@ -642,14 +1112,127 @@ export default function RequisitionReportsPage() {
                 Schedule Report
               </button>
             )}
-            <button
-              type="button"
-              onClick={handlePrint}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-2xs hover:bg-[#F8FAFC] transition-colors"
-            >
-              <Printer className="h-3.5 w-3.5" />
-              Print
-            </button>
+
+            {/* Print with Custom Scope Options Dropdown */}
+            <div className="relative inline-flex rounded-lg shadow-2xs" ref={printDropdownRef}>
+              <button
+                type="button"
+                onClick={() => handlePrint(activeSelectedCount > 0 ? "selected" : "all")}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-l-lg border border-[#CBD5E1] px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer",
+                  activeSelectedCount > 0
+                    ? "bg-[#F0F8FD] border-[#C5E6F5] text-[#0A4D68] hover:bg-[#E2F2FA]"
+                    : "bg-white text-[#334155] hover:bg-[#F8FAFC]"
+                )}
+                title={
+                  activeSelectedCount > 0
+                    ? `Print ${activeSelectedCount} selected custom rows`
+                    : "Print full report"
+                }
+              >
+                <Printer className="h-3.5 w-3.5 text-[#287EAD]" />
+                <span>
+                  {activeSelectedCount > 0 ? `Print (${activeSelectedCount} Selected)` : "Print"}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPrintDropdownOpen((prev) => !prev)}
+                className={cn(
+                  "inline-flex items-center rounded-r-lg border border-l-0 border-[#CBD5E1] px-1.5 py-1.5 text-xs transition-colors cursor-pointer",
+                  activeSelectedCount > 0
+                    ? "bg-[#F0F8FD] border-[#C5E6F5] text-[#0A4D68] hover:bg-[#E2F2FA]"
+                    : "bg-white text-[#64748B] hover:bg-[#F8FAFC]"
+                )}
+                aria-label="Print scope options"
+                aria-expanded={printDropdownOpen}
+              >
+                <ChevronDown className="h-3.5 w-3.5" />
+              </button>
+
+              {printDropdownOpen && (
+                <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-xl border border-[#E2E8F0] bg-white p-1.5 shadow-lg animate-in fade-in zoom-in-95 duration-100">
+                  <div className="px-2.5 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                    Select Print Mode
+                  </div>
+
+                  {activeSelectedCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPrintDropdownOpen(false);
+                        handlePrint("selected");
+                      }}
+                      className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-[#F0F8FD] hover:text-[#0A4D68] transition-colors cursor-pointer"
+                    >
+                      <CheckSquare className="h-4 w-4 text-[#287EAD] shrink-0 mt-0.5" />
+                      <div>
+                        <div className="font-semibold text-[#0A4D68]">
+                          Print Selected Rows ({activeSelectedCount})
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          Custom report with only the {activeSelectedCount} checked rows
+                        </div>
+                      </div>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPrintDropdownOpen(false);
+                      handlePrint("all");
+                    }}
+                    className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                  >
+                    <FileSpreadsheet className="h-4 w-4 text-slate-500 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-semibold text-slate-800">
+                        Print All Filtered Rows ({totalFilteredCount})
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        Complete report matching current filters across all pages
+                      </div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPrintDropdownOpen(false);
+                      handlePrint("page");
+                    }}
+                    className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                  >
+                    <Layers className="h-4 w-4 text-slate-500 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-semibold text-slate-800">
+                        Print Current Page ({currentPageRowsCount})
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        Page {activeMainTab === "financial" ? finPage : retPage} only ({currentPageRowsCount} rows)
+                      </div>
+                    </div>
+                  </button>
+
+                  {activeSelectedCount > 0 && (
+                    <div className="border-t border-slate-100 mt-1 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPrintDropdownOpen(false);
+                          if (activeMainTab === "financial") clearFinSelection();
+                          else clearRetSelection();
+                        }}
+                        className="w-full text-left rounded-lg px-2.5 py-1.5 text-[11px] text-rose-600 hover:bg-rose-50 font-medium cursor-pointer"
+                      >
+                        Clear selection ({activeSelectedCount})
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <button
               type="button"
               onClick={handleExportCsv}
@@ -735,10 +1318,10 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B] print:mt-0.5 print:text-sm">
-                  {formatCurrency(finSummary.total_amount)}
+                  {formatCurrency(currentFinSummary.total_amount)}
                 </div>
                 <div className="mt-0.5 text-[11px] text-[#475569] print:text-[9px] print:mt-0">
-                  Across {finSummary.total_lines} lines
+                  Across {currentFinSummary.total_lines} lines
                 </div>
               </div>
 
@@ -751,10 +1334,10 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-emerald-700 print:mt-0.5 print:text-sm">
-                  {formatCurrency(finSummary.posted_amount)}
+                  {formatCurrency(currentFinSummary.posted_amount)}
                 </div>
                 <div className="mt-0.5 text-[11px] text-emerald-600 font-medium print:text-[9px] print:mt-0">
-                  {finSummary.posted_lines} lines posted
+                  {currentFinSummary.posted_lines} lines posted
                 </div>
               </div>
 
@@ -767,10 +1350,10 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-amber-700 print:mt-0.5 print:text-sm">
-                  {formatCurrency(finSummary.total_amount - finSummary.posted_amount)}
+                  {formatCurrency(currentFinSummary.total_amount - currentFinSummary.posted_amount)}
                 </div>
                 <div className="mt-0.5 text-[11px] text-amber-600 print:text-[9px] print:mt-0">
-                  {finSummary.total_lines - finSummary.posted_lines} unposted lines
+                  {currentFinSummary.total_lines - currentFinSummary.posted_lines} unposted lines
                 </div>
               </div>
 
@@ -783,7 +1366,7 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-indigo-900 print:mt-0.5 print:text-sm">
-                  {finSummary.distinct_activities}
+                  {currentFinSummary.distinct_activities}
                 </div>
                 <div className="mt-0.5 text-[11px] text-indigo-700 print:text-[9px] print:mt-0">
                   SunSystems Dim 10
@@ -799,7 +1382,7 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-teal-900 print:mt-0.5 print:text-sm">
-                  {finSummary.distinct_accounts}
+                  {currentFinSummary.distinct_accounts}
                 </div>
                 <div className="mt-0.5 text-[11px] text-teal-700 print:text-[9px] print:mt-0">
                   Chart of accounts
@@ -815,8 +1398,8 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-blue-900 print:mt-0.5 print:text-sm">
-                  {finSummary.total_lines > 0
-                    ? `${Math.round((finSummary.posted_lines / finSummary.total_lines) * 100)}%`
+                  {currentFinSummary.total_lines > 0
+                    ? `${Math.round((currentFinSummary.posted_lines / currentFinSummary.total_lines) * 100)}%`
                     : "0%"}
                 </div>
                 <div className="mt-0.5 text-[11px] text-blue-700 print:text-[9px] print:mt-0">
@@ -1001,6 +1584,95 @@ export default function RequisitionReportsPage() {
 
               {financialTab === "lines" && (
                 <div className="flex items-center gap-2">
+                  {/* Column Customizer Dropdown */}
+                  <div className="relative inline-flex" ref={finColDropdownRef}>
+                    <button
+                      type="button"
+                      onClick={() => setFinColDropdownOpen((prev) => !prev)}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold shadow-2xs transition-colors cursor-pointer",
+                        visibleFinCols.size < FINANCIAL_REPORT_COLUMNS.length
+                          ? "border-[#287EAD] bg-[#F0F8FD] text-[#0A4D68]"
+                          : "border-[#CBD5E1] bg-white text-[#475569] hover:bg-[#F8FAFC]"
+                      )}
+                      title="Customize visible columns for report and print"
+                      aria-expanded={finColDropdownOpen}
+                    >
+                      <SlidersHorizontal className="h-3.5 w-3.5 text-[#287EAD]" />
+                      <span>Columns</span>
+                      <span className={cn(
+                        "rounded-full px-1.5 py-0.2 text-[10px] font-bold",
+                        visibleFinCols.size < FINANCIAL_REPORT_COLUMNS.length
+                          ? "bg-[#287EAD] text-white"
+                          : "bg-slate-100 text-slate-600"
+                      )}>
+                        {visibleFinCols.size}/{FINANCIAL_REPORT_COLUMNS.length}
+                      </span>
+                      <ChevronDown className="h-3 w-3 text-slate-400" />
+                    </button>
+
+                    {finColDropdownOpen && (
+                      <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-xl border border-[#E2E8F0] bg-white p-2.5 shadow-xl animate-in fade-in zoom-in-95 duration-100">
+                        <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
+                          <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                            Visible Columns
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={selectAllFinCols}
+                              className="text-[10px] font-semibold text-[#287EAD] hover:underline cursor-pointer"
+                            >
+                              All
+                            </button>
+                            <span className="text-slate-300">•</span>
+                            <button
+                              type="button"
+                              onClick={resetFinCols}
+                              className="text-[10px] font-semibold text-slate-500 hover:text-slate-700 cursor-pointer"
+                            >
+                              Reset
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="max-h-60 overflow-y-auto space-y-1 pr-1">
+                          {FINANCIAL_REPORT_COLUMNS.map((col) => {
+                            const isChecked = visibleFinCols.has(col.id);
+                            return (
+                              <label
+                                key={col.id}
+                                className={cn(
+                                  "flex items-center justify-between rounded-lg px-2 py-1.5 text-xs cursor-pointer transition-colors",
+                                  isChecked ? "bg-[#F0F8FD] text-[#0A4D68]" : "hover:bg-slate-50 text-slate-600"
+                                )}
+                              >
+                                <span className="font-medium">{col.label}</span>
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => toggleFinCol(col.id)}
+                                  className="h-3.5 w-3.5 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                                />
+                              </label>
+                            );
+                          })}
+                        </div>
+
+                        <div className="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-500">
+                          <span>{visibleFinCols.size} columns shown in report</span>
+                          <button
+                            type="button"
+                            onClick={() => setFinColDropdownOpen(false)}
+                            className="rounded px-2 py-0.5 font-semibold text-[#287EAD] hover:bg-[#F0F8FD] cursor-pointer"
+                          >
+                            Done
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   <span className="text-xs text-[#64748B]">Page size:</span>
                   <div className="w-36">
                     <CustomListbox
@@ -1020,148 +1692,275 @@ export default function RequisitionReportsPage() {
 
             {/* Sub-Tab 1: Detailed Financial Lines Table */}
             {financialTab === "lines" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden print:overflow-visible print:border-none print:shadow-none print:w-full">
-                <div className="overflow-x-auto print:overflow-visible print:w-full">
-                  <table className="w-full border-collapse text-left text-xs print:text-[9.5px] print:w-full print:table-fixed">
-                    <colgroup className="hidden print:table-column-group">
-                      <col className="w-[10%]" />
-                      <col className="w-[8%]" />
-                      <col className="w-[12%]" />
-                      <col className="w-[8%]" />
-                      <col className="w-[18%]" />
-                      <col className="w-[11%]" />
-                      <col className="w-[8%]" />
-                      <col className="w-[10%]" />
-                      <col className="w-[8%]" />
-                      <col className="w-[7%]" />
-                    </colgroup>
-                    <thead>
-                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
-                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("document_reference")}>
-                          <div className="flex items-center gap-1">
-                            <span>Req Ref</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                          </div>
-                        </th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("date")}>
-                          <div className="flex items-center gap-1">
-                            <span>Date</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                          </div>
-                        </th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1">Dept / Requester</th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1">Activity Code (Dim 10)</th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1">Description</th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1">Account Code</th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1">Cost Centre</th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("amount")}>
-                          <div className="flex items-center justify-end gap-1">
-                            <span>Amount</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                          </div>
-                        </th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1">Journal #</th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#F1F5F9]">
-                      {isLoadingFinancial ? (
-                        <tr>
-                          <td colSpan={10} className="py-12 text-center text-xs text-[#64748B]">
-                            <Loader2 className="mx-auto h-6 w-6 animate-spin text-[#287EAD]" />
-                            <p className="mt-2 font-medium">Loading financial lines…</p>
-                          </td>
-                        </tr>
-                      ) : displayedFinancialLines.length === 0 ? (
-                        <tr>
-                          <td colSpan={10} className="py-12 text-center text-xs text-[#64748B]">
-                            <FileSpreadsheet className="mx-auto h-8 w-8 text-[#9AA5B1] mb-2" />
-                            <p className="text-sm font-semibold text-[#1E293B]">No requisition lines found</p>
-                            <p className="mt-1 text-xs text-[#64748B]">Try clearing your search or filter criteria.</p>
-                          </td>
-                        </tr>
-                      ) : (
-                        displayedFinancialLines.map((line) => (
-                          <tr key={line.id} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 font-semibold text-[#287EAD] whitespace-nowrap">
-                              <Link to={`/${line.document_id || line.id}`} className="hover:underline flex items-center gap-1">
-                                {line.document_reference}
-                                <ExternalLink className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                              </Link>
-                            </td>
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-[#64748B] whitespace-nowrap">{line.date}</td>
-                            <td className="py-2.5 px-3 print:py-1 print:px-1">
-                              <div className="font-semibold text-[#1E293B] truncate">{line.department || "—"}</div>
-                              <div className="text-[10px] text-[#64748B] truncate print:text-[8.5px]">{line.requester}</div>
-                            </td>
-                            <td className="py-2.5 px-3 print:py-1 print:px-1">
-                              <span className="inline-flex items-center rounded bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-0.5 text-[11px] font-mono font-semibold text-[#0A4D68] print:border-none print:bg-transparent print:px-0 print:py-0 print:text-[9px]">
-                                {line.activity_code}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 max-w-xs truncate print:max-w-none print:whitespace-normal print:line-clamp-2" title={line.description}>
-                              {line.description}
-                            </td>
-                            <td className="py-2.5 px-3 print:py-1 print:px-1">
-                              <span className="inline-flex items-center rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono font-semibold text-[#1E293B] print:bg-transparent print:px-0 print:py-0 print:text-[9px]">
-                                {line.account_code}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 font-mono text-slate-600">{line.cost_centre || "—"}</td>
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-right font-bold tabular-nums text-[#1E293B]">
-                              {formatCurrency(line.amount, line.currency)}
-                            </td>
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap print:whitespace-normal print:break-all">
-                              <JournalStatusBadge status={line.journal_status} journalNumber={line.journal_number} />
-                            </td>
-                            <td className="py-2.5 px-3 print:py-1 print:px-1">
-                              <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-[#475569] print:bg-transparent print:px-0 print:text-[9px]">
-                                {line.document_status}
-                              </span>
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Pagination */}
-                {totalFinancialPages > 1 && (
-                  <div className="flex items-center justify-between border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2 text-xs text-[#64748B] print:hidden">
-                    <div>
-                      Showing {(finPage - 1) * finPageSize + 1} to{" "}
-                      {Math.min(finPage * finPageSize, sortedFinancialLines.length)} of{" "}
-                      {sortedFinancialLines.length} lines
+              <div className="space-y-3">
+                {/* Custom Selection Bar */}
+                {selectedFinIds.size > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] px-4 py-2.5 text-xs shadow-2xs print:hidden animate-in fade-in duration-150">
+                    <div className="flex items-center gap-2.5">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white border border-[#C5E6F5] text-[#287EAD]">
+                        <CheckSquare className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <span className="font-bold text-[#0A4D68]">
+                          {selectedFinIds.size} of {sortedFinancialLines.length} {selectedFinIds.size === 1 ? "line" : "lines"} selected
+                        </span>
+                        <span className="ml-2 text-slate-500 font-medium">
+                          (Total: <span className="font-semibold text-slate-700">{formatCurrency(selectedFinSummary.total_amount)}</span>)
+                        </span>
+                        {visibleFinCols.size < FINANCIAL_REPORT_COLUMNS.length && (
+                          <span className="ml-2 rounded bg-white/80 border border-[#C5E6F5] px-1.5 py-0.5 text-[10px] text-[#0A4D68] font-medium">
+                            {visibleFinCols.size} columns active
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {selectedFinIds.size < sortedFinancialLines.length && (
+                        <button
+                          type="button"
+                          onClick={handleSelectAllFilteredFin}
+                          className="rounded-lg border border-[#C5E6F5] bg-white px-2.5 py-1 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors cursor-pointer"
+                        >
+                          Select all {sortedFinancialLines.length} filtered lines
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => setFinPage((p) => Math.max(1, p - 1))}
-                        disabled={finPage === 1}
-                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                        onClick={clearFinSelection}
+                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer"
                       >
-                        <ChevronLeft className="h-4 w-4" />
+                        Clear selection
                       </button>
-                      <span className="px-2 font-medium text-[#1E293B]">
-                        Page {finPage} of {totalFinancialPages}
-                      </span>
                       <button
                         type="button"
-                        onClick={() => setFinPage((p) => Math.min(totalFinancialPages, p + 1))}
-                        disabled={finPage === totalFinancialPages}
-                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                        onClick={() => handlePrint("selected")}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-[#287EAD] bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-[#1E6F99] transition-colors cursor-pointer"
                       >
-                        <ChevronRight className="h-4 w-4" />
+                        <Printer className="h-3.5 w-3.5" />
+                        Print Selected ({selectedFinIds.size})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleExportSelectedFinCsv}
+                        className="inline-flex items-center gap-1 rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                      >
+                        <Download className="h-3.5 w-3.5 text-slate-500" />
+                        Export Selected
                       </button>
                     </div>
                   </div>
                 )}
 
-                {/* Print Footer Summary */}
-                <div className="hidden print:flex items-center justify-between text-[9.5px] text-slate-500 border-t border-slate-300 pt-1.5 mt-3">
-                  <span>End of Report • {sortedFinancialLines.length} lines total • IDM Financial & Requisition Management System</span>
-                  <span>CONFIDENTIAL</span>
+                <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden print:overflow-visible print:border-none print:shadow-none print:w-full">
+                  <div className="overflow-x-auto print:overflow-visible print:w-full">
+                    <table className="w-full border-collapse text-left text-xs print:text-[9.5px] print:w-full print:table-fixed">
+                      <colgroup className="hidden print:table-column-group">
+                        {activeFinColDefs.map((col) => {
+                          const pct = Math.round((col.weight / finColTotalWeight) * 100);
+                          return <col key={col.id} style={{ width: `${pct}%` }} />;
+                        })}
+                      </colgroup>
+                      <thead>
+                        <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
+                          <th className="w-10 px-3 py-2.5 text-center print:hidden">
+                            <input
+                              ref={finHeaderCheckboxRef}
+                              type="checkbox"
+                              aria-label="Select all lines on this page"
+                              checked={allFinPageSelected}
+                              onChange={toggleSelectAllFinOnPage}
+                              className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                            />
+                          </th>
+                          {visibleFinCols.has("document_reference") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("document_reference")}>
+                              <div className="flex items-center gap-1">
+                                <span>Req Ref</span>
+                                <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </div>
+                            </th>
+                          )}
+                          {visibleFinCols.has("date") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("date")}>
+                              <div className="flex items-center gap-1">
+                                <span>Date</span>
+                                <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </div>
+                            </th>
+                          )}
+                          {visibleFinCols.has("department_requester") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Dept / Requester</th>
+                          )}
+                          {visibleFinCols.has("activity_code") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Activity Code (Dim 10)</th>
+                          )}
+                          {visibleFinCols.has("description") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Description</th>
+                          )}
+                          {visibleFinCols.has("account_code") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Account Code</th>
+                          )}
+                          {visibleFinCols.has("cost_centre") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Cost Centre</th>
+                          )}
+                          {visibleFinCols.has("amount") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleFinSort("amount")}>
+                              <div className="flex items-center justify-end gap-1">
+                                <span>Amount</span>
+                                <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </div>
+                            </th>
+                          )}
+                          {visibleFinCols.has("journal_number") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Journal #</th>
+                          )}
+                          {visibleFinCols.has("document_status") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Status</th>
+                          )}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#F1F5F9]">
+                        {isLoadingFinancial ? (
+                          <tr>
+                            <td colSpan={isPrinting ? visibleFinCols.size : visibleFinCols.size + 1} className="py-12 text-center text-xs text-[#64748B]">
+                              <Loader2 className="mx-auto h-6 w-6 animate-spin text-[#287EAD]" />
+                              <p className="mt-2 font-medium">Loading financial lines…</p>
+                            </td>
+                          </tr>
+                        ) : displayedFinancialLines.length === 0 ? (
+                          <tr>
+                            <td colSpan={isPrinting ? visibleFinCols.size : visibleFinCols.size + 1} className="py-12 text-center text-xs text-[#64748B]">
+                              <FileSpreadsheet className="mx-auto h-8 w-8 text-[#9AA5B1] mb-2" />
+                              <p className="text-sm font-semibold text-[#1E293B]">No requisition lines found</p>
+                              <p className="mt-1 text-xs text-[#64748B]">Try clearing your search or filter criteria.</p>
+                            </td>
+                          </tr>
+                        ) : (
+                          displayedFinancialLines.map((line) => {
+                            const isSelected = selectedFinIds.has(line.id);
+                            return (
+                              <tr
+                                key={line.id}
+                                className={cn(
+                                  "transition-colors print:break-inside-avoid",
+                                  isSelected ? "bg-[#F0F8FD] hover:bg-[#E2F2FA]" : "hover:bg-[#F8FAFC]"
+                                )}
+                              >
+                                <td
+                                  className="w-10 px-3 py-2.5 text-center print:hidden cursor-pointer"
+                                  onClick={() => toggleSelectFinRow(line.id)}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`Select row ${line.document_reference}`}
+                                    checked={isSelected}
+                                    onChange={() => toggleSelectFinRow(line.id)}
+                                    className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                                  />
+                                </td>
+                                {visibleFinCols.has("document_reference") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 font-semibold text-[#287EAD] whitespace-nowrap">
+                                    <Link to={`/${line.document_id || line.id}`} className="hover:underline flex items-center gap-1">
+                                      {line.document_reference}
+                                      <ExternalLink className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                                    </Link>
+                                  </td>
+                                )}
+                                {visibleFinCols.has("date") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 text-[#64748B] whitespace-nowrap">{line.date}</td>
+                                )}
+                                {visibleFinCols.has("department_requester") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1">
+                                    <div className="font-semibold text-[#1E293B] truncate">{line.department || "—"}</div>
+                                    <div className="text-[10px] text-[#64748B] truncate print:text-[8.5px]">{line.requester}</div>
+                                  </td>
+                                )}
+                                {visibleFinCols.has("activity_code") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1">
+                                    <span className="inline-flex items-center rounded bg-[#F0F8FD] border border-[#C5E6F5] px-2 py-0.5 text-[11px] font-mono font-semibold text-[#0A4D68] print:border-none print:bg-transparent print:px-0 print:py-0 print:text-[9px]">
+                                      {line.activity_code}
+                                    </span>
+                                  </td>
+                                )}
+                                {visibleFinCols.has("description") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 max-w-xs truncate print:max-w-none print:whitespace-normal print:line-clamp-2" title={line.description}>
+                                    {line.description}
+                                  </td>
+                                )}
+                                {visibleFinCols.has("account_code") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1">
+                                    <span className="inline-flex items-center rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono font-semibold text-[#1E293B] print:bg-transparent print:px-0 print:py-0 print:text-[9px]">
+                                      {line.account_code}
+                                    </span>
+                                  </td>
+                                )}
+                                {visibleFinCols.has("cost_centre") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 font-mono text-slate-600">{line.cost_centre || "—"}</td>
+                                )}
+                                {visibleFinCols.has("amount") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 text-right font-bold tabular-nums text-[#1E293B]">
+                                    {formatCurrency(line.amount, line.currency)}
+                                  </td>
+                                )}
+                                {visibleFinCols.has("journal_number") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap print:whitespace-normal print:break-all">
+                                    <JournalStatusBadge status={line.journal_status} journalNumber={line.journal_number} />
+                                  </td>
+                                )}
+                                {visibleFinCols.has("document_status") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1">
+                                    <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-[#475569] print:bg-transparent print:px-0 print:text-[9px]">
+                                      {line.document_status}
+                                    </span>
+                                  </td>
+                                )}
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Pagination */}
+                  {totalFinancialPages > 1 && (
+                    <div className="flex items-center justify-between border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2 text-xs text-[#64748B] print:hidden">
+                      <div>
+                        Showing {(finPage - 1) * finPageSize + 1} to{" "}
+                        {Math.min(finPage * finPageSize, sortedFinancialLines.length)} of{" "}
+                        {sortedFinancialLines.length} lines
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setFinPage((p) => Math.max(1, p - 1))}
+                          disabled={finPage === 1}
+                          className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                        >
+                          <ChevronLeft className="h-4 w-4" />
+                        </button>
+                        <span className="px-2 font-medium text-[#1E293B]">
+                          Page {finPage} of {totalFinancialPages}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setFinPage((p) => Math.min(totalFinancialPages, p + 1))}
+                          disabled={finPage === totalFinancialPages}
+                          className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Print Footer Summary */}
+                  <div className="hidden print:flex items-center justify-between text-[9.5px] text-slate-500 border-t border-slate-300 pt-1.5 mt-3">
+                    <span>
+                      End of Report • {printScope === "selected" ? `${displayedFinancialLines.length} selected lines (of ${sortedFinancialLines.length})` : `${sortedFinancialLines.length} lines total`} • IDM Financial & Requisition Management System
+                    </span>
+                    <span>CONFIDENTIAL</span>
+                  </div>
                 </div>
               </div>
             )}
@@ -1264,10 +2063,10 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-[#1E293B] print:mt-0.5 print:text-sm">
-                  {formatCurrency(retSummary.total_outstanding_amount)}
+                  {formatCurrency(currentRetSummary.total_outstanding_amount)}
                 </div>
                 <div className="mt-0.5 text-[11px] text-[#475569] print:text-[9px] print:mt-0">
-                  Across {retSummary.total_records} travel forms
+                  Across {currentRetSummary.total_records} travel forms
                 </div>
               </div>
 
@@ -1280,10 +2079,10 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-rose-700 print:mt-0.5 print:text-sm">
-                  {retSummary.total_overdue_records}
+                  {currentRetSummary.total_overdue_records}
                 </div>
                 <div className="mt-0.5 text-[11px] font-medium text-rose-600 print:text-[9px] print:mt-0">
-                  {formatCurrency(retSummary.total_overdue_amount)} delinquent
+                  {formatCurrency(currentRetSummary.total_overdue_amount)} delinquent
                 </div>
               </div>
 
@@ -1296,7 +2095,7 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-amber-800 print:mt-0.5 print:text-sm">
-                  {retSummary.average_days_aged} days
+                  {currentRetSummary.average_days_aged} days
                 </div>
                 <div className="mt-0.5 text-[11px] text-amber-700 print:text-[9px] print:mt-0">
                   Past return grace period
@@ -1312,7 +2111,7 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-teal-800 print:mt-0.5 print:text-sm">
-                  {retSummary.total_awaiting_finance}
+                  {currentRetSummary.total_awaiting_finance}
                 </div>
                 <div className="mt-0.5 text-[11px] text-teal-700 print:text-[9px] print:mt-0">
                   Expense review in progress
@@ -1328,10 +2127,10 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-slate-800 print:mt-0.5 print:text-sm">
-                  {formatCurrency(retSummary.total_advance_amount)}
+                  {formatCurrency(currentRetSummary.total_advance_amount)}
                 </div>
                 <div className="mt-0.5 text-[11px] text-slate-500 print:text-[9px] print:mt-0">
-                  {formatCurrency(retSummary.total_retired_amount)} expensed
+                  {formatCurrency(currentRetSummary.total_retired_amount)} expensed
                 </div>
               </div>
 
@@ -1344,10 +2143,10 @@ export default function RequisitionReportsPage() {
                   </span>
                 </div>
                 <div className="mt-2 text-xl font-bold tabular-nums text-emerald-800 print:mt-0.5 print:text-sm">
-                  {retSummary.aging_totals["current"]?.count || 0}
+                  {currentRetSummary.aging_totals["current"]?.count || 0}
                 </div>
                 <div className="mt-0.5 text-[11px] text-emerald-700 print:text-[9px] print:mt-0">
-                  {retSummary.total_reconciled} reconciled
+                  {currentRetSummary.total_reconciled} reconciled
                 </div>
               </div>
             </div>
@@ -1526,6 +2325,95 @@ export default function RequisitionReportsPage() {
 
               {retirementsTab === "register" && (
                 <div className="flex items-center gap-2">
+                  {/* Column Customizer Dropdown */}
+                  <div className="relative inline-flex" ref={retColDropdownRef}>
+                    <button
+                      type="button"
+                      onClick={() => setRetColDropdownOpen((prev) => !prev)}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold shadow-2xs transition-colors cursor-pointer",
+                        visibleRetCols.size < RETIREMENT_REPORT_COLUMNS.length
+                          ? "border-[#287EAD] bg-[#F0F8FD] text-[#0A4D68]"
+                          : "border-[#CBD5E1] bg-white text-[#475569] hover:bg-[#F8FAFC]"
+                      )}
+                      title="Customize visible columns for report and print"
+                      aria-expanded={retColDropdownOpen}
+                    >
+                      <SlidersHorizontal className="h-3.5 w-3.5 text-[#287EAD]" />
+                      <span>Columns</span>
+                      <span className={cn(
+                        "rounded-full px-1.5 py-0.2 text-[10px] font-bold",
+                        visibleRetCols.size < RETIREMENT_REPORT_COLUMNS.length
+                          ? "bg-[#287EAD] text-white"
+                          : "bg-slate-100 text-slate-600"
+                      )}>
+                        {visibleRetCols.size}/{RETIREMENT_REPORT_COLUMNS.length}
+                      </span>
+                      <ChevronDown className="h-3 w-3 text-slate-400" />
+                    </button>
+
+                    {retColDropdownOpen && (
+                      <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-xl border border-[#E2E8F0] bg-white p-2.5 shadow-xl animate-in fade-in zoom-in-95 duration-100">
+                        <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
+                          <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                            Visible Columns
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={selectAllRetCols}
+                              className="text-[10px] font-semibold text-[#287EAD] hover:underline cursor-pointer"
+                            >
+                              All
+                            </button>
+                            <span className="text-slate-300">•</span>
+                            <button
+                              type="button"
+                              onClick={resetRetCols}
+                              className="text-[10px] font-semibold text-slate-500 hover:text-slate-700 cursor-pointer"
+                            >
+                              Reset
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="max-h-60 overflow-y-auto space-y-1 pr-1">
+                          {RETIREMENT_REPORT_COLUMNS.map((col) => {
+                            const isChecked = visibleRetCols.has(col.id);
+                            return (
+                              <label
+                                key={col.id}
+                                className={cn(
+                                  "flex items-center justify-between rounded-lg px-2 py-1.5 text-xs cursor-pointer transition-colors",
+                                  isChecked ? "bg-[#F0F8FD] text-[#0A4D68]" : "hover:bg-slate-50 text-slate-600"
+                                )}
+                              >
+                                <span className="font-medium">{col.label}</span>
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => toggleRetCol(col.id)}
+                                  className="h-3.5 w-3.5 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                                />
+                              </label>
+                            );
+                          })}
+                        </div>
+
+                        <div className="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-500">
+                          <span>{visibleRetCols.size} columns shown in report</span>
+                          <button
+                            type="button"
+                            onClick={() => setRetColDropdownOpen(false)}
+                            className="rounded px-2 py-0.5 font-semibold text-[#287EAD] hover:bg-[#F0F8FD] cursor-pointer"
+                          >
+                            Done
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   <span className="text-xs text-[#64748B]">Page size:</span>
                   <div className="w-36">
                     <CustomListbox
@@ -1545,216 +2433,333 @@ export default function RequisitionReportsPage() {
 
             {/* Sub-Tab 1: Aging Register Table */}
             {retirementsTab === "register" && (
-              <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden print:overflow-visible print:border-none print:shadow-none print:w-full">
-                <div className="overflow-x-auto print:overflow-visible print:w-full">
-                  <table className="w-full border-collapse text-left text-xs print:text-[9.5px] print:w-full print:table-fixed">
-                    <colgroup className="hidden print:table-column-group">
-                      <col className="w-[10%]" />
-                      <col className="w-[14%]" />
-                      <col className="w-[10%]" />
-                      <col className="w-[11%]" />
-                      <col className="w-[8%]" />
-                      <col className="w-[12%]" />
-                      <col className="w-[9%]" />
-                      <col className="w-[9%]" />
-                      <col className="w-[9%]" />
-                      <col className="w-[8%]" />
-                    </colgroup>
-                    <thead>
-                      <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
-                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("document_reference")}>
-                          <div className="flex items-center gap-1">
-                            <span>Req Ref</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                          </div>
-                        </th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("traveller_name")}>
-                          <div className="flex items-center gap-1">
-                            <span>Traveller</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                          </div>
-                        </th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1">Department</th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1">Travel Dates</th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("due_date")}>
-                          <div className="flex items-center gap-1">
-                            <span>Due Date</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                          </div>
-                        </th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("days_overdue")}>
-                          <div className="flex items-center gap-1">
-                            <span>Aging Status</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                          </div>
-                        </th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("advance_amount")}>
-                          <div className="flex items-center justify-end gap-1">
-                            <span>Advance</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                          </div>
-                        </th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1 text-right">Retired / Spent</th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("outstanding_amount")}>
-                          <div className="flex items-center justify-end gap-1">
-                            <span>Outstanding</span>
-                            <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                          </div>
-                        </th>
-                        <th className="py-2.5 px-3 print:py-1 print:px-1">Workflow State</th>
-                        <th className="py-2.5 px-3 text-center print:hidden">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#F1F5F9]">
-                      {isLoadingRetirements ? (
-                        <tr>
-                          <td colSpan={11} className="py-12 text-center text-xs text-[#64748B]">
-                            <Loader2 className="mx-auto h-6 w-6 animate-spin text-[#287EAD]" />
-                            <p className="mt-2 font-medium">Analyzing outstanding travel retirements…</p>
-                          </td>
-                        </tr>
-                      ) : displayedRetirements.length === 0 ? (
-                        <tr>
-                          <td colSpan={11} className="py-12 text-center text-xs text-[#64748B]">
-                            <CheckCircle2 className="mx-auto h-8 w-8 text-emerald-500 mb-2" />
-                            <p className="text-sm font-semibold text-[#1E293B]">No outstanding retirements found</p>
-                            <p className="mt-1 text-xs text-[#64748B]">
-                              All travel advances have been retired or match the selected filters.
-                            </p>
-                          </td>
-                        </tr>
-                      ) : (
-                        displayedRetirements.map((line) => (
-                          <tr key={line.id} className="hover:bg-[#F8FAFC] transition-colors print:break-inside-avoid">
-                            {/* Requisition Ref */}
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 font-semibold text-[#287EAD] whitespace-nowrap">
-                              <Link
-                                to={`/${line.document_id || line.id}`}
-                                className="hover:underline flex items-center gap-1"
-                              >
-                                {line.document_reference}
-                                <ExternalLink className="h-3 w-3 text-[#94A3B8] print:hidden" />
-                              </Link>
-                            </td>
-
-                            {/* Traveller */}
-                            <td className="py-2.5 px-3 print:py-1 print:px-1">
-                              <div className="font-semibold text-[#1E293B] truncate">{line.traveller_name}</div>
-                              {line.traveller_email && (
-                                <div className="text-[10px] text-[#64748B] truncate print:text-[8.5px]">{line.traveller_email}</div>
-                              )}
-                            </td>
-
-                            {/* Department */}
-                            <td className="py-2.5 px-3 print:py-1 print:px-1">
-                              <span className="inline-flex items-center rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] font-medium text-[#475569] print:bg-transparent print:px-0 print:py-0 print:text-[9px]">
-                                {line.department}
-                              </span>
-                            </td>
-
-                            {/* Travel Dates */}
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-[#475569] whitespace-nowrap">
-                              <div>{formatDateDisplay(line.departure_date)}</div>
-                              <div className="text-[10px] text-[#94A3B8] print:text-[8.5px]">Ret: {formatDateDisplay(line.return_date)}</div>
-                            </td>
-
-                            {/* Due Date */}
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
-                              <div className={cn(
-                                "font-medium",
-                                line.days_overdue > 0 ? "text-rose-700 font-bold" : "text-[#475569]",
-                              )}>
-                                {formatDateDisplay(line.due_date)}
-                              </div>
-                            </td>
-
-                            {/* Aging Status */}
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
-                              <AgingBadge
-                                bucket={line.aging_bucket}
-                                label={line.aging_bucket_label}
-                                days={line.days_overdue}
-                              />
-                            </td>
-
-                            {/* Advance Amount */}
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-right font-medium tabular-nums text-[#475569]">
-                              {formatCurrency(line.advance_amount, line.currency)}
-                            </td>
-
-                            {/* Retired / Spent */}
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-right tabular-nums text-[#64748B]">
-                              {line.retired_amount > 0 ? formatCurrency(line.retired_amount, line.currency) : "—"}
-                            </td>
-
-                            {/* Outstanding Balance */}
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 text-right font-bold tabular-nums text-[#1E293B]">
-                              <span className={cn(
-                                line.outstanding_amount > 0 && line.days_overdue > 0 ? "text-rose-700" : "text-[#1E293B]",
-                              )}>
-                                {formatCurrency(line.outstanding_amount, line.currency)}
-                              </span>
-                            </td>
-
-                            {/* Workflow State */}
-                            <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
-                              <span className="text-[11px] text-[#475569] font-medium print:text-[9px]">
-                                {line.retirement_status_label}
-                              </span>
-                            </td>
-
-                            {/* Action Link */}
-                            <td className="py-2.5 px-3 text-center print:hidden">
-                              <Link
-                                to={`/${line.document_id || line.id}`}
-                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#287EAD] hover:underline"
-                              >
-                                View
-                              </Link>
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Pagination */}
-                {totalRetirementPages > 1 && (
-                  <div className="flex items-center justify-between border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2 text-xs text-[#64748B] print:hidden">
-                    <div>
-                      Showing {(retPage - 1) * retPageSize + 1} to{" "}
-                      {Math.min(retPage * retPageSize, sortedRetirements.length)} of{" "}
-                      {sortedRetirements.length} retirements
+              <div className="space-y-3">
+                {/* Custom Selection Bar */}
+                {selectedRetIds.size > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] px-4 py-2.5 text-xs shadow-2xs print:hidden animate-in fade-in duration-150">
+                    <div className="flex items-center gap-2.5">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white border border-[#C5E6F5] text-[#287EAD]">
+                        <CheckSquare className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <span className="font-bold text-[#0A4D68]">
+                          {selectedRetIds.size} of {sortedRetirements.length} {selectedRetIds.size === 1 ? "record" : "records"} selected
+                        </span>
+                        <span className="ml-2 text-slate-500 font-medium">
+                          (Outstanding: <span className="font-semibold text-slate-700">{formatCurrency(selectedRetSummary.total_outstanding_amount)}</span>)
+                        </span>
+                        {visibleRetCols.size < RETIREMENT_REPORT_COLUMNS.length && (
+                          <span className="ml-2 rounded bg-white/80 border border-[#C5E6F5] px-1.5 py-0.5 text-[10px] text-[#0A4D68] font-medium">
+                            {visibleRetCols.size} columns active
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {selectedRetIds.size < sortedRetirements.length && (
+                        <button
+                          type="button"
+                          onClick={handleSelectAllFilteredRet}
+                          className="rounded-lg border border-[#C5E6F5] bg-white px-2.5 py-1 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors cursor-pointer"
+                        >
+                          Select all {sortedRetirements.length} filtered records
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => setRetPage((p) => Math.max(1, p - 1))}
-                        disabled={retPage === 1}
-                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                        onClick={clearRetSelection}
+                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer"
                       >
-                        <ChevronLeft className="h-4 w-4" />
+                        Clear selection
                       </button>
-                      <span className="px-2 font-medium text-[#1E293B]">
-                        Page {retPage} of {totalRetirementPages}
-                      </span>
                       <button
                         type="button"
-                        onClick={() => setRetPage((p) => Math.min(totalRetirementPages, p + 1))}
-                        disabled={retPage === totalRetirementPages}
-                        className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                        onClick={() => handlePrint("selected")}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-[#287EAD] bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-[#1E6F99] transition-colors cursor-pointer"
                       >
-                        <ChevronRight className="h-4 w-4" />
+                        <Printer className="h-3.5 w-3.5" />
+                        Print Selected ({selectedRetIds.size})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleExportSelectedRetCsv}
+                        className="inline-flex items-center gap-1 rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                      >
+                        <Download className="h-3.5 w-3.5 text-slate-500" />
+                        Export Selected
                       </button>
                     </div>
                   </div>
                 )}
 
-                {/* Print Footer Summary */}
-                <div className="hidden print:flex items-center justify-between text-[9.5px] text-slate-500 border-t border-slate-300 pt-1.5 mt-3">
-                  <span>End of Report • {sortedRetirements.length} retirement records total • IDM Financial & Requisition Management System</span>
-                  <span>CONFIDENTIAL</span>
+                <div className="rounded-xl border border-[#E2E8F0] bg-white shadow-xs overflow-hidden print:overflow-visible print:border-none print:shadow-none print:w-full">
+                  <div className="overflow-x-auto print:overflow-visible print:w-full">
+                    <table className="w-full border-collapse text-left text-xs print:text-[9.5px] print:w-full print:table-fixed">
+                      <colgroup className="hidden print:table-column-group">
+                        {activeRetColDefs.map((col) => {
+                          const pct = Math.round((col.weight / retColTotalWeight) * 100);
+                          return <col key={col.id} style={{ width: `${pct}%` }} />;
+                        })}
+                      </colgroup>
+                      <thead>
+                        <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569] print:bg-slate-100 print:text-[9px]">
+                          <th className="w-10 px-3 py-2.5 text-center print:hidden">
+                            <input
+                              ref={retHeaderCheckboxRef}
+                              type="checkbox"
+                              aria-label="Select all retirements on this page"
+                              checked={allRetPageSelected}
+                              onChange={toggleSelectAllRetOnPage}
+                              className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                            />
+                          </th>
+                          {visibleRetCols.has("document_reference") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("document_reference")}>
+                              <div className="flex items-center gap-1">
+                                <span>Req Ref</span>
+                                <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </div>
+                            </th>
+                          )}
+                          {visibleRetCols.has("traveller_name") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("traveller_name")}>
+                              <div className="flex items-center gap-1">
+                                <span>Traveller</span>
+                                <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </div>
+                            </th>
+                          )}
+                          {visibleRetCols.has("department") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Department</th>
+                          )}
+                          {visibleRetCols.has("travel_dates") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Travel Dates</th>
+                          )}
+                          {visibleRetCols.has("due_date") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("due_date")}>
+                              <div className="flex items-center gap-1">
+                                <span>Due Date</span>
+                                <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </div>
+                            </th>
+                          )}
+                          {visibleRetCols.has("aging_status") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1 cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("days_overdue")}>
+                              <div className="flex items-center gap-1">
+                                <span>Aging Status</span>
+                                <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </div>
+                            </th>
+                          )}
+                          {visibleRetCols.has("advance_amount") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("advance_amount")}>
+                              <div className="flex items-center justify-end gap-1">
+                                <span>Advance</span>
+                                <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </div>
+                            </th>
+                          )}
+                          {visibleRetCols.has("retired_amount") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1 text-right">Retired / Spent</th>
+                          )}
+                          {visibleRetCols.has("outstanding_amount") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1 text-right cursor-pointer hover:text-[#1E293B]" onClick={() => handleRetSort("outstanding_amount")}>
+                              <div className="flex items-center justify-end gap-1">
+                                <span>Outstanding</span>
+                                <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                              </div>
+                            </th>
+                          )}
+                          {visibleRetCols.has("workflow_state") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Workflow State</th>
+                          )}
+                          <th className="py-2.5 px-3 text-center print:hidden">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#F1F5F9]">
+                        {isLoadingRetirements ? (
+                          <tr>
+                            <td colSpan={isPrinting ? visibleRetCols.size : visibleRetCols.size + 2} className="py-12 text-center text-xs text-[#64748B]">
+                              <Loader2 className="mx-auto h-6 w-6 animate-spin text-[#287EAD]" />
+                              <p className="mt-2 font-medium">Analyzing outstanding travel retirements…</p>
+                            </td>
+                          </tr>
+                        ) : displayedRetirements.length === 0 ? (
+                          <tr>
+                            <td colSpan={isPrinting ? visibleRetCols.size : visibleRetCols.size + 2} className="py-12 text-center text-xs text-[#64748B]">
+                              <CheckCircle2 className="mx-auto h-8 w-8 text-emerald-500 mb-2" />
+                              <p className="text-sm font-semibold text-[#1E293B]">No outstanding retirements found</p>
+                              <p className="mt-1 text-xs text-[#64748B]">
+                                All travel advances have been retired or match the selected filters.
+                              </p>
+                            </td>
+                          </tr>
+                        ) : (
+                          displayedRetirements.map((line) => {
+                            const isSelected = selectedRetIds.has(line.id);
+                            return (
+                              <tr
+                                key={line.id}
+                                className={cn(
+                                  "transition-colors print:break-inside-avoid",
+                                  isSelected ? "bg-[#F0F8FD] hover:bg-[#E2F2FA]" : "hover:bg-[#F8FAFC]"
+                                )}
+                              >
+                                <td
+                                  className="w-10 px-3 py-2.5 text-center print:hidden cursor-pointer"
+                                  onClick={() => toggleSelectRetRow(line.id)}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`Select retirement ${line.document_reference}`}
+                                    checked={isSelected}
+                                    onChange={() => toggleSelectRetRow(line.id)}
+                                    className="h-4 w-4 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                                  />
+                                </td>
+                                {visibleRetCols.has("document_reference") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 font-semibold text-[#287EAD] whitespace-nowrap">
+                                    <Link
+                                      to={`/${line.document_id || line.id}`}
+                                      className="hover:underline flex items-center gap-1"
+                                    >
+                                      {line.document_reference}
+                                      <ExternalLink className="h-3 w-3 text-[#94A3B8] print:hidden" />
+                                    </Link>
+                                  </td>
+                                )}
+
+                                {visibleRetCols.has("traveller_name") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1">
+                                    <div className="font-semibold text-[#1E293B] truncate">{line.traveller_name}</div>
+                                    {line.traveller_email && (
+                                      <div className="text-[10px] text-[#64748B] truncate print:text-[8.5px]">{line.traveller_email}</div>
+                                    )}
+                                  </td>
+                                )}
+
+                                {visibleRetCols.has("department") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1">
+                                    <span className="inline-flex items-center rounded-md bg-[#F1F5F9] px-2 py-0.5 text-[11px] font-medium text-[#475569] print:bg-transparent print:px-0 print:py-0 print:text-[9px]">
+                                      {line.department}
+                                    </span>
+                                  </td>
+                                )}
+
+                                {visibleRetCols.has("travel_dates") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 text-[#475569] whitespace-nowrap">
+                                    <div>{formatDateDisplay(line.departure_date)}</div>
+                                    <div className="text-[10px] text-[#94A3B8] print:text-[8.5px]">Ret: {formatDateDisplay(line.return_date)}</div>
+                                  </td>
+                                )}
+
+                                {visibleRetCols.has("due_date") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
+                                    <div className={cn(
+                                      "font-medium",
+                                      line.days_overdue > 0 ? "text-rose-700 font-bold" : "text-[#475569]",
+                                    )}>
+                                      {formatDateDisplay(line.due_date)}
+                                    </div>
+                                  </td>
+                                )}
+
+                                {visibleRetCols.has("aging_status") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
+                                    <AgingBadge
+                                      bucket={line.aging_bucket}
+                                      label={line.aging_bucket_label}
+                                      days={line.days_overdue}
+                                    />
+                                  </td>
+                                )}
+
+                                {visibleRetCols.has("advance_amount") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 text-right font-medium tabular-nums text-[#475569]">
+                                    {formatCurrency(line.advance_amount, line.currency)}
+                                  </td>
+                                )}
+
+                                {visibleRetCols.has("retired_amount") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 text-right tabular-nums text-[#64748B]">
+                                    {line.retired_amount > 0 ? formatCurrency(line.retired_amount, line.currency) : "—"}
+                                  </td>
+                                )}
+
+                                {visibleRetCols.has("outstanding_amount") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 text-right font-bold tabular-nums text-[#1E293B]">
+                                    <span className={cn(
+                                      line.outstanding_amount > 0 && line.days_overdue > 0 ? "text-rose-700" : "text-[#1E293B]",
+                                    )}>
+                                      {formatCurrency(line.outstanding_amount, line.currency)}
+                                    </span>
+                                  </td>
+                                )}
+
+                                {visibleRetCols.has("workflow_state") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
+                                    <span className="text-[11px] text-[#475569] font-medium print:text-[9px]">
+                                      {line.retirement_status_label}
+                                    </span>
+                                  </td>
+                                )}
+
+                                {/* Action Link */}
+                                <td className="py-2.5 px-3 text-center print:hidden">
+                                  <Link
+                                    to={`/${line.document_id || line.id}`}
+                                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#287EAD] hover:underline"
+                                  >
+                                    View
+                                  </Link>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Pagination */}
+                  {totalRetirementPages > 1 && (
+                    <div className="flex items-center justify-between border-t border-[#E2E8F0] bg-[#F8FAFC] px-4 py-2 text-xs text-[#64748B] print:hidden">
+                      <div>
+                        Showing {(retPage - 1) * retPageSize + 1} to{" "}
+                        {Math.min(retPage * retPageSize, sortedRetirements.length)} of{" "}
+                        {sortedRetirements.length} retirements
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setRetPage((p) => Math.max(1, p - 1))}
+                          disabled={retPage === 1}
+                          className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                        >
+                          <ChevronLeft className="h-4 w-4" />
+                        </button>
+                        <span className="px-2 font-medium text-[#1E293B]">
+                          Page {retPage} of {totalRetirementPages}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setRetPage((p) => Math.min(totalRetirementPages, p + 1))}
+                          disabled={retPage === totalRetirementPages}
+                          className="rounded p-1 text-[#64748B] hover:bg-white hover:text-[#1E293B] disabled:opacity-40"
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Print Footer Summary */}
+                  <div className="hidden print:flex items-center justify-between text-[9.5px] text-slate-500 border-t border-slate-300 pt-1.5 mt-3">
+                    <span>
+                      End of Report • {printScope === "selected" ? `${displayedRetirements.length} selected records (of ${sortedRetirements.length})` : `${sortedRetirements.length} retirement records total`} • IDM Financial & Requisition Management System
+                    </span>
+                    <span>CONFIDENTIAL</span>
+                  </div>
                 </div>
               </div>
             )}

@@ -2489,7 +2489,7 @@ function renderInfoNote(text: string, values: TemplateFormValues, fields: Field[
     if (!field) return token;
     const value = field.key && Object.prototype.hasOwnProperty.call(values, field.key)
       ? values[field.key]
-      : values[field.id];
+      : (field.id ? values[field.id] : undefined);
     return infoNoteValueText(value);
   });
 }
