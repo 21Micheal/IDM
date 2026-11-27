@@ -17,6 +17,9 @@ export interface RequisitionReportLine {
   currency: string;
   journal_number: string;
   journal_status: "posted" | "pending" | "failed" | "unposted";
+  payment_voucher_reference?: string;
+  payment_voucher_id?: string;
+  has_payment_voucher?: boolean;
 }
 
 export interface RequisitionReportSummary {
@@ -26,6 +29,8 @@ export interface RequisitionReportSummary {
   posted_lines: number;
   distinct_activities: number;
   distinct_accounts: number;
+  with_payment_voucher_lines?: number;
+  with_payment_voucher_amount?: number;
 }
 
 export interface RequisitionReportActivityGroup {
@@ -69,6 +74,7 @@ export interface RequisitionReportParams {
   status?: string;
   department?: string;
   has_journal?: boolean | string;
+  has_payment_voucher?: boolean | string;
 }
 
 export interface OutstandingRetirementLine {
@@ -96,6 +102,9 @@ export interface OutstandingRetirementLine {
   currency: string;
   retirement_status: string;
   retirement_status_label: string;
+  payment_voucher_reference?: string;
+  payment_voucher_id?: string;
+  has_payment_voucher?: boolean;
 }
 
 export interface AgingBucketTotal {
@@ -113,6 +122,7 @@ export interface RetirementAgingSummary {
   total_awaiting_finance: number;
   total_reconciled: number;
   average_days_aged: number;
+  total_with_payment_voucher?: number;
   aging_totals: Record<string, AgingBucketTotal>;
 }
 
@@ -178,6 +188,7 @@ export interface RetirementsAgingReportParams {
   start_date?: string;
   end_date?: string;
   include_reconciled?: boolean | string;
+  has_payment_voucher?: boolean | string;
   export?: string;
 }
 

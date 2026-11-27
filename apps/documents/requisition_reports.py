@@ -86,6 +86,19 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
         or ""
     )
 
+    # Payment voucher context
+    imp_pv_ref = _text(form.get("imprest_payment_voucher_reference"))
+    ret_pv_ref = _text(form.get("payment_voucher_reference"))
+    pv_refs = [r for r in [imp_pv_ref, ret_pv_ref] if r]
+    doc_pv_ref = ", ".join(sorted(set(pv_refs))) if pv_refs else ""
+    doc_pv_id = str(form.get("imprest_payment_voucher_document_id") or form.get("payment_voucher_document_id") or "")
+    doc_has_pv = bool(
+        pv_refs
+        or doc_pv_id
+        or form.get("imprest_payment_voucher_status") == "generated"
+        or form.get("retirement_payment_voucher_status") == "generated"
+    )
+
     lines: List[Dict[str, Any]] = []
 
     # Look through sections and table fields
@@ -247,6 +260,9 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
                     "currency": row_currency,
                     "journal_number": primary_jnl or "—",
                     "journal_status": primary_status,
+                    "payment_voucher_reference": doc_pv_ref or "—",
+                    "payment_voucher_id": doc_pv_id,
+                    "has_payment_voucher": doc_has_pv,
                 })
 
     # If no lines were in tables, but top-level requisition has financial fields
@@ -271,6 +287,9 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
             "currency": global_currency,
             "journal_number": primary_jnl or "—",
             "journal_status": primary_status,
+            "payment_voucher_reference": doc_pv_ref or "—",
+            "payment_voucher_id": doc_pv_id,
+            "has_payment_voucher": doc_has_pv,
         })
 
     return lines
@@ -288,6 +307,16 @@ def build_requisition_report(queryset: QuerySet, params: Dict[str, Any]) -> Dict
     filter_status = _text(params.get("status")).strip().lower()
     filter_dept = _text(params.get("department")).strip().lower()
     has_journal = str(params.get("has_journal", "")).strip().lower() in ("true", "1", "yes")
+
+    # Payment voucher filter: true -> only with PV, false -> only without PV, None -> all
+    has_pv_param = params.get("has_payment_voucher")
+    filter_has_pv = None
+    if has_pv_param is not None and str(has_pv_param).strip() != "":
+        val = str(has_pv_param).strip().lower()
+        if val in ("true", "1", "yes"):
+            filter_has_pv = True
+        elif val in ("false", "0", "no"):
+            filter_has_pv = False
 
     all_lines: List[Dict[str, Any]] = []
 
@@ -321,6 +350,10 @@ def build_requisition_report(queryset: QuerySet, params: Dict[str, Any]) -> Dict
                 continue
             if has_journal and (not line["journal_number"] or line["journal_number"] == "—"):
                 continue
+            if filter_has_pv is True and not line.get("has_payment_voucher"):
+                continue
+            if filter_has_pv is False and line.get("has_payment_voucher"):
+                continue
 
             # Date filtering
             line_date = line.get("date") or ""
@@ -337,6 +370,7 @@ def build_requisition_report(queryset: QuerySet, params: Dict[str, Any]) -> Dict
                     line["description"],
                     line["account_code"],
                     line["journal_number"],
+                    line.get("payment_voucher_reference", ""),
                     line["document_reference"],
                     line["department"],
                     line["requester"],
@@ -402,6 +436,9 @@ def build_requisition_report(queryset: QuerySet, params: Dict[str, Any]) -> Dict
         reverse=True,
     )
 
+    pv_lines = [item for item in all_lines if item.get("has_payment_voucher")]
+    pv_amount = sum(item["amount"] for item in pv_lines)
+
     summary = {
         "total_amount": round(total_amount, 2),
         "total_lines": len(all_lines),
@@ -409,6 +446,8 @@ def build_requisition_report(queryset: QuerySet, params: Dict[str, Any]) -> Dict
         "posted_lines": len(posted_lines),
         "distinct_activities": len(by_activity_map),
         "distinct_accounts": len(by_account_map),
+        "with_payment_voucher_lines": len(pv_lines),
+        "with_payment_voucher_amount": round(pv_amount, 2),
     }
 
     filter_options = {
@@ -451,6 +490,7 @@ def generate_requisition_report_csv(report_data: Dict[str, Any]) -> str:
         "Currency",
         "Journal Number",
         "Journal Status",
+        "Payment Voucher",
         "Requisition Status",
     ])
 
@@ -469,6 +509,7 @@ def generate_requisition_report_csv(report_data: Dict[str, Any]) -> str:
             line.get("currency", "USD"),
             line.get("journal_number", ""),
             line.get("journal_status", ""),
+            line.get("payment_voucher_reference", ""),
             line.get("document_status", ""),
         ])
 
@@ -507,6 +548,16 @@ def build_outstanding_retirements_report(
     start_date_q = str(p.get("start_date") or "").strip()
     end_date_q = str(p.get("end_date") or "").strip()
     include_reconciled = str(p.get("include_reconciled") or "false").lower() in ("true", "1", "yes")
+
+    # Payment voucher filter
+    has_pv_param = p.get("has_payment_voucher")
+    filter_has_pv = None
+    if has_pv_param is not None and str(has_pv_param).strip() != "":
+        val = str(has_pv_param).strip().lower()
+        if val in ("true", "1", "yes"):
+            filter_has_pv = True
+        elif val in ("false", "0", "no"):
+            filter_has_pv = False
 
     all_retirements: List[Dict[str, Any]] = []
     available_departments = set()
@@ -629,6 +680,19 @@ def build_outstanding_retirements_report(
         currency = _text(doc.currency or values.get("currency_y0qd") or values.get("currency") or "USD").upper()
         doc_ref = doc.reference_number or f"REQ-{str(doc.id)[:8]}"
 
+        # Payment voucher details
+        imp_pv_ref = _text(form.get("imprest_payment_voucher_reference"))
+        ret_pv_ref = _text(form.get("payment_voucher_reference"))
+        pv_refs = [r for r in [imp_pv_ref, ret_pv_ref] if r]
+        doc_pv_ref = ", ".join(sorted(set(pv_refs))) if pv_refs else ""
+        doc_pv_id = str(form.get("imprest_payment_voucher_document_id") or form.get("payment_voucher_document_id") or "")
+        has_pv = bool(
+            pv_refs
+            or doc_pv_id
+            or form.get("imprest_payment_voucher_status") == "generated"
+            or form.get("retirement_payment_voucher_status") == "generated"
+        )
+
         item = {
             "id": str(doc.id),
             "document_id": str(doc.id),
@@ -654,7 +718,16 @@ def build_outstanding_retirements_report(
             "currency": currency,
             "retirement_status": status_kind,
             "retirement_status_label": status_label,
+            "payment_voucher_reference": doc_pv_ref or "—",
+            "payment_voucher_id": doc_pv_id,
+            "has_payment_voucher": has_pv,
         }
+
+        # Filter: Payment Voucher filter
+        if filter_has_pv is True and not has_pv:
+            continue
+        if filter_has_pv is False and has_pv:
+            continue
 
         # Filter: Reconciled exclusion when not requested
         if not include_reconciled and status_kind == "reconciled" and not aging_bucket_q and not status_q:
@@ -662,7 +735,7 @@ def build_outstanding_retirements_report(
 
         # Search filter
         if search_q:
-            haystack = f"{doc_ref} {doc.title} {traveller_name} {traveller_email} {dept_name} {status_label}".lower()
+            haystack = f"{doc_ref} {doc.title} {traveller_name} {traveller_email} {dept_name} {status_label} {doc_pv_ref}".lower()
             if search_q not in haystack:
                 continue
 
@@ -806,6 +879,7 @@ def build_outstanding_retirements_report(
         "total_awaiting_finance": sum(1 for r in all_retirements if r["retirement_status"] == "awaiting_finance"),
         "total_reconciled": sum(1 for r in all_retirements if r["retirement_status"] == "reconciled"),
         "average_days_aged": round(sum(r["days_overdue"] for r in overdue_items) / max(1, len(overdue_items)), 1) if overdue_items else 0.0,
+        "total_with_payment_voucher": sum(1 for r in all_retirements if r.get("has_payment_voucher")),
         "aging_totals": aging_totals,
     }
 
@@ -861,6 +935,7 @@ def generate_outstanding_retirements_csv(report_data: Dict[str, Any]) -> str:
         "Variance Amount",
         "Currency",
         "Retirement Status",
+        "Payment Voucher",
         "Requisition Status",
     ])
 
@@ -881,6 +956,7 @@ def generate_outstanding_retirements_csv(report_data: Dict[str, Any]) -> str:
             f"{row.get('variance_amount', 0.0):.2f}",
             row.get("currency", "USD"),
             row.get("retirement_status_label", ""),
+            row.get("payment_voucher_reference", ""),
             row.get("document_status", ""),
         ])
 

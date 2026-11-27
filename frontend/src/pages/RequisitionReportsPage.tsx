@@ -73,6 +73,7 @@ export const FINANCIAL_REPORT_COLUMNS: ReportColumnDef[] = [
   { id: "cost_centre", label: "Cost Centre", defaultVisible: true, weight: 8 },
   { id: "amount", label: "Amount", defaultVisible: true, weight: 10 },
   { id: "journal_number", label: "Journal #", defaultVisible: true, weight: 8 },
+  { id: "payment_voucher", label: "Payment Voucher (PV)", defaultVisible: true, weight: 10 },
   { id: "document_status", label: "Status", defaultVisible: true, weight: 8 },
 ];
 
@@ -86,6 +87,7 @@ export const RETIREMENT_REPORT_COLUMNS: ReportColumnDef[] = [
   { id: "advance_amount", label: "Advance", defaultVisible: true, weight: 9 },
   { id: "retired_amount", label: "Retired / Spent", defaultVisible: true, weight: 9 },
   { id: "outstanding_amount", label: "Outstanding", defaultVisible: true, weight: 9 },
+  { id: "payment_voucher", label: "Payment Voucher (PV)", defaultVisible: true, weight: 10 },
   { id: "workflow_state", label: "Workflow State", defaultVisible: true, weight: 8 },
 ];
 
@@ -238,6 +240,7 @@ export default function RequisitionReportsPage() {
   const [finStatus, setFinStatus] = useState("");
   const [finDepartment, setFinDepartment] = useState("");
   const [finHasJournal, setFinHasJournal] = useState<boolean | null>(null);
+  const [finHasPaymentVoucher, setFinHasPaymentVoucher] = useState<boolean | null>(null);
   const [finPage, setFinPage] = useState(1);
   const [finPageSize, setFinPageSize] = useState(25);
   const [finSortField, setFinSortField] = useState<string>("date");
@@ -253,6 +256,7 @@ export default function RequisitionReportsPage() {
   const [retStartDate, setRetStartDate] = useState("");
   const [retEndDate, setRetEndDate] = useState("");
   const [retIncludeReconciled, setRetIncludeReconciled] = useState(false);
+  const [retHasPaymentVoucher, setRetHasPaymentVoucher] = useState<boolean | null>(null);
   const [retPage, setRetPage] = useState(1);
   const [retPageSize, setRetPageSize] = useState(25);
   const [retSortField, setRetSortField] = useState<string>("due_date");
@@ -282,7 +286,11 @@ export default function RequisitionReportsPage() {
       const saved = localStorage.getItem("idm_report_fin_columns");
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return new Set(parsed);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const s = new Set(parsed);
+          s.add("payment_voucher");
+          return s;
+        }
       }
     } catch {}
     return new Set(FINANCIAL_REPORT_COLUMNS.map((c) => c.id));
@@ -293,7 +301,11 @@ export default function RequisitionReportsPage() {
       const saved = localStorage.getItem("idm_report_ret_columns");
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return new Set(parsed);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const s = new Set(parsed);
+          s.add("payment_voucher");
+          return s;
+        }
       }
     } catch {}
     return new Set(RETIREMENT_REPORT_COLUMNS.map((c) => c.id));
@@ -434,10 +446,11 @@ export default function RequisitionReportsPage() {
       status: finStatus || undefined,
       department: finDepartment || undefined,
       has_journal: finHasJournal === null ? undefined : finHasJournal,
+      has_payment_voucher: finHasPaymentVoucher === null ? undefined : finHasPaymentVoucher,
     };
   }, [
     finSearch, finStartDate, finEndDate, finAccountCode,
-    finActivityCode, finStatus, finDepartment, finHasJournal,
+    finActivityCode, finStatus, finDepartment, finHasJournal, finHasPaymentVoucher,
   ]);
 
   const {
@@ -461,10 +474,11 @@ export default function RequisitionReportsPage() {
       start_date: retStartDate || undefined,
       end_date: retEndDate || undefined,
       include_reconciled: retIncludeReconciled ? "true" : undefined,
+      has_payment_voucher: retHasPaymentVoucher === null ? undefined : retHasPaymentVoucher,
     };
   }, [
     retSearch, retDepartment, retTraveller, retStatus,
-    retAgingBucket, retStartDate, retEndDate, retIncludeReconciled,
+    retAgingBucket, retStartDate, retEndDate, retIncludeReconciled, retHasPaymentVoucher,
   ]);
 
   const {
@@ -787,6 +801,7 @@ export default function RequisitionReportsPage() {
       { id: "cost_centre", label: "Cost Centre", getValue: (l) => l.cost_centre || "" },
       { id: "amount", label: `Amount (${lines[0]?.currency || "USD"})`, getValue: (l) => String(l.amount) },
       { id: "journal_number", label: "Journal #", getValue: (l) => l.journal_number || "" },
+      { id: "payment_voucher", label: "Payment Voucher (PV)", getValue: (l) => l.payment_voucher_reference || "" },
       { id: "document_status", label: "Status", getValue: (l) => l.document_status || "" },
     ];
 
@@ -823,6 +838,7 @@ export default function RequisitionReportsPage() {
       { id: "advance_amount", label: `Advance (${retirements[0]?.currency || "USD"})`, getValue: (r) => String(r.advance_amount) },
       { id: "retired_amount", label: `Retired / Spent (${retirements[0]?.currency || "USD"})`, getValue: (r) => String(r.retired_amount) },
       { id: "outstanding_amount", label: `Outstanding (${retirements[0]?.currency || "USD"})`, getValue: (r) => String(r.outstanding_amount) },
+      { id: "payment_voucher", label: "Payment Voucher (PV)", getValue: (r) => r.payment_voucher_reference || "" },
       { id: "workflow_state", label: "Workflow State", getValue: (r) => r.retirement_status_label },
     ];
 
@@ -1067,7 +1083,7 @@ export default function RequisitionReportsPage() {
                     : printScope === "page"
                     ? `Current Page (${displayedFinancialLines.length} lines)`
                     : `All Filtered (${sortedFinancialLines.length} lines)`
-                }${
+                }${finHasPaymentVoucher ? " | Payment Voucher: Only with PV" : ""}${
                   visibleFinCols.size < FINANCIAL_REPORT_COLUMNS.length
                     ? ` | Columns (${visibleFinCols.size}): ${activeFinColDefs.map((c) => c.label).join(", ")}`
                     : ""
@@ -1078,7 +1094,7 @@ export default function RequisitionReportsPage() {
                     : printScope === "page"
                     ? `Current Page (${displayedRetirements.length} records)`
                     : `All Filtered (${sortedRetirements.length} records)`
-                } | Overdue: ${currentRetSummary.total_overdue_records}${
+                }${retHasPaymentVoucher ? " | Payment Voucher: Only with PV" : ""} | Overdue: ${currentRetSummary.total_overdue_records}${
                   visibleRetCols.size < RETIREMENT_REPORT_COLUMNS.length
                     ? ` | Columns (${visibleRetCols.size}): ${activeRetColDefs.map((c) => c.label).join(", ")}`
                     : ""
@@ -1093,7 +1109,7 @@ export default function RequisitionReportsPage() {
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-4">
           <div>
             <div className="flex items-center gap-2">
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#F0F8FD] border border-[#C5E6F5] text-[#287EAD]">
+              <span className="flex h-8 w-8 items-center justify-center rounded-none bg-[#F0F8FD] border border-[#C5E6F5] text-[#287EAD]">
                 <FileSpreadsheet className="h-5 w-5" />
               </span>
               <h1 className="text-xl font-bold tracking-tight text-[#1E293B]">
@@ -1111,7 +1127,7 @@ export default function RequisitionReportsPage() {
               <button
                 type="button"
                 onClick={() => setScheduleModalOpen(true)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[#C5E6F5] bg-[#F0F8FD] px-3 py-1.5 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-none border border-[#C5E6F5] bg-[#F0F8FD] px-3 py-1.5 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors"
                 title="Configure automated scheduled reports"
               >
                 <BellRing className="h-3.5 w-3.5 text-[#287EAD]" />
@@ -1120,12 +1136,12 @@ export default function RequisitionReportsPage() {
             )}
 
             {/* Print with Custom Scope Options Dropdown */}
-            <div className="relative inline-flex rounded-lg shadow-2xs" ref={printDropdownRef}>
+            <div className="relative inline-flex rounded-none shadow-2xs" ref={printDropdownRef}>
               <button
                 type="button"
                 onClick={() => handlePrint(activeSelectedCount > 0 ? "selected" : "all")}
                 className={cn(
-                  "inline-flex items-center gap-1.5 rounded-l-lg border border-[#CBD5E1] px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer",
+                  "inline-flex items-center gap-1.5 rounded-none border border-[#CBD5E1] px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer",
                   activeSelectedCount > 0
                     ? "bg-[#F0F8FD] border-[#C5E6F5] text-[#0A4D68] hover:bg-[#E2F2FA]"
                     : "bg-white text-[#334155] hover:bg-[#F8FAFC]"
@@ -1145,7 +1161,7 @@ export default function RequisitionReportsPage() {
                 type="button"
                 onClick={() => setPrintDropdownOpen((prev) => !prev)}
                 className={cn(
-                  "inline-flex items-center rounded-r-lg border border-l-0 border-[#CBD5E1] px-1.5 py-1.5 text-xs transition-colors cursor-pointer",
+                  "inline-flex items-center rounded-none border border-l-0 border-[#CBD5E1] px-1.5 py-1.5 text-xs transition-colors cursor-pointer",
                   activeSelectedCount > 0
                     ? "bg-[#F0F8FD] border-[#C5E6F5] text-[#0A4D68] hover:bg-[#E2F2FA]"
                     : "bg-white text-[#64748B] hover:bg-[#F8FAFC]"
@@ -1157,7 +1173,7 @@ export default function RequisitionReportsPage() {
               </button>
 
               {printDropdownOpen && (
-                <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-xl border border-[#E2E8F0] bg-white p-1.5 shadow-lg animate-in fade-in zoom-in-95 duration-100">
+                <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-none border border-[#E2E8F0] bg-white p-1.5 shadow-lg animate-in fade-in zoom-in-95 duration-100">
                   <div className="px-2.5 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
                     Select Print Mode
                   </div>
@@ -1169,7 +1185,7 @@ export default function RequisitionReportsPage() {
                         setPrintDropdownOpen(false);
                         handlePrint("selected");
                       }}
-                      className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-[#F0F8FD] hover:text-[#0A4D68] transition-colors cursor-pointer"
+                      className="flex w-full items-start gap-2.5 rounded-none px-2.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-[#F0F8FD] hover:text-[#0A4D68] transition-colors cursor-pointer"
                     >
                       <CheckSquare className="h-4 w-4 text-[#287EAD] shrink-0 mt-0.5" />
                       <div>
@@ -1189,7 +1205,7 @@ export default function RequisitionReportsPage() {
                       setPrintDropdownOpen(false);
                       handlePrint("all");
                     }}
-                    className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                    className="flex w-full items-start gap-2.5 rounded-none px-2.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
                   >
                     <FileSpreadsheet className="h-4 w-4 text-slate-500 shrink-0 mt-0.5" />
                     <div>
@@ -1208,7 +1224,7 @@ export default function RequisitionReportsPage() {
                       setPrintDropdownOpen(false);
                       handlePrint("page");
                     }}
-                    className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                    className="flex w-full items-start gap-2.5 rounded-none px-2.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
                   >
                     <Layers className="h-4 w-4 text-slate-500 shrink-0 mt-0.5" />
                     <div>
@@ -1230,7 +1246,7 @@ export default function RequisitionReportsPage() {
                           if (activeMainTab === "financial") clearFinSelection();
                           else clearRetSelection();
                         }}
-                        className="w-full text-left rounded-lg px-2.5 py-1.5 text-[11px] text-rose-600 hover:bg-rose-50 font-medium cursor-pointer"
+                        className="w-full text-left rounded-none px-2.5 py-1.5 text-[11px] text-rose-600 hover:bg-rose-50 font-medium cursor-pointer"
                       >
                         Clear selection ({activeSelectedCount})
                       </button>
@@ -1243,7 +1259,7 @@ export default function RequisitionReportsPage() {
               type="button"
               onClick={handleExportCsv}
               disabled={exportingCsv}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] transition-colors disabled:opacity-60"
+              className="inline-flex items-center gap-1.5 rounded-none bg-[#287EAD] px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] transition-colors disabled:opacity-60"
             >
               {exportingCsv ? (
                 <>
@@ -1316,10 +1332,10 @@ export default function RequisitionReportsPage() {
             {/* ── Light-Colored Stat Cards for Financial Lines ── */}
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-6 print:gap-1.5 print:mb-2.5">
               {/* Card 1: Total Requisition Amount */}
-              <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68] print:text-[10px]">
                   <span>Total Requisitions</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD] print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-[#C5E6F5] text-[#287EAD] print:hidden">
                     <TrendingUp className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -1332,10 +1348,10 @@ export default function RequisitionReportsPage() {
               </div>
 
               {/* Card 2: Posted to SunSystems */}
-              <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-emerald-800 print:text-[10px]">
                   <span>Posted to SunSystems</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700 print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-emerald-100 text-emerald-700 print:hidden">
                     <CheckCircle2 className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -1348,10 +1364,10 @@ export default function RequisitionReportsPage() {
               </div>
 
               {/* Card 3: Pending / Unposted */}
-              <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-amber-800 print:text-[10px]">
                   <span>Pending / Unposted</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700 print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-amber-100 text-amber-700 print:hidden">
                     <Clock className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -1364,10 +1380,10 @@ export default function RequisitionReportsPage() {
               </div>
 
               {/* Card 4: Unique Activities */}
-              <div className="rounded-xl border border-[#DDD6FE] bg-[#F5F3FF] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#DDD6FE] bg-[#F5F3FF] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-indigo-800 print:text-[10px]">
                   <span>Unique Activities</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700 print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-indigo-100 text-indigo-700 print:hidden">
                     <Layers className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -1380,10 +1396,10 @@ export default function RequisitionReportsPage() {
               </div>
 
               {/* Card 5: Unique Accounts */}
-              <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-teal-800 print:text-[10px]">
                   <span>GL Account Codes</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700 print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-teal-100 text-teal-700 print:hidden">
                     <Building2 className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -1396,10 +1412,10 @@ export default function RequisitionReportsPage() {
               </div>
 
               {/* Card 6: Posting Rate */}
-              <div className="rounded-xl border border-[#BFDBFE] bg-[#EFF6FF] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#BFDBFE] bg-[#EFF6FF] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-blue-800 print:text-[10px]">
                   <span>Posting Rate</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-blue-100 text-blue-700 print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-blue-100 text-blue-700 print:hidden">
                     <BarChart3 className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -1511,8 +1527,22 @@ export default function RequisitionReportsPage() {
                   <span>With Journal # only</span>
                 </label>
 
+                {/* Payment Voucher Only Filter Checkbox */}
+                <label className="flex items-center gap-1.5 text-xs text-[#0A4D68] cursor-pointer select-none rounded-lg bg-[#F0F8FD] border border-[#C5E6F5] px-2.5 py-1 hover:bg-[#E2F2FA] transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={finHasPaymentVoucher === true}
+                    onChange={(e) => {
+                      setFinHasPaymentVoucher(e.target.checked ? true : null);
+                      setFinPage(1);
+                    }}
+                    className="rounded border-[#CBD5E1] text-[#287EAD] focus:ring-[#287EAD]"
+                  />
+                  <span className="font-semibold">With Payment Voucher (PV) only</span>
+                </label>
+
                 {/* Reset Filters */}
-                {(finSearch || finStartDate || finEndDate || finAccountCode || finActivityCode || finDepartment || finStatus || finHasJournal !== null) && (
+                {(finSearch || finStartDate || finEndDate || finAccountCode || finActivityCode || finDepartment || finStatus || finHasJournal !== null || finHasPaymentVoucher !== null) && (
                   <button
                     type="button"
                     onClick={() => {
@@ -1524,6 +1554,7 @@ export default function RequisitionReportsPage() {
                       setFinDepartment("");
                       setFinStatus("");
                       setFinHasJournal(null);
+                      setFinHasPaymentVoucher(null);
                       setFinPage(1);
                     }}
                     className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline"
@@ -1596,7 +1627,7 @@ export default function RequisitionReportsPage() {
                       type="button"
                       onClick={() => setFinColDropdownOpen((prev) => !prev)}
                       className={cn(
-                        "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold shadow-2xs transition-colors cursor-pointer",
+                        "inline-flex items-center gap-1.5 rounded-none border px-2.5 py-1 text-xs font-semibold shadow-2xs transition-colors cursor-pointer",
                         visibleFinCols.size < FINANCIAL_REPORT_COLUMNS.length
                           ? "border-[#287EAD] bg-[#F0F8FD] text-[#0A4D68]"
                           : "border-[#CBD5E1] bg-white text-[#475569] hover:bg-[#F8FAFC]"
@@ -1607,7 +1638,7 @@ export default function RequisitionReportsPage() {
                       <SlidersHorizontal className="h-3.5 w-3.5 text-[#287EAD]" />
                       <span>Columns</span>
                       <span className={cn(
-                        "rounded-full px-1.5 py-0.2 text-[10px] font-bold",
+                        "px-1.5 py-0.2 text-[10px] font-bold rounded-none",
                         visibleFinCols.size < FINANCIAL_REPORT_COLUMNS.length
                           ? "bg-[#287EAD] text-white"
                           : "bg-slate-100 text-slate-600"
@@ -1618,7 +1649,7 @@ export default function RequisitionReportsPage() {
                     </button>
 
                     {finColDropdownOpen && (
-                      <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-xl border border-[#E2E8F0] bg-white p-2.5 shadow-xl animate-in fade-in zoom-in-95 duration-100">
+                      <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-none border border-[#E2E8F0] bg-white p-2.5 shadow-xl animate-in fade-in zoom-in-95 duration-100">
                         <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
                           <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
                             Visible Columns
@@ -1649,7 +1680,7 @@ export default function RequisitionReportsPage() {
                               <label
                                 key={col.id}
                                 className={cn(
-                                  "flex items-center justify-between rounded-lg px-2 py-1.5 text-xs cursor-pointer transition-colors",
+                                  "flex items-center justify-between rounded-none px-2 py-1.5 text-xs cursor-pointer transition-colors",
                                   isChecked ? "bg-[#F0F8FD] text-[#0A4D68]" : "hover:bg-slate-50 text-slate-600"
                                 )}
                               >
@@ -1658,7 +1689,7 @@ export default function RequisitionReportsPage() {
                                   type="checkbox"
                                   checked={isChecked}
                                   onChange={() => toggleFinCol(col.id)}
-                                  className="h-3.5 w-3.5 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                                  className="h-3.5 w-3.5 rounded-none border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
                                 />
                               </label>
                             );
@@ -1670,7 +1701,7 @@ export default function RequisitionReportsPage() {
                           <button
                             type="button"
                             onClick={() => setFinColDropdownOpen(false)}
-                            className="rounded px-2 py-0.5 font-semibold text-[#287EAD] hover:bg-[#F0F8FD] cursor-pointer"
+                            className="rounded-none px-2 py-0.5 font-semibold text-[#287EAD] hover:bg-[#F0F8FD] cursor-pointer"
                           >
                             Done
                           </button>
@@ -1689,7 +1720,7 @@ export default function RequisitionReportsPage() {
                       }}
                       options={pageSizeOptions}
                       className="text-xs"
-                      buttonClassName="h-7 border-[#CBD5E1] bg-white text-xs rounded-lg"
+                      buttonClassName="h-7 border-[#CBD5E1] bg-white text-xs rounded-none"
                     />
                   </div>
                 </div>
@@ -1701,9 +1732,9 @@ export default function RequisitionReportsPage() {
               <div className="space-y-3">
                 {/* Custom Selection Bar */}
                 {matchingFinSelectedCount > 0 && (
-                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] px-4 py-2.5 text-xs shadow-2xs print:hidden animate-in fade-in duration-150">
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-none border border-[#C5E6F5] bg-[#F0F8FD] px-4 py-2.5 text-xs shadow-2xs print:hidden animate-in fade-in duration-150">
                     <div className="flex items-center gap-2.5">
-                      <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white border border-[#C5E6F5] text-[#287EAD]">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-none bg-white border border-[#C5E6F5] text-[#287EAD]">
                         <CheckSquare className="h-4 w-4" />
                       </div>
                       <div>
@@ -1714,7 +1745,7 @@ export default function RequisitionReportsPage() {
                           (Total: <span className="font-semibold text-slate-700">{formatCurrency(selectedFinSummary.total_amount)}</span>)
                         </span>
                         {visibleFinCols.size < FINANCIAL_REPORT_COLUMNS.length && (
-                          <span className="ml-2 rounded bg-white/80 border border-[#C5E6F5] px-1.5 py-0.5 text-[10px] text-[#0A4D68] font-medium">
+                          <span className="ml-2 rounded-none bg-white/80 border border-[#C5E6F5] px-1.5 py-0.5 text-[10px] text-[#0A4D68] font-medium">
                             {visibleFinCols.size} columns active
                           </span>
                         )}
@@ -1725,7 +1756,7 @@ export default function RequisitionReportsPage() {
                         <button
                           type="button"
                           onClick={handleSelectAllFilteredFin}
-                          className="rounded-lg border border-[#C5E6F5] bg-white px-2.5 py-1 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors cursor-pointer"
+                          className="rounded-none border border-[#C5E6F5] bg-white px-2.5 py-1 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors cursor-pointer"
                         >
                           Select all {sortedFinancialLines.length} filtered lines
                         </button>
@@ -1733,14 +1764,14 @@ export default function RequisitionReportsPage() {
                       <button
                         type="button"
                         onClick={clearFinSelection}
-                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer"
+                        className="rounded-none border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer"
                       >
                         Clear selection
                       </button>
                       <button
                         type="button"
                         onClick={() => handlePrint("selected")}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-[#287EAD] bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-[#1E6F99] transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1.5 rounded-none border border-[#287EAD] bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-[#1E6F99] transition-colors cursor-pointer"
                       >
                         <Printer className="h-3.5 w-3.5" />
                         Print Selected ({matchingFinSelectedCount})
@@ -1748,7 +1779,7 @@ export default function RequisitionReportsPage() {
                       <button
                         type="button"
                         onClick={handleExportSelectedFinCsv}
-                        className="inline-flex items-center gap-1 rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1 rounded-none border border-[#CBD5E1] bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
                       >
                         <Download className="h-3.5 w-3.5 text-slate-500" />
                         Export Selected
@@ -1821,6 +1852,9 @@ export default function RequisitionReportsPage() {
                           )}
                           {visibleFinCols.has("journal_number") && (
                             <th className="py-2.5 px-3 print:py-1 print:px-1">Journal #</th>
+                          )}
+                          {visibleFinCols.has("payment_voucher") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Payment Voucher (PV)</th>
                           )}
                           {visibleFinCols.has("document_status") && (
                             <th className="py-2.5 px-3 print:py-1 print:px-1">Status</th>
@@ -1912,6 +1946,27 @@ export default function RequisitionReportsPage() {
                                 {visibleFinCols.has("journal_number") && (
                                   <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap print:whitespace-normal print:break-all">
                                     <JournalStatusBadge status={line.journal_status} journalNumber={line.journal_number} />
+                                  </td>
+                                )}
+                                {visibleFinCols.has("payment_voucher") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
+                                    {line.payment_voucher_reference && line.payment_voucher_reference !== "—" ? (
+                                      line.payment_voucher_id ? (
+                                        <Link
+                                          to={`/${line.payment_voucher_id}`}
+                                          className="inline-flex items-center gap-1 rounded bg-[#C5E6F5]/40 border border-[#287EAD]/30 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] hover:bg-[#C5E6F5] hover:underline print:border-none print:bg-transparent print:p-0 print:text-[9px]"
+                                        >
+                                          {line.payment_voucher_reference}
+                                          <ExternalLink className="h-2.5 w-2.5 text-[#287EAD] print:hidden" />
+                                        </Link>
+                                      ) : (
+                                        <span className="inline-flex items-center rounded bg-[#C5E6F5]/40 border border-[#287EAD]/30 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] print:border-none print:bg-transparent print:p-0 print:text-[9px]">
+                                          {line.payment_voucher_reference}
+                                        </span>
+                                      )
+                                    ) : (
+                                      <span className="text-slate-400">—</span>
+                                    )}
                                   </td>
                                 )}
                                 {visibleFinCols.has("document_status") && (
@@ -2062,10 +2117,10 @@ export default function RequisitionReportsPage() {
             {/* ── Light-Colored Stat Cards for Outstanding Retirements ── */}
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-6 print:gap-1.5 print:mb-2.5">
               {/* Card 1: Total Outstanding */}
-              <div className="rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#C5E6F5] bg-[#F0F8FD] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-[#0A4D68] print:text-[10px]">
                   <span>Outstanding Balance</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD] print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-[#C5E6F5] text-[#287EAD] print:hidden">
                     <TrendingUp className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -2078,10 +2133,10 @@ export default function RequisitionReportsPage() {
               </div>
 
               {/* Card 2: Overdue Retirements */}
-              <div className="rounded-xl border border-[#FECDD3] bg-[#FFF1F2] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#FECDD3] bg-[#FFF1F2] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-rose-800 print:text-[10px]">
                   <span>Overdue Retirements</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-rose-100 text-rose-700 print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-rose-100 text-rose-700 print:hidden">
                     <ShieldAlert className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -2094,10 +2149,10 @@ export default function RequisitionReportsPage() {
               </div>
 
               {/* Card 3: Average Aging */}
-              <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#FDE68A] bg-[#FFFBEB] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-amber-800 print:text-[10px]">
                   <span>Avg. Aging (Overdue)</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700 print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-amber-100 text-amber-700 print:hidden">
                     <Clock className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -2110,10 +2165,10 @@ export default function RequisitionReportsPage() {
               </div>
 
               {/* Card 4: Awaiting Finance Review */}
-              <div className="rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#99F6E4] bg-[#F0FDFA] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-teal-800 print:text-[10px]">
                   <span>Awaiting Finance</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-teal-700 print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-teal-100 text-teal-700 print:hidden">
                     <ClipboardList className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -2126,10 +2181,10 @@ export default function RequisitionReportsPage() {
               </div>
 
               {/* Card 5: Total Advance Issued */}
-              <div className="rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#E2E8F0] bg-[#F8FAFC] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-slate-700 print:text-[10px]">
                   <span>Total Advance Issued</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-slate-200 text-slate-700 print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-slate-200 text-slate-700 print:hidden">
                     <Building2 className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -2142,10 +2197,10 @@ export default function RequisitionReportsPage() {
               </div>
 
               {/* Card 6: Current & Reconciled */}
-              <div className="rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs print:p-2 print:rounded-md print:shadow-none print:border-slate-300">
+              <div className="rounded-none border border-[#BBF7D0] bg-[#F0FDF4] p-3.5 shadow-xs print:p-2 print:rounded-none print:shadow-none print:border-slate-300">
                 <div className="flex items-center justify-between text-xs font-semibold text-emerald-800 print:text-[10px]">
                   <span>Current / Not Due</span>
-                  <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700 print:hidden">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-none bg-emerald-100 text-emerald-700 print:hidden">
                     <CheckCircle2 className="h-3.5 w-3.5" />
                   </span>
                 </div>
@@ -2255,8 +2310,22 @@ export default function RequisitionReportsPage() {
                   <span>Include Reconciled</span>
                 </label>
 
+                {/* Payment Voucher Only Filter Checkbox */}
+                <label className="flex items-center gap-1.5 text-xs text-[#0A4D68] cursor-pointer select-none rounded-lg bg-[#F0F8FD] border border-[#C5E6F5] px-2.5 py-1 hover:bg-[#E2F2FA] transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={retHasPaymentVoucher === true}
+                    onChange={(e) => {
+                      setRetHasPaymentVoucher(e.target.checked ? true : null);
+                      setRetPage(1);
+                    }}
+                    className="rounded border-[#CBD5E1] text-[#287EAD] focus:ring-[#287EAD]"
+                  />
+                  <span className="font-semibold">With Payment Voucher (PV) only</span>
+                </label>
+
                 {/* Reset Filters */}
-                {(retSearch || retDepartment || retTraveller || retStatus || retAgingBucket !== "all" || retIncludeReconciled) && (
+                {(retSearch || retDepartment || retTraveller || retStatus || retAgingBucket !== "all" || retIncludeReconciled || retHasPaymentVoucher !== null) && (
                   <button
                     type="button"
                     onClick={() => {
@@ -2266,6 +2335,7 @@ export default function RequisitionReportsPage() {
                       setRetStatus("");
                       setRetAgingBucket("all");
                       setRetIncludeReconciled(false);
+                      setRetHasPaymentVoucher(null);
                       setRetPage(1);
                     }}
                     className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:underline cursor-pointer"
@@ -2338,7 +2408,7 @@ export default function RequisitionReportsPage() {
                       type="button"
                       onClick={() => setRetColDropdownOpen((prev) => !prev)}
                       className={cn(
-                        "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold shadow-2xs transition-colors cursor-pointer",
+                        "inline-flex items-center gap-1.5 rounded-none border px-2.5 py-1 text-xs font-semibold shadow-2xs transition-colors cursor-pointer",
                         visibleRetCols.size < RETIREMENT_REPORT_COLUMNS.length
                           ? "border-[#287EAD] bg-[#F0F8FD] text-[#0A4D68]"
                           : "border-[#CBD5E1] bg-white text-[#475569] hover:bg-[#F8FAFC]"
@@ -2349,7 +2419,7 @@ export default function RequisitionReportsPage() {
                       <SlidersHorizontal className="h-3.5 w-3.5 text-[#287EAD]" />
                       <span>Columns</span>
                       <span className={cn(
-                        "rounded-full px-1.5 py-0.2 text-[10px] font-bold",
+                        "px-1.5 py-0.2 text-[10px] font-bold rounded-none",
                         visibleRetCols.size < RETIREMENT_REPORT_COLUMNS.length
                           ? "bg-[#287EAD] text-white"
                           : "bg-slate-100 text-slate-600"
@@ -2360,7 +2430,7 @@ export default function RequisitionReportsPage() {
                     </button>
 
                     {retColDropdownOpen && (
-                      <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-xl border border-[#E2E8F0] bg-white p-2.5 shadow-xl animate-in fade-in zoom-in-95 duration-100">
+                      <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-none border border-[#E2E8F0] bg-white p-2.5 shadow-xl animate-in fade-in zoom-in-95 duration-100">
                         <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
                           <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
                             Visible Columns
@@ -2391,7 +2461,7 @@ export default function RequisitionReportsPage() {
                               <label
                                 key={col.id}
                                 className={cn(
-                                  "flex items-center justify-between rounded-lg px-2 py-1.5 text-xs cursor-pointer transition-colors",
+                                  "flex items-center justify-between rounded-none px-2 py-1.5 text-xs cursor-pointer transition-colors",
                                   isChecked ? "bg-[#F0F8FD] text-[#0A4D68]" : "hover:bg-slate-50 text-slate-600"
                                 )}
                               >
@@ -2400,7 +2470,7 @@ export default function RequisitionReportsPage() {
                                   type="checkbox"
                                   checked={isChecked}
                                   onChange={() => toggleRetCol(col.id)}
-                                  className="h-3.5 w-3.5 rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
+                                  className="h-3.5 w-3.5 rounded-none border-slate-300 text-[#287EAD] focus:ring-[#287EAD] cursor-pointer"
                                 />
                               </label>
                             );
@@ -2412,7 +2482,7 @@ export default function RequisitionReportsPage() {
                           <button
                             type="button"
                             onClick={() => setRetColDropdownOpen(false)}
-                            className="rounded px-2 py-0.5 font-semibold text-[#287EAD] hover:bg-[#F0F8FD] cursor-pointer"
+                            className="rounded-none px-2 py-0.5 font-semibold text-[#287EAD] hover:bg-[#F0F8FD] cursor-pointer"
                           >
                             Done
                           </button>
@@ -2431,7 +2501,7 @@ export default function RequisitionReportsPage() {
                       }}
                       options={pageSizeOptions}
                       className="text-xs"
-                      buttonClassName="h-7 border-[#CBD5E1] bg-white text-xs rounded-lg"
+                      buttonClassName="h-7 border-[#CBD5E1] bg-white text-xs rounded-none"
                     />
                   </div>
                 </div>
@@ -2443,9 +2513,9 @@ export default function RequisitionReportsPage() {
               <div className="space-y-3">
                 {/* Custom Selection Bar */}
                 {matchingRetSelectedCount > 0 && (
-                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#C5E6F5] bg-[#F0F8FD] px-4 py-2.5 text-xs shadow-2xs print:hidden animate-in fade-in duration-150">
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-none border border-[#C5E6F5] bg-[#F0F8FD] px-4 py-2.5 text-xs shadow-2xs print:hidden animate-in fade-in duration-150">
                     <div className="flex items-center gap-2.5">
-                      <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white border border-[#C5E6F5] text-[#287EAD]">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-none bg-white border border-[#C5E6F5] text-[#287EAD]">
                         <CheckSquare className="h-4 w-4" />
                       </div>
                       <div>
@@ -2456,7 +2526,7 @@ export default function RequisitionReportsPage() {
                           (Outstanding: <span className="font-semibold text-slate-700">{formatCurrency(selectedRetSummary.total_outstanding_amount)}</span>)
                         </span>
                         {visibleRetCols.size < RETIREMENT_REPORT_COLUMNS.length && (
-                          <span className="ml-2 rounded bg-white/80 border border-[#C5E6F5] px-1.5 py-0.5 text-[10px] text-[#0A4D68] font-medium">
+                          <span className="ml-2 rounded-none bg-white/80 border border-[#C5E6F5] px-1.5 py-0.5 text-[10px] text-[#0A4D68] font-medium">
                             {visibleRetCols.size} columns active
                           </span>
                         )}
@@ -2467,7 +2537,7 @@ export default function RequisitionReportsPage() {
                         <button
                           type="button"
                           onClick={handleSelectAllFilteredRet}
-                          className="rounded-lg border border-[#C5E6F5] bg-white px-2.5 py-1 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors cursor-pointer"
+                          className="rounded-none border border-[#C5E6F5] bg-white px-2.5 py-1 text-xs font-semibold text-[#0A4D68] hover:bg-[#E2F2FA] transition-colors cursor-pointer"
                         >
                           Select all {sortedRetirements.length} filtered records
                         </button>
@@ -2475,14 +2545,14 @@ export default function RequisitionReportsPage() {
                       <button
                         type="button"
                         onClick={clearRetSelection}
-                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer"
+                        className="rounded-none border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer"
                       >
                         Clear selection
                       </button>
                       <button
                         type="button"
                         onClick={() => handlePrint("selected")}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-[#287EAD] bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-[#1E6F99] transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1.5 rounded-none border border-[#287EAD] bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-[#1E6F99] transition-colors cursor-pointer"
                       >
                         <Printer className="h-3.5 w-3.5" />
                         Print Selected ({matchingRetSelectedCount})
@@ -2490,7 +2560,7 @@ export default function RequisitionReportsPage() {
                       <button
                         type="button"
                         onClick={handleExportSelectedRetCsv}
-                        className="inline-flex items-center gap-1 rounded-lg border border-[#CBD5E1] bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1 rounded-none border border-[#CBD5E1] bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
                       >
                         <Download className="h-3.5 w-3.5 text-slate-500" />
                         Export Selected
@@ -2578,6 +2648,9 @@ export default function RequisitionReportsPage() {
                                 <ArrowUpDown className="h-3 w-3 text-[#94A3B8] print:hidden" />
                               </div>
                             </th>
+                          )}
+                          {visibleRetCols.has("payment_voucher") && (
+                            <th className="py-2.5 px-3 print:py-1 print:px-1">Payment Voucher (PV)</th>
                           )}
                           {visibleRetCols.has("workflow_state") && (
                             <th className="py-2.5 px-3 print:py-1 print:px-1">Workflow State</th>
@@ -2701,6 +2774,28 @@ export default function RequisitionReportsPage() {
                                     )}>
                                       {formatCurrency(line.outstanding_amount, line.currency)}
                                     </span>
+                                  </td>
+                                )}
+
+                                {visibleRetCols.has("payment_voucher") && (
+                                  <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
+                                    {line.payment_voucher_reference && line.payment_voucher_reference !== "—" ? (
+                                      line.payment_voucher_id ? (
+                                        <Link
+                                          to={`/${line.payment_voucher_id}`}
+                                          className="inline-flex items-center gap-1 rounded bg-[#C5E6F5]/40 border border-[#287EAD]/30 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] hover:bg-[#C5E6F5] hover:underline print:border-none print:bg-transparent print:p-0 print:text-[9px]"
+                                        >
+                                          {line.payment_voucher_reference}
+                                          <ExternalLink className="h-2.5 w-2.5 text-[#287EAD] print:hidden" />
+                                        </Link>
+                                      ) : (
+                                        <span className="inline-flex items-center rounded bg-[#C5E6F5]/40 border border-[#287EAD]/30 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] print:border-none print:bg-transparent print:p-0 print:text-[9px]">
+                                          {line.payment_voucher_reference}
+                                        </span>
+                                      )
+                                    ) : (
+                                      <span className="text-slate-400">—</span>
+                                    )}
                                   </td>
                                 )}
 
@@ -2986,10 +3081,10 @@ export default function RequisitionReportsPage() {
       {/* ── Scheduled Report Configuration Modal ── */}
       {scheduleModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
-          <div className="w-full max-w-md rounded-2xl border border-[#C5E6F5] bg-white shadow-xl overflow-hidden">
+          <div className="w-full max-w-md rounded-none border border-[#C5E6F5] bg-white shadow-xl overflow-hidden">
             <div className="border-b border-[#C5E6F5] bg-[#F0F8FD] px-5 py-4 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#C5E6F5] text-[#287EAD]">
+                <span className="flex h-7 w-7 items-center justify-center rounded-none bg-[#C5E6F5] text-[#287EAD]">
                   <BellRing className="h-4 w-4" />
                 </span>
                 <h3 className="text-sm font-bold text-[#1E293B]">
@@ -3007,22 +3102,22 @@ export default function RequisitionReportsPage() {
 
             <div className="p-5 space-y-4 text-xs">
               {isLoadingSchedule && (
-                <p className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-slate-600">Loading saved schedule…</p>
+                <p className="rounded-none border border-slate-200 bg-slate-50 p-2 text-slate-600">Loading saved schedule…</p>
               )}
               {scheduleLoadFailed && (
-                <p className="rounded-lg border border-rose-200 bg-rose-50 p-2 text-rose-700">
+                <p className="rounded-none border border-rose-200 bg-rose-50 p-2 text-rose-700">
                   Scheduled delivery can only be managed by an administrator.
                 </p>
               )}
               {savedSchedule?.last_sent_on && (
                 <p className="text-[11px] text-[#64748B]">Last sent: {formatDateDisplay(savedSchedule.last_sent_on)}</p>
               )}
-              <label className="flex items-center gap-2 rounded-lg border border-[#C5E6F5] bg-[#F0F8FD] p-3 font-semibold text-[#0A4D68]">
+              <label className="flex items-center gap-2 rounded-none border border-[#C5E6F5] bg-[#F0F8FD] p-3 font-semibold text-[#0A4D68]">
                 <input
                   type="checkbox"
                   checked={scheduleEnabled}
                   onChange={(event) => setScheduleEnabled(event.target.checked)}
-                  className="rounded border-slate-300 text-[#287EAD] focus:ring-[#287EAD]"
+                  className="rounded-none border-slate-300 text-[#287EAD] focus:ring-[#287EAD]"
                 />
                 Enable automated delivery
               </label>
@@ -3037,7 +3132,7 @@ export default function RequisitionReportsPage() {
                       type="button"
                       onClick={() => setScheduleFrequency(freq)}
                       className={cn(
-                        "rounded-lg border px-3 py-2 text-center font-semibold capitalize transition-all cursor-pointer",
+                        "rounded-none border px-3 py-2 text-center font-semibold capitalize transition-all cursor-pointer",
                         scheduleFrequency === freq
                           ? "border-[#287EAD] bg-[#F0F8FD] text-[#0A4D68] shadow-xs"
                           : "border-slate-200 text-slate-600 hover:border-slate-300",
@@ -3082,7 +3177,7 @@ export default function RequisitionReportsPage() {
                 </div>
               </div>
 
-              <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 text-[11px] text-[#475569] space-y-1">
+              <div className="rounded-none bg-slate-50 border border-slate-200 p-3 text-[11px] text-[#475569] space-y-1">
                 <div className="flex items-center gap-1 font-semibold text-[#1E293B]">
                   <Mail className="h-3.5 w-3.5 text-[#287EAD]" />
                   <span>Report Attachment:</span>
@@ -3096,7 +3191,7 @@ export default function RequisitionReportsPage() {
                 type="button"
                 onClick={handleSendTestSchedule}
                 disabled={scheduleSendingTest || scheduleLoadFailed}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-2xs hover:bg-[#F8FAFC] disabled:opacity-60 cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-none border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-2xs hover:bg-[#F8FAFC] disabled:opacity-60 cursor-pointer"
               >
                 {scheduleSendingTest ? (
                   <>
@@ -3115,7 +3210,7 @@ export default function RequisitionReportsPage() {
                 <button
                   type="button"
                   onClick={() => setScheduleModalOpen(false)}
-                  className="rounded-lg px-3 py-1.5 text-xs font-semibold text-[#64748B] hover:text-[#1E293B] cursor-pointer"
+                  className="rounded-none px-3 py-1.5 text-xs font-semibold text-[#64748B] hover:text-[#1E293B] cursor-pointer"
                 >
                   Cancel
                 </button>
@@ -3123,7 +3218,7 @@ export default function RequisitionReportsPage() {
                   type="button"
                   onClick={() => void handleSaveSchedule()}
                   disabled={scheduleSaving || isLoadingSchedule || scheduleLoadFailed}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#287EAD] px-4 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-1.5 rounded-none bg-[#287EAD] px-4 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E6F99] cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   {scheduleSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
                   {scheduleSaving ? "Saving…" : "Save Schedule"}
