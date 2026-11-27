@@ -38,6 +38,7 @@ import {
   ArrowLeft, Send, Loader2, Edit2, Info, FileCode, Eye, EyeOff, Check, X, Save,
   MessageSquare, Download, AlertTriangle, ShieldCheck, PanelRightOpen, PanelRightClose,
   TrendingUp, TrendingDown, CheckCircle2, XCircle, Printer, RefreshCw, Trash2, ListChecks,
+  ExternalLink,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -486,6 +487,182 @@ function buildRetirementReview(sections: unknown[], values: Record<string, unkno
   }
 
   return { outcome, explanation, fields: reviewFields, infoNotes, attachments, tables };
+}
+
+function NonFormDocumentViewer({ doc }: { doc: any }) {
+  const isPaymentVoucher = doc?.document_type?.code === "PAYMENT_VOUCHER" || Boolean(doc?.metadata?.payment_voucher);
+  const pvKind = doc?.metadata?.payment_voucher?.kind;
+  const kindBadge = pvKind === "imprest"
+    ? "DSA / Imprest Payment Voucher"
+    : pvKind === "retirement"
+      ? "Retirement Payment Voucher"
+      : "Payment Voucher";
+  const parentReqId = doc?.metadata?.payment_voucher?.source_document_id || "";
+  const parentReqRef = doc?.metadata?.payment_voucher?.source_reference || "";
+  const voucherRef = doc?.metadata?.payment_voucher?.journal_reference
+    || doc?.metadata?.voucher_reference
+    || doc?.reference_number
+    || "";
+  const hasFile = Boolean(doc?.file);
+
+  const [downloading, setDownloading] = useState(false);
+
+  const previewQuery = useQuery({
+    queryKey: ["non-form-doc-pdf", doc?.id],
+    queryFn: async () => {
+      const { data } = await documentsAPI.previewUrl(doc.id);
+      return { ...data, url: normalizeApiFileUrl(data.url) ?? data.url };
+    },
+    enabled: Boolean(doc?.id && hasFile),
+    refetchInterval: (query) => (query.state.data?.viewer === "processing" ? 1_500 : false),
+  });
+
+  const pdfUrl = previewQuery.data?.viewer === "pdfjs" ? previewQuery.data.url : null;
+
+  const handleDownload = async () => {
+    if (!doc?.id) return;
+    setDownloading(true);
+    try {
+      const response = await documentsAPI.downloadAsPdf(doc.id);
+      const blobUrl = URL.createObjectURL(new Blob([response.data], { type: "application/pdf" }));
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      const filename = (doc.title || doc.reference_number || (isPaymentVoucher ? `Payment_Voucher_${voucherRef}` : "Document")).replace(/\s+/g, "_");
+      link.download = `${filename}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1_000);
+    } catch {
+      toast.error("Could not download the document. Please check your permissions.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  if (!hasFile) {
+    return (
+      <div className="mx-auto mt-10 max-w-xl border border-[#C8CDD2] bg-white p-8 shadow-sm">
+        <div className="flex items-start gap-3">
+          <Info className="mt-1 h-6 w-6 text-[#287EAD]" />
+          <div>
+            <h2 className="text-xl font-semibold text-[#1F2933]">
+              {doc.title || "Non-Form Document"}
+            </h2>
+            <p className="mt-2 text-sm text-[#5E6870]">
+              This document does not contain an interactive requisition form.
+            </p>
+          </div>
+        </div>
+        <div className="mt-6 flex gap-3">
+          <Link
+            to="/list"
+            className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
+          >
+            <ArrowLeft className="h-4 w-4" /> Back to Requisitions
+          </Link>
+          <Link
+            to="/reports"
+            className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
+          >
+            Go to Reports
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F5F7F8] flex flex-col">
+      {/* Top Banner */}
+      <div className="border-b border-[#C8CDD2] bg-[#0A4D68] px-4 py-3 sm:px-6 text-white shadow-sm">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="bg-[#287EAD] text-white text-[11px] font-bold px-2 py-0.5 tracking-wider uppercase">
+                {isPaymentVoucher ? kindBadge : doc.document_type?.name || "Document"}
+              </span>
+              {voucherRef && (
+                <span className="font-mono text-xs font-semibold text-[#C5E6F5]">
+                  Ref: {voucherRef}
+                </span>
+              )}
+            </div>
+            <h1 className="mt-1 truncate text-base sm:text-lg font-bold text-white">
+              {doc.title || (isPaymentVoucher ? `Payment Voucher — ${voucherRef}` : doc.reference_number)}
+            </h1>
+            {parentReqRef && (
+              <p className="text-xs text-white/80">
+                Associated with Requisition: <span className="font-mono font-medium">{parentReqRef}</span>
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              to="/list"
+              className="inline-flex items-center gap-1.5 border border-white/30 bg-white/10 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/20 transition-colors"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" /> Requisitions
+            </Link>
+            <Link
+              to="/reports"
+              className="inline-flex items-center gap-1.5 border border-white/30 bg-white/10 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/20 transition-colors"
+            >
+              Reports
+            </Link>
+            {parentReqId && (
+              <Link
+                to={`/${parentReqId}`}
+                className="inline-flex items-center gap-1.5 border border-[#C5E6F5] bg-[#C5E6F5] px-3 py-1.5 text-xs font-semibold text-[#0A4D68] hover:bg-[#b2dff2] transition-colors"
+              >
+                <ExternalLink className="h-3.5 w-3.5" /> Open Requisition Form
+              </Link>
+            )}
+            <button
+              type="button"
+              onClick={() => void handleDownload()}
+              disabled={downloading}
+              className="inline-flex items-center gap-1.5 border border-emerald-600 bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 transition-colors disabled:opacity-50"
+            >
+              {downloading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+              {downloading ? "Downloading…" : "Download PDF"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Document Viewer */}
+      <div className="flex-1 p-4 sm:p-6 max-w-6xl w-full mx-auto flex flex-col">
+        <div className="flex-1 bg-white border border-[#C8CDD2] shadow-sm flex flex-col min-h-[75vh]">
+          {pdfUrl ? (
+            <LpoPdfPreview
+              url={pdfUrl}
+              title={doc.title || "Document"}
+              canPrint={true}
+              onPrint={() => documentsAPI.filePrintEvent(doc.id).then(() => undefined)}
+            />
+          ) : previewQuery.isError || previewQuery.data?.preview_status === "failed" ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-sm text-[#5E6870]">
+              <p>{previewQuery.data?.preview_error || "Could not load the document PDF preview."}</p>
+              <button
+                type="button"
+                onClick={() => void previewQuery.refetch()}
+                className="border border-[#AEB5BB] bg-white px-3 py-2 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
+              >
+                Retry preview
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-sm text-[#46545E]">
+              <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
+              <p>Loading document preview…</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 type TabId = "workflow" | "details" | "history" | "comments" | "audit";
@@ -1325,27 +1502,7 @@ export default function FormDetailPage() {
   }
 
   if (!formData?.sections) {
-    return (
-      <div className="mx-auto mt-10 max-w-xl border border-[#C8CDD2] bg-white p-8 shadow-sm">
-        <div className="flex items-start gap-3">
-          <Info className="mt-1 h-6 w-6 text-[#287EAD]" />
-          <div>
-            <h2 className="text-xl font-semibold text-[#1F2933]">This document isn't a form</h2>
-            <p className="mt-2 text-sm text-[#5E6870]">
-              It has no in-app form fields, so it belongs in the regular Documents area instead.
-            </p>
-          </div>
-        </div>
-        <div className="mt-6 flex gap-3">
-          <Link to="/list" className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
-            Back to Requisitions
-          </Link>
-          <Link to={`/documents/${id}`} className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#246d9c]">
-            Open in Documents
-          </Link>
-        </div>
-      </div>
-    );
+    return <NonFormDocumentViewer doc={doc} />;
   }
 
   const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;

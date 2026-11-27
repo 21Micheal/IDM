@@ -30,7 +30,7 @@ import {
   Building2, ClipboardList, RefreshCw, ExternalLink, Layers,
   ChevronLeft, ChevronRight, SlidersHorizontal, Loader2,
   Calendar, Mail, User, ShieldAlert, Send, BellRing,
-  ArrowUpDown, Check, CheckSquare, ChevronDown,
+  ArrowUpDown, Check, CheckSquare, ChevronDown, Eye,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
@@ -38,6 +38,7 @@ import {
 } from "recharts";
 import { documentsAPI } from "@/services/api";
 import CustomListbox from "@/components/ui/CustomListbox";
+import PaymentVoucherPreviewModal from "@/components/documents/PaymentVoucherPreviewModal";
 import { toast } from "@/components/ui/vault-toast";
 import type {
   RequisitionReportLine,
@@ -270,6 +271,15 @@ export default function RequisitionReportsPage() {
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [scheduleSendingTest, setScheduleSendingTest] = useState(false);
   const [scheduleSaving, setScheduleSaving] = useState(false);
+
+  // Payment Voucher Preview Modal state
+  const [previewVoucher, setPreviewVoucher] = useState<{
+    id: string;
+    reference?: string;
+    kind?: string;
+    requisitionId?: string;
+    requisitionRef?: string;
+  } | null>(null);
 
   // Selection state for custom scoped printing
   const [selectedFinIds, setSelectedFinIds] = useState<Set<string>>(new Set());
@@ -1997,23 +2007,66 @@ export default function RequisitionReportsPage() {
                                 )}
                                 {visibleFinCols.has("payment_voucher") && (
                                   <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
-                                    {line.payment_voucher_reference && line.payment_voucher_reference !== "—" ? (
+                                    {line.payment_vouchers && line.payment_vouchers.length > 0 ? (
+                                      <div className="flex flex-wrap items-center gap-1.5 print:hidden">
+                                        {line.payment_vouchers.map((pv, idx) => (
+                                          <button
+                                            key={pv.id || `${pv.reference}-${idx}`}
+                                            type="button"
+                                            onClick={() => setPreviewVoucher({
+                                              id: pv.id,
+                                              reference: pv.reference,
+                                              kind: pv.kind,
+                                              requisitionId: line.document_id,
+                                              requisitionRef: line.document_reference,
+                                            })}
+                                            title={`View ${pv.kind === "imprest" ? "DSA Imprest" : pv.kind === "retirement" ? "Retirement Claim" : ""} Payment Voucher (${pv.reference})`}
+                                            className={cn(
+                                              "inline-flex items-center gap-1 border px-2 py-0.5 text-[11px] font-mono font-bold cursor-pointer transition-colors",
+                                              pv.kind === "imprest"
+                                                ? "border-[#287EAD]/40 bg-[#C5E6F5]/40 text-[#0A4D68] hover:bg-[#C5E6F5] hover:border-[#287EAD]"
+                                                : pv.kind === "retirement"
+                                                  ? "border-indigo-300 bg-indigo-50/90 text-indigo-900 hover:bg-indigo-100 hover:border-indigo-500"
+                                                  : "border-slate-300 bg-slate-50 text-slate-800 hover:bg-slate-100",
+                                            )}
+                                          >
+                                            <span className="text-[9px] uppercase font-sans font-extrabold px-1 py-0.2 bg-white/70 text-slate-700">
+                                              {pv.kind === "imprest" ? "DSA" : pv.kind === "retirement" ? "RET" : "PV"}
+                                            </span>
+                                            <span>{pv.reference}</span>
+                                            <Eye className="h-2.5 w-2.5 opacity-70" />
+                                          </button>
+                                        ))}
+                                      </div>
+                                    ) : line.payment_voucher_reference && line.payment_voucher_reference !== "—" ? (
                                       line.payment_voucher_id ? (
-                                        <Link
-                                          to={`/${line.payment_voucher_id}`}
-                                          className="inline-flex items-center gap-1 rounded bg-[#C5E6F5]/40 border border-[#287EAD]/30 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] hover:bg-[#C5E6F5] hover:underline print:border-none print:bg-transparent print:p-0 print:text-[9px]"
+                                        <button
+                                          type="button"
+                                          onClick={() => setPreviewVoucher({
+                                            id: line.payment_voucher_id!,
+                                            reference: line.payment_voucher_reference,
+                                            requisitionId: line.document_id,
+                                            requisitionRef: line.document_reference,
+                                          })}
+                                          title="View Payment Voucher"
+                                          className="inline-flex items-center gap-1 border border-[#287EAD]/30 bg-[#C5E6F5]/40 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] hover:bg-[#C5E6F5] hover:border-[#287EAD] cursor-pointer transition-colors print:hidden"
                                         >
-                                          {line.payment_voucher_reference}
-                                          <ExternalLink className="h-2.5 w-2.5 text-[#287EAD] print:hidden" />
-                                        </Link>
+                                          <span>{line.payment_voucher_reference}</span>
+                                          <Eye className="h-2.5 w-2.5 text-[#287EAD]" />
+                                        </button>
                                       ) : (
-                                        <span className="inline-flex items-center rounded bg-[#C5E6F5]/40 border border-[#287EAD]/30 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] print:border-none print:bg-transparent print:p-0 print:text-[9px]">
+                                        <span className="inline-flex items-center border border-[#287EAD]/30 bg-[#C5E6F5]/40 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] print:hidden">
                                           {line.payment_voucher_reference}
                                         </span>
                                       )
                                     ) : (
-                                      <span className="text-slate-400">—</span>
+                                      <span className="text-slate-400 print:hidden">—</span>
                                     )}
+                                    <span className="hidden print:inline text-[9px] font-mono">
+                                      {line.payment_vouchers && line.payment_vouchers.length > 0
+                                        ? line.payment_vouchers.map(pv => `${pv.kind === "imprest" ? "DSA:" : pv.kind === "retirement" ? "RET:" : ""}${pv.reference}`).join(", ")
+                                        : (line.payment_voucher_reference || "—")}
+                                    </span>
                                   </td>
                                 )}
                                 {visibleFinCols.has("document_status") && (
@@ -2871,23 +2924,66 @@ export default function RequisitionReportsPage() {
 
                                 {visibleRetCols.has("payment_voucher") && (
                                   <td className="py-2.5 px-3 print:py-1 print:px-1 whitespace-nowrap">
-                                    {line.payment_voucher_reference && line.payment_voucher_reference !== "—" ? (
+                                    {line.payment_vouchers && line.payment_vouchers.length > 0 ? (
+                                      <div className="flex flex-wrap items-center gap-1.5 print:hidden">
+                                        {line.payment_vouchers.map((pv, idx) => (
+                                          <button
+                                            key={pv.id || `${pv.reference}-${idx}`}
+                                            type="button"
+                                            onClick={() => setPreviewVoucher({
+                                              id: pv.id,
+                                              reference: pv.reference,
+                                              kind: pv.kind,
+                                              requisitionId: line.document_id,
+                                              requisitionRef: line.document_reference,
+                                            })}
+                                            title={`View ${pv.kind === "imprest" ? "DSA Imprest" : pv.kind === "retirement" ? "Retirement Claim" : ""} Payment Voucher (${pv.reference})`}
+                                            className={cn(
+                                              "inline-flex items-center gap-1 border px-2 py-0.5 text-[11px] font-mono font-bold cursor-pointer transition-colors",
+                                              pv.kind === "imprest"
+                                                ? "border-[#287EAD]/40 bg-[#C5E6F5]/40 text-[#0A4D68] hover:bg-[#C5E6F5] hover:border-[#287EAD]"
+                                                : pv.kind === "retirement"
+                                                  ? "border-indigo-300 bg-indigo-50/90 text-indigo-900 hover:bg-indigo-100 hover:border-indigo-500"
+                                                  : "border-slate-300 bg-slate-50 text-slate-800 hover:bg-slate-100",
+                                            )}
+                                          >
+                                            <span className="text-[9px] uppercase font-sans font-extrabold px-1 py-0.2 bg-white/70 text-slate-700">
+                                              {pv.kind === "imprest" ? "DSA" : pv.kind === "retirement" ? "RET" : "PV"}
+                                            </span>
+                                            <span>{pv.reference}</span>
+                                            <Eye className="h-2.5 w-2.5 opacity-70" />
+                                          </button>
+                                        ))}
+                                      </div>
+                                    ) : line.payment_voucher_reference && line.payment_voucher_reference !== "—" ? (
                                       line.payment_voucher_id ? (
-                                        <Link
-                                          to={`/${line.payment_voucher_id}`}
-                                          className="inline-flex items-center gap-1 rounded bg-[#C5E6F5]/40 border border-[#287EAD]/30 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] hover:bg-[#C5E6F5] hover:underline print:border-none print:bg-transparent print:p-0 print:text-[9px]"
+                                        <button
+                                          type="button"
+                                          onClick={() => setPreviewVoucher({
+                                            id: line.payment_voucher_id!,
+                                            reference: line.payment_voucher_reference,
+                                            requisitionId: line.document_id,
+                                            requisitionRef: line.document_reference,
+                                          })}
+                                          title="View Payment Voucher"
+                                          className="inline-flex items-center gap-1 border border-[#287EAD]/30 bg-[#C5E6F5]/40 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] hover:bg-[#C5E6F5] hover:border-[#287EAD] cursor-pointer transition-colors print:hidden"
                                         >
-                                          {line.payment_voucher_reference}
-                                          <ExternalLink className="h-2.5 w-2.5 text-[#287EAD] print:hidden" />
-                                        </Link>
+                                          <span>{line.payment_voucher_reference}</span>
+                                          <Eye className="h-2.5 w-2.5 text-[#287EAD]" />
+                                        </button>
                                       ) : (
-                                        <span className="inline-flex items-center rounded bg-[#C5E6F5]/40 border border-[#287EAD]/30 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] print:border-none print:bg-transparent print:p-0 print:text-[9px]">
+                                        <span className="inline-flex items-center border border-[#287EAD]/30 bg-[#C5E6F5]/40 px-2 py-0.5 text-[11px] font-mono font-bold text-[#0A4D68] print:hidden">
                                           {line.payment_voucher_reference}
                                         </span>
                                       )
                                     ) : (
-                                      <span className="text-slate-400">—</span>
+                                      <span className="text-slate-400 print:hidden">—</span>
                                     )}
+                                    <span className="hidden print:inline text-[9px] font-mono">
+                                      {line.payment_vouchers && line.payment_vouchers.length > 0
+                                        ? line.payment_vouchers.map(pv => `${pv.kind === "imprest" ? "DSA:" : pv.kind === "retirement" ? "RET:" : ""}${pv.reference}`).join(", ")
+                                        : (line.payment_voucher_reference || "—")}
+                                    </span>
                                   </td>
                                 )}
 
@@ -3319,6 +3415,16 @@ export default function RequisitionReportsPage() {
             </div>
           </div>
         </div>
+      )}
+      {previewVoucher && (
+        <PaymentVoucherPreviewModal
+          voucherId={previewVoucher.id}
+          reference={previewVoucher.reference}
+          kind={previewVoucher.kind}
+          requisitionId={previewVoucher.requisitionId}
+          requisitionRef={previewVoucher.requisitionRef}
+          onClose={() => setPreviewVoucher(null)}
+        />
       )}
     </div>
   );

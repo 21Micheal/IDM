@@ -37,7 +37,102 @@ def _text(value: Any) -> str:
     return str(value).strip()
 
 
-def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
+def _build_payment_voucher_map() -> Dict[str, List[Dict[str, Any]]]:
+    from collections import defaultdict
+    from apps.documents.models import Document
+    pv_map: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    try:
+        pv_docs = (
+            Document.objects.filter(metadata__payment_voucher__isnull=False)
+            .only("id", "reference_number", "metadata")
+            .order_by("created_at")
+        )
+        for pv in pv_docs:
+            meta = pv.metadata.get("payment_voucher", {}) if isinstance(pv.metadata, dict) else {}
+            src_id = meta.get("source_document_id")
+            if src_id:
+                kind = str(meta.get("kind") or "voucher").lower()
+                label = "DSA PV" if kind == "imprest" else ("Retirement PV" if kind == "retirement" else "PV")
+                pv_map[str(src_id)].append({
+                    "id": str(pv.id),
+                    "reference": pv.reference_number or meta.get("journal_reference") or str(pv.id)[:8],
+                    "kind": kind,
+                    "kind_label": label,
+                    "amount": str(meta.get("amount") or ""),
+                    "currency": str(meta.get("currency") or ""),
+                })
+    except Exception:
+        pass
+    return pv_map
+
+
+def _extract_document_payment_vouchers(
+    doc: Any,
+    form: Dict[str, Any],
+    pv_map: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> List[Dict[str, Any]]:
+    doc_id_str = str(getattr(doc, "id", "") or "")
+    pvs: List[Dict[str, Any]] = []
+    seen_ids = set()
+
+    # 1. From pre-fetched pv_map
+    if pv_map and doc_id_str in pv_map:
+        for item in pv_map[doc_id_str]:
+            pvs.append(dict(item))
+            if item.get("id"):
+                seen_ids.add(str(item["id"]))
+
+    # 2. Check form metadata
+    # Imprest Payment Voucher from form
+    imp_id = str(form.get("imprest_payment_voucher_document_id") or "").strip()
+    imp_ref = _text(form.get("imprest_payment_voucher_reference"))
+    if imp_id and imp_id not in seen_ids:
+        pvs.insert(0, {
+            "id": imp_id,
+            "reference": imp_ref or "DSA PV",
+            "kind": "imprest",
+            "kind_label": "DSA PV",
+            "amount": "",
+            "currency": "",
+        })
+        seen_ids.add(imp_id)
+    elif imp_ref and not any(p.get("reference") == imp_ref for p in pvs):
+        pvs.insert(0, {
+            "id": imp_id,
+            "reference": imp_ref,
+            "kind": "imprest",
+            "kind_label": "DSA PV",
+            "amount": "",
+            "currency": "",
+        })
+
+    # Retirement Payment Voucher from form
+    ret_id = str(form.get("payment_voucher_document_id") or "").strip()
+    ret_ref = _text(form.get("payment_voucher_reference"))
+    if ret_id and ret_id not in seen_ids:
+        pvs.append({
+            "id": ret_id,
+            "reference": ret_ref or "Retirement PV",
+            "kind": "retirement",
+            "kind_label": "Retirement PV",
+            "amount": "",
+            "currency": "",
+        })
+        seen_ids.add(ret_id)
+    elif ret_ref and not any(p.get("reference") == ret_ref for p in pvs):
+        pvs.append({
+            "id": ret_id,
+            "reference": ret_ref,
+            "kind": "retirement",
+            "kind_label": "Retirement PV",
+            "amount": "",
+            "currency": "",
+        })
+
+    return pvs
+
+
+def extract_document_requisition_lines(doc: Any, pv_map: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> List[Dict[str, Any]]:
     """
     Extract line items from a requisition form document.
     """
@@ -87,14 +182,19 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
     )
 
     # Payment voucher context
-    imp_pv_ref = _text(form.get("imprest_payment_voucher_reference"))
-    ret_pv_ref = _text(form.get("payment_voucher_reference"))
-    pv_refs = [r for r in [imp_pv_ref, ret_pv_ref] if r]
-    doc_pv_ref = ", ".join(sorted(set(pv_refs))) if pv_refs else ""
-    doc_pv_id = str(form.get("imprest_payment_voucher_document_id") or form.get("payment_voucher_document_id") or "")
+    pvs = _extract_document_payment_vouchers(doc, form, pv_map)
+    if pvs:
+        if len(pvs) > 1:
+            doc_pv_ref = ", ".join(f"{p['kind_label']}: {p['reference']}" for p in pvs)
+        else:
+            doc_pv_ref = pvs[0]["reference"]
+        doc_pv_id = pvs[0]["id"]
+    else:
+        doc_pv_ref = ""
+        doc_pv_id = ""
+
     doc_has_pv = bool(
-        pv_refs
-        or doc_pv_id
+        pvs
         or form.get("imprest_payment_voucher_status") == "generated"
         or form.get("retirement_payment_voucher_status") == "generated"
     )
@@ -278,6 +378,7 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
                     "journal_status": primary_status,
                     "payment_voucher_reference": doc_pv_ref or "—",
                     "payment_voucher_id": doc_pv_id,
+                    "payment_vouchers": pvs,
                     "has_payment_voucher": doc_has_pv,
                 })
 
@@ -306,6 +407,7 @@ def extract_document_requisition_lines(doc: Any) -> List[Dict[str, Any]]:
                 "journal_status": primary_status,
                 "payment_voucher_reference": doc_pv_ref or "—",
                 "payment_voucher_id": doc_pv_id,
+                "payment_vouchers": pvs,
                 "has_payment_voucher": doc_has_pv,
             })
 
@@ -336,6 +438,7 @@ def build_requisition_report(queryset: QuerySet, params: Dict[str, Any]) -> Dict
             filter_has_pv = False
 
     all_lines: List[Dict[str, Any]] = []
+    pv_map = _build_payment_voucher_map()
 
     # Metadata tracking for filter dropdowns
     available_accounts = set()
@@ -350,7 +453,7 @@ def build_requisition_report(queryset: QuerySet, params: Dict[str, Any]) -> Dict
             continue
         seen_doc_ids.add(doc_id_str)
 
-        extracted = extract_document_requisition_lines(doc)
+        extracted = extract_document_requisition_lines(doc, pv_map=pv_map)
         for line in extracted:
             # Track filter options
             if line["account_code"] and line["account_code"] != "—":
@@ -583,6 +686,7 @@ def build_outstanding_retirements_report(
             filter_has_pv = False
 
     all_retirements: List[Dict[str, Any]] = []
+    pv_map = _build_payment_voucher_map()
     available_departments = set()
     available_travellers = set()
     available_statuses = set()
@@ -710,14 +814,19 @@ def build_outstanding_retirements_report(
         doc_ref = doc.reference_number or f"REQ-{str(doc.id)[:8]}"
 
         # Payment voucher details
-        imp_pv_ref = _text(form.get("imprest_payment_voucher_reference"))
-        ret_pv_ref = _text(form.get("payment_voucher_reference"))
-        pv_refs = [r for r in [imp_pv_ref, ret_pv_ref] if r]
-        doc_pv_ref = ", ".join(sorted(set(pv_refs))) if pv_refs else ""
-        doc_pv_id = str(form.get("imprest_payment_voucher_document_id") or form.get("payment_voucher_document_id") or "")
+        pvs = _extract_document_payment_vouchers(doc, form, pv_map)
+        if pvs:
+            if len(pvs) > 1:
+                doc_pv_ref = ", ".join(f"{p['kind_label']}: {p['reference']}" for p in pvs)
+            else:
+                doc_pv_ref = pvs[0]["reference"]
+            doc_pv_id = pvs[0]["id"]
+        else:
+            doc_pv_ref = ""
+            doc_pv_id = ""
+
         has_pv = bool(
-            pv_refs
-            or doc_pv_id
+            pvs
             or form.get("imprest_payment_voucher_status") == "generated"
             or form.get("retirement_payment_voucher_status") == "generated"
         )
@@ -749,6 +858,7 @@ def build_outstanding_retirements_report(
             "retirement_status_label": status_label,
             "payment_voucher_reference": doc_pv_ref or "—",
             "payment_voucher_id": doc_pv_id,
+            "payment_vouchers": pvs,
             "has_payment_voucher": has_pv,
         }
 

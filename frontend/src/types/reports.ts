@@ -19,7 +19,17 @@ export interface RequisitionReportLine {
   journal_status: "posted" | "pending" | "failed" | "unposted";
   payment_voucher_reference?: string;
   payment_voucher_id?: string;
+  payment_vouchers?: ReportPaymentVoucherInfo[];
   has_payment_voucher?: boolean;
+}
+
+export interface ReportPaymentVoucherInfo {
+  id: string;
+  reference: string;
+  kind?: "imprest" | "retirement" | "voucher" | string;
+  kind_label?: string;
+  amount?: string;
+  currency?: string;
 }
 
 export interface RequisitionReportSummary {
@@ -104,6 +114,7 @@ export interface OutstandingRetirementLine {
   retirement_status_label: string;
   payment_voucher_reference?: string;
   payment_voucher_id?: string;
+  payment_vouchers?: ReportPaymentVoucherInfo[];
   has_payment_voucher?: boolean;
 }
 
